@@ -2,10 +2,10 @@
 
 以前端可视化为抓手、多轮交互生成完整全栈应用的 Vibe Coding 平台。
 
-当前阶段：**M1 完成 · Phase 3 单视口与资源生命周期**。画布标注 → Java BFF →
+当前阶段：**M1 完成 · Phase 4 双视图与等比预览**。画布标注 → Java BFF →
 Python AI Core → LangGraph 单 Agent → Docker 沙盒 → 构建验证 / 自动修复 →
-项目内预览与 Diff，全链路已打通；工作台支持多项目、多 Tab、画布/预览单视口
-切换、5 Tab 上限、关闭即销毁沙盒与拖拽排序。
+项目内预览与 Diff，全链路已打通；工作台支持对比/展示两种布局、无缝缩放
+预览、多项目 Tab、5 Tab 上限、关闭即销毁沙盒与拖拽排序。
 
 ## 目录
 
@@ -21,7 +21,7 @@ scripts/smoke-test.sh                 验证 Java -> Python 跨语言调用
 scripts/sandbox_e2e_test.py           沙盒创建/补丁/构建校验/销毁 E2E
 scripts/agent_e2e_test.py             Agent 闭环 E2E（Mock LLM）
 scripts/platform_e2e_test.py          全链路 E2E（Vite 代理 → BFF → AI Core → 沙盒）
-scripts/ui_e2e_test.py                浏览器 E2E（Playwright：单视口 / 沙盒销毁 / Tab 上限 / 账户）
+scripts/ui_e2e_test.py                浏览器 E2E（Playwright：双视图 / 缩放预览 / 沙盒销毁 / Tab 上限）
 docs/screenshots/                     M1 联调截图
 docker-compose.yml                    只编排平台自身服务
 ```
@@ -84,11 +84,13 @@ Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier �
 
 ![登录页](docs/screenshots/phase2-login.png)
 
-![单视口画布模式](docs/screenshots/phase3-canvas-mode.png)
+![对比模式：画布编辑](docs/screenshots/phase4-canvas-mode.png)
 
-![单视口实时预览](docs/screenshots/phase3-preview-mode.png)
+![展示模式：画布 + 等比缩放预览](docs/screenshots/phase4-dual-mode.png)
 
-![5 个项目上限](docs/screenshots/phase3-tab-limit.png)
+![对比模式：全屏预览](docs/screenshots/phase4-preview-mode.png)
+
+![5 个项目上限](docs/screenshots/phase4-tab-limit.png)
 
 platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
 使用匿名卷），修改前端源码后由 Vite HMR 即时生效，无需重建镜像。
@@ -103,22 +105,31 @@ platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
 右上角头像菜单包含 **账户设置**（展示用户、租户、角色、Token 掩码）与
 **退出登录**。当前鉴权仅用于前端门禁，真实认证 / RBAC 后续接入。
 
-## 多 Tab 工作区与资源生命周期（Phase 2 / 3）
+## 多 Tab 工作区与资源生命周期（Phase 2 / 3 / 4）
 
 - 顶部左侧 **项目下拉栏**：切换项目、查看已打开状态、新建项目；「导入项目」
   为后续阶段占位，当前禁用。
-- 每个项目对应一个 Tab 窗口，窗口内是 **单视口**：顶部 Segmented Control
-  在「画布编辑 / 实时预览」间切换，两个面板始终保持挂载，仅用
-  `display:none` 隐藏非活动面板，因此圈选标注、缩放与 iframe 加载状态
-  都不会丢失。外层视口高度由 `--viewport-h` 固定，切换时不跳动。
+- 每个项目窗口支持两种布局：
+  - **对比模式**：单屏全屏显示，顶部「画布 / 预览」Tab 切换；
+  - **展示模式**：画布与预览左右 50% 同显，窄屏自动压缩。
+- 两种模式下画布与预览面板 **始终挂载**，只用 CSS `display:none` 控制
+  显隐。切换不会重建 React 组件，也不会重载 iframe，因此圈选标注、缩放、
+  浮层草稿与 Vite HMR WebSocket 连接全部保留。
+- 预览区与画布容器等高同宽：顶部 chrome 固定 42px，下方画面填满剩余空间；
+  `.project-viewport`、`.runtime-stage` 等外层全部 `overflow:hidden`。
+- 预览 iframe 以 1024×640 固定分辨率渲染，再用 `transform: translate(-50%,
+  -50%) scale()` 等比缩放并居中；`contain` 策略保证完整页面可见，留白与
+  沙盒页面同色，视觉上是一块无缝的应用屏幕。iframe 与 body 均隐藏滚动条。
+- 结果状态、自动修复次数与「详情 / 代码 Diff」以浮层/抽屉覆盖在预览上，
+  不挤压 iframe 尺寸。
 - Agent 完成后若停留在画布模式，右下角显示 **查看效果 →**，一键切到预览。
 - **最多同时打开 5 个项目**。达到上限后，下拉栏与 Tab 栏的新建入口禁用，
   并展示「最多只能同时打开 5 个项目，请关闭其他项目后再新建」。
 - **关闭 Tab = 彻底销毁项目**：删除项目与运行状态，并通过 BFF
   `DELETE /api/v1/sandboxes/{sandboxId}` 销毁该项目关联的全部 Docker
   容器；若 Run 仍在途，结果返回后立即销毁新沙盒，避免泄漏。
-- 新建项目按当前存活项目复用 **最小空闲编号**（关闭「未命名项目 2」后，
-  新建仍为「未命名项目 2」，而不是项目 6）。
+- 新建项目以 **当前存活 Tab 数 + 1** 为编号起点；若该编号已被占用则顺延，
+  保证递增且绝不重名（例如存活 4 个且 5、6 已占用时，新项目为 7）。
 - 工作区结构与 Tab 顺序持久化到 `localStorage` 的 `vibe.workspace.v1`；
   已完成 Run 的预览结果与 `sandboxIds` 存入 `sessionStorage`
   `vibe.runs.v1`，刷新后仍可查看效果并在关闭时清理沙盒。
@@ -126,6 +137,15 @@ platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
   渲染与 CPU 开销；sandbox 容器仍在运行，关闭 Tab 才会释放。
 - 每个项目独立保存标注、意图草稿与 Run 结果，切换 Tab 不串状态；多个项目
   可并行执行，Tab 状态点显示 idle / running / success / error。
+
+### 前端状态隔离
+
+工作区没有引入额外状态库，`useWorkspace` 是单一工作区 store，`WorkspacePage`
+用 `runStates[projectId]` 保存每个项目的运行态；`ProjectWorkspace` 的
+`viewMode` / `mode` 是每个 Tab 自己的本地状态。所有项目窗口按 `project.id`
+作为 key 常驻挂载，因此每个 Tab 的画布、预览、布局选择互不影响；异步 Run
+回写也始终带 `projectId`，关闭 Tab 后由 `closedProjectsRef` 阻止迟到结果污染
+状态并立即销毁新沙盒。
 
 ### 5 个项目时的 Docker 资源（实测）
 
@@ -166,11 +186,12 @@ python3 scripts/ui_e2e_test.py
 
 真实浏览器中验证未登录跳转 → 一键登录 → 新建项目 → 拖拽 Tab 排序 →
 刷新验证 localStorage 持久化 → 画布圈选并发送意图 → 执行中状态反馈 →
-**查看效果**切换全屏预览并校验 iframe 按钮 `rgb(255, 0, 0)` → 往返切换
-验证视口尺寸 / 标注 / iframe 状态不变 → **刷新恢复预览结果** → 关闭 Tab
-并通过 Docker CLI 确认容器已销毁 → 5 Tab 上限 → 关闭项目 2 后名称复用 →
-账户设置 / 退出 / 账号密码登录。截图输出到 `docs/screenshots/`
-（`phase3-*.png`）。
+**查看效果**切换全屏预览并校验 iframe 按钮 `rgb(255, 0, 0)` → 对比/展示
+模式往返，比对画布与预览面板宽高、检查外层无滚动条、iframe 等比缩放居中 →
+用 DOM 节点标记验证组件零重挂载 → 详情抽屉中的 Diff 与沙盒信息 →
+**刷新恢复预览结果** → 关闭 Tab 并通过 Docker CLI 确认容器已销毁 →
+5 Tab 上限 → 关闭项目后按存活数递增命名且不重名 → 账户设置 / 退出 /
+账号密码登录。截图输出到 `docs/screenshots/`（`phase4-*.png`）。
 
 ### 3. 分层验证
 

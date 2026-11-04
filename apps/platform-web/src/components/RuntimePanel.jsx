@@ -1,4 +1,6 @@
+import { useState } from 'react'
 import DiffView from './DiffView.jsx'
+import ScaledPreview from './ScaledPreview.jsx'
 
 /**
  * 同步链路没有真实节点事件，M1 用时间轴模拟进度，避免界面看起来卡死。
@@ -34,6 +36,8 @@ function StatusPill({ status }) {
 
 function LoadingState({ elapsed }) {
   const stageIndex = stageIndexFor(elapsed)
+  const stage = STAGES[stageIndex]
+
   return (
     <div className="loading-state runtime-loading">
       <div className="orbit" aria-hidden="true">
@@ -41,27 +45,28 @@ function LoadingState({ elapsed }) {
         <span />
         <span />
       </div>
-      <div>
+      <div className="loading-copy">
         <h3 className="loading-title">Agent 正在执行</h3>
         <p className="muted">
           同步链路已打通，正在等待沙盒返回结果 · {elapsed < 1 ? '<1' : elapsed}s
         </p>
+        <p className="loading-step">
+          <span>
+            {stageIndex + 1} / {STAGES.length}
+          </span>
+          {stage.title}
+        </p>
+        <p className="loading-detail">{stage.detail}</p>
       </div>
 
-      <ol className="timeline">
-        {STAGES.map((stage, index) => {
-          const state = index < stageIndex ? 'done' : index === stageIndex ? 'active' : ''
-          return (
-            <li key={stage.title} className={state}>
-              <span className="timeline-dot" />
-              <div>
-                <strong>{stage.title}</strong>
-                <small>{stage.detail}</small>
-              </div>
-            </li>
-          )
-        })}
-      </ol>
+      <div className="stage-dots" aria-hidden="true">
+        {STAGES.map((item, index) => (
+          <i
+            key={item.title}
+            className={index < stageIndex ? 'is-done' : index === stageIndex ? 'is-active' : ''}
+          />
+        ))}
+      </div>
 
       <div className="progress-track">
         <span />
@@ -97,101 +102,92 @@ function IdleState({ hasAnnotation, projectName }) {
   )
 }
 
-function ResultState({ result }) {
-  const success = result.status === 'AWAITING_APPROVAL'
+function RunDetails({ result, onClose }) {
   const verify = result.verifyResult
   const diffLines = result.generatedPatch ? result.generatedPatch.split('\n').length : 0
 
   return (
-    <div className="runtime-result">
-      <div className="result-head">
-        <StatusPill status={result.status} />
-        <span className="elapsed">
-          {result.retryCount > 0 ? `自动修复 ${result.retryCount} 次` : '一次通过'}
-        </span>
-      </div>
-
-      {result.previewUrl ? (
-        <div className="runtime-preview-wrap">
-          <iframe
-            className="runtime-preview-frame"
-            src={result.previewUrl}
-            title="Sandbox preview"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
-          />
-          <span className="preview-url">{result.previewUrl}</span>
+    <div className="runtime-drawer" role="dialog" aria-label="Run 执行详情">
+      <div className="runtime-drawer-head">
+        <div>
+          <span className="eyebrow">Run Detail</span>
+          <strong>执行详情</strong>
         </div>
-      ) : (
-        <p className="muted">没有可用的预览地址。</p>
-      )}
-
-      {result.error && <div className="error-box">{result.error}</div>}
-
-      <div className="runtime-meta">
-        <span>
-          Run <code>{result.runId}</code>
-        </span>
-        <span>
-          构建 <code>{verify?.durationMs ? `${verify.durationMs} ms` : '—'}</code>
-        </span>
-        <span>
-          退出码 <code>{verify ? verify.exitCode : '—'}</code>
-        </span>
-        <span>
-          沙盒 <code>{result.sandboxId}</code>
-        </span>
+        <button className="ghost-button" type="button" onClick={onClose}>
+          关闭
+        </button>
       </div>
 
-      {diffLines > 0 && (
-        <details className="runtime-fold">
-          <summary>
-            查看本次生成的代码 Diff
-            <span>{diffLines} 行</span>
-          </summary>
-          <DiffView patch={result.generatedPatch} title="Generated Patch" />
-        </details>
-      )}
+      <div className="runtime-drawer-body">
+        <div className="runtime-meta">
+          <span>
+            Run <code>{result.runId}</code>
+          </span>
+          <span>
+            构建 <code>{verify?.durationMs ? `${verify.durationMs} ms` : '—'}</code>
+          </span>
+          <span>
+            退出码 <code>{verify ? verify.exitCode : '—'}</code>
+          </span>
+          <span>
+            沙盒 <code>{result.sandboxId}</code>
+          </span>
+        </div>
 
-      {!success && verify?.errorLogs && (
-        <details className="runtime-fold">
-          <summary>最终构建日志</summary>
-          <pre className="log-view">{verify.errorLogs}</pre>
-        </details>
-      )}
+        {result.error && <div className="error-box">{result.error}</div>}
 
-      {result.messages?.length > 0 && (
-        <details className="runtime-fold">
-          <summary>
-            Agent 执行轨迹
-            <span>{result.messages.length} 条</span>
-          </summary>
-          <ol className="trace-list">
-            {result.messages.map((message, index) => (
-              <li key={index} className={message.level === 'error' ? 'is-error' : ''}>
-                <span className="trace-node">{message.node}</span>
-                <p>{message.content}</p>
-              </li>
-            ))}
-          </ol>
-        </details>
-      )}
+        {diffLines > 0 && (
+          <details className="runtime-fold" open>
+            <summary>
+              查看本次生成的代码 Diff
+              <span>{diffLines} 行</span>
+            </summary>
+            <DiffView patch={result.generatedPatch} title="Generated Patch" />
+          </details>
+        )}
 
-      {result.previewUrl && (
-        <a className="ghost-button runtime-open" href={result.previewUrl} target="_blank" rel="noreferrer">
-          在新窗口打开预览 ↗
-        </a>
-      )}
+        {!result.status?.includes('APPROVAL') && verify?.errorLogs && (
+          <details className="runtime-fold">
+            <summary>最终构建日志</summary>
+            <pre className="log-view">{verify.errorLogs}</pre>
+          </details>
+        )}
+
+        {result.messages?.length > 0 && (
+          <details className="runtime-fold">
+            <summary>
+              Agent 执行轨迹
+              <span>{result.messages.length} 条</span>
+            </summary>
+            <ol className="trace-list">
+              {result.messages.map((message, index) => (
+                <li key={index} className={message.level === 'error' ? 'is-error' : ''}>
+                  <span className="trace-node">{message.node}</span>
+                  <p>{message.content}</p>
+                </li>
+              ))}
+            </ol>
+          </details>
+        )}
+      </div>
     </div>
   )
 }
 
 /**
- * 每个 Tab 独立的运行预览区。
- * 与旧版固定右侧 RunPanel 的区别：preview 跟随项目窗口，
- * 切换 Tab 不会串项目，也不再占用画布之外的独立栏位。
+ * 每个 Tab 独立的“沙盒屏幕”。
+ *
+ * 结构固定为「chrome 顶栏 + 全出血预览画布」：
+ *  - chrome 与 CanvasStage 的浏览器栏等高，双屏模式左右严格对齐；
+ *  - 预览内容使用 ScaledPreview 等比缩放，外层不产生滚动条；
+ *  - 状态、详情与 Diff 以浮层 / 抽屉覆盖在画布上，不挤压 iframe 尺寸。
  */
-export default function RuntimePanel({ run, projectName, expanded = false }) {
+export default function RuntimePanel({ run, projectName, expanded = false, visible = true }) {
+  const [detailsOpen, setDetailsOpen] = useState(false)
   const { submitting, elapsed, result, error, annotation } = run
+  const previewUrl = result?.previewUrl
+  const success = result?.status === 'AWAITING_APPROVAL'
+  const diffLines = result?.generatedPatch ? result.generatedPatch.split('\n').length : 0
 
   let stateLabel = 'IDLE'
   let stateClass = 'is-idle'
@@ -202,39 +198,104 @@ export default function RuntimePanel({ run, projectName, expanded = false }) {
     stateLabel = 'FAILED'
     stateClass = 'is-failed'
   } else if (result) {
-    stateLabel = result.status === 'AWAITING_APPROVAL' ? 'READY' : 'FAILED'
-    stateClass = result.status === 'AWAITING_APPROVAL' ? 'is-ready' : 'is-failed'
+    stateLabel = success ? 'READY' : 'FAILED'
+    stateClass = success ? 'is-ready' : 'is-failed'
   }
 
   return (
-    <aside className={`runtime-panel ${expanded ? 'is-expanded' : ''}`}>
-      <div className="runtime-head">
-        <div>
-          <span className="eyebrow">Sandbox Preview</span>
-          <h3>实时预览与执行状态</h3>
-        </div>
+    <aside
+      className={`runtime-panel is-immersive ${expanded ? 'is-expanded' : ''}`}
+      data-sandbox-id={result?.sandboxId ?? ''}
+    >
+      <div className="canvas-chrome runtime-chrome">
+        <span className="chrome-dots" aria-hidden="true">
+          <i className="dot-red" />
+          <i className="dot-amber" />
+          <i className="dot-green" />
+        </span>
+        <span className="runtime-url" title={previewUrl ?? 'vibe://sandbox/preview'}>
+          {previewUrl ?? 'vibe://sandbox/preview'}
+        </span>
         <span className={`runtime-state ${stateClass}`}>
           <i />
           {stateLabel}
         </span>
       </div>
 
-      <div className="runtime-scroll">
-        {submitting && <LoadingState elapsed={elapsed} />}
+      <div className="runtime-stage">
+        {/* iframe 一旦挂载就保留到下一次 Run 或关闭 Tab，切换视图只改 display。 */}
+        {previewUrl && (
+          <ScaledPreview
+            src={previewUrl}
+            title={`${projectName} 沙盒预览`}
+            visible={visible && !submitting}
+          />
+        )}
 
-        {!submitting && error && (
-          <div className="error-state runtime-error">
-            <span className="error-code">RUN_FAILED</span>
-            <h3>链路执行失败</h3>
-            <p>{error}</p>
-            <p className="muted">检查 Java BFF / Python AI Core 容器状态后重试。</p>
+        {submitting && (
+          <div className="runtime-overlay">
+            <LoadingState elapsed={elapsed} />
           </div>
         )}
 
-        {!submitting && !error && result && <ResultState result={result} />}
+        {!submitting && error && (
+          <div className="runtime-overlay">
+            <div className="error-state runtime-error">
+              <span className="error-code">RUN_FAILED</span>
+              <h3>链路执行失败</h3>
+              <p>{error}</p>
+              <p className="muted">检查 Java BFF / Python AI Core 容器状态后重试。</p>
+            </div>
+          </div>
+        )}
 
         {!submitting && !error && !result && (
-          <IdleState hasAnnotation={Boolean(annotation)} projectName={projectName} />
+          <div className="runtime-overlay">
+            <IdleState hasAnnotation={Boolean(annotation)} projectName={projectName} />
+          </div>
+        )}
+
+        {!submitting && !error && result && !previewUrl && (
+          <div className="runtime-overlay">
+            <p className="muted">没有可用的预览地址。</p>
+          </div>
+        )}
+
+        {!submitting && !error && result && (
+          <div className="runtime-result-overlay">
+            <div className="runtime-result-status">
+              <StatusPill status={result.status} />
+              <span className="elapsed">
+                {result.retryCount > 0 ? `自动修复 ${result.retryCount} 次` : '一次通过'}
+              </span>
+            </div>
+
+            <div className="runtime-result-actions">
+              {(diffLines > 0 || result.messages?.length > 0) && (
+                <button
+                  className="runtime-pill-button"
+                  type="button"
+                  onClick={() => setDetailsOpen(true)}
+                >
+                  详情 / 代码 Diff
+                </button>
+              )}
+              {previewUrl && (
+                <a
+                  className="runtime-pill-button"
+                  href={previewUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  新窗口 ↗
+                </a>
+              )}
+            </div>
+          </div>
+        )}
+
+        {detailsOpen && result && (
+          <RunDetails result={result} onClose={() => setDetailsOpen(false)} />
         )}
       </div>
     </aside>

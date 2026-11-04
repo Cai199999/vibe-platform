@@ -44,13 +44,14 @@ const createInitialState = () => {
 }
 
 /**
- * 分配项目名称：复用当前未被占用的最小编号。
- * 例如已有 1、3、4、5，关闭 2 后新建仍得到「未命名项目 2」，不会继续递增。
+ * 分配项目名称：以「当前存活 Tab 数 + 1」为起点递增。
+ * 例如初始只有「演示项目」时，新项目为 2；存活 4 个 Tab 时从 5 起编号。
+ * 若该编号已被历史项目占用（中间关闭过项目），继续顺延，保证绝不重名。
  * 编号从 2 开始，1 号语义上留给初始「演示项目」。
  */
-function nextProjectName(projects) {
+function nextProjectName(projects, openTabCount) {
   const usedNames = new Set(projects.map((project) => project.name))
-  let index = 2
+  let index = Math.max(2, openTabCount + 1)
   while (usedNames.has(`未命名项目 ${index}`)) {
     index += 1
   }
@@ -117,7 +118,9 @@ export function useWorkspace() {
       if (previous.openTabs.length >= MAX_OPEN_TABS) {
         return previous
       }
-      const created = createProject(nextProjectName(previous.projects))
+      const created = createProject(
+        nextProjectName(previous.projects, previous.openTabs.length),
+      )
       return {
         ...previous,
         projects: [...previous.projects, created],

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Phase 3 真实浏览器 E2E：单视口切换 → Agent → 沙盒销毁 → 5 Tab 上限 → 命名复用。
+"""Phase 4 真实浏览器 E2E：对比/展示模式 → 缩放预览 → 沙盒销毁 → 5 Tab 上限。
 
 覆盖点：
     - 未登录跳转 / 一键登录 / 账号密码登录
     - 多 Tab 新建、拖拽排序、localStorage 持久化
-    - 单视口「画布编辑 / 实时预览」切换：尺寸不变、画布状态与 iframe 不丢失
+    - 对比模式：画布/预览单屏切换；展示模式：左右双屏同显
+    - 两种模式往返时组件零卸载，画布标注与 iframe / HMR 状态不丢失
+    - 预览 iframe 等比缩放居中、外层无滚动条、iframe body 隐藏滚动条
     - Agent 完成后「查看效果」快捷切换
     - 关闭 Tab = 删除项目 + 销毁 Docker 沙盒（通过 BFF 调用 Python internal API）
-    - 最多 5 个 Tab；关闭项目后按最小空闲编号复用项目名
+    - 最多 5 个 Tab；新建项目按存活数量递增命名且不重名
 
 前置：
     pip install playwright && playwright install chromium
@@ -17,12 +19,13 @@
     python3 scripts/ui_e2e_test.py
 
 产出：
-    docs/screenshots/phase3-workspace.png
-    docs/screenshots/phase3-canvas-mode.png
-    docs/screenshots/phase3-loading.png
-    docs/screenshots/phase3-preview-mode.png
-    docs/screenshots/phase3-tab-limit.png
-    docs/screenshots/phase3-account.png
+    docs/screenshots/phase4-workspace.png
+    docs/screenshots/phase4-canvas-mode.png
+    docs/screenshots/phase4-loading.png
+    docs/screenshots/phase4-preview-mode.png
+    docs/screenshots/phase4-dual-mode.png
+    docs/screenshots/phase4-tab-limit.png
+    docs/screenshots/phase4-account.png
 """
 
 from __future__ import annotations
@@ -125,6 +128,64 @@ def assert_same_box(before: dict, after: dict, label: str) -> None:
             fail(f"{label} 视图尺寸发生变化: {before} -> {after}")
 
 
+def assert_no_outer_scroll(active, label: str) -> None:
+    """外层预览容器必须 overflow:hidden，且自身不能产生滚动距离。"""
+    for selector in (".project-viewport", ".runtime-stage", ".canvas-stage"):
+        metrics = active.locator(selector).evaluate("""el => {
+                const style = getComputedStyle(el);
+                return {
+                    overflowX: style.overflowX,
+                    overflowY: style.overflowY,
+                    scrollWidth: el.scrollWidth,
+                    clientWidth: el.clientWidth,
+                    scrollHeight: el.scrollHeight,
+                    clientHeight: el.clientHeight,
+                };
+            }""")
+        if metrics["overflowX"] != "hidden" or metrics["overflowY"] != "hidden":
+            fail(f"{label} {selector} 未设置 overflow:hidden: {metrics}")
+        if metrics["scrollWidth"] > metrics["clientWidth"] + 1:
+            fail(f"{label} {selector} 出现横向滚动: {metrics}")
+        if metrics["scrollHeight"] > metrics["clientHeight"] + 1:
+            fail(f"{label} {selector} 出现纵向滚动: {metrics}")
+
+
+def assert_scaled_preview(active, label: str) -> None:
+    """iframe 必须等比缩放并居中，且缩放后不超出预览容器。"""
+    metrics = active.locator(".runtime-preview-screen").evaluate("""el => {
+            const scaler = el.querySelector('.runtime-preview-scaler');
+            const frame = el.querySelector('.runtime-preview-frame');
+            const screen = el.getBoundingClientRect();
+            const box = scaler.getBoundingClientRect();
+            return {
+                screen: {x: screen.x, y: screen.y, width: screen.width, height: screen.height},
+                scaler: {x: box.x, y: box.y, width: box.width, height: box.height},
+                transform: getComputedStyle(scaler).transform,
+                frameConnected: frame?.isConnected ?? false,
+            };
+        }""")
+    if metrics["transform"] in ("none", ""):
+        fail(f"{label} 未应用 transform scale: {metrics}")
+    if not metrics["frameConnected"]:
+        fail(f"{label} iframe 已被卸载")
+    if metrics["scaler"]["width"] > metrics["screen"]["width"] + 1:
+        fail(f"{label} 缩放后宽度超出容器: {metrics}")
+    if metrics["scaler"]["height"] > metrics["screen"]["height"] + 1:
+        fail(f"{label} 缩放后高度超出容器: {metrics}")
+    dx = abs(
+        metrics["scaler"]["x"]
+        + metrics["scaler"]["width"] / 2
+        - (metrics["screen"]["x"] + metrics["screen"]["width"] / 2)
+    )
+    dy = abs(
+        metrics["scaler"]["y"]
+        + metrics["scaler"]["height"] / 2
+        - (metrics["screen"]["y"] + metrics["screen"]["height"] / 2)
+    )
+    if dx > 2 or dy > 2:
+        fail(f"{label} 缩放后未居中: dx={dx} dy={dy}")
+
+
 def main() -> None:
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     sandbox_id = ""
@@ -163,7 +224,7 @@ def main() -> None:
             "未命名项目 2"
         )
         page.screenshot(
-            path=str(SCREENSHOT_DIR / "phase3-workspace.png"), full_page=True
+            path=str(SCREENSHOT_DIR / "phase4-workspace.png"), full_page=True
         )
 
         drag_tab(page, "演示项目", "未命名项目 2")
@@ -188,7 +249,7 @@ def main() -> None:
         expect(popover).to_be_visible()
         page.wait_for_timeout(300)
         page.screenshot(
-            path=str(SCREENSHOT_DIR / "phase3-canvas-mode.png"), full_page=True
+            path=str(SCREENSHOT_DIR / "phase4-canvas-mode.png"), full_page=True
         )
 
         popover.locator("input").fill("改颜色")
@@ -199,16 +260,18 @@ def main() -> None:
         expect(active.locator(".seg-status-running")).to_be_visible(timeout=10_000)
         expect(page.locator(".chip-live")).to_be_visible()
         page.wait_for_timeout(900)
-        page.screenshot(path=str(SCREENSHOT_DIR / "phase3-loading.png"), full_page=True)
+        page.screenshot(path=str(SCREENSHOT_DIR / "phase4-loading.png"), full_page=True)
 
         expect(active.locator(".view-result-cta")).to_be_visible(timeout=120_000)
         expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
         expect(active.locator(".runtime-preview-frame")).to_be_hidden()
 
-        retry_text = active.locator(".result-head .elapsed").inner_text()
+        retry_text = active.locator(".runtime-result-overlay .elapsed").inner_text()
         if "自动修复 1 次" not in retry_text:
             fail(f"重试信息异常: {retry_text}")
-        sandbox_id = active.locator(".runtime-meta code").nth(3).inner_text()
+        sandbox_id = active.locator(".runtime-panel").get_attribute("data-sandbox-id")
+        if not sandbox_id:
+            fail("未读取到 sandboxId")
         print(f"   沙盒: {sandbox_id} / {retry_text}")
 
         print("\n== 6. 点击「查看效果」切换到全屏预览 ==")
@@ -226,37 +289,106 @@ def main() -> None:
         if background != "rgb(255, 0, 0)":
             fail(f"按钮不是红色: {background}")
 
+        page.wait_for_timeout(300)
+        assert_scaled_preview(active, "对比模式预览")
         page.screenshot(
-            path=str(SCREENSHOT_DIR / "phase3-preview-mode.png"), full_page=True
+            path=str(SCREENSHOT_DIR / "phase4-preview-mode.png"), full_page=True
         )
-        active.get_by_text("查看本次生成的代码 Diff").click()
-        expect(active.locator(".diff-view")).to_contain_text("backgroundColor")
 
-        print("\n== 7. 往返切换：画布标注与 iframe 状态均不丢失 ==")
-        active.get_by_role("button", name="画布编辑").click()
+        print("\n== 7. 对比/展示模式往返：组件不卸载、尺寸严格对齐 ==")
+        # 在 DOM 节点上打标记，任何一次切换若导致 React 重建节点都会被发现。
+        page.evaluate("""() => {
+                const windowNode = document.querySelector('.tab-window.is-active');
+                window.__vibeNodes = {
+                    canvas: windowNode.querySelector('.canvas-stage'),
+                    frame: windowNode.querySelector('.runtime-preview-frame'),
+                };
+            }""")
+
+        active.get_by_role("button", name="展示模式").click()
+        expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
+        expect(active.locator(".preview-pane.is-visible")).to_be_visible()
+        expect(active.locator(".pane-switch")).to_have_count(0)
+
+        canvas_frame_box = active.locator(".canvas-frame").bounding_box()
+        preview_panel_box = active.locator(".runtime-panel").bounding_box()
+        assert_same_box(canvas_frame_box, preview_panel_box, "展示模式画布/预览")
+        page.wait_for_timeout(300)
+        assert_no_outer_scroll(active, "展示模式")
+        assert_scaled_preview(active, "展示模式")
+
+        identity = page.evaluate("""() => {
+                const windowNode = document.querySelector('.tab-window.is-active');
+                return {
+                    canvas: windowNode.querySelector('.canvas-stage') === window.__vibeNodes.canvas,
+                    frame: windowNode.querySelector('.runtime-preview-frame') === window.__vibeNodes.frame,
+                };
+            }""")
+        if not identity["canvas"] or not identity["frame"]:
+            fail(f"视图模式切换导致组件被重新挂载: {identity}")
+
+        frame = page.frame_locator(".tab-window.is-active .runtime-preview-frame")
+        expect(frame.locator("button")).to_have_css(
+            "background-color", "rgb(255, 0, 0)"
+        )
+        body_style = frame.locator("body").evaluate("""el => {
+                const style = getComputedStyle(el);
+                return {overflowX: style.overflowX, overflowY: style.overflowY};
+            }""")
+        if body_style["overflowX"] != "hidden" or body_style["overflowY"] != "hidden":
+            fail(f"iframe body 仍可能出现原生滚动条: {body_style}")
+        page.screenshot(
+            path=str(SCREENSHOT_DIR / "phase4-dual-mode.png"), full_page=True
+        )
+
+        # Diff / Run 详情以抽屉覆盖，不挤压预览画面。
+        active.get_by_role("button", name="详情 / 代码 Diff").click()
+        expect(active.locator(".runtime-drawer")).to_be_visible()
+        expect(active.locator(".runtime-meta code").nth(3)).to_have_text(sandbox_id)
+        expect(active.locator(".diff-view")).to_contain_text("backgroundColor")
+        active.locator(".runtime-drawer").get_by_role("button", name="关闭").click()
+        expect(active.locator(".runtime-drawer")).to_have_count(0)
+
+        active.get_by_role("button", name="对比模式").click()
+        expect(active.locator(".pane-switch")).to_be_visible()
+        expect(active.locator(".preview-pane.is-visible")).to_be_visible()
+        expect(active.locator(".canvas-pane.is-visible")).to_have_count(0)
+        assert_same_box(
+            canvas_box,
+            active.locator(".project-viewport").bounding_box(),
+            "展示 → 对比",
+        )
+
+        active.get_by_role("button", name="画布", exact=True).click()
         expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
         expect(active.locator(".annotation-ellipse")).to_be_visible()
         canvas_box_again = active.locator(".project-viewport").bounding_box()
         assert_same_box(canvas_box, canvas_box_again, "预览 → 画布")
 
-        active.get_by_role("button", name="实时预览").click()
+        active.get_by_role("button", name="预览", exact=True).click()
         expect(active.locator(".runtime-preview-frame")).to_be_visible()
         assert_same_box(
             canvas_box, active.locator(".project-viewport").bounding_box(), "再次切换"
         )
+        page.wait_for_timeout(300)
+        assert_no_outer_scroll(active, "对比模式")
+        assert_scaled_preview(active, "对比模式")
         frame = page.frame_locator(".tab-window.is-active .runtime-preview-frame")
         expect(frame.locator("button")).to_have_css(
             "background-color", "rgb(255, 0, 0)"
         )
-        print("   切换过程外层视口尺寸稳定，圈选与 iframe 均保留")
+        print("   两种模式/画布预览往返均无重挂载，圈选与 iframe 状态保留")
 
         print("\n== 8. 刷新页面：恢复预览结果，默认回到画布模式 ==")
         page.reload(wait_until="networkidle")
         active = page.locator(".tab-window.is-active")
         expect(active.locator(".tab-window-title h2")).to_have_text("演示项目")
         expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
+        expect(active.locator(".pane-switch")).to_be_visible()
         expect(active.locator(".view-result-cta")).to_be_visible()
-        expect(active.locator(".runtime-meta code").nth(3)).to_have_text(sandbox_id)
+        expect(active.locator(".runtime-panel")).to_have_attribute(
+            "data-sandbox-id", sandbox_id
+        )
         active.locator(".view-result-cta").click()
         frame = page.frame_locator(".tab-window.is-active .runtime-preview-frame")
         expect(frame.locator("button")).to_have_css(
@@ -265,7 +397,6 @@ def main() -> None:
         print("   刷新后预览与沙盒信息均恢复，关闭项目仍可追踪沙盒")
 
         print("\n== 9. 关闭项目：删除状态并销毁沙盒容器 ==")
-        expect(active.locator(".runtime-meta code").nth(3)).to_have_text(sandbox_id)
         page.locator(".workspace-tab.is-active .tab-close").click()
         expect(page.locator(".workspace-tab")).to_have_count(1)
         page.locator(".project-switcher-button").click()
@@ -295,29 +426,33 @@ def main() -> None:
         expect(page.locator(".project-menu-hint")).to_contain_text("请关闭其他项目")
         page.wait_for_timeout(250)
         page.screenshot(
-            path=str(SCREENSHOT_DIR / "phase3-tab-limit.png"), full_page=True
+            path=str(SCREENSHOT_DIR / "phase4-tab-limit.png"), full_page=True
         )
         page.keyboard.press("Escape")
         print("   5 个 Tab 时新建入口已禁用并展示上限提示")
 
-        print("\n== 11. 关闭项目 2 后新建，名称复用最小空闲编号 ==")
+        print("\n== 11. 关闭项目 2 后新建，按存活数量递增且不重名 ==")
         page.locator(".workspace-tab", has_text="未命名项目 2").locator(
             ".tab-close"
         ).click()
         expect(page.locator(".workspace-tab")).to_have_count(4)
         open_new_project(page)
         expect(page.locator(".workspace-tab")).to_have_count(5)
+        # 存活 4 个 Tab → 从 5 起编号；5、6 已被占用，顺延到 7，绝不重名。
         expect(page.locator(".tab-window.is-active .tab-window-title h2")).to_have_text(
-            "未命名项目 2"
+            "未命名项目 7"
         )
-        print("   关闭项目 2 后，新项目重新使用名称「未命名项目 2」")
+        names = page.locator(".workspace-tab .tab-name").all_inner_texts()
+        if len(names) != len(set(names)):
+            fail(f"项目名称出现重复: {names}")
+        print("   关闭项目 2 后，新项目按存活数递增为「未命名项目 7」")
 
         print("\n== 12. 账户设置、退出与账号密码登录 ==")
         page.locator(".avatar-button").click()
         page.get_by_role("menuitem", name="账户设置").click()
         expect(page.locator(".account-dialog")).to_be_visible()
         expect(page.get_by_text("demo@vibe.local")).to_be_visible()
-        page.screenshot(path=str(SCREENSHOT_DIR / "phase3-account.png"), full_page=True)
+        page.screenshot(path=str(SCREENSHOT_DIR / "phase4-account.png"), full_page=True)
         page.get_by_role("button", name="完成").click()
 
         page.locator(".avatar-button").click()
@@ -341,7 +476,7 @@ def main() -> None:
         browser.close()
 
     print(
-        "\nPASS: 单视口切换 → 沙盒销毁 → 5 Tab 上限 → 项目名复用 → 账户体系 全流程通过"
+        "\nPASS: 对比/展示模式 → 缩放预览 → 沙盒销毁 → 5 Tab 上限 → 账户体系 全流程通过"
     )
 
 

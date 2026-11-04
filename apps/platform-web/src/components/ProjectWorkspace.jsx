@@ -3,12 +3,15 @@ import CanvasStage from './CanvasStage.jsx'
 import RuntimePanel from './RuntimePanel.jsx'
 
 /**
- * 单个项目窗口：单视口 + 顶部「画布编辑 / 实时预览」切换。
+ * 单个项目窗口：支持「对比模式」与「展示模式」两种布局。
  *
- * 两种视图同时挂载，仅通过 display:none 切换：
- *  - CanvasStage 的圈选、浮层和 ResizeObserver 状态不会因切换而丢失；
- *  - iframe 一旦加载便保持存活，切回预览时不需要重新冷启动。
- * 外层 .project-viewport 使用固定高度，切换视图不会引起页面跳动。
+ *  - 对比模式：单屏全屏显示画布或预览，顶部 Tab 切换；
+ *  - 展示模式：画布与预览左右 50% 同显。
+ *
+ * 两个面板从挂载起始终存在，只通过 CSS display 控制显隐：
+ *  - CanvasStage 的圈选、缩放、浮层与 ResizeObserver 状态不会丢失；
+ *  - iframe 元素不重建，Vite HMR 的 WebSocket 连接与页面状态保持；
+ *  - 切换视图时外层 .project-viewport 高度固定，不会引起页面跳动。
  */
 export default function ProjectWorkspace({
   project,
@@ -19,10 +22,15 @@ export default function ProjectWorkspace({
   onClearAnnotation,
   onSubmit,
 }) {
+  // 当前布局：compare = 单屏切换，dual = 双屏同显。
+  const [viewMode, setViewMode] = useState('compare')
+  // 仅对比模式生效：当前显示画布还是预览。
   const [mode, setMode] = useState('canvas')
   const annotation = run.annotation
   const submitting = run.submitting
   const previewReady = Boolean(run.result?.previewUrl)
+  const canvasVisible = viewMode === 'dual' || mode === 'canvas'
+  const previewVisible = viewMode === 'dual' || mode === 'preview'
   const status = submitting
     ? 'running'
     : run.error
@@ -65,30 +73,53 @@ export default function ProjectWorkspace({
             清除标注
           </button>
 
-          <div className="segmented" role="group" aria-label="项目视图切换">
+          <div className="segmented view-mode-switch" role="group" aria-label="视图模式">
             <button
               type="button"
-              className={mode === 'canvas' ? 'is-active' : ''}
-              aria-pressed={mode === 'canvas'}
-              onClick={() => setMode('canvas')}
+              className={viewMode === 'compare' ? 'is-active' : ''}
+              aria-pressed={viewMode === 'compare'}
+              onClick={() => setViewMode('compare')}
             >
-              画布编辑
+              对比模式
             </button>
             <button
               type="button"
-              className={mode === 'preview' ? 'is-active' : ''}
-              aria-pressed={mode === 'preview'}
-              onClick={() => setMode('preview')}
+              className={viewMode === 'dual' ? 'is-active' : ''}
+              aria-pressed={viewMode === 'dual'}
+              onClick={() => setViewMode('dual')}
             >
-              <span className={`seg-status seg-status-${status}`} aria-hidden="true" />
-              实时预览
+              展示模式
             </button>
           </div>
+
+          {viewMode === 'compare' && (
+            <div className="segmented pane-switch" role="group" aria-label="单屏视图切换">
+              <button
+                type="button"
+                className={mode === 'canvas' ? 'is-active' : ''}
+                aria-pressed={mode === 'canvas'}
+                onClick={() => setMode('canvas')}
+              >
+                画布
+              </button>
+              <button
+                type="button"
+                className={mode === 'preview' ? 'is-active' : ''}
+                aria-pressed={mode === 'preview'}
+                onClick={() => setMode('preview')}
+              >
+                <span className={`seg-status seg-status-${status}`} aria-hidden="true" />
+                预览
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
-      <div className={`project-viewport mode-${mode}`}>
-        <div className={`viewport-pane canvas-pane ${mode === 'canvas' ? 'is-visible' : 'is-hidden'}`}>
+      <div className={`project-viewport view-${viewMode}`}>
+        <div
+          className={`viewport-pane canvas-pane ${canvasVisible ? 'is-visible' : 'is-hidden'}`}
+        >
           <CanvasStage
             annotation={annotation}
             intent={run.intent}
@@ -99,7 +130,7 @@ export default function ProjectWorkspace({
             disabled={submitting}
           />
 
-          {previewReady && mode === 'canvas' && (
+          {previewReady && viewMode === 'compare' && mode === 'canvas' && (
             <button
               className="view-result-cta"
               type="button"
@@ -111,8 +142,15 @@ export default function ProjectWorkspace({
           )}
         </div>
 
-        <div className={`viewport-pane preview-pane ${mode === 'preview' ? 'is-visible' : 'is-hidden'}`}>
-          <RuntimePanel run={run} projectName={project.name} expanded />
+        <div
+          className={`viewport-pane preview-pane ${previewVisible ? 'is-visible' : 'is-hidden'}`}
+        >
+          <RuntimePanel
+            run={run}
+            projectName={project.name}
+            expanded
+            visible={active && previewVisible}
+          />
         </div>
       </div>
 
