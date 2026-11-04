@@ -2,19 +2,25 @@
 
 以前端可视化为抓手、多轮交互生成完整全栈应用的 Vibe Coding 平台。
 
-当前阶段：**P0 脚手架**。只包含 Java BFF、Python AI Core、基础设施连接与最小 schema，不包含业务逻辑。
+当前阶段：**M1 完成**。画布标注 → Java BFF → Python AI Core → LangGraph 单 Agent
+→ Docker 沙盒 → 构建验证 / 自动修复 → 预览与 Diff 展示，全链路已打通。
 
 ## 目录
 
 ```text
-apps/platform-bff/                    Java 21 + Spring Boot 3.3 BFF 骨架
-services/orchestrator/                Python 3.12 + FastAPI + LangGraph 依赖骨架
-services/orchestrator/ai_core/        SandboxProvider 抽象与 LocalDockerSandbox
+apps/platform-web/                    React 18 + Vite 画布（标注 / 执行状态 / 预览 / Diff）
+apps/platform-bff/                    Java 21 + Spring Boot 3.3 BFF
+services/orchestrator/                Python 3.12 + FastAPI + LangGraph AI Core
+services/orchestrator/ai_core/        Sandbox / Agent / API
 services/orchestrator/sandbox_template/ React + Vite 沙盒基础镜像
 infra/migrations/schema.sql           M1 初始 MySQL schema（无物理外键）
 scripts/init-db.sh                    应用 schema 到已有 Docker MySQL
 scripts/smoke-test.sh                 验证 Java -> Python 跨语言调用
 scripts/sandbox_e2e_test.py           沙盒创建/补丁/构建校验/销毁 E2E
+scripts/agent_e2e_test.py             Agent 闭环 E2E（Mock LLM）
+scripts/platform_e2e_test.py          全链路 E2E（Vite 代理 → BFF → AI Core → 沙盒）
+scripts/ui_e2e_test.py                浏览器 E2E（Playwright：圈选 / Loading / 预览 / Diff）
+docs/screenshots/                     M1 联调截图
 docker-compose.yml                    只编排平台自身服务
 ```
 
@@ -37,58 +43,104 @@ docker compose ps
 
 | 服务 | 宿主端口 | 容器内地址 |
 |---|---|---|
+| platform-web | 5173 | `http://platform-web:5173` |
 | java-bff | 8080 | `http://java-bff:8080` |
 | python-ai | 8100 | `http://python-ai:8100` |
 
-两个服务都加入自定义网络 `vibe-platform-net`，因此 Java 可以直接通过服务名
-`http://python-ai:8100` 访问 Python。
+打开 <http://127.0.0.1:5173> 即可使用画布。浏览器只请求同源 `/api`，由 Vite
+代理到 `java-bff`；三个服务都加入 `vibe-platform-net`，Java 通过服务名
+`http://python-ai:8100` 调用 Python。
+
+```text
+Browser ──/api──▶ platform-web(Vite proxy) ──▶ java-bff ──▶ python-ai ──▶ Docker sandbox
+                     :5173                       :8080          :8100         127.0.0.1:<random>
+```
+
+## 画布全链路（M1）
+
+1. 在画布上按住鼠标拖拽，圈选「开始体验」按钮。
+2. 输入修改意图（默认「改颜色」），点击 **提交标注**。
+3. 前端组装 `AnnotationEnvelope`，POST `/api/v1/runs`。
+4. Java BFF 同步代理到 `POST /api/v1/internal/runs/execute`（长读超时 300s）。
+5. Python 创建 React + Vite 沙盒，执行 LangGraph：
+
+```text
+planner -> coder -> applier -> verifier -> evaluator
+                        ^                       |
+                        +---- retry (<= 3) <-----+
+                                                +-- success -> awaiting_approval
+                                                +-- exhausted -> failed
+```
+
+6. 前端「Agent 执行状态」面板展示阶段动画；成功后展示 `previewUrl` iframe
+   与右侧 `generatedPatch` Diff。
+
+Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier 捕获日志后
+自动修复 1 次，最终返回 `AWAITING_APPROVAL`，方便稳定复现完整闭环。
+
+![Agent 执行中](docs/screenshots/m1-loading.png)
+
+![执行结果：预览与 Diff](docs/screenshots/m1-result.png)
+
+platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
+使用匿名卷），修改前端源码后由 Vite HMR 即时生效，无需重建镜像。
 
 ## 验证
 
-### 1. Python 自身
+### 1. 全链路 E2E（推荐）
 
 ```bash
-curl -s http://127.0.0.1:8100/api/v1/health | python3 -m json.tool
-curl -s http://127.0.0.1:8100/api/v1/internal/ping | python3 -m json.tool
+python3 scripts/platform_e2e_test.py
 ```
 
-### 2. Java 调用 Python
+覆盖：三个服务健康检查 → Vite `/api` 代理 → 画布同款请求体 → Java BFF →
+Python Agent → 沙盒创建 → 首次构建失败 → 自动修复 → 预览页与 `/src/App.jsx`
+包含红色样式 → 清理沙盒。
+
+### 2. 浏览器 UI E2E（Playwright）
 
 ```bash
+pip install playwright
+playwright install chromium
+python3 scripts/ui_e2e_test.py
+```
+
+真实浏览器中圈选按钮 → 提交标注 → 截取 Loading 面板 → 等待
+`AWAITING_APPROVAL` → 校验 iframe 内按钮 `rgb(255, 0, 0)` → 截取结果图 →
+清理沙盒。截图输出到 `docs/screenshots/`。
+
+### 3. 分层验证
+
+```bash
+python3 scripts/sandbox_e2e_test.py   # 沙盒生命周期 / 补丁 / 构建
+python3 scripts/agent_e2e_test.py     # Agent 闭环 / 3 次上限 / FULLSTACK 拒绝
+./scripts/smoke-test.sh               # Java -> Python 健康检查
+```
+
+### 4. 手动调用
+
+```bash
+curl -s http://127.0.0.1:5173/api/v1/health | python3 -m json.tool
 curl -s http://127.0.0.1:8080/api/v1/health | python3 -m json.tool
+curl -s http://127.0.0.1:8100/api/v1/health | python3 -m json.tool
 ```
 
-预期返回：
+`java-bff` 的 `dependencies.pythonAi.status=UP` 即证明跨语言调用成功；Python
+不可达时 Java 返回 503 + `DEGRADED`，不会抛出 500。
 
-```json
-{
-  "status": "UP",
-  "service": "java-bff",
-  "version": "0.1.0",
-  "timestamp": "...",
-  "dependencies": {
-    "pythonAi": {
-      "status": "UP",
-      "target": "python-ai",
-      "details": {
-        "status": "UP",
-        "service": "python-ai",
-        "version": "0.1.0",
-        "langgraph_version": "..."
-      }
-    }
-  }
-}
-```
+## Java BFF Run API
 
-`dependencies.pythonAi.status=UP` 即证明 Docker 自定义网络内 Java -> Python 的 DNS 与 HTTP 调用成功。
-若 Python 不可达，Java 返回 HTTP 503 且 `status=DEGRADED`，不会抛出 500。
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/v1/runs` | 接收画布标注，同步代理 AI Core 执行 |
 
-一键验证：
+BFF 只校验 `projectId` / `annotation` 存在，`annotation` 与 `options` 以
+`JsonNode` 透传，契约单一真源在 Python `agent/schemas.py`。AI Core 的 HTTP
+状态与 JSON 原样返回：业务失败（重试耗尽）是 `200 + status=FAILED`，参数 /
+沙盒错误是 4xx/5xx。
 
-```bash
-./scripts/smoke-test.sh
-```
+> AI Core 客户端强制 HTTP/1.1。JDK HttpClient 默认尝试 h2c Upgrade，Uvicorn
+> 不支持升级，POST 请求体会丢失（表现为 FastAPI 422 missing body）。
 
 ## 沙盒（Sandbox）
 
@@ -104,14 +156,8 @@ curl -s http://127.0.0.1:8080/api/v1/health | python3 -m json.tool
 | DELETE | `/api/v1/internal/sandbox/{sandboxId}` | 强制销毁容器 |
 
 沙盒镜像 `vibe-platform/sandbox-react:dev` 首次使用时自动构建（依赖已预热，
-单次创建约 1~3 秒）。E2E 验证：
-
-```bash
-python3 scripts/sandbox_e2e_test.py
-```
-
-测试会依次验证：创建 → 端口映射 → 注入语法错误 → verify 失败 → diff 修复 →
-verify 成功 → Vite 返回最新模块 → 销毁 → 资源 404。
+单次创建约 1~3 秒）。Dockerfile 已配置 `registry.npmmirror.com`，依赖层与
+源码层分离以利用 Docker 缓存。
 
 > 安全提示：挂载 Docker Socket 等价于授予 python-ai 宿主 root 权限，仅限本地
 > 开发与受信任环境。生产环境必须替换为独立沙盒节点 + gVisor，业务容器不得
@@ -125,18 +171,10 @@ verify 成功 → Vite 返回最新模块 → 销毁 → 资源 404。
 `POST /api/v1/internal/runs/execute` 接收画布 `AnnotationEnvelope`，创建沙盒并
 同步执行 LangGraph：
 
-```text
-planner -> coder -> applier -> verifier -> evaluator
-                        ^                       |
-                        +---- retry (<= 3) <-----+
-                                                +-- success -> awaiting_approval
-                                                +-- exhausted -> failed
-```
-
-- `applier` 直接复用 SandboxProvider（与沙盒 `apply-patch` API 同一实现），
+- `applier` 直接复用 `SandboxProvider`（与沙盒 `apply-patch` API 同一实现），
   避免内部 HTTP 自调用。
 - `verifier` 执行 `npm run build`，失败日志写入状态并由 `coder` 重试；
-  `retry_count` 硬上限为 3，超过后返回 `FAILED`。
+  `retry_count` 硬上限为 3，预算耗尽返回 `FAILED`。
 - 模型选择：`llmProvider=auto` 时，有 `DEEPSEEK_API_KEY` 用 DeepSeek，
   否则用 Mock；也可显式指定 `mock` / `deepseek`。
 - Mock 场景：`fail_first`（首次写错，验证自动修复）、`always_fail`
@@ -171,15 +209,6 @@ planner -> coder -> applier -> verifier -> evaluator
   }
 }
 ```
-
-E2E：
-
-```bash
-python3 scripts/agent_e2e_test.py
-```
-
-覆盖：首次语法错误 → 自动修复 → `AWAITING_APPROVAL`；持续失败 → 3 次上限
-→ `FAILED`；`FULLSTACK` 意图 → `422 FULLSTACK_NOT_SUPPORTED`。
 
 > M1 的 execute 是同步接口，便于后台联调；M2 将改为 202 + checkpoint + 事件流。
 

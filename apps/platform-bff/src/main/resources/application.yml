@@ -41,6 +41,9 @@ ai-core:
   base-url: ${AI_CORE_BASE_URL:http://localhost:8100}
   connect-timeout-ms: ${AI_CORE_CONNECT_TIMEOUT_MS:2000}
   read-timeout-ms: ${AI_CORE_READ_TIMEOUT_MS:3000}
+  # Run 执行是同步长请求：模型调用 + 沙盒构建 + 最多 3 次修复。
+  run-connect-timeout-ms: ${AI_CORE_RUN_CONNECT_TIMEOUT_MS:2000}
+  run-read-timeout-ms: ${AI_CORE_RUN_READ_TIMEOUT_MS:300000}
 
 # MinIO 仅做客户端配置，M1 启动时懒连接。
 minio:
