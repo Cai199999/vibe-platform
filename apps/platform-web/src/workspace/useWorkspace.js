@@ -5,6 +5,12 @@ const STORAGE_KEY = 'vibe.workspace.v1'
 const STORAGE_VERSION = 1
 const TARGET_FILE = 'src/App.jsx'
 
+/**
+ * 工作区最多同时打开 5 个项目，前端只是第一道防线。
+ * 真实上限还需要后端按租户做配额校验（M2）。
+ */
+export const MAX_OPEN_TABS = 5
+
 const newId = (prefix) => {
   const random =
     typeof crypto !== 'undefined' && crypto.randomUUID
@@ -37,6 +43,20 @@ const createInitialState = () => {
   }
 }
 
+/**
+ * 分配项目名称：复用当前未被占用的最小编号。
+ * 例如已有 1、3、4、5，关闭 2 后新建仍得到「未命名项目 2」，不会继续递增。
+ * 编号从 2 开始，1 号语义上留给初始「演示项目」。
+ */
+function nextProjectName(projects) {
+  const usedNames = new Set(projects.map((project) => project.name))
+  let index = 2
+  while (usedNames.has(`未命名项目 ${index}`)) {
+    index += 1
+  }
+  return `未命名项目 ${index}`
+}
+
 function normalizeState(raw) {
   if (!raw || !Array.isArray(raw.projects) || raw.projects.length === 0) {
     return createInitialState()
@@ -49,7 +69,7 @@ function normalizeState(raw) {
   }
   const projectIds = new Set(projects.map((project) => project.id))
   const openTabs = Array.isArray(raw.openTabs)
-    ? raw.openTabs.filter((id) => projectIds.has(id))
+    ? raw.openTabs.filter((id) => projectIds.has(id)).slice(0, MAX_OPEN_TABS)
     : []
   const activeTabId =
     raw.activeTabId && openTabs.includes(raw.activeTabId)
@@ -94,7 +114,10 @@ export function useWorkspace() {
 
   const createNewProject = useCallback(() => {
     setState((previous) => {
-      const created = createProject(`未命名项目 ${previous.projects.length + 1}`)
+      if (previous.openTabs.length >= MAX_OPEN_TABS) {
+        return previous
+      }
+      const created = createProject(nextProjectName(previous.projects))
       return {
         ...previous,
         projects: [...previous.projects, created],
@@ -109,6 +132,12 @@ export function useWorkspace() {
       if (!previous.projects.some((project) => project.id === projectId)) {
         return previous
       }
+      if (
+        !previous.openTabs.includes(projectId) &&
+        previous.openTabs.length >= MAX_OPEN_TABS
+      ) {
+        return previous
+      }
       const openTabs = previous.openTabs.includes(projectId)
         ? previous.openTabs
         : [...previous.openTabs, projectId]
@@ -116,6 +145,11 @@ export function useWorkspace() {
     })
   }, [])
 
+  /**
+   * 关闭项目：Tab、项目本身与上下文一并移除。
+   * 与旧行为（仅关闭 Tab、保留下拉栏入口）不同，关闭即彻底销毁项目；
+   * 沙盒容器的清理由 WorkspacePage 在调用前触发。
+   */
   const closeTab = useCallback((projectId) => {
     setState((previous) => {
       const index = previous.openTabs.indexOf(projectId)
@@ -125,7 +159,12 @@ export function useWorkspace() {
       if (activeTabId === projectId) {
         activeTabId = openTabs[Math.min(index, openTabs.length - 1)] ?? null
       }
-      return { ...previous, openTabs, activeTabId }
+      return {
+        ...previous,
+        projects: previous.projects.filter((project) => project.id !== projectId),
+        openTabs,
+        activeTabId,
+      }
     })
   }, [])
 
@@ -165,6 +204,8 @@ export function useWorkspace() {
     openTabs: state.openTabs,
     activeTabId: state.activeTabId,
     activeProject,
+    maxTabs: MAX_OPEN_TABS,
+    limitReached: state.openTabs.length >= MAX_OPEN_TABS,
     createProject: createNewProject,
     openProject,
     closeTab,

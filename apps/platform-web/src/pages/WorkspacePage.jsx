@@ -18,6 +18,60 @@ const EMPTY_RUN = {
   startedAt: null,
   result: null,
   error: null,
+  // 同一项目可能执行多次，每次都会生成新沙盒；关闭项目时需全部销毁。
+  sandboxIds: [],
+}
+
+// 已完成 Run 的轻量会话快照：刷新页面后仍能显示「查看效果」，
+// 且 sandboxIds 不丢失，关闭 Tab 时仍能正确销毁容器。
+const RUN_STORAGE_KEY = 'vibe.runs.v1'
+
+function loadRunStates(projects) {
+  const projectIds = new Set(projects.map((project) => project.id))
+  try {
+    const raw = window.sessionStorage.getItem(RUN_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    const restored = {}
+    Object.entries(parsed).forEach(([projectId, saved]) => {
+      if (!projectIds.has(projectId) || !saved) return
+      const sandboxIds = Array.isArray(saved.sandboxIds) ? saved.sandboxIds : []
+      if (saved.result?.sandboxId && !sandboxIds.includes(saved.result.sandboxId)) {
+        sandboxIds.push(saved.result.sandboxId)
+      }
+      restored[projectId] = {
+        ...EMPTY_RUN,
+        annotation: saved.annotation ?? null,
+        result: saved.result ?? null,
+        error: saved.error ?? null,
+        sandboxIds,
+      }
+    })
+    return restored
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 通过 BFF 销毁沙盒。BFF 再调用 Python 内部接口
+ * DELETE /api/v1/internal/sandbox/{sandbox_id}。
+ * 404 视为已销毁（幂等）；失败只记录日志，不阻塞前端关闭 Tab。
+ */
+async function destroySandbox(sandboxId, token) {
+  if (!sandboxId) return
+  try {
+    const response = await fetch(`/api/v1/sandboxes/${encodeURIComponent(sandboxId)}`, {
+      method: 'DELETE',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      keepalive: true,
+    })
+    if (!response.ok && response.status !== 404) {
+      console.warn(`销毁沙盒失败 ${sandboxId}: HTTP ${response.status}`)
+    }
+  } catch (cause) {
+    console.warn(`销毁沙盒失败 ${sandboxId}: ${cause?.message || cause}`)
+  }
 }
 
 const newId = (prefix) => {
@@ -116,6 +170,8 @@ export default function WorkspacePage() {
     openTabs,
     activeTabId,
     activeProject,
+    maxTabs,
+    limitReached,
     createProject,
     openProject,
     closeTab,
@@ -123,9 +179,30 @@ export default function WorkspacePage() {
     reorderTabs,
   } = useWorkspace()
 
-  const [runStates, setRunStates] = useState({})
+  const [runStates, setRunStates] = useState(() => loadRunStates(projects))
   const [accountOpen, setAccountOpen] = useState(false)
   const inflightRef = useRef(new Set())
+  // 记录已关闭项目，防止关闭瞬间仍在执行的 Run 回写状态或泄漏沙盒。
+  const closedProjectsRef = useRef(new Set())
+
+  // 刷新页面后恢复已完成的预览；只持久化会话内结果，不写入 localStorage。
+  useEffect(() => {
+    const snapshot = {}
+    Object.entries(runStates).forEach(([projectId, run]) => {
+      if (!run.result && !run.error && run.sandboxIds.length === 0) return
+      snapshot[projectId] = {
+        annotation: run.annotation,
+        result: run.result,
+        error: run.error,
+        sandboxIds: run.sandboxIds,
+      }
+    })
+    try {
+      window.sessionStorage.setItem(RUN_STORAGE_KEY, JSON.stringify(snapshot))
+    } catch {
+      // 快照过大 / 隐私模式：忽略，当前会话仍可正常使用。
+    }
+  }, [runStates])
 
   const anyRunning = useMemo(
     () => Object.values(runStates).some((run) => run.submitting),
@@ -157,6 +234,7 @@ export default function WorkspacePage() {
   }, [anyRunning])
 
   const patchRun = (projectId, patch) => {
+    if (closedProjectsRef.current.has(projectId)) return
     setRunStates((previous) => {
       const base = previous[projectId] ?? EMPTY_RUN
       const next = typeof patch === 'function' ? patch(base) : { ...base, ...patch }
@@ -233,13 +311,49 @@ export default function WorkspacePage() {
         return
       }
       const result = await response.json()
-      patchRun(projectId, { result })
+      if (closedProjectsRef.current.has(projectId)) {
+        // 提交后用户立即关闭了项目：后端仍会完成本次 Run，
+        // 前端拿到结果后立刻销毁新生成的沙盒，避免资源泄漏。
+        await destroySandbox(result.sandboxId, session?.token)
+        return
+      }
+      patchRun(projectId, (previous) => ({
+        ...previous,
+        result,
+        sandboxIds:
+          result.sandboxId && !previous.sandboxIds.includes(result.sandboxId)
+            ? [...previous.sandboxIds, result.sandboxId]
+            : previous.sandboxIds,
+      }))
     } catch (cause) {
       patchRun(projectId, { error: `网络请求失败：${cause?.message || cause}` })
     } finally {
       inflightRef.current.delete(projectId)
       patchRun(projectId, { submitting: false })
     }
+  }
+
+  /**
+   * 关闭项目 = 彻底销毁：
+   * 1. 标记 closed，阻止在途 Run 回写；
+   * 2. 从工作区删除项目 / Tab；
+   * 3. 删除该项目的运行状态；
+   * 4. 调用 BFF 依次销毁所有关联沙盒。
+   */
+  const handleCloseTab = (projectId) => {
+    const sandboxIds = runStates[projectId]?.sandboxIds ?? []
+    closedProjectsRef.current.add(projectId)
+    inflightRef.current.delete(projectId)
+    closeTab(projectId)
+    setRunStates((previous) => {
+      if (!(projectId in previous)) return previous
+      const next = { ...previous }
+      delete next[projectId]
+      return next
+    })
+    sandboxIds.forEach((sandboxId) => {
+      void destroySandbox(sandboxId, session?.token)
+    })
   }
 
   const statuses = useMemo(() => {
@@ -275,14 +389,21 @@ export default function WorkspacePage() {
             projects={projects}
             activeProject={activeProject}
             openTabs={openTabs}
+            limitReached={limitReached}
             onOpenProject={openProject}
             onNewProject={createProject}
           />
 
           <div className="workspace-stats">
-            <span className="chip chip-muted">{projects.length} 个项目</span>
-            <span className="chip chip-muted">{openTabs.length} 个窗口</span>
+            <span className="chip chip-muted">
+              {openTabs.length} / {maxTabs} 个项目
+            </span>
             {anyRunning && <span className="chip chip-live">Agent 执行中</span>}
+            {limitReached && (
+              <span className="workspace-limit" role="status">
+                最多只能同时打开 {maxTabs} 个项目，请关闭其他项目后再新建。
+              </span>
+            )}
           </div>
         </div>
 
@@ -291,8 +412,9 @@ export default function WorkspacePage() {
           openTabs={openTabs}
           activeTabId={activeTabId}
           statuses={statuses}
+          limitReached={limitReached}
           onSelect={setActiveTab}
-          onClose={closeTab}
+          onClose={handleCloseTab}
           onReorder={reorderTabs}
           onNewProject={createProject}
         />

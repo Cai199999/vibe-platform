@@ -190,7 +190,7 @@ function ResultState({ result }) {
  * 与旧版固定右侧 RunPanel 的区别：preview 跟随项目窗口，
  * 切换 Tab 不会串项目，也不再占用画布之外的独立栏位。
  */
-export default function RuntimePanel({ run, projectName }) {
+export default function RuntimePanel({ run, projectName, expanded = false }) {
   const { submitting, elapsed, result, error, annotation } = run
 
   let stateLabel = 'IDLE'
@@ -207,7 +207,7 @@ export default function RuntimePanel({ run, projectName }) {
   }
 
   return (
-    <aside className="runtime-panel">
+    <aside className={`runtime-panel ${expanded ? 'is-expanded' : ''}`}>
       <div className="runtime-head">
         <div>
           <span className="eyebrow">Sandbox Preview</span>

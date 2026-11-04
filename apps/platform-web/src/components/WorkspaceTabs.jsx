@@ -81,6 +81,7 @@ export default function WorkspaceTabs({
   onClose,
   onReorder,
   onNewProject,
+  limitReached,
 }) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -121,11 +122,19 @@ export default function WorkspaceTabs({
         </SortableContext>
       </DndContext>
 
-      <button className="tab-new" type="button" title="新建项目" onClick={onNewProject}>
+      <button
+        className="tab-new"
+        type="button"
+        disabled={limitReached}
+        title={limitReached ? '最多只能同时打开 5 个项目，请关闭其他项目' : '新建项目'}
+        onClick={onNewProject}
+      >
         ＋
       </button>
 
-      <span className="tabs-hint">拖拽 Tab 可排序</span>
+      <span className="tabs-hint">
+        {limitReached ? '已达 5 个项目上限' : '拖拽 Tab 可排序'}
+      </span>
     </div>
   )
 }

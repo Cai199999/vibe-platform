@@ -8,6 +8,7 @@ export default function ProjectSwitcher({
   projects,
   activeProject,
   openTabs,
+  limitReached,
   onOpenProject,
   onNewProject,
 }) {
@@ -90,6 +91,8 @@ export default function ProjectSwitcher({
             <button
               type="button"
               role="menuitem"
+              disabled={limitReached}
+              title={limitReached ? '最多只能同时打开 5 个项目，请关闭其他项目' : undefined}
               onClick={() => {
                 onNewProject()
                 setOpen(false)
@@ -97,6 +100,7 @@ export default function ProjectSwitcher({
             >
               <span aria-hidden="true">＋</span>
               新建项目
+              {limitReached && <span className="project-menu-badge">5 / 5</span>}
             </button>
             <button type="button" role="menuitem" disabled title="Phase 3 支持导入 HTML / URL">
               <span aria-hidden="true">↥</span>
@@ -104,6 +108,12 @@ export default function ProjectSwitcher({
               <span className="project-menu-badge">Phase 3</span>
             </button>
           </div>
+
+          {limitReached && (
+            <p className="project-menu-hint">
+              最多只能同时打开 5 个项目，请关闭其他项目后再新建。
+            </p>
+          )}
         </div>
       )}
     </div>

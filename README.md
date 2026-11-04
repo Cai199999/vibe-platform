@@ -2,9 +2,10 @@
 
 以前端可视化为抓手、多轮交互生成完整全栈应用的 Vibe Coding 平台。
 
-当前阶段：**M1 完成 · Phase 2 多 Tab 工作区**。画布标注 → Java BFF → Python AI Core
-→ LangGraph 单 Agent → Docker 沙盒 → 构建验证 / 自动修复 → 项目内预览与 Diff，
-全链路已打通；工作台支持多项目、多 Tab、拖拽排序与本地持久化。
+当前阶段：**M1 完成 · Phase 3 单视口与资源生命周期**。画布标注 → Java BFF →
+Python AI Core → LangGraph 单 Agent → Docker 沙盒 → 构建验证 / 自动修复 →
+项目内预览与 Diff，全链路已打通；工作台支持多项目、多 Tab、画布/预览单视口
+切换、5 Tab 上限、关闭即销毁沙盒与拖拽排序。
 
 ## 目录
 
@@ -20,7 +21,7 @@ scripts/smoke-test.sh                 验证 Java -> Python 跨语言调用
 scripts/sandbox_e2e_test.py           沙盒创建/补丁/构建校验/销毁 E2E
 scripts/agent_e2e_test.py             Agent 闭环 E2E（Mock LLM）
 scripts/platform_e2e_test.py          全链路 E2E（Vite 代理 → BFF → AI Core → 沙盒）
-scripts/ui_e2e_test.py                浏览器 E2E（Playwright：多 Tab / 拖拽 / 圈选 / 预览 / Diff）
+scripts/ui_e2e_test.py                浏览器 E2E（Playwright：单视口 / 沙盒销毁 / Tab 上限 / 账户）
 docs/screenshots/                     M1 联调截图
 docker-compose.yml                    只编排平台自身服务
 ```
@@ -74,19 +75,20 @@ planner -> coder -> applier -> verifier -> evaluator
                                                 +-- exhausted -> failed
 ```
 
-6. 当前 Tab 的「实时预览与执行状态」面板展示阶段动画；成功后在该 Tab 内
-   展示 `previewUrl` iframe，并可展开 `generatedPatch` Diff 与执行轨迹。
+6. 当前 Tab 顶部的状态点与顶栏提示显示执行进度；成功后画布右下角出现
+   **查看效果**，点击切到「实时预览」，全屏展示 `previewUrl` iframe，并可
+   展开 `generatedPatch` Diff 与执行轨迹。
 
 Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier 捕获日志后
 自动修复 1 次，最终返回 `AWAITING_APPROVAL`，方便稳定复现完整闭环。
 
 ![登录页](docs/screenshots/phase2-login.png)
 
-![多 Tab 工作区](docs/screenshots/phase2-workspace.png)
+![单视口画布模式](docs/screenshots/phase3-canvas-mode.png)
 
-![画布浮层输入](docs/screenshots/phase2-canvas-popover.png)
+![单视口实时预览](docs/screenshots/phase3-preview-mode.png)
 
-![执行结果：Tab 内预览与 Diff](docs/screenshots/phase2-result.png)
+![5 个项目上限](docs/screenshots/phase3-tab-limit.png)
 
 platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
 使用匿名卷），修改前端源码后由 Vite HMR 即时生效，无需重建镜像。
@@ -101,18 +103,46 @@ platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
 右上角头像菜单包含 **账户设置**（展示用户、租户、角色、Token 掩码）与
 **退出登录**。当前鉴权仅用于前端门禁，真实认证 / RBAC 后续接入。
 
-## 多 Tab 工作区（Phase 2）
+## 多 Tab 工作区与资源生命周期（Phase 2 / 3）
 
 - 顶部左侧 **项目下拉栏**：切换项目、查看已打开状态、新建项目；「导入项目」
-  为 Phase 3 占位，当前禁用。
-- 每个项目对应一个 Tab 窗口，窗口内左侧是标注画布，右侧是该项目的
-  **沙盒实时预览与执行状态**；移除旧的固定右侧预览栏。
-- Tab 支持切换、关闭、重新打开；使用 `@dnd-kit` 拖拽排序（指针 / 键盘），
-  关闭 Tab 不会删除项目，可从下拉栏重新打开。
+  为后续阶段占位，当前禁用。
+- 每个项目对应一个 Tab 窗口，窗口内是 **单视口**：顶部 Segmented Control
+  在「画布编辑 / 实时预览」间切换，两个面板始终保持挂载，仅用
+  `display:none` 隐藏非活动面板，因此圈选标注、缩放与 iframe 加载状态
+  都不会丢失。外层视口高度由 `--viewport-h` 固定，切换时不跳动。
+- Agent 完成后若停留在画布模式，右下角显示 **查看效果 →**，一键切到预览。
+- **最多同时打开 5 个项目**。达到上限后，下拉栏与 Tab 栏的新建入口禁用，
+  并展示「最多只能同时打开 5 个项目，请关闭其他项目后再新建」。
+- **关闭 Tab = 彻底销毁项目**：删除项目与运行状态，并通过 BFF
+  `DELETE /api/v1/sandboxes/{sandboxId}` 销毁该项目关联的全部 Docker
+  容器；若 Run 仍在途，结果返回后立即销毁新沙盒，避免泄漏。
+- 新建项目按当前存活项目复用 **最小空闲编号**（关闭「未命名项目 2」后，
+  新建仍为「未命名项目 2」，而不是项目 6）。
 - 工作区结构与 Tab 顺序持久化到 `localStorage` 的 `vibe.workspace.v1`；
-  运行状态与沙盒预览属于会话态，刷新后重置。
+  已完成 Run 的预览结果与 `sandboxIds` 存入 `sessionStorage`
+  `vibe.runs.v1`，刷新后仍可查看效果并在关闭时清理沙盒。
+- 非激活 Tab 使用 `display:none` + `content-visibility:hidden` 休眠，降低
+  渲染与 CPU 开销；sandbox 容器仍在运行，关闭 Tab 才会释放。
 - 每个项目独立保存标注、意图草稿与 Run 结果，切换 Tab 不串状态；多个项目
   可并行执行，Tab 状态点显示 idle / running / success / error。
+
+### 5 个项目时的 Docker 资源（实测）
+
+同一时刻并发创建 5 个 React + Vite 沙盒，稳定后 `docker stats`：
+
+| 指标 | 单沙盒 | 5 个沙盒合计 |
+|---|---|---|
+| 常驻内存 | 78–95 MiB | **约 426 MiB（0.42 GiB）** |
+| 空闲 CPU | 0.05%–0.19% | **约 0.6%** |
+| 进程数（PIDs） | 29–32 | 148 |
+| 限额 | 768 MiB / 1 CPU / 256 PIDs | 3.75 GiB / 5 CPU / 1280 PIDs |
+| 监听端口 | 1 个随机端口，仅 `127.0.0.1` | 5 个随机端口 |
+
+平台自身（`java-bff` + `python-ai` + `platform-web`）常驻约 377 MiB。
+5 个项目全部打开时，平台 + 沙盒常驻内存约 **800 MiB**；构建/热更新瞬间
+CPU 会短时冲高，但每个容器受 1 CPU 限额约束。沙盒镜像
+`vibe-platform/sandbox-react:dev` 约 492 MB（镜像层共享，不随容器数线性增长）。
 
 ## 验证
 
@@ -135,10 +165,12 @@ python3 scripts/ui_e2e_test.py
 ```
 
 真实浏览器中验证未登录跳转 → 一键登录 → 新建项目 → 拖拽 Tab 排序 →
-刷新验证 localStorage 持久化 → 在当前 Tab 圈选按钮并发送意图 → 截取 Loading
-→ 等待 `AWAITING_APPROVAL` → 校验 Tab 内 iframe 按钮 `rgb(255, 0, 0)` →
-展开 Diff → 关闭 / 重新打开 Tab → 账户设置 → 清理沙盒。截图输出到
-`docs/screenshots/`（`phase2-*.png`）。
+刷新验证 localStorage 持久化 → 画布圈选并发送意图 → 执行中状态反馈 →
+**查看效果**切换全屏预览并校验 iframe 按钮 `rgb(255, 0, 0)` → 往返切换
+验证视口尺寸 / 标注 / iframe 状态不变 → **刷新恢复预览结果** → 关闭 Tab
+并通过 Docker CLI 确认容器已销毁 → 5 Tab 上限 → 关闭项目 2 后名称复用 →
+账户设置 / 退出 / 账号密码登录。截图输出到 `docs/screenshots/`
+（`phase3-*.png`）。
 
 ### 3. 分层验证
 
@@ -164,6 +196,7 @@ curl -s http://127.0.0.1:8100/api/v1/health | python3 -m json.tool
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/v1/runs` | 接收画布标注，同步代理 AI Core 执行 |
+| DELETE | `/api/v1/sandboxes/{sandboxId}` | 代理 AI Core 销毁沙盒；404 幂等透传 |
 
 BFF 只校验 `projectId` / `annotation` 存在，`annotation` 与 `options` 以
 `JsonNode` 透传，契约单一真源在 Python `agent/schemas.py`。AI Core 的 HTTP
