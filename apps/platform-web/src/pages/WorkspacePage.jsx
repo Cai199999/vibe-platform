@@ -1,27 +1,24 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import AppHeader from '../components/AppHeader.jsx'
 import AccountDialog from '../components/AccountDialog.jsx'
-import CanvasStage from '../components/CanvasStage.jsx'
-import RunPanel from '../components/RunPanel.jsx'
+import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
+import ProjectWorkspace from '../components/ProjectWorkspace.jsx'
+import WorkspaceTabs from '../components/WorkspaceTabs.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
+import { useWorkspace } from '../workspace/useWorkspace.js'
 import { INITIAL_APP } from '../mockProject.js'
 
 const TARGET_FILE = 'src/App.jsx'
-const PROJECT_ID = 'proj_canvas_demo'
 
-/**
- * 同步执行的进度提示只负责“体验”，不代表真实节点进度：
- * 真实状态要等 M2 事件流；M1 用时间轴模拟，避免界面看起来卡死。
- */
-const STAGES = [
-  { at: 0, title: '正在解析画布标注', detail: '归一化坐标 → 组件选区 → AnnotationEnvelope' },
-  { at: 3, title: 'Planner 正在规划修改方案', detail: '理解“改颜色”的目标组件与验收条件' },
-  { at: 6, title: 'Coder 正在生成代码', detail: '输出 Unified Diff / 全量文件' },
-  { at: 9, title: 'Applier 正在写入沙盒', detail: 'git apply + Vite HMR 热更新' },
-  { at: 12, title: 'Verifier 正在运行构建', detail: 'npm run build 收集错误日志' },
-  { at: 16, title: '遇到报错，正在尝试自我修复（第 1 次）', detail: '错误日志回灌 Coder，重新生成补丁' },
-  { at: 22, title: '再次验证中', detail: '等待沙盒返回最终结果' },
-]
+const EMPTY_RUN = {
+  annotation: null,
+  intent: '',
+  submitting: false,
+  elapsed: 0,
+  startedAt: null,
+  result: null,
+  error: null,
+}
 
 const newId = (prefix) => {
   const random =
@@ -31,19 +28,11 @@ const newId = (prefix) => {
   return `${prefix}_${random}`
 }
 
-const stageIndexFor = (elapsed) => {
-  let index = 0
-  STAGES.forEach((stage, i) => {
-    if (elapsed >= stage.at) index = i
-  })
-  return index
-}
-
 /**
  * 将画布上的归一化选区组装为 AnnotationEnvelope。
  * worldTarget 保留归一化坐标，后端可换算到任意分辨率。
  */
-function buildAnnotation(rect, instruction) {
+function buildAnnotation(rect, instruction, source) {
   const now = new Date().toISOString()
   return {
     version: 1,
@@ -68,8 +57,8 @@ function buildAnnotation(rect, instruction) {
       selector: "[data-vibe-target='cta-button']",
       snippet: {
         startLine: 1,
-        endLine: INITIAL_APP.split('\n').length,
-        content: INITIAL_APP,
+        endLine: source.split('\n').length,
+        content: source,
         hash: 'sha256:canvas-demo',
       },
     },
@@ -105,44 +94,122 @@ async function extractError(response) {
   return `HTTP ${response.status} ${response.statusText || ''}`.trim()
 }
 
+function EmptyWorkspace({ onNewProject }) {
+  return (
+    <div className="workspace-empty">
+      <div className="empty-mark" aria-hidden="true">
+        ▦
+      </div>
+      <h2>工作区里还没有打开的窗口</h2>
+      <p>新建一个项目，或从左上角项目下拉栏重新打开已有项目。</p>
+      <button className="primary-button" type="button" onClick={onNewProject}>
+        ＋ 新建项目
+      </button>
+    </div>
+  )
+}
+
 export default function WorkspacePage() {
   const { user, session } = useAuth()
-  const [annotation, setAnnotation] = useState(null)
-  const [submitting, setSubmitting] = useState(false)
-  const [elapsed, setElapsed] = useState(0)
-  const [result, setResult] = useState(null)
-  const [error, setError] = useState(null)
-  const [accountOpen, setAccountOpen] = useState(false)
+  const {
+    projects,
+    openTabs,
+    activeTabId,
+    activeProject,
+    createProject,
+    openProject,
+    closeTab,
+    setActiveTab,
+    reorderTabs,
+  } = useWorkspace()
 
+  const [runStates, setRunStates] = useState({})
+  const [accountOpen, setAccountOpen] = useState(false)
+  const inflightRef = useRef(new Set())
+
+  const anyRunning = useMemo(
+    () => Object.values(runStates).some((run) => run.submitting),
+    [runStates],
+  )
+
+  // 所有 Tab 共用同一个计时器；按 startedAt 计算各自耗时，避免多项目并发时互相覆盖。
   useEffect(() => {
-    if (!submitting) return undefined
-    const startedAt = Date.now()
+    if (!anyRunning) return undefined
     const timer = window.setInterval(() => {
-      setElapsed(Math.floor((Date.now() - startedAt) / 1000))
+      setRunStates((previous) => {
+        let changed = false
+        const next = { ...previous }
+        Object.entries(previous).forEach(([projectId, run]) => {
+          if (!run.submitting) return
+          const elapsed = Math.max(
+            0,
+            Math.floor((Date.now() - (run.startedAt ?? Date.now())) / 1000),
+          )
+          if (elapsed !== run.elapsed) {
+            next[projectId] = { ...run, elapsed }
+            changed = true
+          }
+        })
+        return changed ? next : previous
+      })
     }, 400)
     return () => window.clearInterval(timer)
-  }, [submitting])
+  }, [anyRunning])
 
-  const stageIndex = useMemo(() => stageIndexFor(elapsed), [elapsed])
+  const patchRun = (projectId, patch) => {
+    setRunStates((previous) => {
+      const base = previous[projectId] ?? EMPTY_RUN
+      const next = typeof patch === 'function' ? patch(base) : { ...base, ...patch }
+      if (next === base) return previous
+      return { ...previous, [projectId]: next }
+    })
+  }
 
-  /**
-   * 由画布内浮层触发：annotation 已在 state 中，instruction 来自浮层输入框。
-   */
-  const submit = async (instruction) => {
+  const handleAnnotationChange = (projectId, rect) => {
+    // 无论新建还是清除选区，都重置该项目的意图草稿，避免旧意图误发到新目标。
+    patchRun(projectId, (previous) => ({ ...previous, annotation: rect, intent: '' }))
+  }
+
+  const handleIntentChange = (projectId, intent) => {
+    patchRun(projectId, (previous) => ({ ...previous, intent }))
+  }
+
+  const handleClearAnnotation = (projectId) => {
+    patchRun(projectId, (previous) => ({ ...previous, annotation: null, intent: '' }))
+  }
+
+  const handleSubmit = async (projectId, instruction) => {
+    const project = projects.find((item) => item.id === projectId)
+    const run = runStates[projectId] ?? EMPTY_RUN
     const text = instruction.trim()
-    if (!annotation || !text || submitting) return
+    if (
+      !project ||
+      !run.annotation ||
+      !text ||
+      run.submitting ||
+      inflightRef.current.has(projectId)
+    ) {
+      return
+    }
 
-    setSubmitting(true)
-    setElapsed(0)
-    setResult(null)
-    setError(null)
+    inflightRef.current.add(projectId)
+    const startedAt = Date.now()
+    patchRun(projectId, {
+      submitting: true,
+      elapsed: 0,
+      startedAt,
+      result: null,
+      error: null,
+      intent: '',
+    })
 
+    const source = project.files?.[TARGET_FILE] ?? INITIAL_APP
     const payload = {
       runId: newId('run'),
       tenantId: user?.tenantId || 'tenant_local',
-      projectId: PROJECT_ID,
-      annotation: buildAnnotation(annotation, text),
-      files: { [TARGET_FILE]: INITIAL_APP },
+      projectId: project.id,
+      annotation: buildAnnotation(run.annotation, text, source),
+      files: { [TARGET_FILE]: source },
       options: {
         llmProvider: 'mock',
         mockScenario: 'fail_first',
@@ -161,71 +228,94 @@ export default function WorkspacePage() {
         body: JSON.stringify(payload),
       })
       if (!response.ok) {
-        setError(await extractError(response))
+        const message = await extractError(response)
+        patchRun(projectId, { error: message })
         return
       }
-      setResult(await response.json())
+      const result = await response.json()
+      patchRun(projectId, { result })
     } catch (cause) {
-      setError(`网络请求失败：${cause?.message || cause}`)
+      patchRun(projectId, { error: `网络请求失败：${cause?.message || cause}` })
     } finally {
-      setSubmitting(false)
+      inflightRef.current.delete(projectId)
+      patchRun(projectId, { submitting: false })
     }
   }
 
+  const statuses = useMemo(() => {
+    const map = {}
+    openTabs.forEach((projectId) => {
+      const run = runStates[projectId]
+      if (!run) {
+        map[projectId] = 'idle'
+      } else if (run.submitting) {
+        map[projectId] = 'running'
+      } else if (run.error) {
+        map[projectId] = 'error'
+      } else if (run.result) {
+        map[projectId] = 'success'
+      } else {
+        map[projectId] = 'idle'
+      }
+    })
+    return map
+  }, [openTabs, runStates])
+
+  const openProjects = openTabs
+    .map((projectId) => projects.find((project) => project.id === projectId))
+    .filter(Boolean)
+
   return (
-    <div className="app-shell">
-      <AppHeader busy={submitting} onOpenAccount={() => setAccountOpen(true)} />
+    <div className="app-shell app-shell-wide">
+      <AppHeader busy={anyRunning} onOpenAccount={() => setAccountOpen(true)} />
 
-      <main className="layout">
-        <section className="studio">
-          <div className="studio-head">
-            <div>
-              <span className="eyebrow">Canvas · Demo Project</span>
-              <h2>拖拽圈选，画布内直接下达指令</h2>
-            </div>
-            <button
-              className="ghost-button"
-              type="button"
-              disabled={!annotation || submitting}
-              onClick={() => setAnnotation(null)}
-            >
-              清除标注
-            </button>
-          </div>
-
-          <CanvasStage
-            annotation={annotation}
-            onAnnotationChange={setAnnotation}
-            onSubmit={submit}
-            submitting={submitting}
-            disabled={submitting}
+      <main className="workspace">
+        <div className="workspace-toolbar">
+          <ProjectSwitcher
+            projects={projects}
+            activeProject={activeProject}
+            openTabs={openTabs}
+            onOpenProject={openProject}
+            onNewProject={createProject}
           />
 
-          <div className="studio-status">
-            <span className={`selection-state ${annotation ? 'is-ready' : ''}`}>
-              {annotation
-                ? `已圈选 ${(annotation.width * 100).toFixed(0)}% × ${(annotation.height * 100).toFixed(0)}%`
-                : '尚未圈选组件'}
-            </span>
-            <span className="chip chip-muted">Mock LLM · fail_first</span>
-            <span className="studio-tip">圈选后输入意图，Enter 发送</span>
+          <div className="workspace-stats">
+            <span className="chip chip-muted">{projects.length} 个项目</span>
+            <span className="chip chip-muted">{openTabs.length} 个窗口</span>
+            {anyRunning && <span className="chip chip-live">Agent 执行中</span>}
           </div>
+        </div>
 
-          <p className="footnote">
-            同步链路：platform-web → <code>/api/v1/runs</code> → Java BFF → python-ai → Docker 沙盒。
-            首次执行会创建 Vite 沙盒，通常需要 20–60 秒。
-          </p>
-        </section>
-
-        <RunPanel
-          submitting={submitting}
-          stages={STAGES}
-          stageIndex={stageIndex}
-          elapsed={elapsed}
-          result={result}
-          error={error}
-          hasAnnotation={Boolean(annotation)}
+        <WorkspaceTabs
+          projects={projects}
+          openTabs={openTabs}
+          activeTabId={activeTabId}
+          statuses={statuses}
+          onSelect={setActiveTab}
+          onClose={closeTab}
+          onReorder={reorderTabs}
+          onNewProject={createProject}
         />
+
+        <div className="workspace-body">
+          {openProjects.map((project) => {
+            const run = runStates[project.id] ?? EMPTY_RUN
+            return (
+              <ProjectWorkspace
+                key={project.id}
+                project={project}
+                run={run}
+                active={project.id === activeTabId}
+                onAnnotationChange={(rect) => handleAnnotationChange(project.id, rect)}
+                onIntentChange={(intent) => handleIntentChange(project.id, intent)}
+                onClearAnnotation={() => handleClearAnnotation(project.id)}
+                onSubmit={(instruction) => handleSubmit(project.id, instruction)}
+              />
+            )
+          })}
+
+          {openProjects.length === 0 && <EmptyWorkspace onNewProject={createProject} />}
+        </div>
       </main>
 
       <AccountDialog open={accountOpen} onClose={() => setAccountOpen(false)} />

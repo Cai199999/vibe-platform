@@ -2,13 +2,14 @@
 
 以前端可视化为抓手、多轮交互生成完整全栈应用的 Vibe Coding 平台。
 
-当前阶段：**M1 完成**。画布标注 → Java BFF → Python AI Core → LangGraph 单 Agent
-→ Docker 沙盒 → 构建验证 / 自动修复 → 预览与 Diff 展示，全链路已打通。
+当前阶段：**M1 完成 · Phase 2 多 Tab 工作区**。画布标注 → Java BFF → Python AI Core
+→ LangGraph 单 Agent → Docker 沙盒 → 构建验证 / 自动修复 → 项目内预览与 Diff，
+全链路已打通；工作台支持多项目、多 Tab、拖拽排序与本地持久化。
 
 ## 目录
 
 ```text
-apps/platform-web/                    React 18 + Vite（登录 / 工作台 / 画布浮层 / 预览 / Diff）
+apps/platform-web/                    React 18 + Vite（登录 / 多 Tab 工作台 / 画布浮层 / 预览 / Diff）
 apps/platform-bff/                    Java 21 + Spring Boot 3.3 BFF
 services/orchestrator/                Python 3.12 + FastAPI + LangGraph AI Core
 services/orchestrator/ai_core/        Sandbox / Agent / API
@@ -19,7 +20,7 @@ scripts/smoke-test.sh                 验证 Java -> Python 跨语言调用
 scripts/sandbox_e2e_test.py           沙盒创建/补丁/构建校验/销毁 E2E
 scripts/agent_e2e_test.py             Agent 闭环 E2E（Mock LLM）
 scripts/platform_e2e_test.py          全链路 E2E（Vite 代理 → BFF → AI Core → 沙盒）
-scripts/ui_e2e_test.py                浏览器 E2E（Playwright：圈选 / Loading / 预览 / Diff）
+scripts/ui_e2e_test.py                浏览器 E2E（Playwright：多 Tab / 拖拽 / 圈选 / 预览 / Diff）
 docs/screenshots/                     M1 联调截图
 docker-compose.yml                    只编排平台自身服务
 ```
@@ -73,17 +74,19 @@ planner -> coder -> applier -> verifier -> evaluator
                                                 +-- exhausted -> failed
 ```
 
-6. 前端「Agent 执行状态」面板展示阶段动画；成功后展示 `previewUrl` iframe
-   与右侧 `generatedPatch` Diff。
+6. 当前 Tab 的「实时预览与执行状态」面板展示阶段动画；成功后在该 Tab 内
+   展示 `previewUrl` iframe，并可展开 `generatedPatch` Diff 与执行轨迹。
 
 Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier 捕获日志后
 自动修复 1 次，最终返回 `AWAITING_APPROVAL`，方便稳定复现完整闭环。
 
-![登录页](docs/screenshots/phase1-login.png)
+![登录页](docs/screenshots/phase2-login.png)
 
-![画布浮层输入](docs/screenshots/phase1-canvas-popover.png)
+![多 Tab 工作区](docs/screenshots/phase2-workspace.png)
 
-![执行结果：预览与 Diff](docs/screenshots/phase1-result.png)
+![画布浮层输入](docs/screenshots/phase2-canvas-popover.png)
+
+![执行结果：Tab 内预览与 Diff](docs/screenshots/phase2-result.png)
 
 platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
 使用匿名卷），修改前端源码后由 Vite HMR 即时生效，无需重建镜像。
@@ -97,6 +100,19 @@ platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
 
 右上角头像菜单包含 **账户设置**（展示用户、租户、角色、Token 掩码）与
 **退出登录**。当前鉴权仅用于前端门禁，真实认证 / RBAC 后续接入。
+
+## 多 Tab 工作区（Phase 2）
+
+- 顶部左侧 **项目下拉栏**：切换项目、查看已打开状态、新建项目；「导入项目」
+  为 Phase 3 占位，当前禁用。
+- 每个项目对应一个 Tab 窗口，窗口内左侧是标注画布，右侧是该项目的
+  **沙盒实时预览与执行状态**；移除旧的固定右侧预览栏。
+- Tab 支持切换、关闭、重新打开；使用 `@dnd-kit` 拖拽排序（指针 / 键盘），
+  关闭 Tab 不会删除项目，可从下拉栏重新打开。
+- 工作区结构与 Tab 顺序持久化到 `localStorage` 的 `vibe.workspace.v1`；
+  运行状态与沙盒预览属于会话态，刷新后重置。
+- 每个项目独立保存标注、意图草稿与 Run 结果，切换 Tab 不串状态；多个项目
+  可并行执行，Tab 状态点显示 idle / running / success / error。
 
 ## 验证
 
@@ -118,10 +134,11 @@ playwright install chromium
 python3 scripts/ui_e2e_test.py
 ```
 
-真实浏览器中验证未登录跳转 → 一键登录 → 圈选按钮 → 画布浮层输入并发送 →
-截取 Loading 面板 → 等待 `AWAITING_APPROVAL` → 校验 iframe 内按钮
-`rgb(255, 0, 0)` → 打开账户设置 → 清理沙盒。截图输出到 `docs/screenshots/`
-（`phase1-*.png`）。
+真实浏览器中验证未登录跳转 → 一键登录 → 新建项目 → 拖拽 Tab 排序 →
+刷新验证 localStorage 持久化 → 在当前 Tab 圈选按钮并发送意图 → 截取 Loading
+→ 等待 `AWAITING_APPROVAL` → 校验 Tab 内 iframe 按钮 `rgb(255, 0, 0)` →
+展开 Diff → 关闭 / 重新打开 Tab → 账户设置 → 清理沙盒。截图输出到
+`docs/screenshots/`（`phase2-*.png`）。
 
 ### 3. 分层验证
 

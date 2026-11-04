@@ -1,0 +1,174 @@
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { INITIAL_APP } from '../mockProject.js'
+
+const STORAGE_KEY = 'vibe.workspace.v1'
+const STORAGE_VERSION = 1
+const TARGET_FILE = 'src/App.jsx'
+
+const newId = (prefix) => {
+  const random =
+    typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+      : Math.random().toString(36).slice(2, 14)
+  return `${prefix}_${random}`
+}
+
+const templateFiles = () => ({ [TARGET_FILE]: INITIAL_APP })
+
+/**
+ * 创建项目。Phase 2 只支持平台内置 React 模板；
+ * Phase 3 导入项目会复用同一结构，替换 template / files。
+ */
+const createProject = (name) => ({
+  id: newId('proj'),
+  name,
+  template: 'vibe-react',
+  files: templateFiles(),
+  createdAt: new Date().toISOString(),
+})
+
+const createInitialState = () => {
+  const project = createProject('演示项目')
+  return {
+    version: STORAGE_VERSION,
+    projects: [project],
+    openTabs: [project.id],
+    activeTabId: project.id,
+  }
+}
+
+function normalizeState(raw) {
+  if (!raw || !Array.isArray(raw.projects) || raw.projects.length === 0) {
+    return createInitialState()
+  }
+  const projects = raw.projects.filter(
+    (project) => project?.id && project?.name && project?.files?.[TARGET_FILE],
+  )
+  if (projects.length === 0) {
+    return createInitialState()
+  }
+  const projectIds = new Set(projects.map((project) => project.id))
+  const openTabs = Array.isArray(raw.openTabs)
+    ? raw.openTabs.filter((id) => projectIds.has(id))
+    : []
+  const activeTabId =
+    raw.activeTabId && openTabs.includes(raw.activeTabId)
+      ? raw.activeTabId
+      : (openTabs[0] ?? null)
+  return {
+    version: STORAGE_VERSION,
+    projects,
+    openTabs,
+    activeTabId,
+  }
+}
+
+function loadState() {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY)
+    if (!raw) return createInitialState()
+    return normalizeState(JSON.parse(raw))
+  } catch {
+    return createInitialState()
+  }
+}
+
+/**
+ * 多项目工作区状态：
+ *  - projects   : 所有项目（关闭 Tab 不删除项目）
+ *  - openTabs   : 当前打开的 Tab，顺序即展示顺序
+ *  - activeTabId: 当前激活项目
+ *
+ * 仅持久化工作区结构；沙盒预览与 Run 结果属于会话态，刷新后重置。
+ */
+export function useWorkspace() {
+  const [state, setState] = useState(loadState)
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+    } catch {
+      // 存储配额不足 / 隐私模式：工作区仍可在内存中正常使用。
+    }
+  }, [state])
+
+  const createNewProject = useCallback(() => {
+    setState((previous) => {
+      const created = createProject(`未命名项目 ${previous.projects.length + 1}`)
+      return {
+        ...previous,
+        projects: [...previous.projects, created],
+        openTabs: [...previous.openTabs, created.id],
+        activeTabId: created.id,
+      }
+    })
+  }, [])
+
+  const openProject = useCallback((projectId) => {
+    setState((previous) => {
+      if (!previous.projects.some((project) => project.id === projectId)) {
+        return previous
+      }
+      const openTabs = previous.openTabs.includes(projectId)
+        ? previous.openTabs
+        : [...previous.openTabs, projectId]
+      return { ...previous, openTabs, activeTabId: projectId }
+    })
+  }, [])
+
+  const closeTab = useCallback((projectId) => {
+    setState((previous) => {
+      const index = previous.openTabs.indexOf(projectId)
+      if (index < 0) return previous
+      const openTabs = previous.openTabs.filter((id) => id !== projectId)
+      let activeTabId = previous.activeTabId
+      if (activeTabId === projectId) {
+        activeTabId = openTabs[Math.min(index, openTabs.length - 1)] ?? null
+      }
+      return { ...previous, openTabs, activeTabId }
+    })
+  }, [])
+
+  const setActiveTab = useCallback((projectId) => {
+    setState((previous) =>
+      previous.openTabs.includes(projectId)
+        ? { ...previous, activeTabId: projectId }
+        : previous,
+    )
+  }, [])
+
+  const reorderTabs = useCallback((fromIndex, toIndex) => {
+    setState((previous) => {
+      if (
+        fromIndex === toIndex ||
+        fromIndex < 0 ||
+        toIndex < 0 ||
+        fromIndex >= previous.openTabs.length ||
+        toIndex >= previous.openTabs.length
+      ) {
+        return previous
+      }
+      const openTabs = [...previous.openTabs]
+      const [moved] = openTabs.splice(fromIndex, 1)
+      openTabs.splice(toIndex, 0, moved)
+      return { ...previous, openTabs }
+    })
+  }, [])
+
+  const activeProject = useMemo(
+    () => state.projects.find((project) => project.id === state.activeTabId) ?? null,
+    [state.projects, state.activeTabId],
+  )
+
+  return {
+    projects: state.projects,
+    openTabs: state.openTabs,
+    activeTabId: state.activeTabId,
+    activeProject,
+    createProject: createNewProject,
+    openProject,
+    closeTab,
+    setActiveTab,
+    reorderTabs,
+  }
+}

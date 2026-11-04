@@ -21,12 +21,19 @@ function normalizeRect(originX, originY, x, y) {
  *  - 鼠标 / 触控拖拽圈选组件，坐标归一化到 0~1；
  *  - 圈选完成后，在选区旁弹出浮动意图输入框，直接发送给 Agent。
  */
-export default function CanvasStage({ annotation, onAnnotationChange, onSubmit, submitting, disabled }) {
+export default function CanvasStage({
+  annotation,
+  intent,
+  onIntentChange,
+  onAnnotationChange,
+  onSubmit,
+  submitting,
+  disabled,
+}) {
   const stageRef = useRef(null)
   const inputRef = useRef(null)
   const [draft, setDraft] = useState(null)
   const [drawing, setDrawing] = useState(false)
-  const [intent, setIntent] = useState('')
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 })
 
   // 监听画布尺寸，浮层按像素计算左右/上下空间，避免超出可视区域。
@@ -40,13 +47,10 @@ export default function CanvasStage({ annotation, onAnnotationChange, onSubmit, 
     return () => observer.disconnect()
   }, [])
 
-  // 每次产生新圈选：清空上一次意图并聚焦输入框。
+  // 产生新圈选后聚焦输入框。意图草稿由父级按项目持有，切换 Tab 后仍会保留；
+  // 新选区 / 清除选区时的草稿重置在 WorkspacePage 的 annotation 回调里完成。
   useEffect(() => {
-    if (!annotation) {
-      setIntent('')
-      return undefined
-    }
-    setIntent('')
+    if (!annotation) return undefined
     const frame = window.requestAnimationFrame(() => inputRef.current?.focus())
     return () => window.cancelAnimationFrame(frame)
   }, [annotation])
@@ -204,7 +208,7 @@ export default function CanvasStage({ annotation, onAnnotationChange, onSubmit, 
                 maxLength={120}
                 placeholder="例如：把按钮改成红色"
                 disabled={submitting}
-                onChange={(event) => setIntent(event.target.value)}
+                onChange={(event) => onIntentChange?.(event.target.value)}
               />
               <button
                 className="popover-send"
