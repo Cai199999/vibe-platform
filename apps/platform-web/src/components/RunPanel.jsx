@@ -102,8 +102,8 @@ function IdleState({ hasAnnotation }) {
       <h3>{hasAnnotation ? '标注已就绪' : '先在画布上圈一个组件'}</h3>
       <p>
         {hasAnnotation
-          ? '在下方填写修改意图，然后点击“提交标注”。Agent 会创建隔离沙盒、生成代码并运行构建。'
-          : '按住鼠标在左侧预览上拖拽，画一个圈。然后写下“改颜色”，提交给 Agent。'}
+          ? '在画布浮层内写下修改意图，Enter 发送。Agent 会创建隔离沙盒、生成代码并运行构建。'
+          : '在画布上拖拽圈出组件，浮层会自动出现。输入“改颜色”并发送给 Agent。'}
       </p>
       <ol className="flow-list">
         <li>Planner 解析标注，生成修改计划</li>

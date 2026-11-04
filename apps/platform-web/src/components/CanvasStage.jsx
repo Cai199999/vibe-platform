@@ -1,6 +1,10 @@
-import { useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 const clamp01 = (value) => Math.min(1, Math.max(0, value))
+
+const POPOVER_WIDTH = 272
+const POPOVER_HEIGHT = 150
+const POPOVER_GAP = 14
 
 function normalizeRect(originX, originY, x, y) {
   return {
@@ -14,13 +18,38 @@ function normalizeRect(originX, originY, x, y) {
 /**
  * 画布 Stage：
  *  - 展示一个与沙盒初始源码一致的 Mock 页面；
- *  - 鼠标 / 触控拖拽即可圈选组件，坐标归一化到 0~1，窗口缩放不丢失；
- *  - 圈选结果通过 onAnnotationChange 回传给外层。
+ *  - 鼠标 / 触控拖拽圈选组件，坐标归一化到 0~1；
+ *  - 圈选完成后，在选区旁弹出浮动意图输入框，直接发送给 Agent。
  */
-export default function CanvasStage({ annotation, onAnnotationChange, disabled }) {
+export default function CanvasStage({ annotation, onAnnotationChange, onSubmit, submitting, disabled }) {
   const stageRef = useRef(null)
+  const inputRef = useRef(null)
   const [draft, setDraft] = useState(null)
   const [drawing, setDrawing] = useState(false)
+  const [intent, setIntent] = useState('')
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 })
+
+  // 监听画布尺寸，浮层按像素计算左右/上下空间，避免超出可视区域。
+  useEffect(() => {
+    const node = stageRef.current
+    if (!node) return undefined
+    const update = () => setStageSize({ width: node.clientWidth, height: node.clientHeight })
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [])
+
+  // 每次产生新圈选：清空上一次意图并聚焦输入框。
+  useEffect(() => {
+    if (!annotation) {
+      setIntent('')
+      return undefined
+    }
+    setIntent('')
+    const frame = window.requestAnimationFrame(() => inputRef.current?.focus())
+    return () => window.cancelAnimationFrame(frame)
+  }, [annotation])
 
   const toPoint = (event) => {
     const box = stageRef.current.getBoundingClientRect()
@@ -66,6 +95,40 @@ export default function CanvasStage({ annotation, onAnnotationChange, disabled }
 
   const activeRect = draft ? normalizeRect(draft.originX, draft.originY, draft.x, draft.y) : annotation
 
+  /**
+   * 浮层定位：优先放选区右侧，其次左侧；两侧空间都不足时放到选区下方。
+   * 所有位置都做边界收拢，避免被 canvas-stage 裁切。
+   */
+  const popoverStyle = useMemo(() => {
+    if (!annotation || drawing || stageSize.width === 0) return null
+    const { width, height } = stageSize
+    const leftPx = annotation.x * width
+    const rightPx = (annotation.x + annotation.width) * width
+    const centerY = (annotation.y + annotation.height / 2) * height
+    const clampTop = (value) =>
+      Math.min(Math.max(12, value), Math.max(12, height - POPOVER_HEIGHT - 12))
+
+    if (width - rightPx >= POPOVER_WIDTH + POPOVER_GAP) {
+      return { left: rightPx + POPOVER_GAP, top: clampTop(centerY - POPOVER_HEIGHT / 2) }
+    }
+    if (leftPx >= POPOVER_WIDTH + POPOVER_GAP) {
+      return { right: width - leftPx + POPOVER_GAP, top: clampTop(centerY - POPOVER_HEIGHT / 2) }
+    }
+
+    // 窄屏兜底：横跨选区下方，宽度由 left/right 自适应。
+    const below = (annotation.y + annotation.height) * height + 12
+    const above = annotation.y * height - POPOVER_HEIGHT - 12
+    const top = below + POPOVER_HEIGHT <= height - 12 ? below : Math.max(12, above)
+    return { left: 12, right: 12, width: 'auto', top: clampTop(top) }
+  }, [annotation, drawing, stageSize])
+
+  const handleSend = (event) => {
+    event.preventDefault()
+    const text = intent.trim()
+    if (!text || !annotation || submitting) return
+    onSubmit?.(text)
+  }
+
   return (
     <div className="canvas-frame">
       <div className="canvas-chrome">
@@ -95,12 +158,12 @@ export default function CanvasStage({ annotation, onAnnotationChange, disabled }
               剩下的交给 Agent。
             </h1>
             <p className="mock-copy">
-              在左侧画布圈选任意组件，写下修改意图。Agent 会在隔离沙盒中生成代码、运行构建，并自动修复错误。
+              在画布圈选任意组件，浮层内写下修改意图。Agent 会在隔离沙盒中生成代码、运行构建，并自动修复错误。
             </p>
             <button className="mock-cta" data-vibe-target="cta-button" type="button">
               开始体验
             </button>
-            <span className="cta-hint">圈选我，然后写“改颜色”</span>
+            <span className="cta-hint">圈选我，然后输入“改颜色”</span>
           </section>
         </div>
 
@@ -116,6 +179,45 @@ export default function CanvasStage({ annotation, onAnnotationChange, disabled }
           >
             <span className="annotation-tag">标注</span>
           </div>
+        )}
+
+        {annotation && !drawing && popoverStyle && (
+          <form
+            className="canvas-popover"
+            style={popoverStyle}
+            role="dialog"
+            aria-label="输入修改意图"
+            onPointerDown={(event) => event.stopPropagation()}
+            onPointerUp={(event) => event.stopPropagation()}
+            onSubmit={handleSend}
+          >
+            <div className="popover-head">
+              <span className="popover-dot" />
+              <span>对选区下达指令</span>
+              <span className="popover-target">button</span>
+            </div>
+            <div className="popover-row">
+              <input
+                ref={inputRef}
+                type="text"
+                value={intent}
+                maxLength={120}
+                placeholder="例如：把按钮改成红色"
+                disabled={submitting}
+                onChange={(event) => setIntent(event.target.value)}
+              />
+              <button
+                className="popover-send"
+                type="submit"
+                disabled={!intent.trim() || submitting}
+              >
+                {submitting ? <span className="mini-spinner" aria-label="执行中" /> : '发送'}
+              </button>
+            </div>
+            <p className="popover-hint">
+              {submitting ? 'Agent 正在执行，请稍候…' : 'Enter 发送 · 重新圈选可更换目标'}
+            </p>
+          </form>
         )}
 
         <div className="canvas-hint">

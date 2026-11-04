@@ -8,7 +8,7 @@
 ## 目录
 
 ```text
-apps/platform-web/                    React 18 + Vite 画布（标注 / 执行状态 / 预览 / Diff）
+apps/platform-web/                    React 18 + Vite（登录 / 工作台 / 画布浮层 / 预览 / Diff）
 apps/platform-bff/                    Java 21 + Spring Boot 3.3 BFF
 services/orchestrator/                Python 3.12 + FastAPI + LangGraph AI Core
 services/orchestrator/ai_core/        Sandbox / Agent / API
@@ -47,8 +47,9 @@ docker compose ps
 | java-bff | 8080 | `http://java-bff:8080` |
 | python-ai | 8100 | `http://python-ai:8100` |
 
-打开 <http://127.0.0.1:5173> 即可使用画布。浏览器只请求同源 `/api`，由 Vite
-代理到 `java-bff`；三个服务都加入 `vibe-platform-net`，Java 通过服务名
+打开 <http://127.0.0.1:5173> 会先进入登录页，点击 **一键体验** 即可进入工作台；
+Mock 会话写入 `localStorage`。浏览器只请求同源 `/api`，由 Vite 代理到
+`java-bff`；三个服务都加入 `vibe-platform-net`，Java 通过服务名
 `http://python-ai:8100` 调用 Python。
 
 ```text
@@ -59,7 +60,7 @@ Browser ──/api──▶ platform-web(Vite proxy) ──▶ java-bff ──�
 ## 画布全链路（M1）
 
 1. 在画布上按住鼠标拖拽，圈选「开始体验」按钮。
-2. 输入修改意图（默认「改颜色」），点击 **提交标注**。
+2. 选区旁自动弹出浮动输入框，输入「改颜色」，按 Enter 或点击 **发送**。
 3. 前端组装 `AnnotationEnvelope`，POST `/api/v1/runs`。
 4. Java BFF 同步代理到 `POST /api/v1/internal/runs/execute`（长读超时 300s）。
 5. Python 创建 React + Vite 沙盒，执行 LangGraph：
@@ -78,12 +79,24 @@ planner -> coder -> applier -> verifier -> evaluator
 Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier 捕获日志后
 自动修复 1 次，最终返回 `AWAITING_APPROVAL`，方便稳定复现完整闭环。
 
-![Agent 执行中](docs/screenshots/m1-loading.png)
+![登录页](docs/screenshots/phase1-login.png)
 
-![执行结果：预览与 Diff](docs/screenshots/m1-result.png)
+![画布浮层输入](docs/screenshots/phase1-canvas-popover.png)
+
+![执行结果：预览与 Diff](docs/screenshots/phase1-result.png)
 
 platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
 使用匿名卷），修改前端源码后由 Vite HMR 即时生效，无需重建镜像。
+
+## 路由与账户（Phase 1）
+
+| 路径 | 说明 |
+|---|---|
+| `/login` | Mock 登录：账号密码或一键体验，Token 写入 `localStorage` |
+| `/workspace` | 受保护工作台；未登录访问会重定向到 `/login` |
+
+右上角头像菜单包含 **账户设置**（展示用户、租户、角色、Token 掩码）与
+**退出登录**。当前鉴权仅用于前端门禁，真实认证 / RBAC 后续接入。
 
 ## 验证
 
@@ -105,9 +118,10 @@ playwright install chromium
 python3 scripts/ui_e2e_test.py
 ```
 
-真实浏览器中圈选按钮 → 提交标注 → 截取 Loading 面板 → 等待
-`AWAITING_APPROVAL` → 校验 iframe 内按钮 `rgb(255, 0, 0)` → 截取结果图 →
-清理沙盒。截图输出到 `docs/screenshots/`。
+真实浏览器中验证未登录跳转 → 一键登录 → 圈选按钮 → 画布浮层输入并发送 →
+截取 Loading 面板 → 等待 `AWAITING_APPROVAL` → 校验 iframe 内按钮
+`rgb(255, 0, 0)` → 打开账户设置 → 清理沙盒。截图输出到 `docs/screenshots/`
+（`phase1-*.png`）。
 
 ### 3. 分层验证
 

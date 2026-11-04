@@ -7,9 +7,9 @@ RUN npm config set registry https://registry.npmmirror.com
 
 WORKDIR /app
 
-# 先复制锁文件/依赖清单，最大化 Docker 层缓存。
+# 先复制锁文件/依赖清单，最大化 Docker 层缓存，并保证构建可复现。
 COPY package*.json ./
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 
 COPY . .
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M1 真实浏览器 E2E：在画布上圈选按钮、提交标注、观察 Loading、预览与 Diff。
+"""M1 真实浏览器 E2E：登录 → 画布浮层 → Agent → 预览 / Diff → 账户设置。
 
 前置：
     pip install playwright && playwright install chromium
@@ -9,12 +9,16 @@
     python3 scripts/ui_e2e_test.py
 
 产出：
-    docs/screenshots/m1-loading.png
-    docs/screenshots/m1-result.png
+    docs/screenshots/phase1-login.png
+    docs/screenshots/phase1-canvas-popover.png
+    docs/screenshots/phase1-loading.png
+    docs/screenshots/phase1-result.png
+    docs/screenshots/phase1-account.png
 """
 
 from __future__ import annotations
 
+import re
 import sys
 import urllib.request
 from pathlib import Path
@@ -73,27 +77,46 @@ def main() -> None:
             ),
         )
 
-        print("== 1. 打开画布 ==")
-        page.goto(WEB_URL, wait_until="networkidle")
+        print("== 1. 未登录访问工作台应跳转登录页 ==")
+        page.goto(f"{WEB_URL}workspace", wait_until="networkidle")
+        expect(page).to_have_url(re.compile(r"/login$"))
+        expect(page.locator(".auth-card")).to_be_visible()
+        page.screenshot(path=str(SCREENSHOT_DIR / "phase1-login.png"), full_page=True)
+        print(f"   登录页截图: {SCREENSHOT_DIR / 'phase1-login.png'}")
+
+        print("\n== 2. 一键登录并进入工作台 ==")
+        page.get_by_role("button", name="一键体验（推荐）").click()
+        expect(page).to_have_url(re.compile(r"/workspace$"))
         expect(page.locator(".canvas-stage")).to_be_visible()
-        expect(page.get_by_text("尚未圈选组件")).to_be_visible()
-        print("   画布与空闲状态已渲染")
+        session = page.evaluate("window.localStorage.getItem('vibe.auth.session')")
+        if not session:
+            fail("Token 未写入 localStorage")
+        print("   登录成功，localStorage 会话已写入")
 
-        print("\n== 2. 圈选按钮并提交标注 ==")
+        print("\n== 3. 圈选按钮，画布内浮层输入意图 ==")
         draw_around(page, page.locator(".mock-cta"))
+        popover = page.locator(".canvas-popover")
+        expect(popover).to_be_visible()
+        expect(popover.get_by_text("对选区下达指令")).to_be_visible()
         expect(page.get_by_text("标注已就绪")).to_be_visible()
-        expect(page.get_by_text("已圈选", exact=False)).to_be_visible()
+        page.wait_for_timeout(300)  # 等待浮层入场动画结束再截图
+        page.screenshot(
+            path=str(SCREENSHOT_DIR / "phase1-canvas-popover.png"), full_page=True
+        )
+        print(f"   浮层截图: {SCREENSHOT_DIR / 'phase1-canvas-popover.png'}")
 
-        page.locator("#instruction").fill("改颜色")
-        page.get_by_role("button", name="提交标注").click()
+        popover.locator("input").fill("改颜色")
+        popover.locator("input").press("Enter")
 
-        print("\n== 3. 观察 Agent 执行状态面板 ==")
-        expect(page.get_by_text("Agent 正在执行")).to_be_visible(timeout=10_000)
+        print("\n== 4. 观察 Agent 执行状态面板 ==")
+        expect(
+            page.get_by_role("heading", name="Agent 正在执行", exact=True)
+        ).to_be_visible(timeout=10_000)
         page.wait_for_timeout(900)
-        page.screenshot(path=str(SCREENSHOT_DIR / "m1-loading.png"), full_page=True)
-        print(f"   Loading 截图: {SCREENSHOT_DIR / 'm1-loading.png'}")
+        page.screenshot(path=str(SCREENSHOT_DIR / "phase1-loading.png"), full_page=True)
+        print(f"   Loading 截图: {SCREENSHOT_DIR / 'phase1-loading.png'}")
 
-        print("\n== 4. 等待闭环结果 ==")
+        print("\n== 5. 等待闭环结果 ==")
         expect(page.locator(".status-pill.is-success")).to_be_visible(timeout=120_000)
         expect(page.locator(".preview-frame")).to_be_visible()
         expect(page.locator(".diff-view")).to_contain_text("backgroundColor")
@@ -111,7 +134,7 @@ def main() -> None:
         print(f"   沙盒: {sandbox_id}")
         print(f"   预览: {preview_url}")
 
-        print("\n== 5. 验证 iframe 内的红色按钮 ==")
+        print("\n== 6. 验证 iframe 内的红色按钮 ==")
         frame = page.frame_locator(".preview-frame")
         cta = frame.locator("button")
         expect(cta).to_be_visible(timeout=30_000)
@@ -120,8 +143,29 @@ def main() -> None:
         if background != "rgb(255, 0, 0)":
             fail(f"按钮不是红色: {background}")
 
-        page.screenshot(path=str(SCREENSHOT_DIR / "m1-result.png"), full_page=True)
-        print(f"   结果截图: {SCREENSHOT_DIR / 'm1-result.png'}")
+        page.screenshot(path=str(SCREENSHOT_DIR / "phase1-result.png"), full_page=True)
+        print(f"   结果截图: {SCREENSHOT_DIR / 'phase1-result.png'}")
+
+        print("\n== 7. 账户设置弹窗 ==")
+        page.locator(".avatar-button").click()
+        page.get_by_role("menuitem", name="账户设置").click()
+        expect(page.locator(".account-dialog")).to_be_visible()
+        expect(page.get_by_text("demo@vibe.local")).to_be_visible()
+        page.screenshot(path=str(SCREENSHOT_DIR / "phase1-account.png"), full_page=True)
+        print(f"   账户弹窗截图: {SCREENSHOT_DIR / 'phase1-account.png'}")
+        page.get_by_role("button", name="完成").click()
+        expect(page.locator(".account-dialog")).to_have_count(0)
+
+        print("\n== 8. 退出登录，再用账号密码登录 ==")
+        page.locator(".avatar-button").click()
+        page.get_by_role("menuitem", name="退出登录").click()
+        expect(page).to_have_url(re.compile(r"/login$"))
+        page.locator("#login-account").fill("alice@example.com")
+        page.locator("#login-password").fill("vibe-demo")
+        page.get_by_role("button", name="登录并进入工作台").click()
+        expect(page).to_have_url(re.compile(r"/workspace$"))
+        expect(page.locator(".account-name")).to_have_text("alice")
+        print("   账号密码登录与退出登录均正常")
 
         if console_errors:
             print("\n   浏览器控制台错误:")
@@ -132,7 +176,7 @@ def main() -> None:
         cleanup_sandbox(sandbox_id)
         browser.close()
 
-    print("\nPASS: 浏览器端到端验证通过（圈选 → Loading → 预览 → Diff → 清理）")
+    print("\nPASS: 登录 → 浮层 → Loading → 预览 → Diff → 账户设置 全流程通过")
 
 
 if __name__ == "__main__":
