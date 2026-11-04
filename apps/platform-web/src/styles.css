@@ -509,6 +509,13 @@ code {
   cursor: grabbing;
 }
 
+/* 平移使用 pointer capture，指针可能移出面板；全局保持抓手光标，
+   避免拖拽过程中光标闪回默认箭头。 */
+body.is-viewport-panning,
+body.is-viewport-panning * {
+  cursor: grabbing !important;
+}
+
 /* 与 iframe 内页面使用完全相同的逻辑视口：1024px 宽，左上角缩放。 */
 .canvas-viewport {
   position: absolute;

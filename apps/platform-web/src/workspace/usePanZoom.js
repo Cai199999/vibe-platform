@@ -17,6 +17,21 @@ const MIN_VISIBLE_PX = 96
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
 
 /**
+ * 单轴平移边界：只做「至少保留 MIN_VISIBLE_PX 可见」的硬保护，绝不居中。
+ *
+ * Cover 基准在 100% 时会让其中一个方向恰好等于容器尺寸，若该方向强制居中，
+ * 就会表现为「对比模式只能上下拖、展示模式只能左右拖」。视口应当是无限画布：
+ * X / Y 两个方向始终独立、自由平移，只限制极端拖出可视区。
+ */
+const clampAxis = (translate, contentSize, containerSize) => {
+  const min = MIN_VISIBLE_PX - contentSize
+  const max = containerSize - MIN_VISIBLE_PX
+  // 容器比最小可见区还小时无解，退回居中，避免产生翻转的 clamp 区间。
+  if (min > max) return (containerSize - contentSize) / 2
+  return clamp(translate, min, max)
+}
+
+/**
  * 画布 / 预览共用的平移缩放交互。
  *
  *  - 滚轮：以鼠标指针为中心缩放（先求指针下方的世界坐标，再反算新的平移）；
@@ -42,16 +57,17 @@ export default function usePanZoom({
   const baseRef = useRef({ baseScale, baseOffsetX, baseOffsetY })
   baseRef.current = { baseScale, baseOffsetX, baseOffsetY }
 
-  // 空格是“临时抓手”修饰键；输入框内不拦截，避免无法输入空格。
+  // 空格是“临时抓手”修饰键；只有输入类控件不拦截，避免无法输入空格。
+  // 按钮 / 链接不排除：刚点过工具栏按钮时焦点仍在 button 上，若排除会导致
+  // 空格 + 左键平移失效（Figma / PS 也允许在任何位置按住空格抓手）。
   useEffect(() => {
-    // 输入框、按钮、链接保留空格的原生语义，不劫持为平移抓手。
-    const isInteractive = (target) =>
+    const isTypingTarget = (target) =>
       target instanceof HTMLElement &&
       (target.isContentEditable ||
-        ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A'].includes(target.tagName))
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
 
     const onKeyDown = (event) => {
-      if (event.code !== 'Space' || event.repeat || isInteractive(event.target)) {
+      if (event.code !== 'Space' || event.repeat || isTypingTarget(event.target)) {
         return
       }
       event.preventDefault()
@@ -78,11 +94,14 @@ export default function usePanZoom({
     }
   }, [])
 
-  /**
-   * 把 panX/panY 限制在合理范围：
-   *  - 内容小于容器时自动居中；
-   *  - 内容大于容器时，保证至少 MIN_VISIBLE_PX 留在可视区内。
-   */
+  // 平移期间指针使用 setPointerCapture，可能移出面板；给 body 挂全局抓手光标，
+  // 避免拖拽过程中光标闪回默认箭头（Figma / PS 手感）。
+  useEffect(() => {
+    if (!panning) return undefined
+    document.body.classList.add('is-viewport-panning')
+    return () => document.body.classList.remove('is-viewport-panning')
+  }, [panning])
+
   const clampView = useCallback(
     (next) => {
       const node = containerRef.current
@@ -95,27 +114,9 @@ export default function usePanZoom({
       const contentWidth = VIEWPORT_BASE_WIDTH * scaleBase * next.zoom
       const contentHeight = VIEWPORT_BASE_HEIGHT * scaleBase * next.zoom
 
-      let translateX = ox + next.panX
-      if (contentWidth <= width) {
-        translateX = (width - contentWidth) / 2
-      } else {
-        translateX = clamp(
-          translateX,
-          MIN_VISIBLE_PX - contentWidth,
-          width - MIN_VISIBLE_PX,
-        )
-      }
-
-      let translateY = oy + next.panY
-      if (contentHeight <= height) {
-        translateY = (height - contentHeight) / 2
-      } else {
-        translateY = clamp(
-          translateY,
-          MIN_VISIBLE_PX - contentHeight,
-          height - MIN_VISIBLE_PX,
-        )
-      }
+      // X / Y 各自独立计算，任何布局模式（对比 / 展示）都不锁轴。
+      const translateX = clampAxis(ox + next.panX, contentWidth, width)
+      const translateY = clampAxis(oy + next.panY, contentHeight, height)
 
       return { ...next, panX: translateX - ox, panY: translateY - oy }
     },

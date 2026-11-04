@@ -562,6 +562,24 @@ def main() -> None:
             fail("未读取到预览屏幕尺寸")
         px = preview_screen["x"] + preview_screen["width"] / 2
         py = preview_screen["y"] + preview_screen["height"] / 2
+
+        # Cover 基准在 100% 时总有一个方向恰好填满容器。旧实现会在该方向
+        # 强制居中，表现为「对比模式只能上下拖、展示模式只能左右拖」。
+        # 先在 100% 下验证中键二维平移，再重置进入缩放测试。
+        page.mouse.move(px, py)
+        page.mouse.down(button="middle")
+        page.mouse.move(px + 90, py + 60, steps=6)
+        page.mouse.up(button="middle")
+        page.wait_for_timeout(200)
+        preview_pan0 = viewport_snapshot(preview_pane, "预览 100% 平移")
+        dx0 = preview_pan0["x"] - preview_initial["x"]
+        dy0 = preview_pan0["y"] - preview_initial["y"]
+        if abs(dx0) < 40 or abs(dy0) < 40:
+            fail(f"预览 100% 中键平移未同时作用于 X/Y: ({dx0:.1f}, {dy0:.1f})")
+        print(f"   预览 100% 中键二维平移: ({dx0:.0f}, {dy0:.0f})")
+        active.locator(".preview-pane .viewport-reset").click()
+        page.wait_for_timeout(200)
+
         anchor_before = pointer_world_point(
             preview_pane,
             preview_screen["width"] / 2,
@@ -617,6 +635,24 @@ def main() -> None:
         canvas_stage = active.locator(".canvas-pane .canvas-stage").bounding_box()
         if not canvas_stage:
             fail("未读取到画布舞台尺寸")
+
+        # 对比模式 100% 同样必须二维自由平移（此前 Y 轴之外的方向会被锁住）。
+        center_x = canvas_stage["x"] + canvas_stage["width"] / 2
+        center_y = canvas_stage["y"] + canvas_stage["height"] / 2
+        page.mouse.move(center_x, center_y)
+        page.mouse.down(button="middle")
+        page.mouse.move(center_x - 80, center_y + 60, steps=6)
+        page.mouse.up(button="middle")
+        page.wait_for_timeout(200)
+        canvas_pan0 = viewport_snapshot(canvas_pane, "画布 100% 平移")
+        dx0 = canvas_pan0["x"] - canvas_initial["x"]
+        dy0 = canvas_pan0["y"] - canvas_initial["y"]
+        if abs(dx0) < 40 or abs(dy0) < 40:
+            fail(f"画布 100% 中键平移未同时作用于 X/Y: ({dx0:.1f}, {dy0:.1f})")
+        print(f"   画布 100% 中键二维平移: ({dx0:.0f}, {dy0:.0f})")
+        active.locator(".canvas-pane .viewport-reset").click()
+        page.wait_for_timeout(200)
+
         cx = canvas_stage["x"] + canvas_stage["width"] * 0.15
         cy = canvas_stage["y"] + canvas_stage["height"] * 0.75
         page.mouse.move(cx, cy)
@@ -681,7 +717,66 @@ def main() -> None:
         )
         print(f"   视口联动: 两侧同步为 {linked_canvas['zoom']}%，transform 完全一致")
 
-        # 8.4 重置恢复 100%，画布与预览重新严格对齐。
+        # 8.4 展示模式 100%：中键 / 空格 + 左键都必须二维自由平移。
+        active.locator(".canvas-pane .viewport-reset").click()
+        page.wait_for_timeout(250)
+        dual_initial = viewport_snapshot(canvas_pane, "展示模式 100%")
+        if dual_initial["zoom"] != 100:
+            fail(f"展示模式重置后不是 100%: {dual_initial}")
+        dual_stage = active.locator(".canvas-pane .canvas-stage").bounding_box()
+        if not dual_stage:
+            fail("未读取到展示模式画布尺寸")
+        dx = dual_stage["x"] + dual_stage["width"] / 2
+        dy = dual_stage["y"] + dual_stage["height"] / 2
+
+        page.mouse.move(dx, dy)
+        page.mouse.down(button="middle")
+        page.mouse.move(dx + 80, dy + 55, steps=6)
+        page.mouse.up(button="middle")
+        page.wait_for_timeout(200)
+        dual_panned = viewport_snapshot(canvas_pane, "展示模式中键平移")
+        delta_x = dual_panned["x"] - dual_initial["x"]
+        delta_y = dual_panned["y"] - dual_initial["y"]
+        if abs(delta_x) < 40 or abs(delta_y) < 40:
+            fail("展示模式中键平移未同时作用于 X/Y: " f"({delta_x:.1f}, {delta_y:.1f})")
+        linked_panned = viewport_snapshot(preview_pane, "展示模式联动平移")
+        if linked_panned["transform"] != dual_panned["transform"]:
+            fail("展示模式平移后画布/预览 transform 不一致")
+        print(f"   展示模式 100% 中键二维平移: ({delta_x:.0f}, {delta_y:.0f})")
+        active.locator(".canvas-pane .viewport-reset").click()
+        page.wait_for_timeout(200)
+
+        # 空格 + 左键：按住时 grab，拖拽中 grabbing，并且同样二维平移。
+        page.keyboard.down("Space")
+        page.wait_for_timeout(120)
+        cursor_ready = active.locator(".canvas-pane .canvas-stage").evaluate(
+            "el => getComputedStyle(el).cursor"
+        )
+        if cursor_ready != "grab":
+            fail(f"空格按下后光标不是 grab: {cursor_ready}")
+        page.mouse.move(dx, dy)
+        page.mouse.down()
+        page.mouse.move(dx - 70, dy - 45, steps=6)
+        page.wait_for_timeout(120)
+        cursor_panning = active.locator(".canvas-pane .canvas-stage").evaluate(
+            "el => getComputedStyle(el).cursor"
+        )
+        page.mouse.up()
+        page.keyboard.up("Space")
+        page.wait_for_timeout(200)
+        if cursor_panning != "grabbing":
+            fail(f"拖拽中光标不是 grabbing: {cursor_panning}")
+        dual_space = viewport_snapshot(canvas_pane, "展示模式空格平移")
+        delta_x = dual_space["x"] - dual_initial["x"]
+        delta_y = dual_space["y"] - dual_initial["y"]
+        if abs(delta_x) < 40 or abs(delta_y) < 40:
+            fail("空格 + 左键平移未同时作用于 X/Y: " f"({delta_x:.1f}, {delta_y:.1f})")
+        print(
+            f"   空格+左键二维平移: ({delta_x:.0f}, {delta_y:.0f})，"
+            "光标 grab -> grabbing"
+        )
+
+        # 8.5 重置恢复 100%，画布与预览重新严格对齐。
         active.locator(".canvas-pane .viewport-reset").click()
         active.locator(".preview-pane .viewport-reset").click()
         page.wait_for_timeout(250)
