@@ -1,6 +1,10 @@
 import { useState } from 'react'
 import CanvasStage from './CanvasStage.jsx'
 import RuntimePanel from './RuntimePanel.jsx'
+import {
+  ViewportProvider,
+  useViewportState,
+} from '../workspace/ViewportContext.jsx'
 
 /**
  * 单个项目窗口：支持「对比模式」与「展示模式」两种布局。
@@ -13,7 +17,7 @@ import RuntimePanel from './RuntimePanel.jsx'
  *  - iframe 元素不重建，Vite HMR 的 WebSocket 连接与页面状态保持；
  *  - 切换视图时外层 .project-viewport 高度固定，不会引起页面跳动。
  */
-export default function ProjectWorkspace({
+function ProjectWorkspaceInner({
   project,
   run,
   active,
@@ -23,6 +27,7 @@ export default function ProjectWorkspace({
   onSubmit,
   onRetry,
 }) {
+  const { linked, setLinked } = useViewportState()
   // 当前布局：compare = 单屏切换，dual = 双屏同显。
   const [viewMode, setViewMode] = useState('compare')
   // 仅对比模式生效：当前显示画布还是预览。
@@ -93,6 +98,19 @@ export default function ProjectWorkspace({
             </button>
           </div>
 
+          {viewMode === 'dual' && (
+            <button
+              type="button"
+              className={`link-toggle ${linked ? 'is-active' : ''}`}
+              aria-pressed={linked}
+              title="画布与预览同步缩放、平移"
+              onClick={() => setLinked((value) => !value)}
+            >
+              <span className="link-dot" aria-hidden="true" />
+              视口联动
+            </button>
+          )}
+
           {viewMode === 'compare' && (
             <div className="segmented pane-switch" role="group" aria-label="单屏视图切换">
               <button
@@ -161,5 +179,19 @@ export default function ProjectWorkspace({
         首次执行会创建 Vite 沙盒，通常需要 20–60 秒；关闭 Tab 会销毁对应沙盒。
       </p>
     </section>
+  )
+}
+
+/**
+ * 每个项目窗口拥有独立的视口状态容器：
+ *  - 画布与预览各自保存 zoom / panX / panY；
+ *  - 切换对比模式面板只改 CSS 可见性，状态不会重置；
+ *  - 展示模式下可开启视口联动，两边共享同一组变换。
+ */
+export default function ProjectWorkspace(props) {
+  return (
+    <ViewportProvider>
+      <ProjectWorkspaceInner {...props} />
+    </ViewportProvider>
   )
 }

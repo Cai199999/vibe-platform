@@ -376,6 +376,49 @@ code {
   cursor: not-allowed;
 }
 
+/* 展示模式下的视口联动开关。 */
+.link-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: rgba(148, 163, 184, 0.06);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    border-color 0.18s ease,
+    color 0.18s ease,
+    background 0.18s ease;
+}
+
+.link-toggle:hover {
+  border-color: rgba(56, 189, 248, 0.4);
+  color: #bae6fd;
+}
+
+.link-toggle.is-active {
+  border-color: rgba(56, 189, 248, 0.5);
+  background: rgba(56, 189, 248, 0.12);
+  color: #bae6fd;
+}
+
+.link-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.45;
+}
+
+.link-toggle.is-active .link-dot {
+  opacity: 1;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.8);
+}
+
 /* ------------------------------------------------------------------ */
 /* Canvas                                                              */
 /* ------------------------------------------------------------------ */
@@ -454,6 +497,16 @@ code {
 
 .canvas-stage.is-drawing {
   cursor: crosshair;
+}
+
+/* 空格 / 中键进入抓手模式；正在拖拽时显示 grabbing。 */
+.canvas-stage.is-pan-ready {
+  cursor: grab;
+}
+
+.canvas-stage.is-panning,
+.canvas-stage.is-panning.is-drawing {
+  cursor: grabbing;
 }
 
 /* 与 iframe 内页面使用完全相同的逻辑视口：1024px 宽，左上角缩放。 */
@@ -2619,6 +2672,66 @@ code {
   overflow: hidden;
   transform-origin: top left;
   will-change: transform;
+}
+
+/* iframe 会吞掉 wheel / pointer 事件，因此用一层透明手势层承接交互。
+   它位于 iframe 之上、状态 HUD（z-index 10）之下。 */
+.preview-gesture-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  cursor: default;
+  touch-action: none;
+}
+
+.preview-gesture-layer.is-pan-ready {
+  cursor: grab;
+}
+
+.preview-gesture-layer.is-panning {
+  cursor: grabbing;
+}
+
+/* 每个视口右上角的缩放比例与重置入口。 */
+.viewport-controls {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 12;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 5px 4px 9px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
+  background: rgba(2, 6, 23, 0.72);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(10px);
+}
+
+.viewport-zoom {
+  min-width: 38px;
+  color: #bae6fd;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.viewport-reset {
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.12);
+  color: #7dd3fc;
+  font-size: 10.5px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.viewport-reset:hover {
+  background: rgba(56, 189, 248, 0.24);
+  color: #e0f2fe;
 }
 
 .runtime-overlay {

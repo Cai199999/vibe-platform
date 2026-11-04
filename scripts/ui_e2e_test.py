@@ -292,6 +292,56 @@ def assert_canvas_preview_parity(page, active, label: str) -> None:
     )
 
 
+def viewport_snapshot(pane, label: str):
+    """读取单个面板的视口状态：缩放百分比、transform 与内容包围盒。"""
+    snapshot = pane.evaluate("""root => {
+            const layer = root.querySelector(
+                '.canvas-viewport, .runtime-preview-frame'
+            );
+            const zoomNode = root.querySelector('[data-viewport-zoom]');
+            if (!layer) return null;
+            const style = getComputedStyle(layer);
+            const box = layer.getBoundingClientRect();
+            return {
+                zoom: zoomNode
+                    ? parseInt(zoomNode.textContent.replace('%', ''), 10)
+                    : null,
+                transform: style.transform,
+                x: box.x,
+                y: box.y,
+                width: box.width,
+                height: box.height,
+            };
+        }""")
+    if not snapshot:
+        fail(f"{label} 未读取到视口元素")
+    return snapshot
+
+
+def pointer_world_point(pane, x: float, y: float, label: str):
+    """指针在“设计视口坐标系”中的世界坐标，用于验证缩放锚点。
+
+    参数 x / y 必须是相对容器（preview-screen 或 canvas-stage）的坐标。
+    """
+    point = pane.evaluate(
+        """(root, args) => {
+            const layer = root.querySelector(
+                '.canvas-viewport, .runtime-preview-frame'
+            );
+            if (!layer) return null;
+            const matrix = new DOMMatrix(getComputedStyle(layer).transform);
+            return {
+                x: (args.x - matrix.e) / matrix.a,
+                y: (args.y - matrix.f) / matrix.d,
+            };
+        }""",
+        {"x": x, "y": y},
+    )
+    if not point:
+        fail(f"{label} 未读取到视口变换矩阵")
+    return point
+
+
 def main() -> None:
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     sandbox_id = ""
@@ -497,7 +547,152 @@ def main() -> None:
         )
         print("   两种模式/画布预览往返均无重挂载，圈选与 iframe 状态保留")
 
-        print("\n== 8. 刷新页面：恢复预览结果，默认回到画布模式 ==")
+        print("\n== 8. 视口交互：滚轮缩放、中键平移、状态保持与视口联动 ==")
+        preview_pane = active.locator(".preview-pane")
+        canvas_pane = active.locator(".canvas-pane")
+
+        # 8.1 预览区：滚轮放大 + 中键平移（当前处于对比模式预览）。
+        preview_initial = viewport_snapshot(preview_pane, "预览初始")
+        if preview_initial["zoom"] != 100:
+            fail(f"预览初始视口不是 100%: {preview_initial}")
+        preview_screen = active.locator(
+            ".preview-pane .runtime-preview-screen"
+        ).bounding_box()
+        if not preview_screen:
+            fail("未读取到预览屏幕尺寸")
+        px = preview_screen["x"] + preview_screen["width"] / 2
+        py = preview_screen["y"] + preview_screen["height"] / 2
+        anchor_before = pointer_world_point(
+            preview_pane,
+            preview_screen["width"] / 2,
+            preview_screen["height"] / 2,
+            "预览缩放前",
+        )
+        page.mouse.move(px, py)
+        page.mouse.wheel(0, -600)
+        page.wait_for_timeout(250)
+        preview_zoomed = viewport_snapshot(preview_pane, "预览滚轮放大")
+        if preview_zoomed["zoom"] <= 130:
+            fail(f"预览滚轮未放大: {preview_initial} -> {preview_zoomed}")
+        if preview_zoomed["transform"] == preview_initial["transform"]:
+            fail("预览滚轮改变了比例但没有更新 transform")
+        anchor_after = pointer_world_point(
+            preview_pane,
+            preview_screen["width"] / 2,
+            preview_screen["height"] / 2,
+            "预览缩放后",
+        )
+        if (
+            abs(anchor_before["x"] - anchor_after["x"]) > 1.5
+            or abs(anchor_before["y"] - anchor_after["y"]) > 1.5
+        ):
+            fail(
+                "预览滚轮缩放没有以鼠标指针为中心: "
+                f"{anchor_before} -> {anchor_after}"
+            )
+
+        page.mouse.move(px, py)
+        page.mouse.down(button="middle")
+        page.mouse.move(px + 90, py + 60, steps=6)
+        page.mouse.up(button="middle")
+        page.wait_for_timeout(200)
+        preview_panned = viewport_snapshot(preview_pane, "预览中键平移")
+        if (
+            abs(preview_panned["x"] - preview_zoomed["x"]) < 20
+            or abs(preview_panned["y"] - preview_zoomed["y"]) < 20
+        ):
+            fail(f"预览中键平移未生效: {preview_zoomed} -> {preview_panned}")
+        print(
+            f"   预览视口: 100% -> {preview_zoomed['zoom']}%，"
+            f"中键平移 ({preview_panned['x'] - preview_zoomed['x']:.0f}, "
+            f"{preview_panned['y'] - preview_zoomed['y']:.0f})"
+        )
+
+        # 8.2 画布区独立缩放；在画布/预览间往返，两个视口都不得重置。
+        active.get_by_role("button", name="画布", exact=True).click()
+        expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
+        canvas_initial = viewport_snapshot(canvas_pane, "画布初始")
+        if canvas_initial["zoom"] != 100:
+            fail(f"画布初始视口不是 100%: {canvas_initial}")
+        canvas_stage = active.locator(".canvas-pane .canvas-stage").bounding_box()
+        if not canvas_stage:
+            fail("未读取到画布舞台尺寸")
+        cx = canvas_stage["x"] + canvas_stage["width"] * 0.15
+        cy = canvas_stage["y"] + canvas_stage["height"] * 0.75
+        page.mouse.move(cx, cy)
+        page.mouse.wheel(0, -600)
+        page.wait_for_timeout(250)
+        canvas_zoomed = viewport_snapshot(canvas_pane, "画布滚轮放大")
+        if canvas_zoomed["zoom"] <= 130:
+            fail(f"画布滚轮未放大: {canvas_initial} -> {canvas_zoomed}")
+
+        page.mouse.move(cx, cy)
+        page.mouse.down(button="middle")
+        page.mouse.move(cx - 70, cy - 50, steps=6)
+        page.mouse.up(button="middle")
+        page.wait_for_timeout(200)
+        canvas_panned = viewport_snapshot(canvas_pane, "画布中键平移")
+
+        active.get_by_role("button", name="预览", exact=True).click()
+        expect(active.locator(".preview-pane.is-visible")).to_be_visible()
+        preview_restored = viewport_snapshot(preview_pane, "预览恢复")
+        if preview_restored["transform"] != preview_panned["transform"]:
+            fail(
+                "切换到预览后视口被重置: "
+                f"{preview_panned['transform']} -> {preview_restored['transform']}"
+            )
+
+        active.get_by_role("button", name="画布", exact=True).click()
+        canvas_restored = viewport_snapshot(canvas_pane, "画布恢复")
+        if canvas_restored["transform"] != canvas_panned["transform"]:
+            fail(
+                "切回画布后视口被重置: "
+                f"{canvas_panned['transform']} -> {canvas_restored['transform']}"
+            )
+        print(
+            f"   画布视口: 100% -> {canvas_zoomed['zoom']}%，"
+            "画布/预览往返后两边 transform 均保持"
+        )
+
+        # 8.3 展示模式视口联动：同一组 zoom/pan 同步到两侧。
+        active.get_by_role("button", name="展示模式").click()
+        link_toggle = active.get_by_role("button", name="视口联动")
+        expect(link_toggle).to_be_visible()
+        link_toggle.click()
+        expect(link_toggle).to_have_attribute("aria-pressed", "true")
+
+        stage_box = active.locator(".canvas-pane .canvas-stage").bounding_box()
+        # 先重置到 100%，再以画面中心为锚点放大，截图能同时看到两侧同一内容。
+        active.locator(".canvas-pane .viewport-reset").click()
+        page.wait_for_timeout(200)
+        lx = stage_box["x"] + stage_box["width"] / 2
+        ly = stage_box["y"] + stage_box["height"] / 2
+        page.mouse.move(lx, ly)
+        page.mouse.wheel(0, -300)
+        page.wait_for_timeout(250)
+        linked_canvas = viewport_snapshot(canvas_pane, "联动画布")
+        linked_preview = viewport_snapshot(preview_pane, "联动预览")
+        if linked_canvas["zoom"] != linked_preview["zoom"]:
+            fail(f"视口联动缩放不一致: {linked_canvas} / {linked_preview}")
+        if linked_canvas["transform"] != linked_preview["transform"]:
+            fail(f"视口联动 transform 不一致: {linked_canvas} / {linked_preview}")
+        page.screenshot(
+            path=str(SCREENSHOT_DIR / "phase4-viewport-link.png"), full_page=True
+        )
+        print(f"   视口联动: 两侧同步为 {linked_canvas['zoom']}%，transform 完全一致")
+
+        # 8.4 重置恢复 100%，画布与预览重新严格对齐。
+        active.locator(".canvas-pane .viewport-reset").click()
+        active.locator(".preview-pane .viewport-reset").click()
+        page.wait_for_timeout(250)
+        reset_canvas = viewport_snapshot(canvas_pane, "重置画布")
+        reset_preview = viewport_snapshot(preview_pane, "重置预览")
+        if reset_canvas["zoom"] != 100 or reset_preview["zoom"] != 100:
+            fail(f"重置视图未回到 100%: {reset_canvas} / {reset_preview}")
+        assert_canvas_preview_parity(page, active, "重置视口后展示模式")
+        print("   重置视图后回到 100%，画布/预览卡片再次严格对齐")
+
+        print("\n== 9. 刷新页面：恢复预览结果，默认回到画布模式 ==")
         page.reload(wait_until="networkidle")
         active = page.locator(".tab-window.is-active")
         expect(active.locator(".tab-window-title h2")).to_have_text("演示项目")
@@ -514,7 +709,7 @@ def main() -> None:
         )
         print("   刷新后预览与沙盒信息均恢复，关闭项目仍可追踪沙盒")
 
-        print("\n== 9. 沙盒被外部销毁：预览显示连接失败并可重新执行 ==")
+        print("\n== 10. 沙盒被外部销毁：预览显示连接失败并可重新执行 ==")
         console_state["suppress"] = True
         removed = subprocess.run(
             ["docker", "rm", "-f", f"vibe-sandbox-{sandbox_id}"],
@@ -550,7 +745,7 @@ def main() -> None:
         )
         print(f"   失联提示正确，重新执行后新沙盒: {sandbox_id}")
 
-        print("\n== 10. 关闭项目：删除状态并销毁沙盒容器 ==")
+        print("\n== 11. 关闭项目：删除状态并销毁沙盒容器 ==")
         page.locator(".workspace-tab.is-active .tab-close").click()
         expect(page.locator(".workspace-tab")).to_have_count(1)
         page.locator(".project-switcher-button").click()
@@ -562,7 +757,7 @@ def main() -> None:
         print(f"   项目已删除，容器 vibe-sandbox-{sandbox_id} 已销毁")
         console_state["suppress"] = False
 
-        print("\n== 11. 同时打开 5 个项目，触发上限 ==")
+        print("\n== 12. 同时打开 5 个项目，触发上限 ==")
         for _ in range(4):
             open_new_project(page)
         expect(page.locator(".workspace-tab")).to_have_count(5)
@@ -586,7 +781,7 @@ def main() -> None:
         page.keyboard.press("Escape")
         print("   5 个 Tab 时新建入口已禁用并展示上限提示")
 
-        print("\n== 12. 关闭项目 2 后新建，按存活数量递增且不重名 ==")
+        print("\n== 13. 关闭项目 2 后新建，按存活数量递增且不重名 ==")
         page.locator(".workspace-tab", has_text="未命名项目 2").locator(
             ".tab-close"
         ).click()
@@ -602,7 +797,7 @@ def main() -> None:
             fail(f"项目名称出现重复: {names}")
         print("   关闭项目 2 后，新项目按存活数递增为「未命名项目 7」")
 
-        print("\n== 13. 账户设置、退出与账号密码登录 ==")
+        print("\n== 14. 账户设置、退出与账号密码登录 ==")
         page.locator(".avatar-button").click()
         page.get_by_role("menuitem", name="账户设置").click()
         expect(page.locator(".account-dialog")).to_be_visible()

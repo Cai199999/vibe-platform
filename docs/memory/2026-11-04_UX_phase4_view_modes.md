@@ -63,6 +63,34 @@
   - Diff / 运行元信息放入 `.runtime-drawer` 覆盖层，不挤压 iframe；
   - Loading / Idle / Error 都是 stage 内的居中覆盖层，不产生滚动。
 
+### 视口交互（`ViewportContext.jsx` / `usePanZoom.js`）
+
+- 画布与预览都支持滚轮缩放和中键 / 空格 + 左键平移：
+  - 缩放范围 `0.25x ~ 3x`（相对 cover 基准）；
+  - 滚轮以鼠标指针为中心：先求指针下的世界坐标，再反算新的 translate；
+  - 平移限制保证画面至少保留 96px 可见；内容小于容器时自动居中；
+  - 右上角 HUD 实时显示百分比，并提供「重置视图」。
+- 状态模型为 `{ zoom, panX, panY }`，存放在 `ProjectWorkspace` 外层的
+  `ViewportProvider` 中，画布 / 预览各一份；`zoom` 相对 cover 基准，
+  `panX/panY` 是相对初始居中位置的屏幕像素偏移。
+- 最终 transform 是基准与用户状态的组合：
+  `translate(baseOffsetX + panX, baseOffsetY + panY) scale(baseScale * zoom)`。
+  画布 `.canvas-viewport` 与预览 iframe 使用完全相同的公式。
+- 对比模式下两个组件始终挂载，只切换 `visibility`；Context 不随面板切换
+  卸载，因此 scale / x / y 零丢失。展示模式切换时 pane 尺寸变化会重算
+  基准，用户的 zoom / pan 继续叠加。
+- 展示模式新增「视口联动」开关：`ViewportProvider` 在 linked 状态下把任意
+  一侧的更新同时写入两侧。两面板宽高一致、基准变换一致，所以同一组
+  zoom/pan 得到完全相同的 transform。
+- iframe 会吞掉 wheel/pointer 事件，`ScaledPreview` 在 iframe 之上增加
+  `.preview-gesture-layer` 透明手势层承接交互；手势层位于状态 HUD
+  （z-index 10）之下，因此 HUD 按钮仍可点击。需要真实操作沙盒时使用
+  「新窗口 ↗」。
+- CanvasStage 的圈选仍用左键；中键 / 空格 + 左键在 pointerdown 阶段优先
+  进入平移，不会误产生标注。空格在输入框 / 按钮 / 链接上保留原生语义。
+- 画布 Mock 的响应式 padding 覆盖已移除：媒体查询按真实浏览器视口生效，
+  而 iframe 内部媒体查询按 1280×720 生效，删除后两边版式才不会分叉。
+
 ### 生命周期
 
 - 保留 5 Tab 上限与关闭即销毁：关闭 Tab 删除项目、运行状态，并调用 BFF
@@ -79,6 +107,8 @@
   运行结果与 `sandboxIds`。
 - `ProjectWorkspace` 的 `viewMode/mode`、`CanvasStage` 的圈选草稿、
   `RuntimePanel` 的详情抽屉开关都是每个 Tab 实例自己的本地状态。
+- 画布 / 预览的 `zoom / panX / panY` 由每个 `ProjectWorkspace` 的
+  `ViewportProvider` 持有；它与项目窗口同生命周期，切换面板或布局都不重置。
 - 项目窗口以 `project.id` 为 key 常驻渲染，隐藏时不卸载，因此每个 Tab 的
   DOM、iframe 与本地 state 都彼此独立。
 - 异步 Run 始终带 `projectId` 回写；关闭项目后 `closedProjectsRef` 阻止
@@ -103,13 +133,17 @@
 5. iframe 内按钮仍为 `rgb(255, 0, 0)`，body `overflow:hidden`。
 6. 详情抽屉展示 Diff 与 sandboxId，关闭后恢复预览。
 7. 刷新后恢复画布模式、CTA 与 sandboxId；关闭 Tab 后 Docker 容器销毁。
-8. 外部 `docker rm -f` 当前沙盒后切回预览，显示 PREVIEW_OFFLINE；点击
+8. 视口交互：预览滚轮 100%→246% 且指针下世界坐标不漂移（锚点校验 ≤1.5px）；
+   中键拖拽平移 (90, 60)；画布独立缩放至 246%；画布/预览往返后两侧
+   transform 与用户状态完全不变；展示模式开启联动后两侧同步至 157%、
+   transform 字符串完全一致；重置后回到 100% 并恢复卡片对齐。
+9. 外部 `docker rm -f` 当前沙盒后切回预览，显示 PREVIEW_OFFLINE；点击
    「重新执行 Agent」会创建新沙盒并恢复红色按钮预览。
-9. 5 Tab 上限、按存活数量递增命名且无重复、账户体系均通过。
+10. 5 Tab 上限、按存活数量递增命名且无重复、账户体系均通过。
 
 截图：`phase4-canvas-mode.png`、`phase4-preview-mode.png`、
-`phase4-dual-mode.png`、`phase4-preview-offline.png`、
-`phase4-tab-limit.png`、`phase4-account.png`。
+`phase4-dual-mode.png`、`phase4-viewport-link.png`、
+`phase4-preview-offline.png`、`phase4-tab-limit.png`、`phase4-account.png`。
 
 ## 踩坑记录
 

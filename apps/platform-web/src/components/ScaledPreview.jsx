@@ -3,22 +3,33 @@ import useFillViewport, {
   VIEWPORT_BASE_HEIGHT,
   VIEWPORT_BASE_WIDTH,
 } from '../workspace/useFillViewport.js'
+import usePanZoom from '../workspace/usePanZoom.js'
 
 /**
- * 沙盒预览采用「固定 1280×720 设计视口 + cover 缩放」策略：
+ * 沙盒预览使用「固定 1280×720 设计视口 + cover 基准 + 用户视口变换」：
  *
  *  1. iframe 始终以 1280×720 作为内部视口，页面按桌面版式排版；
- *  2. scale = max(containerWidth / 1280, containerHeight / 720)；
- *  3. 用 translate 把缩放后的画面居中，多余部分由外层 overflow:hidden 裁切；
- *  4. 不使用 flex 居中、不添加 padding / margin，画面四边严格贴住容器。
- *
- * 全程只改 iframe 的尺寸与 transform，不修改 src、不重建节点：
- *  - Vite HMR 的 WebSocket 连接、页面滚动位置和组件状态都保持不变；
- *  - 缩放参数与 CanvasStage 完全一致，画布与预览的内容比例严格相同。
+ *  2. 基准 scale / offset 由 useFillViewport 以 cover 方式计算，保证铺满；
+ *  3. 用户滚轮缩放、中键 / 空格 + 左键平移叠加在同一组 transform 上；
+ *  4. iframe 上方覆盖一层透明手势层：iframe 会吞掉指针与滚轮事件，只有
+ *     通过手势层才能在预览内容任意位置进行缩放和平移；
+ *  5. 视口状态存放在 ViewportContext，切换画布 / 预览不会重置。
  */
 export default function ScaledPreview({ src, title, visible = true }) {
   const screenRef = useRef(null)
-  const { scale, offsetX, offsetY, recalc } = useFillViewport(screenRef)
+  const {
+    scale: baseScale,
+    offsetX: baseOffsetX,
+    offsetY: baseOffsetY,
+    recalc,
+  } = useFillViewport(screenRef)
+  const viewport = usePanZoom({
+    containerRef: screenRef,
+    panel: 'preview',
+    baseScale,
+    baseOffsetX,
+    baseOffsetY,
+  })
 
   // visibility / display 切换后补一帧，确保拿到舞台的最终尺寸。
   useLayoutEffect(() => {
@@ -38,11 +49,44 @@ export default function ScaledPreview({ src, title, visible = true }) {
         style={{
           width: `${VIEWPORT_BASE_WIDTH}px`,
           height: `${VIEWPORT_BASE_HEIGHT}px`,
-          transform: `translate(${offsetX}px, ${offsetY}px) scale(${scale})`,
+          transform: `translate(${viewport.translateX}px, ${viewport.translateY}px) scale(${viewport.scale})`,
           transformOrigin: 'top left',
-          opacity: scale > 0 ? 1 : 0,
+          opacity: scaleReady(baseScale) ? 1 : 0,
         }}
       />
+
+      {/* 透明手势层：拦截 iframe 吞掉的 wheel / pointer 事件。 */}
+      <div
+        className={`preview-gesture-layer ${viewport.spaceHeld ? 'is-pan-ready' : ''} ${viewport.panning ? 'is-panning' : ''}`}
+        data-preview-gesture
+        onPointerDown={(event) => {
+          if (!viewport.startPan(event)) {
+            event.preventDefault()
+          }
+        }}
+        onPointerMove={viewport.movePan}
+        onPointerUp={viewport.endPan}
+        onPointerCancel={viewport.endPan}
+        onDoubleClick={viewport.reset}
+        onAuxClick={(event) => event.preventDefault()}
+        title="滚轮缩放 · 中键或空格+左键平移 · 双击重置"
+      />
+
+      <div className="viewport-controls" onPointerDown={(event) => event.stopPropagation()}>
+        <span className="viewport-zoom" data-viewport-zoom>
+          {viewport.zoomPercent}%
+        </span>
+        <button
+          className="viewport-reset"
+          type="button"
+          onClick={viewport.reset}
+          title="恢复 100% 并回到初始位置"
+        >
+          重置视图
+        </button>
+      </div>
     </div>
   )
 }
+
+const scaleReady = (scale) => scale > 0

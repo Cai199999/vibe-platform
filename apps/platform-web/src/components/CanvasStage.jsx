@@ -3,6 +3,7 @@ import useFillViewport, {
   VIEWPORT_BASE_HEIGHT,
   VIEWPORT_BASE_WIDTH,
 } from '../workspace/useFillViewport.js'
+import usePanZoom from '../workspace/usePanZoom.js'
 
 const clamp01 = (value) => Math.min(1, Math.max(0, value))
 
@@ -40,7 +41,19 @@ export default function CanvasStage({
   const [drawing, setDrawing] = useState(false)
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 })
   // 与沙盒预览共用 1280×720 设计视口：两边缩放参数与页面尺寸完全一致。
-  const { scale, offsetX, offsetY } = useFillViewport(stageRef)
+  const {
+    scale: baseScale,
+    offsetX: baseOffsetX,
+    offsetY: baseOffsetY,
+  } = useFillViewport(stageRef)
+  // 画布自己的平移 / 缩放状态，保存在 ProjectWorkspace 级别的 ViewportContext。
+  const viewport = usePanZoom({
+    containerRef: stageRef,
+    panel: 'canvas',
+    baseScale,
+    baseOffsetX,
+    baseOffsetY,
+  })
 
   // 监听画布尺寸，浮层按像素计算左右/上下空间，避免超出可视区域。
   useEffect(() => {
@@ -70,6 +83,10 @@ export default function CanvasStage({
   }
 
   const handlePointerDown = (event) => {
+    // 中键 / 空格 + 左键优先进入平移，避免误触发画布圈选。
+    if (viewport.startPan(event)) {
+      return
+    }
     if (disabled || event.button !== 0) {
       return
     }
@@ -83,6 +100,9 @@ export default function CanvasStage({
   }
 
   const handlePointerMove = (event) => {
+    if (viewport.movePan(event)) {
+      return
+    }
     if (!drawing || !draft) {
       return
     }
@@ -91,6 +111,9 @@ export default function CanvasStage({
   }
 
   const finishDrawing = (event) => {
+    if (viewport.endPan(event)) {
+      return
+    }
     if (!drawing || !draft) {
       return
     }
@@ -153,19 +176,20 @@ export default function CanvasStage({
 
       <div
         ref={stageRef}
-        className={`canvas-stage ${disabled ? 'is-disabled' : ''} ${drawing ? 'is-drawing' : ''}`}
+        className={`canvas-stage ${disabled ? 'is-disabled' : ''} ${drawing ? 'is-drawing' : ''} ${viewport.spaceHeld ? 'is-pan-ready' : ''} ${viewport.panning ? 'is-panning' : ''}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={finishDrawing}
         onPointerCancel={finishDrawing}
+        onAuxClick={(event) => event.preventDefault()}
       >
-        {/* 页面层与 iframe 使用同一缩放算法：1280×720 设计视口，cover 居中。 */}
+        {/* 页面层与 iframe 使用同一套基准变换，再叠加用户平移 / 缩放。 */}
         <div
           className="canvas-viewport"
           style={{
             width: `${VIEWPORT_BASE_WIDTH}px`,
             height: `${VIEWPORT_BASE_HEIGHT}px`,
-            transform: `translate(${offsetX}px, ${offsetY}px) scale(${scale})`,
+            transform: `translate(${viewport.translateX}px, ${viewport.translateY}px) scale(${viewport.scale})`,
             transformOrigin: 'top left',
           }}
         >
@@ -241,8 +265,24 @@ export default function CanvasStage({
           </form>
         )}
 
+        <div className="viewport-controls" onPointerDown={(event) => event.stopPropagation()}>
+          <span className="viewport-zoom" data-viewport-zoom>
+            {viewport.zoomPercent}%
+          </span>
+          <button
+            className="viewport-reset"
+            type="button"
+            onClick={viewport.reset}
+            title="恢复 100% 并回到初始位置"
+          >
+            重置视图
+          </button>
+        </div>
+
         <div className="canvas-hint">
-          {drawing ? '松开鼠标完成圈选' : '按住鼠标拖拽，圈选要修改的组件'}
+          {drawing
+            ? '松开鼠标完成圈选'
+            : '左键圈选 · 空格/中键平移 · 滚轮缩放'}
         </div>
       </div>
     </div>
