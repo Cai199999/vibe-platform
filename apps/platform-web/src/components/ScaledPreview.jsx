@@ -1,67 +1,45 @@
-import { useCallback, useLayoutEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef } from 'react'
+import useFillViewport, { VIEWPORT_BASE_WIDTH } from '../workspace/useFillViewport.js'
 
 /**
- * 沙盒预览使用固定的“设计分辨率”渲染，再整体等比缩放到容器中。
+ * 沙盒预览采用「固定逻辑宽度 + 视觉撑满」策略：
  *
- * 为什么不用 100% 宽高：
- *  - iframe 内部页面会随容器宽度反复重排，双屏/单屏切换时视觉不一致；
- *  - 固定 1024×640 后，Vite HMR 连接、页面滚动位置与组件状态都保持稳定；
- *  - 外层只用 transform 缩放，不重建 iframe，因此不会触发重新加载。
+ *  1. iframe 始终以 1024px 作为内部视口宽度，页面按桌面版式排版；
+ *  2. 以容器宽度计算缩放比 scale = containerWidth / 1024；
+ *  3. iframe 的逻辑高度取 containerHeight / scale，缩放后宽高都恰好等于容器；
+ *  4. 使用 transform-origin: top left + scale，不做 flex 居中，也不留任何黑边。
+ *
+ * 全程只改 iframe 的尺寸与 transform，不修改 src、不重建节点：
+ *  - Vite HMR 的 WebSocket 连接、页面滚动位置和组件状态都保持不变；
+ *  - 视口宽高比始终与容器一致，不会出现上下/左右留白。
  */
-const DESIGN_WIDTH = 1024
-const DESIGN_HEIGHT = 640
-
 export default function ScaledPreview({ src, title, visible = true }) {
   const screenRef = useRef(null)
-  const [scale, setScale] = useState(0)
+  const { scale, logicalHeight, recalc } = useFillViewport(screenRef)
 
-  const recalc = useCallback(() => {
-    const node = screenRef.current
-    if (!node) return
-    const { width, height } = node.getBoundingClientRect()
-    if (width <= 0 || height <= 0) {
-      // 面板被 display:none 时尺寸为 0；保持上一次比例，切回后 ResizeObserver 会重算。
-      return
-    }
-    // contain：完整展示页面，短边留白由外层背景填充，绝不裁切内容。
-    setScale(Math.min(width / DESIGN_WIDTH, height / DESIGN_HEIGHT))
-  }, [])
-
-  useLayoutEffect(() => {
-    const node = screenRef.current
-    if (!node) return undefined
-    const observer = new ResizeObserver(recalc)
-    observer.observe(node)
-    recalc()
-    return () => observer.disconnect()
-  }, [recalc])
-
-  // display:none → block 时 ResizeObserver 理论上会触发；再补一帧确保拿到最终尺寸。
+  // visibility / display 切换后补一帧，确保拿到舞台的最终尺寸。
   useLayoutEffect(() => {
     if (!visible) return undefined
     const frame = window.requestAnimationFrame(recalc)
     return () => window.cancelAnimationFrame(frame)
   }, [visible, recalc])
 
-  const scalerStyle = {
-    width: `${DESIGN_WIDTH}px`,
-    height: `${DESIGN_HEIGHT}px`,
-    transform: `translate(-50%, -50%) scale(${scale})`,
-    opacity: scale > 0 ? 1 : 0,
-  }
-
   return (
     <div ref={screenRef} className="runtime-preview-screen">
-      <div className="runtime-preview-scaler" style={scalerStyle}>
-        <iframe
-          className="runtime-preview-frame"
-          src={src}
-          title={title}
-          sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
-          scrolling="no"
-          style={{ width: `${DESIGN_WIDTH}px`, height: `${DESIGN_HEIGHT}px` }}
-        />
-      </div>
+      <iframe
+        className="runtime-preview-frame"
+        src={src}
+        title={title}
+        sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
+        scrolling="no"
+        style={{
+          width: `${VIEWPORT_BASE_WIDTH}px`,
+          height: logicalHeight > 0 ? `${logicalHeight}px` : '100%',
+          transform: `scale(${scale})`,
+          transformOrigin: 'top left',
+          opacity: scale > 0 ? 1 : 0,
+        }}
+      />
     </div>
   )
 }

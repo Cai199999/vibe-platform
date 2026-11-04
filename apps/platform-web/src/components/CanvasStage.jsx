@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import useFillViewport, { VIEWPORT_BASE_WIDTH } from '../workspace/useFillViewport.js'
 
 const clamp01 = (value) => Math.min(1, Math.max(0, value))
 
@@ -35,6 +36,8 @@ export default function CanvasStage({
   const [draft, setDraft] = useState(null)
   const [drawing, setDrawing] = useState(false)
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 })
+  // 与沙盒预览共用 1024px 设计宽度：缩放后画布与 iframe 的页面尺寸完全一致。
+  const { scale, logicalHeight } = useFillViewport(stageRef)
 
   // 监听画布尺寸，浮层按像素计算左右/上下空间，避免超出可视区域。
   useEffect(() => {
@@ -153,22 +156,33 @@ export default function CanvasStage({
         onPointerUp={finishDrawing}
         onPointerCancel={finishDrawing}
       >
-        <div className="mock-page">
-          <section className="mock-card">
-            <p className="mock-kicker">Vibe Studio</p>
-            <h1 className="mock-title">
-              把想法画出来。
-              <br />
-              剩下的交给 Agent。
-            </h1>
-            <p className="mock-copy">
-              在画布圈选任意组件，浮层内写下修改意图。Agent 会在隔离沙盒中生成代码、运行构建，并自动修复错误。
-            </p>
-            <button className="mock-cta" data-vibe-target="cta-button" type="button">
-              开始体验
-            </button>
-            <span className="cta-hint">圈选我，然后输入“改颜色”</span>
-          </section>
+        {/* 页面层与 iframe 使用同一缩放算法：1024px 逻辑宽度，左上角原点。 */}
+        <div
+          className="canvas-viewport"
+          style={{
+            width: `${VIEWPORT_BASE_WIDTH}px`,
+            height: logicalHeight > 0 ? `${logicalHeight}px` : '100%',
+            transform: `scale(${scale})`,
+            transformOrigin: 'top left',
+          }}
+        >
+          <div className="mock-page">
+            <section className="mock-card">
+              <p className="mock-kicker">Vibe Studio</p>
+              <h1 className="mock-title">
+                把想法画出来。
+                <br />
+                剩下的交给 Agent。
+              </h1>
+              <p className="mock-copy">
+                在画布上圈选任意组件，写下修改意图。Agent 会生成代码、运行构建，并自动修复错误。
+              </p>
+              <button className="mock-cta" data-vibe-target="cta-button" type="button">
+                开始体验
+              </button>
+              <span className="cta-hint">圈选我，然后输入“改颜色”</span>
+            </section>
+          </div>
         </div>
 
         {activeRect && (

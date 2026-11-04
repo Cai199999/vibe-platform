@@ -151,16 +151,17 @@ def assert_no_outer_scroll(active, label: str) -> None:
 
 
 def assert_scaled_preview(active, label: str) -> None:
-    """iframe 必须等比缩放并居中，且缩放后不超出预览容器。"""
+    """iframe 必须以左上角为原点缩放，并在宽高上严格铺满预览屏幕。"""
     metrics = active.locator(".runtime-preview-screen").evaluate("""el => {
-            const scaler = el.querySelector('.runtime-preview-scaler');
             const frame = el.querySelector('.runtime-preview-frame');
             const screen = el.getBoundingClientRect();
-            const box = scaler.getBoundingClientRect();
+            const box = frame.getBoundingClientRect();
+            const style = getComputedStyle(frame);
             return {
                 screen: {x: screen.x, y: screen.y, width: screen.width, height: screen.height},
-                scaler: {x: box.x, y: box.y, width: box.width, height: box.height},
-                transform: getComputedStyle(scaler).transform,
+                frame: {x: box.x, y: box.y, width: box.width, height: box.height},
+                transform: style.transform,
+                transformOrigin: style.transformOrigin,
                 frameConnected: frame?.isConnected ?? false,
             };
         }""")
@@ -168,22 +169,78 @@ def assert_scaled_preview(active, label: str) -> None:
         fail(f"{label} 未应用 transform scale: {metrics}")
     if not metrics["frameConnected"]:
         fail(f"{label} iframe 已被卸载")
-    if metrics["scaler"]["width"] > metrics["screen"]["width"] + 1:
-        fail(f"{label} 缩放后宽度超出容器: {metrics}")
-    if metrics["scaler"]["height"] > metrics["screen"]["height"] + 1:
-        fail(f"{label} 缩放后高度超出容器: {metrics}")
-    dx = abs(
-        metrics["scaler"]["x"]
-        + metrics["scaler"]["width"] / 2
-        - (metrics["screen"]["x"] + metrics["screen"]["width"] / 2)
+    if metrics["transformOrigin"] not in ("0px 0px", "left top", "0 0"):
+        fail(f"{label} transform-origin 不是 top left: {metrics}")
+    if abs(metrics["frame"]["width"] - metrics["screen"]["width"]) > 2:
+        fail(f"{label} iframe 缩放后未铺满宽度: {metrics}")
+    if abs(metrics["frame"]["height"] - metrics["screen"]["height"]) > 2:
+        fail(f"{label} iframe 缩放后未铺满高度: {metrics}")
+    if abs(metrics["frame"]["x"] - metrics["screen"]["x"]) > 1:
+        fail(f"{label} iframe 未与预览屏幕左对齐: {metrics}")
+    if abs(metrics["frame"]["y"] - metrics["screen"]["y"]) > 1:
+        fail(f"{label} iframe 未与预览屏幕顶部对齐: {metrics}")
+
+
+def assert_pane_stack(active, visible: str, hidden: str, label: str) -> None:
+    """隐藏面板必须 visibility:hidden 且不接收指针事件，防止 iframe 挡住画布。"""
+    visible_style = active.locator(visible).evaluate("""el => {
+            const style = getComputedStyle(el);
+            return {visibility: style.visibility, pointerEvents: style.pointerEvents, zIndex: style.zIndex};
+        }""")
+    hidden_style = active.locator(hidden).evaluate("""el => {
+            const style = getComputedStyle(el);
+            return {visibility: style.visibility, pointerEvents: style.pointerEvents, zIndex: style.zIndex};
+        }""")
+    if (
+        visible_style["visibility"] != "visible"
+        or visible_style["pointerEvents"] == "none"
+    ):
+        fail(f"{label} 当前面板不可交互: {visible_style}")
+    if (
+        hidden_style["visibility"] != "hidden"
+        or hidden_style["pointerEvents"] != "none"
+    ):
+        fail(f"{label} 隐藏面板仍可能截获鼠标事件: {hidden_style}")
+    if int(hidden_style["zIndex"]) >= int(visible_style["zIndex"]):
+        fail(
+            f"{label} 隐藏面板 z-index 未低于当前面板: {hidden_style} / {visible_style}"
+        )
+    print(
+        f"   显隐层级: {label} visible={visible_style['visibility']} / hidden={hidden_style['visibility']}"
     )
-    dy = abs(
-        metrics["scaler"]["y"]
-        + metrics["scaler"]["height"] / 2
-        - (metrics["screen"]["y"] + metrics["screen"]["height"] / 2)
+
+
+def assert_canvas_preview_parity(page, active, label: str) -> None:
+    """画布 Mock 页面与 iframe 内真实页面必须处于同一视觉尺寸与位置。"""
+    canvas_card = active.locator(".mock-card").bounding_box()
+    vibe_card = (
+        page.frame_locator(".tab-window.is-active .runtime-preview-frame")
+        .locator(".vibe-card")
+        .bounding_box()
     )
-    if dx > 2 or dy > 2:
-        fail(f"{label} 缩放后未居中: dx={dx} dy={dy}")
+    if not canvas_card or not vibe_card:
+        fail(f"{label} 未读取到画布/预览卡片尺寸")
+
+    for key in ("width", "height"):
+        if abs(canvas_card[key] - vibe_card[key]) > 2:
+            fail(
+                f"{label} 画布与预览卡片 {key} 不一致: "
+                f"{canvas_card[key]} vs {vibe_card[key]}"
+            )
+
+    canvas_stage = active.locator(".canvas-stage").bounding_box()
+    preview_screen = active.locator(".runtime-preview-screen").bounding_box()
+    canvas_center = canvas_card["y"] + canvas_card["height"] / 2 - canvas_stage["y"]
+    preview_center = vibe_card["y"] + vibe_card["height"] / 2 - preview_screen["y"]
+    if abs(canvas_center - preview_center) > 2:
+        fail(
+            f"{label} 画布与预览卡片垂直位置不一致: "
+            f"{canvas_center:.1f} vs {preview_center:.1f}"
+        )
+    print(
+        f"   卡片对齐: {canvas_card['width']:.1f}×{canvas_card['height']:.1f} / "
+        f"centerY {canvas_center:.1f} vs {preview_center:.1f}"
+    )
 
 
 def main() -> None:
@@ -266,7 +323,11 @@ def main() -> None:
         expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
         expect(active.locator(".runtime-preview-frame")).to_be_hidden()
 
-        retry_text = active.locator(".runtime-result-overlay .elapsed").inner_text()
+        # 预览面板在对比模式画布下是 visibility:hidden，inner_text 会返回空；
+        # 这里只需要校验 DOM 内容，使用 text_content 不受可见性影响。
+        retry_text = (
+            active.locator(".runtime-result-overlay .elapsed").text_content() or ""
+        )
         if "自动修复 1 次" not in retry_text:
             fail(f"重试信息异常: {retry_text}")
         sandbox_id = active.locator(".runtime-panel").get_attribute("data-sandbox-id")
@@ -291,6 +352,7 @@ def main() -> None:
 
         page.wait_for_timeout(300)
         assert_scaled_preview(active, "对比模式预览")
+        assert_canvas_preview_parity(page, active, "对比模式预览")
         page.screenshot(
             path=str(SCREENSHOT_DIR / "phase4-preview-mode.png"), full_page=True
         )
@@ -337,6 +399,7 @@ def main() -> None:
             }""")
         if body_style["overflowX"] != "hidden" or body_style["overflowY"] != "hidden":
             fail(f"iframe body 仍可能出现原生滚动条: {body_style}")
+        assert_canvas_preview_parity(page, active, "展示模式")
         page.screenshot(
             path=str(SCREENSHOT_DIR / "phase4-dual-mode.png"), full_page=True
         )
@@ -362,11 +425,13 @@ def main() -> None:
         active.get_by_role("button", name="画布", exact=True).click()
         expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
         expect(active.locator(".annotation-ellipse")).to_be_visible()
+        assert_pane_stack(active, ".canvas-pane", ".preview-pane", "画布模式")
         canvas_box_again = active.locator(".project-viewport").bounding_box()
         assert_same_box(canvas_box, canvas_box_again, "预览 → 画布")
 
         active.get_by_role("button", name="预览", exact=True).click()
         expect(active.locator(".runtime-preview-frame")).to_be_visible()
+        assert_pane_stack(active, ".preview-pane", ".canvas-pane", "预览模式")
         assert_same_box(
             canvas_box, active.locator(".project-viewport").bounding_box(), "再次切换"
         )

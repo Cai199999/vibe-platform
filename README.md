@@ -112,14 +112,21 @@ platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
 - 每个项目窗口支持两种布局：
   - **对比模式**：单屏全屏显示，顶部「画布 / 预览」Tab 切换；
   - **展示模式**：画布与预览左右 50% 同显，窄屏自动压缩。
-- 两种模式下画布与预览面板 **始终挂载**，只用 CSS `display:none` 控制
-  显隐。切换不会重建 React 组件，也不会重载 iframe，因此圈选标注、缩放、
-  浮层草稿与 Vite HMR WebSocket 连接全部保留。
+- 两种模式下画布与预览面板 **始终挂载**。对比模式用 `visibility:hidden` +
+  `pointer-events:none` + `z-index` 让非当前面板彻底退出命中测试；Tab 级休眠
+  仍用 `display:none`。切换不会重建 React 组件或 iframe，圈选标注、浮层草稿
+  与 Vite HMR WebSocket 连接全部保留。
 - 预览区与画布容器等高同宽：顶部 chrome 固定 42px，下方画面填满剩余空间；
-  `.project-viewport`、`.runtime-stage` 等外层全部 `overflow:hidden`。
-- 预览 iframe 以 1024×640 固定分辨率渲染，再用 `transform: translate(-50%,
-  -50%) scale()` 等比缩放并居中；`contain` 策略保证完整页面可见，留白与
-  沙盒页面同色，视觉上是一块无缝的应用屏幕。iframe 与 body 均隐藏滚动条。
+  `.project-viewport`、`.runtime-stage`、`.canvas-stage` 等外层全部
+  `overflow:hidden`。
+- 画布与预览共用 `useFillViewport`：以 1024px 为逻辑宽度，
+  `scale = 容器宽 / 1024`，逻辑高度取 `容器高 / scale`，最后用
+  `transform-origin: top left; transform: scale(scale)` 铺满容器。缩放后
+  iframe 宽高严格等于预览屏幕，不存在黑边；画布 Mock 页面使用同一套参数，
+  因此两边卡片尺寸、位置与垂直中心像素级一致。
+- 画布、iframe、chrome 与舞台统一使用 `#0f172a`，边缘完全融合；
+  iframe 加 `scrolling="no"`，沙盒模板的 `html/body/#root` 也设
+  `overflow:hidden`，内外都不会出现原生滚动条。
 - 结果状态、自动修复次数与「详情 / 代码 Diff」以浮层/抽屉覆盖在预览上，
   不挤压 iframe 尺寸。
 - Agent 完成后若停留在画布模式，右下角显示 **查看效果 →**，一键切到预览。
@@ -187,7 +194,8 @@ python3 scripts/ui_e2e_test.py
 真实浏览器中验证未登录跳转 → 一键登录 → 新建项目 → 拖拽 Tab 排序 →
 刷新验证 localStorage 持久化 → 画布圈选并发送意图 → 执行中状态反馈 →
 **查看效果**切换全屏预览并校验 iframe 按钮 `rgb(255, 0, 0)` → 对比/展示
-模式往返，比对画布与预览面板宽高、检查外层无滚动条、iframe 等比缩放居中 →
+模式往返，比对画布与预览面板宽高、检查外层无滚动条、iframe 缩放后严格铺满
+预览屏幕（左上角原点）→ 对比画布 Mock 卡片与 iframe 内卡片的宽高/垂直中心 →
 用 DOM 节点标记验证组件零重挂载 → 详情抽屉中的 Diff 与沙盒信息 →
 **刷新恢复预览结果** → 关闭 Tab 并通过 Docker CLI 确认容器已销毁 →
 5 Tab 上限 → 关闭项目后按存活数递增命名且不重名 → 账户设置 / 退出 /
