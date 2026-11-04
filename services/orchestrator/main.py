@@ -1,44 +1,24 @@
-"""Vibe Platform - Python AI Core 骨架。
+"""Vibe Platform - Python AI Core。
 
-M1 只提供健康检查与跨语言连通性验证；LangGraph 的具体 Graph、模型路由、
-多 Agent 调度留在后续阶段实现。
+M1 提供：
+  - 健康检查 / Java BFF 连通性探针；
+  - 单前端 React 沙盒的 Docker 生命周期 API；
+  - LangGraph 依赖已就绪，具体 Graph / 多 Agent 编排在后续阶段实现。
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
-from typing import Literal
 
 from fastapi import FastAPI
-from pydantic import BaseModel
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from ai_core.api.sandbox import router as sandbox_router
+from ai_core.config import get_settings
+from ai_core.sandbox import get_sandbox_provider
+from ai_core.schemas import HealthResponse, PingResponse
 
-class Settings(BaseSettings):
-    """从环境变量 / .env 读取的服务配置。"""
-
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
-
-    app_env: str = "local"
-    service_name: str = "python-ai"
-    service_version: str = "0.1.0"
-
-    # M1 只做占位；M2 由 ModelRouter 统一读取。
-    deepseek_api_key: str = ""
-    deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-chat"
-
-    # 复用宿主机 Docker Redis；当前骨架不主动连接。
-    redis_host: str = "127.0.0.1"
-    redis_port: int = 6379
-
-
-settings = Settings()
+settings = get_settings()
 
 
 def _package_version(package_name: str) -> str | None:
@@ -49,38 +29,26 @@ def _package_version(package_name: str) -> str | None:
         return None
 
 
-class HealthResponse(BaseModel):
-    """服务健康检查响应。"""
-
-    status: Literal["UP", "DEGRADED"]
-    service: str
-    version: str
-    timestamp: datetime
-    language: str = "python"
-    dependencies: dict[str, str] = {}
-
-
-class PingResponse(BaseModel):
-    """供 Java BFF 调用的最小连通性响应。"""
-
-    status: Literal["UP"] = "UP"
-    service: str
-    version: str
-    timestamp: datetime
-    app_env: str
-    langgraph_version: str | None = None
-
-
 app = FastAPI(
     title="Vibe Platform AI Core",
     version=settings.service_version,
-    description="Python AI Core skeleton: health check and Java BFF connectivity probe.",
+    description=(
+        "Python AI Core skeleton: health check, BFF connectivity probe and "
+        "Docker sandbox lifecycle API."
+    ),
 )
+
+app.include_router(sandbox_router)
 
 
 @app.get("/api/v1/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    """Python AI Core 自身健康检查。"""
+    """Python AI Core 自身健康检查。
+
+    Docker / 沙盒镜像状态只作为诊断信息返回，不把整个服务判为 DEGRADED：
+    Docker 暂不可用不应阻断 Java BFF 等非沙盒功能。
+    """
+    provider = get_sandbox_provider()
     return HealthResponse(
         status="UP",
         service=settings.service_name,
@@ -88,6 +56,8 @@ def health() -> HealthResponse:
         timestamp=datetime.now(timezone.utc),
         dependencies={
             "langgraph": _package_version("langgraph") or "NOT_INSTALLED",
+            "docker": provider.docker_version(),
+            "sandbox_image": provider.image_state(),
         },
     )
 

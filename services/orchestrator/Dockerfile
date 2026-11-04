@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl git \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system app \
     && useradd --system --gid app app
@@ -17,7 +17,11 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .
+COPY ai_core ./ai_core
+# 沙盒构建上下文：镜像不存在时由 LocalDockerSandbox 自动构建。
+COPY sandbox_template ./sandbox_template
 
+# 以非 root 运行；通过 compose 的 group_add 加入宿主 docker 组以访问 socket。
 USER app
 
 EXPOSE 8100

@@ -7,12 +7,15 @@
 ## 目录
 
 ```text
-apps/platform-bff/          Java 21 + Spring Boot 3.3 BFF 骨架
-services/orchestrator/      Python 3.12 + FastAPI + LangGraph 依赖骨架
-infra/migrations/schema.sql M1 初始 MySQL schema（无物理外键）
-scripts/init-db.sh          应用 schema 到已有 Docker MySQL
-scripts/smoke-test.sh       验证 Java -> Python 跨语言调用
-docker-compose.yml          只编排平台自身服务
+apps/platform-bff/                    Java 21 + Spring Boot 3.3 BFF 骨架
+services/orchestrator/                Python 3.12 + FastAPI + LangGraph 依赖骨架
+services/orchestrator/ai_core/        SandboxProvider 抽象与 LocalDockerSandbox
+services/orchestrator/sandbox_template/ React + Vite 沙盒基础镜像
+infra/migrations/schema.sql           M1 初始 MySQL schema（无物理外键）
+scripts/init-db.sh                    应用 schema 到已有 Docker MySQL
+scripts/smoke-test.sh                 验证 Java -> Python 跨语言调用
+scripts/sandbox_e2e_test.py           沙盒创建/补丁/构建校验/销毁 E2E
+docker-compose.yml                    只编排平台自身服务
 ```
 
 ## 前置条件
@@ -86,6 +89,36 @@ curl -s http://127.0.0.1:8080/api/v1/health | python3 -m json.tool
 ```bash
 ./scripts/smoke-test.sh
 ```
+
+## 沙盒（Sandbox）
+
+`python-ai` 通过挂载的 `/var/run/docker.sock` 调用宿主 Docker，为每个项目创建
+独立的 React + Vite 容器。容器限制：`cap_drop=ALL`、`no-new-privileges`、
+内存 / CPU / PID 限额，预览端口只绑定 `127.0.0.1`。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/v1/internal/sandbox/create` | 创建容器，写入初始文件，返回预览 URL |
+| POST | `/api/v1/internal/sandbox/apply-patch` | 全量文件 / unified diff，触发 Vite HMR |
+| GET | `/api/v1/internal/sandbox/verify?sandbox_id=...&check=build` | 执行 `npm run build` / `npm run test` |
+| DELETE | `/api/v1/internal/sandbox/{sandboxId}` | 强制销毁容器 |
+
+沙盒镜像 `vibe-platform/sandbox-react:dev` 首次使用时自动构建（依赖已预热，
+单次创建约 1~3 秒）。E2E 验证：
+
+```bash
+python3 scripts/sandbox_e2e_test.py
+```
+
+测试会依次验证：创建 → 端口映射 → 注入语法错误 → verify 失败 → diff 修复 →
+verify 成功 → Vite 返回最新模块 → 销毁 → 资源 404。
+
+> 安全提示：挂载 Docker Socket 等价于授予 python-ai 宿主 root 权限，仅限本地
+> 开发与受信任环境。生产环境必须替换为独立沙盒节点 + gVisor，业务容器不得
+> 直接挂载 Docker Socket。
+>
+> 若容器内无权限访问 Socket，执行
+> `stat -c '%g' /var/run/docker.sock` 获取 GID，并写入 `.env` 的 `DOCKER_GID`。
 
 ## 数据库
 

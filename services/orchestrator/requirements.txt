@@ -11,3 +11,6 @@ langchain-openai==0.3.0
 
 # 内部 HTTP 调用（后续调用 Sandbox / 模型网关）
 httpx==0.28.1
+
+# Docker SDK：通过挂载的 /var/run/docker.sock 管理沙盒容器
+docker==7.1.0

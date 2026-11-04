@@ -27,8 +27,23 @@ services:
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
       REDIS_HOST: ${REDIS_HOST:-host.docker.internal}
       REDIS_PORT: ${REDIS_PORT:-6379}
+      # Sandbox：通过挂载的 Docker Socket 在宿主机创建隔离容器。
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-vibe-platform/sandbox-react:dev}
+      SANDBOX_PREVIEW_HOST: ${SANDBOX_PREVIEW_HOST:-127.0.0.1}
+      SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-768}
+      SANDBOX_CPU_LIMIT: ${SANDBOX_CPU_LIMIT:-1.0}
+      SANDBOX_START_TIMEOUT_SECONDS: ${SANDBOX_START_TIMEOUT_SECONDS:-90}
+      SANDBOX_VERIFY_TIMEOUT_SECONDS: ${SANDBOX_VERIFY_TIMEOUT_SECONDS:-180}
     ports:
       - "8100:8100"
+    volumes:
+      # M1 本地开发：直接复用宿主机 Docker Daemon 创建沙盒容器。
+      # 安全注意：Docker Socket 等价于宿主 root 权限，仅限本地受信任环境。
+      # 生产环境替换为独立沙盒节点 / gVisor，禁止业务容器直接挂载。
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      # 宿主 docker 组 GID，Linux 上用 `stat -c '%g' /var/run/docker.sock` 获取。
+      - "${DOCKER_GID:-115}"
     extra_hosts:
       # 让容器通过 host.docker.internal 访问宿主机上已有的中间件。
       - "host.docker.internal:host-gateway"
