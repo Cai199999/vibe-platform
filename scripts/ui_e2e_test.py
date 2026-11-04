@@ -259,6 +259,7 @@ def assert_export_archive(download, label: str) -> None:
             "index.html",
             "src/App.jsx",
             "src/main.jsx",
+            "VIBE_CONTEXT.md",
         }
         missing = required - names
         if missing:
@@ -276,6 +277,17 @@ def assert_export_archive(download, label: str) -> None:
         # Agent 已把 CTA 改成红色，导出包必须是修改后的真实沙盒内容。
         if "backgroundColor: 'red'" not in source:
             fail(f"{label} 的 src/App.jsx 不是 Agent 修改后的版本")
+
+        context_file = tar.extractfile("./VIBE_CONTEXT.md") or tar.extractfile(
+            "VIBE_CONTEXT.md"
+        )
+        if context_file is None:
+            fail(f"{label} 缺少 VIBE_CONTEXT.md")
+        context = context_file.read().decode("utf-8", errors="replace")
+        # 本地 Cursor 需要从 Markdown 中读到画布意图与机器可读的信封。
+        for token in ("VIBE_CONTEXT", "改颜色", "UI_ONLY", "AnnotationEnvelope"):
+            if token not in context:
+                fail(f"{label} 的 VIBE_CONTEXT.md 缺少内容: {token}")
 
     size_kb = Path(path).stat().st_size / 1024
     print(f"   {label}: project-export.tar.gz / {size_kb:.1f} KB / {len(names)} 个文件")

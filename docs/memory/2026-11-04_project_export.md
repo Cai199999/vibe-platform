@@ -17,6 +17,14 @@
   - 输出为 bytes，超过 `SANDBOX_MAX_EXPORT_BYTES`（默认 32 MiB）直接拒绝。
 - `GET /api/v1/internal/sandbox/{sandbox_id}/export` 返回
   `application/gzip` + `Content-Disposition: attachment`。
+- Agent 执行时（读完目标文件后）把本次 AnnotationEnvelope 渲染为
+  `VIBE_CONTEXT.md` 写入沙盒根目录：
+  - 模块：`ai_core/agent/context_doc.py`；
+  - 内容：项目 / Run / 沙盒 / 目标文件 / 组件 / 选择器 / 意图类型、
+    用户自然语言意图、UI 摘要、验收标准、归一化选区、源码定位、
+    完整 AnnotationEnvelope JSON（`~~~json` 围栏）；
+  - 导出时随源码一起打包，Cursor / Claude Code 打开项目即可读到背景；
+  - 写入失败只记日志，不影响 Run 与构建校验。
 
 ### Java BFF
 
@@ -52,8 +60,10 @@
 - 未知 runId 返回 404 `RUN_NOT_FOUND`。
 - Playwright：工具栏与下拉菜单各触发一次下载，`tarfile` 校验包含
   `package.json` / `package-lock.json` / `vite.config.js` / `index.html` /
-  `src/App.jsx` / `src/main.jsx`，不含 `node_modules` / `.git` / `dist`，
-  且 `src/App.jsx` 是 Agent 修改后的红色按钮版本。
+  `src/App.jsx` / `src/main.jsx` / `VIBE_CONTEXT.md`，不含
+  `node_modules` / `.git` / `dist`，且 `src/App.jsx` 是 Agent 修改后的
+  红色按钮版本；`VIBE_CONTEXT.md` 必须包含用户指令「改颜色」、`UI_ONLY`
+  与完整 `AnnotationEnvelope`。
 - 解压到干净目录，在 `node:20-alpine` 容器执行 `npm ci && npm run build`
   成功（31 modules，991ms）。
 

@@ -190,6 +190,10 @@ platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
 
 - 容器内执行 `tar -czf - --exclude=node_modules --exclude=.git --exclude=dist .`，
   保留 `package.json` / `package-lock.json` / `vite.config.js` / `src/`。
+- 导出包根目录包含 **`VIBE_CONTEXT.md`**：Agent 执行时把本次画布
+  `AnnotationEnvelope`（用户意图、UI 摘要、验收标准、归一化选区、目标文件 /
+  组件 / 选择器、完整 JSON）渲染成 Markdown。在 Cursor / Claude Code 中打开
+  解压后的项目时，先读该文件即可知道画布上的修改背景。
 - BFF 不落盘、不解析压缩包，直接把 AI Core 的 `InputStream` 复制到 Servlet
   输出流；响应头为 `Content-Type: application/gzip` 与
   `Content-Disposition: attachment; filename="project-export.tar.gz"`。

@@ -6,6 +6,10 @@ import logging
 import uuid
 from typing import Any
 
+from ai_core.agent.context_doc import (
+    VIBE_CONTEXT_FILENAME,
+    render_vibe_context,
+)
 from ai_core.agent.graph import AgentGraphRunner
 from ai_core.agent.llm import (
     AgentLLMError,
@@ -74,6 +78,29 @@ class RunExecutionService:
             raise TargetFileNotFoundError(
                 f"读取目标文件失败 {target_file}: {exc}"
             ) from exc
+
+        # 把画布标注渲染成 VIBE_CONTEXT.md 写进沙盒，导出源码包时自动带上：
+        # 本地 Cursor / Claude Code 打开项目即可看到本次修改意图。
+        # 写入失败只记录日志，不影响 Run 本身的执行与校验。
+        try:
+            self._sandbox.apply_patch(
+                handle.sandbox_id,
+                files={
+                    VIBE_CONTEXT_FILENAME: render_vibe_context(
+                        request,
+                        run_id,
+                        handle.sandbox_id,
+                        target_file,
+                    )
+                },
+            )
+        except SandboxError:
+            logger.warning(
+                "failed to write %s run_id=%s",
+                VIBE_CONTEXT_FILENAME,
+                run_id,
+                exc_info=True,
+            )
 
         annotation_context = self._build_annotation_context(request, target_file)
         initial_state: dict[str, Any] = {
