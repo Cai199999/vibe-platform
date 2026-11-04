@@ -27,6 +27,7 @@ function ProjectWorkspaceInner({
   onAnnotationIntentChange,
   onAnnotationRemove,
   onAnnotationSend,
+  onAnnotationRollback,
   onClearAnnotations,
   onSubmit,
   onRetry,
@@ -121,7 +122,7 @@ function ProjectWorkspaceInner({
             {submitting && !run.pendingAnnotationId ? (
               <>
                 <span className="mini-spinner" aria-label="执行中" />
-                执行中…
+                {run.pendingAction === 'rollback' ? '回滚中…' : '执行中…'}
               </>
             ) : (
               `批量提交 (${annotations.length}/3)`
@@ -209,7 +210,9 @@ function ProjectWorkspaceInner({
             onAnnotationIntentChange={onAnnotationIntentChange}
             onAnnotationRemove={onAnnotationRemove}
             onAnnotationSend={onAnnotationSend}
+            onAnnotationRollback={onAnnotationRollback}
             pendingAnnotationId={run.pendingAnnotationId}
+            pendingAction={run.pendingAction}
             submitting={submitting}
             disabled={submitting}
           />

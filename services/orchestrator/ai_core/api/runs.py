@@ -6,9 +6,15 @@ from fastapi import APIRouter, HTTPException
 from docker.errors import DockerException
 
 from ai_core.agent.llm import AgentLLMConfigurationError
-from ai_core.agent.schemas import ExecuteRunRequest, ExecuteRunResponse
+from ai_core.agent.schemas import (
+    ExecuteRunRequest,
+    ExecuteRunResponse,
+    RollbackRunRequest,
+    RollbackRunResponse,
+)
 from ai_core.agent.service import (
     FullStackNotSupportedError,
+    RollbackTargetMismatchError,
     RunExecutionService,
     TargetFileNotFoundError,
 )
@@ -41,6 +47,26 @@ def execute_run(request: ExecuteRunRequest) -> ExecuteRunResponse:
         raise HTTPException(
             status_code=422,
             detail={"code": "LLM_NOT_CONFIGURED", "message": str(exc)},
+        ) from exc
+    except SandboxError as exc:
+        raise sandbox_error_to_http(exc) from exc
+    except DockerException as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "SANDBOX_DOCKER_UNAVAILABLE", "message": str(exc)},
+        ) from exc
+
+
+@router.post("/rollback", response_model=RollbackRunResponse)
+def rollback_run(request: RollbackRunRequest) -> RollbackRunResponse:
+    """把沙盒代码与单个标注 thread 回滚到指定成功轮次。"""
+    service = RunExecutionService()
+    try:
+        return service.rollback(request)
+    except RollbackTargetMismatchError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ROLLBACK_TARGET_MISMATCH", "message": str(exc)},
         ) from exc
     except SandboxError as exc:
         raise sandbox_error_to_http(exc) from exc

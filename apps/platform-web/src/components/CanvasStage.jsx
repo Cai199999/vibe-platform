@@ -128,6 +128,7 @@ function AnnotationPopover({
   total,
   submitting,
   pending,
+  pendingAction,
   active,
   panReady,
   scale,
@@ -135,6 +136,7 @@ function AnnotationPopover({
   onChange,
   onRemove,
   onSend,
+  onRollback,
   onActivate,
   onDeactivate,
 }) {
@@ -154,6 +156,7 @@ function AnnotationPopover({
 
   const targetLabel = annotation.target?.label || '组件'
   const sending = Boolean(submitting && pending)
+  const rollingBack = sending && pendingAction === 'rollback'
   return (
     <form
       className={`canvas-popover tone-${index % 3} ${active ? 'is-active' : ''}`}
@@ -211,11 +214,31 @@ function AnnotationPopover({
             <div
               key={message.id || `${message.role}-${messageIndex}`}
               className={`chat-bubble is-${message.role}`}
+              data-turn={message.turnCount ?? undefined}
             >
               <span className="chat-role">
                 {message.role === 'user' ? '你' : 'Agent'}
               </span>
               <p>{message.content}</p>
+              {message.role === 'assistant' && message.commitHash && (
+                <div className="chat-checkpoint">
+                  <span
+                    className="chat-commit"
+                    title={`Git ${message.commitHash}`}
+                  >
+                    turn {message.turnCount} · {message.commitHash.slice(0, 7)}
+                  </span>
+                  <button
+                    className="chat-rollback"
+                    type="button"
+                    disabled={submitting}
+                    title="恢复这一轮的代码与对话，丢弃之后的所有修改"
+                    onClick={() => onRollback?.(annotation.id, message)}
+                  >
+                    ↩️ 回滚到此步
+                  </button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -243,11 +266,13 @@ function AnnotationPopover({
         </button>
       </div>
       <p className="popover-hint">
-        {sending
-          ? 'Agent 正在这个圈上增量修改…'
-          : history.length
-            ? '同一圈可继续发送，最新指令会覆盖冲突属性'
-            : '发送后立即执行；后续可继续对话调整'}
+        {rollingBack
+          ? '正在恢复该轮代码与对话上下文…'
+          : sending
+            ? 'Agent 正在这个圈上增量修改…'
+            : history.length
+              ? '同一圈可继续发送；也可以回到任意成功轮次'
+              : '发送后立即执行；后续可继续对话调整'}
       </p>
     </form>
   )
@@ -266,7 +291,9 @@ export default function CanvasStage({
   onAnnotationIntentChange,
   onAnnotationRemove,
   onAnnotationSend,
+  onAnnotationRollback,
   pendingAnnotationId,
+  pendingAction,
   submitting,
   disabled,
 }) {
@@ -541,6 +568,7 @@ export default function CanvasStage({
                   total={annotations.length}
                   submitting={submitting}
                   pending={pendingAnnotationId === annotation.id}
+                  pendingAction={pendingAnnotationId === annotation.id ? pendingAction : null}
                   active={annotation.id === activeAnnotationId}
                   panReady={viewport.spaceHeld}
                   scale={viewport.scale}
@@ -551,6 +579,7 @@ export default function CanvasStage({
                   onChange={onAnnotationIntentChange}
                   onRemove={onAnnotationRemove}
                   onSend={onAnnotationSend}
+                  onRollback={onAnnotationRollback}
                   onActivate={activateAnnotation}
                   onDeactivate={deactivateAnnotation}
                 />

@@ -40,6 +40,18 @@ public class RunController {
     }
 
     /**
+     * 把某个标注 thread 回滚到指定成功轮次。
+     *
+     * <p>AI Core 会执行 {@code git reset --hard} 并恢复该 thread 的
+     * checkpoint；返回的 previewUrl 带 cache-busting 参数，前端替换后
+     * iframe 强制刷新。</p>
+     */
+    @PostMapping("/rollback")
+    public ResponseEntity<JsonNode> rollback(@Valid @RequestBody RollbackRunRequest request) {
+        return runService.rollback(request);
+    }
+
+    /**
      * 下载该 Run 生成的完整项目（tar.gz）。
      *
      * <p>sandboxId 可选：BFF 会记录最近执行的 runId -> sandboxId；前端同时

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -20,6 +21,9 @@ from ai_core.agent.schemas import (
     AnnotationEnvelope,
     ExecuteRunRequest,
     ExecuteRunResponse,
+    RollbackRunRequest,
+    RollbackRunResponse,
+    RunCommitRecord,
     VerifyResultModel,
 )
 from ai_core.agent.thread_memory import ThreadMemoryStore, get_thread_store
@@ -38,6 +42,10 @@ class FullStackNotSupportedError(Exception):
 
 class TargetFileNotFoundError(Exception):
     """标注指向的文件不存在。"""
+
+
+class RollbackTargetMismatchError(Exception):
+    """前端提交的 commit 与服务端 thread checkpoint 不一致。"""
 
 
 class RunExecutionService:
@@ -79,6 +87,14 @@ class RunExecutionService:
 
         # 先构造 LLM，避免密钥缺失时已经创建了沙盒。
         llm = build_agent_llm(request, self._settings)
+
+        # 每个 thread 本轮成功后对应的轮次坐标。批量提交时各圈可能处于不同
+        # 轮次；Git 只有一个全局 commit，因此 commit message 使用最大轮次。
+        turn_counts = {
+            thread_id: self._threads.next_turn(thread_id, annotation.chat_history)
+            for annotation, thread_id in zip(annotations, thread_ids)
+        }
+        run_turn_count = max(turn_counts.values(), default=1)
 
         # 多轮改同一个圈时复用当前项目沙盒；只有首次 / 沙盒丢失才创建新容器。
         handle, reused_sandbox, current_files = self._open_sandbox(
@@ -210,24 +226,69 @@ class RunExecutionService:
             raise
 
         status = str(final_state.get("status") or "FAILED")
+        error = final_state.get("error")
         retry_count = int(final_state.get("retry_count", 0))
+
+        # 只有 Verifier 通过、进入 AWAITING_APPROVAL 的 Run 才落 Git
+        # checkpoint。一个批量 Run = 一个全局 commit；每个参与 thread 记录
+        # 自己的 turnCount，前端据此渲染每条助手消息的回滚按钮。
+        commit_hash: str | None = None
+        baseline_commit: str | None = None
+        commits: list[RunCommitRecord] = []
+        if status == "AWAITING_APPROVAL":
+            try:
+                commit_hash = self._sandbox.git_commit(
+                    handle.sandbox_id,
+                    f"run: {run_id} - turn: {run_turn_count}",
+                )
+                commits = [
+                    RunCommitRecord(
+                        thread_id=thread_id,
+                        turn_count=turn_counts[thread_id],
+                        commit_hash=commit_hash,
+                        run_id=run_id,
+                    )
+                    for thread_id in thread_ids
+                ]
+                try:
+                    baseline_commit = self._sandbox.git_baseline_commit(
+                        handle.sandbox_id
+                    )
+                except SandboxError:
+                    logger.warning(
+                        "failed to read git baseline run_id=%s", run_id, exc_info=True
+                    )
+            except SandboxError as exc:
+                # 代码已经构建通过，但没有可回滚的 checkpoint 不能宣称成功：
+                # 否则前端会生成一个无法 Undo 的“成功轮次”。
+                logger.exception("git checkpoint failed run_id=%s", run_id)
+                status = "FAILED"
+                error = f"Git checkpoint 失败: {exc}"
+                commit_hash = None
+                commits = []
+
         assistant_message = self._assistant_message(
             instructions,
             status=status,
-            error=final_state.get("error"),
+            error=error,
             retry_count=retry_count,
         )
         final_files = dict(final_state.get("current_files") or current_files)
         generated_files = final_state.get("generated_files") or {}
         generated_patch = str(final_state.get("generated_patch") or "")
         changed_files = sorted(generated_files) or list(target_files)
+        response_state = {**final_state, "status": status, "error": error}
         response = self._to_response(
             run_id,
             handle.sandbox_id,
             handle.preview_url,
-            final_state,
+            response_state,
             reused_sandbox=reused_sandbox,
             assistant_message=assistant_message,
+            commit_hash=commit_hash,
+            turn_count=run_turn_count if commit_hash else 0,
+            baseline_commit=baseline_commit,
+            commits=commits,
         )
         self._record_threads(
             annotations,
@@ -240,9 +301,70 @@ class RunExecutionService:
             patch=generated_patch,
             changed_files=changed_files,
             retry_count=retry_count,
+            turn_counts=turn_counts if commit_hash else None,
+            commit_hash=commit_hash,
+            baseline_commit=baseline_commit,
         )
         self._maybe_destroy(handle.sandbox_id, request)
         return response
+
+    def rollback(self, request: RollbackRunRequest) -> RollbackRunResponse:
+        """把沙盒代码与单个 thread 的上下文回滚到指定成功轮次。
+
+        顺序很重要：
+          1. 先校验 thread checkpoint 与前端 commit 是否指向同一轮；
+          2. 再执行 ``git reset --hard``，失败时绝不修改 thread 记忆；
+          3. 最后恢复 ThreadMemoryStore 的 chatHistory / runs / files 快照，
+             丢弃该轮之后的所有上下文。
+
+        当前 Git 历史是全局线性的：回滚线程 B 也会丢弃 B 之后的 A/C 提交。
+        M1.5 接受该限制；M2 用事件溯源重放未撤销标注的意图。
+        """
+        handle = self._sandbox.get(request.sandbox_id)
+        checkpoint = self._threads.checkpoint(
+            request.thread_id,
+            run_id=request.run_id,
+            turn_count=request.turn_count,
+            commit_hash=request.commit_hash,
+        )
+        if checkpoint and checkpoint.get("commitHash") != request.commit_hash:
+            raise RollbackTargetMismatchError(
+                "回滚目标与 thread checkpoint 不一致："
+                f"request={request.commit_hash}, "
+                f"checkpoint={checkpoint.get('commitHash')}"
+            )
+
+        self._sandbox.git_reset_hard(request.sandbox_id, request.commit_hash)
+        restored = self._threads.rollback_to_checkpoint(
+            request.thread_id,
+            run_id=request.run_id,
+            turn_count=request.turn_count,
+            commit_hash=request.commit_hash,
+        )
+        if restored is None:
+            # python-ai 重启后内存 checkpoint 可能不存在；Git 回滚仍然有效，
+            # 前端会按消息坐标自行截断本地历史。
+            logger.warning(
+                "thread checkpoint missing thread_id=%s run_id=%s commit=%s",
+                request.thread_id,
+                request.run_id,
+                request.commit_hash,
+            )
+
+        revision = str(int(time.time() * 1000))
+        separator = "&" if "?" in handle.preview_url else "?"
+        preview_url = f"{handle.preview_url}{separator}v={revision}"
+        return RollbackRunResponse(
+            sandbox_id=request.sandbox_id,
+            thread_id=request.thread_id,
+            commit_hash=request.commit_hash,
+            turn_count=(restored or checkpoint or {}).get("turnCount")
+            or request.turn_count,
+            run_id=(restored or checkpoint or {}).get("runId") or request.run_id,
+            checkpoint_restored=restored is not None,
+            preview_url=preview_url,
+            preview_revision=revision,
+        )
 
     # --------------------------------------------------------
     # 内部工具
@@ -376,6 +498,9 @@ class RunExecutionService:
         patch: str,
         changed_files: list[str],
         retry_count: int,
+        turn_counts: dict[str, int] | None = None,
+        commit_hash: str | None = None,
+        baseline_commit: str | None = None,
     ) -> None:
         """把本轮对话与修改记录写入每个标注自己的 thread。"""
         user_messages: dict[str, Any] = {}
@@ -401,6 +526,9 @@ class RunExecutionService:
             patch=patch,
             changed_files=changed_files,
             retry_count=retry_count,
+            turn_counts=turn_counts,
+            commit_hash=commit_hash,
+            baseline_commit=baseline_commit,
         )
 
     @staticmethod
@@ -505,6 +633,10 @@ class RunExecutionService:
         *,
         reused_sandbox: bool = False,
         assistant_message: str = "",
+        commit_hash: str | None = None,
+        turn_count: int = 0,
+        baseline_commit: str | None = None,
+        commits: list[RunCommitRecord] | None = None,
     ) -> ExecuteRunResponse:
         verify_state = state.get("verify_result") or {}
         verify_result = VerifyResultModel(**verify_state) if verify_state else None
@@ -525,6 +657,10 @@ class RunExecutionService:
             retry_count=int(state.get("retry_count", 0)),
             messages=state.get("messages", []),
             assistant_message=assistant_message,
+            commit_hash=commit_hash,
+            turn_count=turn_count,
+            baseline_commit=baseline_commit,
+            commits=commits or [],
             error=state.get("error"),
         )
 

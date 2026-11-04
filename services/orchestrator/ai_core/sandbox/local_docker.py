@@ -13,6 +13,7 @@ python-ai 容器通过挂载的 /var/run/docker.sock 调用宿主机 Docker：
 from __future__ import annotations
 
 import io
+import re
 import shlex
 import socket
 import tarfile
@@ -29,6 +30,7 @@ from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from ai_core.config import Settings, get_settings
 from ai_core.sandbox.base import (
     SandboxError,
+    SandboxGitError,
     SandboxHandle,
     SandboxNotFoundError,
     SandboxPatchError,
@@ -43,6 +45,10 @@ LABEL_SANDBOX_ID = "vibe.sandbox.id"
 LABEL_PROJECT_ID = "vibe.project.id"
 LABEL_MANAGED = "vibe.managed"
 
+# 沙盒 Git 仓库忽略项：依赖与构建产物重建即可，不需要进入 checkpoint。
+GITIGNORE_CONTENT = "node_modules/\ndist/\n.vite/\n*.log\n"
+FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+
 
 class LocalDockerSandbox(SandboxProvider):
     """单机 Docker 沙盒实现。"""
@@ -50,6 +56,9 @@ class LocalDockerSandbox(SandboxProvider):
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self._lock = threading.RLock()
+        # Git 操作串行化：同一沙盒的 commit / reset 不能交错，否则 HEAD
+        # 与 thread checkpoint 可能指向不同的代码快照。
+        self._git_lock = threading.RLock()
         # 构造阶段不抛异常：Docker 暂不可用时服务仍应启动，
         # 由具体沙盒请求返回 503，健康检查只展示 UNAVAILABLE。
         self._client: docker.DockerClient | None = None
@@ -126,6 +135,9 @@ class LocalDockerSandbox(SandboxProvider):
                 self._put_files(container, normalized)
 
             container.start()
+            # 在 Agent 第一次写入前建立基线 commit：后续每一轮成功 Run 都
+            # 在它之上追加 checkpoint，删除标注时可回滚到真正的初始代码。
+            self._ensure_git_repo(container)
             self._wait_until_ready(container, sandbox_id)
 
             with self._lock:
@@ -189,6 +201,154 @@ class LocalDockerSandbox(SandboxProvider):
             template="react-vite",
             created_at=created_at,
         )
+
+    def git_commit(self, sandbox_id: str, message: str) -> str:
+        """暂存全部源码并提交，返回 40 位 commit hash。
+
+        ``--allow-empty`` 保证“模型没有实际改动但构建通过”的轮次也能形成
+        可回滚 checkpoint，使前端每一轮助手消息都有稳定锚点。
+        """
+        container = self._get_container(sandbox_id)
+        with self._git_lock:
+            self._ensure_git_repo(container)
+            code, output = self._exec(
+                container,
+                ["git", "add", "-A"],
+                workdir=self.settings.sandbox_workdir,
+            )
+            if code != 0:
+                raise SandboxGitError(f"git add 失败: {self._decode(output)}")
+
+            code, output = self._exec(
+                container,
+                ["git", "commit", "--allow-empty", "-m", message],
+                workdir=self.settings.sandbox_workdir,
+            )
+            if code != 0:
+                raise SandboxGitError(f"git commit 失败: {self._decode(output)}")
+
+            code, output = self._exec(
+                container,
+                ["git", "rev-parse", "HEAD"],
+                workdir=self.settings.sandbox_workdir,
+            )
+            commit_hash = self._extract_commit_hash(self._decode(output))
+            if code != 0 or commit_hash is None:
+                raise SandboxGitError(f"读取 commit hash 失败: {self._decode(output)}")
+            return commit_hash
+
+    def git_reset_hard(self, sandbox_id: str, commit_hash: str) -> None:
+        """恢复工作区到指定 commit。
+
+        commit hash 必须通过 40 位十六进制白名单校验，且用参数数组传给
+        ``git``，不做 shell 字符串拼接，避免注入。
+        """
+        normalized = commit_hash.strip().lower()
+        if not FULL_COMMIT_RE.fullmatch(normalized):
+            raise SandboxValidationError("非法 commit hash")
+
+        container = self._get_container(sandbox_id)
+        with self._git_lock:
+            self._ensure_git_repo(container)
+            code, output = self._exec(
+                container,
+                ["git", "cat-file", "-e", f"{normalized}^{{commit}}"],
+                workdir=self.settings.sandbox_workdir,
+            )
+            if code != 0:
+                raise SandboxGitError(
+                    f"commit 不存在或不是提交对象 {normalized}: "
+                    f"{self._decode(output)}"
+                )
+
+            code, output = self._exec(
+                container,
+                ["git", "reset", "--hard", normalized],
+                workdir=self.settings.sandbox_workdir,
+            )
+            if code != 0:
+                raise SandboxGitError(f"git reset --hard 失败: {self._decode(output)}")
+
+    def git_baseline_commit(self, sandbox_id: str) -> str:
+        """读取沙盒根提交（创建容器时建立的初始代码快照）。"""
+        container = self._get_container(sandbox_id)
+        with self._git_lock:
+            self._ensure_git_repo(container)
+            code, output = self._exec(
+                container,
+                ["git", "rev-list", "--max-parents=0", "HEAD"],
+                workdir=self.settings.sandbox_workdir,
+            )
+            value = self._extract_commit_hash(self._decode(output))
+            if code != 0 or value is None:
+                raise SandboxGitError(
+                    f"读取 baseline commit 失败: {self._decode(output)}"
+                )
+            return value
+
+    def _ensure_git_repo(self, container: Any) -> None:
+        """确保工作区是带初始提交的 Git 仓库（幂等）。
+
+        兼容本次升级前已创建的沙盒：第一次 commit / rollback 时即时初始化，
+        以当时代码作为 baseline。
+        """
+        workdir = self.settings.sandbox_workdir
+        code, _ = self._exec(
+            container,
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            workdir=workdir,
+        )
+        if code != 0:
+            code, output = self._exec(
+                container,
+                ["git", "init", "-q"],
+                workdir=workdir,
+            )
+            if code != 0:
+                raise SandboxGitError(f"git init 失败: {self._decode(output)}")
+
+        # 不覆盖项目自带 .gitignore；仅在新沙盒里补默认忽略项。
+        code, _ = self._exec(container, ["test", "-f", ".gitignore"], workdir=workdir)
+        if code != 0:
+            self._put_files(container, {".gitignore": GITIGNORE_CONTENT})
+
+        self._exec(
+            container,
+            ["git", "config", "user.name", "Vibe Agent"],
+            workdir=workdir,
+        )
+        self._exec(
+            container,
+            ["git", "config", "user.email", "agent@vibe.local"],
+            workdir=workdir,
+        )
+
+        code, _ = self._exec(
+            container,
+            ["git", "rev-parse", "--verify", "HEAD"],
+            workdir=workdir,
+        )
+        if code != 0:
+            code, output = self._exec(
+                container,
+                ["git", "add", "-A"],
+                workdir=workdir,
+            )
+            if code != 0:
+                raise SandboxGitError(f"初始化 git add 失败: {self._decode(output)}")
+            code, output = self._exec(
+                container,
+                ["git", "commit", "--allow-empty", "-m", "baseline: sandbox init"],
+                workdir=workdir,
+            )
+            if code != 0:
+                raise SandboxGitError(f"初始化 commit 失败: {self._decode(output)}")
+
+            self._exec(
+                container,
+                ["git", "tag", "-f", "vibe-baseline", "HEAD"],
+                workdir=workdir,
+            )
 
     def apply_patch(
         self,
@@ -583,6 +743,15 @@ class LocalDockerSandbox(SandboxProvider):
             demux=demux,
         )
         return int(result.exit_code), result.output
+
+    @staticmethod
+    def _extract_commit_hash(output: str) -> str | None:
+        """从可能有告警行的 Git stdout 中提取最后一个合法 SHA-1。"""
+        for line in reversed(output.strip().splitlines()):
+            candidate = line.strip()
+            if FULL_COMMIT_RE.fullmatch(candidate):
+                return candidate
+        return None
 
     @staticmethod
     def _decode(value: Any) -> str:

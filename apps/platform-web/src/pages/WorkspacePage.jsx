@@ -20,6 +20,8 @@ const EMPTY_RUN = {
   submitting: false,
   // 单标注迷你 Chatbox 发送时记录是哪一个，用于只在该浮层显示 spinner。
   pendingAnnotationId: null,
+  // run | rollback：同一个 pendingAnnotationId 下区分“执行修改”和“撤销”。
+  pendingAction: null,
   elapsed: 0,
   startedAt: null,
   result: null,
@@ -197,11 +199,14 @@ function buildAnnotation(entry, source) {
     createdAt: entry.createdAt ?? new Date().toISOString(),
     threadId: entry.threadId,
     // 每个圈独立记忆：后端据此把上一轮指令、助手回复与修改记录传给模型。
+    // commitHash / turnCount 让 python-ai 重启后仍能恢复 thread 轮次。
     chatHistory: (entry.chatHistory ?? []).slice(-40).map((message) => ({
       id: message.id,
       role: message.role,
       content: message.content,
       runId: message.runId,
+      commitHash: message.commitHash,
+      turnCount: message.turnCount,
       createdAt: message.createdAt,
     })),
   }
@@ -209,6 +214,9 @@ function buildAnnotation(entry, source) {
 
 /**
  * 助手回复只追加一次；批量提交时每条标注都会得到同一条 run 级回复。
+ *
+ * 成功 Run 会带一个全局 commit hash；从 result.commits 中取当前 thread
+ * 自己的 turnCount，写进消息后即可在气泡旁渲染“回滚到此步”。
  */
 function appendAssistantMessage(annotation, result, fallback = '') {
   const content =
@@ -218,6 +226,11 @@ function appendAssistantMessage(annotation, result, fallback = '') {
       ? `执行失败：${result?.error || '构建未通过'}`
       : '已更新预览，可以继续在这个圈里提出修改。')
   const runId = result?.runId
+  const commit = result?.commits?.find(
+    (item) =>
+      item.threadId === annotation.threadId ||
+      item.threadId === annotation.id,
+  )
   const history = annotation.chatHistory ?? []
   const last = history[history.length - 1]
   if (
@@ -231,6 +244,9 @@ function appendAssistantMessage(annotation, result, fallback = '') {
     ...history,
     newMessage('assistant', content, {
       runId,
+      sandboxId: result?.sandboxId,
+      commitHash: commit?.commitHash,
+      turnCount: commit?.turnCount,
     }),
   ]
 }
@@ -384,6 +400,12 @@ export default function WorkspacePage() {
             // 每个标注 = 一个独立 Agent thread，后续对话复用同一个 id。
             threadId: newId('thread'),
             chatHistory: [],
+            // M1.5 全局撤销基线：记录“圈出该标注时”的代码 commit。
+            // 删除该圈时直接 reset 到这里；之后 A/C 的改动会丢失，M2 用
+            // Event Sourcing 重放未删除标注的意图。
+            baseCommitHash: previous.result?.commitHash ?? null,
+            lastCommitHash: null,
+            lastTurnCount: 0,
           },
         ],
       }
@@ -399,17 +421,158 @@ export default function WorkspacePage() {
     }))
   }
 
-  const handleAnnotationRemove = (projectId, annotationId) => {
-    patchRun(projectId, (previous) => ({
-      ...previous,
-      annotations: previous.annotations.filter(
-        (annotation) => annotation.id !== annotationId,
-      ),
-    }))
+  /**
+   * M1.5 全局基线回滚：删除圈时恢复“圈选该标注之前”的代码。
+   *
+   * 这是有意选择的最简策略：全局 Git 是线性的，删除 B 会一并丢弃 B 之后
+   * 其它圈的提交。M2 使用 Event Sourcing 重放仍未撤销的 A/C 意图来规避。
+   */
+  const resetToAnnotationBaseline = async (
+    annotation,
+    baseCommitHash,
+    sandboxId,
+  ) => {
+    const response = await fetch('/api/v1/runs/rollback', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session?.token ?? ''}`,
+      },
+      body: JSON.stringify({
+        sandboxId,
+        // 删除的 thread 可能没有对应 checkpoint；后端会以 Git 回滚为准。
+        threadId: annotation.threadId || annotation.id,
+        commitHash: baseCommitHash,
+      }),
+    })
+    if (!response.ok) {
+      throw new Error(await extractError(response))
+    }
+    return response.json()
   }
 
-  const handleClearAnnotations = (projectId) => {
-    patchRun(projectId, (previous) => ({ ...previous, annotations: [] }))
+  const handleAnnotationRemove = async (projectId, annotationId) => {
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const annotation = run.annotations.find((item) => item.id === annotationId)
+    if (!annotation || run.submitting || inflightRef.current.has(projectId)) return
+
+    const baseCommitHash =
+      annotation.baseCommitHash || run.result?.baselineCommit || null
+    const sandboxId = run.result?.sandboxId || annotation.lastSandboxId
+    const needsReset = Boolean(
+      annotation.lastCommitHash && baseCommitHash && sandboxId,
+    )
+    if (!needsReset) {
+      patchRun(projectId, (previous) => ({
+        ...previous,
+        annotations: previous.annotations.filter(
+          (item) => item.id !== annotationId,
+        ),
+      }))
+      return
+    }
+
+    inflightRef.current.add(projectId)
+    patchRun(projectId, {
+      submitting: true,
+      pendingAnnotationId: annotationId,
+      pendingAction: 'rollback',
+      error: null,
+    })
+    try {
+      const result = await resetToAnnotationBaseline(
+        annotation,
+        baseCommitHash,
+        sandboxId,
+      )
+      if (closedProjectsRef.current.has(projectId)) return
+      patchRun(projectId, (previous) => ({
+        ...previous,
+        error: null,
+        result: previous.result
+          ? {
+              ...previous.result,
+              previewUrl: result.previewUrl,
+              commitHash: result.commitHash,
+              turnCount: result.turnCount ?? 0,
+              error: null,
+            }
+          : previous.result,
+        annotations: previous.annotations.filter(
+          (item) => item.id !== annotationId,
+        ),
+      }))
+    } catch (cause) {
+      patchRun(projectId, {
+        error: `删除标注并回滚失败：${cause?.message || cause}`,
+      })
+    } finally {
+      inflightRef.current.delete(projectId)
+      patchRun(projectId, {
+        submitting: false,
+        pendingAnnotationId: null,
+        pendingAction: null,
+      })
+    }
+  }
+
+  const handleClearAnnotations = async (projectId) => {
+    const run = runStates[projectId] ?? EMPTY_RUN
+    if (run.submitting || inflightRef.current.has(projectId)) return
+    const annotations = run.annotations
+    if (annotations.length === 0) return
+
+    // 最早执行过的圈决定 earliest baseline；清空后所有圈都会消失。
+    const anchor = annotations.find((annotation) => annotation.lastCommitHash)
+    const baseCommitHash = anchor
+      ? anchor.baseCommitHash || run.result?.baselineCommit || null
+      : null
+    const sandboxId = run.result?.sandboxId || anchor?.lastSandboxId
+    if (!anchor || !baseCommitHash || !sandboxId) {
+      patchRun(projectId, (previous) => ({ ...previous, annotations: [] }))
+      return
+    }
+
+    inflightRef.current.add(projectId)
+    patchRun(projectId, {
+      submitting: true,
+      pendingAnnotationId: null,
+      pendingAction: 'rollback',
+      error: null,
+    })
+    try {
+      const result = await resetToAnnotationBaseline(
+        anchor,
+        baseCommitHash,
+        sandboxId,
+      )
+      if (closedProjectsRef.current.has(projectId)) return
+      patchRun(projectId, (previous) => ({
+        ...previous,
+        error: null,
+        annotations: [],
+        result: previous.result
+          ? {
+              ...previous.result,
+              previewUrl: result.previewUrl,
+              commitHash: result.commitHash,
+              turnCount: result.turnCount ?? 0,
+              error: null,
+            }
+          : previous.result,
+      }))
+    } catch (cause) {
+      patchRun(projectId, {
+        error: `清除标注并回滚失败：${cause?.message || cause}`,
+      })
+    } finally {
+      inflightRef.current.delete(projectId)
+      patchRun(projectId, {
+        submitting: false,
+        pendingAnnotationId: null,
+        pendingAction: null,
+      })
+    }
   }
 
   const projectSource = (project) =>
@@ -464,6 +627,7 @@ export default function WorkspacePage() {
       ...previous,
       submitting: true,
       pendingAnnotationId: annotationId,
+      pendingAction: 'run',
       elapsed: 0,
       startedAt,
       error: null,
@@ -516,6 +680,15 @@ export default function WorkspacePage() {
                 ...item,
                 lastRunId: result.runId,
                 lastSandboxId: result.sandboxId,
+                // 第一轮成功后才拿到沙盒 root commit；只补空值，绝不覆盖
+                // 圈选时已经确定的真实基线。
+                baseCommitHash:
+                  item.baseCommitHash || result.baselineCommit || null,
+                lastCommitHash: result.commitHash || item.lastCommitHash,
+                lastTurnCount:
+                  result.commits?.[0]?.turnCount ||
+                  result.turnCount ||
+                  item.lastTurnCount,
                 chatHistory: appendAssistantMessage(item, result),
               }
             : item,
@@ -541,7 +714,11 @@ export default function WorkspacePage() {
       }))
     } finally {
       inflightRef.current.delete(projectId)
-      patchRun(projectId, { submitting: false, pendingAnnotationId: null })
+      patchRun(projectId, {
+        submitting: false,
+        pendingAnnotationId: null,
+        pendingAction: null,
+      })
     }
   }
 
@@ -575,6 +752,7 @@ export default function WorkspacePage() {
     patchRun(projectId, {
       submitting: true,
       pendingAnnotationId: null,
+      pendingAction: 'run',
       elapsed: 0,
       startedAt,
       result: null,
@@ -617,12 +795,23 @@ export default function WorkspacePage() {
           result.status === 'FAILED'
             ? result.error || '构建验证未通过'
             : null,
-        annotations: previous.annotations.map((annotation) => ({
-          ...annotation,
-          lastRunId: result.runId,
-          lastSandboxId: result.sandboxId,
-          chatHistory: appendAssistantMessage(annotation, result),
-        })),
+        annotations: previous.annotations.map((annotation) => {
+          const commit = result.commits?.find(
+            (item) =>
+              item.threadId === annotation.threadId ||
+              item.threadId === annotation.id,
+          )
+          return {
+            ...annotation,
+            lastRunId: result.runId,
+            lastSandboxId: result.sandboxId,
+            baseCommitHash:
+              annotation.baseCommitHash || result.baselineCommit || null,
+            lastCommitHash: result.commitHash || annotation.lastCommitHash,
+            lastTurnCount: commit?.turnCount || annotation.lastTurnCount,
+            chatHistory: appendAssistantMessage(annotation, result),
+          }
+        }),
         sandboxIds:
           result.sandboxId && !previous.sandboxIds.includes(result.sandboxId)
             ? [...previous.sandboxIds, result.sandboxId]
@@ -640,7 +829,118 @@ export default function WorkspacePage() {
       }))
     } finally {
       inflightRef.current.delete(projectId)
-      patchRun(projectId, { submitting: false, pendingAnnotationId: null })
+      patchRun(projectId, {
+        submitting: false,
+        pendingAnnotationId: null,
+        pendingAction: null,
+      })
+    }
+  }
+
+  /**
+   * 单标注回滚：把沙盒代码与当前 thread 的上下文恢复到某条成功助手消息。
+   *
+   * 1. 前端只保留目标消息及其之前的聊天记录；
+   * 2. 后端执行 git reset --hard + thread checkpoint 恢复；
+   * 3. 替换带 cache-busting 的 previewUrl，强制 iframe 重新加载。
+   */
+  const handleAnnotationRollback = async (projectId, annotationId, message) => {
+    const project = projects.find((item) => item.id === projectId)
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const annotation = run.annotations.find((item) => item.id === annotationId)
+    const sandboxId =
+      message?.sandboxId || run.result?.sandboxId || annotation?.lastSandboxId
+    if (
+      !project ||
+      !annotation ||
+      !message?.commitHash ||
+      !sandboxId ||
+      run.submitting ||
+      inflightRef.current.has(projectId)
+    ) {
+      return
+    }
+
+    inflightRef.current.add(projectId)
+    patchRun(projectId, {
+      submitting: true,
+      pendingAnnotationId: annotationId,
+      pendingAction: 'rollback',
+      elapsed: 0,
+      startedAt: Date.now(),
+      error: null,
+    })
+
+    try {
+      const response = await fetch('/api/v1/runs/rollback', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session?.token ?? ''}`,
+        },
+        body: JSON.stringify({
+          sandboxId,
+          threadId: annotation.threadId,
+          commitHash: message.commitHash,
+          runId: message.runId,
+          turnCount: message.turnCount,
+        }),
+      })
+      if (!response.ok) {
+        throw new Error(await extractError(response))
+      }
+      const result = await response.json()
+      if (closedProjectsRef.current.has(projectId)) return
+
+      patchRun(projectId, (previous) => ({
+        ...previous,
+        error: null,
+        // 全局代码已经回到该 commit；保留其它标注对象，它们的历史由线程
+        // checkpoint 各自管理。M1.5 的跨标注覆盖限制记录在架构文档。
+        result: previous.result
+          ? {
+              ...previous.result,
+              status: 'AWAITING_APPROVAL',
+              previewUrl: result.previewUrl,
+              commitHash: result.commitHash,
+              turnCount: result.turnCount,
+              runId: result.runId || previous.result.runId,
+              error: null,
+            }
+          : previous.result,
+        annotations: previous.annotations.map((item) =>
+          item.id === annotationId
+            ? (() => {
+                const history = item.chatHistory ?? []
+                const targetIndex = history.findIndex(
+                  (entry) => entry.id === message.id,
+                )
+                const kept =
+                  targetIndex >= 0 ? history.slice(0, targetIndex + 1) : history
+                return {
+                  ...item,
+                  intent: '',
+                  lastRunId: message.runId,
+                  lastSandboxId: result.sandboxId,
+                  lastCommitHash: message.commitHash,
+                  lastTurnCount: message.turnCount,
+                  chatHistory: kept,
+                }
+              })()
+            : item,
+        ),
+      }))
+    } catch (cause) {
+      patchRun(projectId, {
+        error: `回滚失败：${cause?.message || cause}`,
+      })
+    } finally {
+      inflightRef.current.delete(projectId)
+      patchRun(projectId, {
+        submitting: false,
+        pendingAnnotationId: null,
+        pendingAction: null,
+      })
     }
   }
 
@@ -825,6 +1125,9 @@ export default function WorkspacePage() {
                 }
                 onAnnotationSend={(annotationId) =>
                   handleAnnotationSend(project.id, annotationId)
+                }
+                onAnnotationRollback={(annotationId, message) =>
+                  handleAnnotationRollback(project.id, annotationId, message)
                 }
                 onClearAnnotations={() => handleClearAnnotations(project.id)}
                 onSubmit={() => handleSubmit(project.id)}

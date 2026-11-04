@@ -1009,6 +1009,48 @@ body.is-viewport-panning * {
   overflow-wrap: anywhere;
 }
 
+/* 每个成功轮次是一个 Git checkpoint：展示短 hash 并提供单轮回滚入口。 */
+.chat-checkpoint {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.chat-commit {
+  color: rgba(148, 163, 184, 0.72);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.chat-rollback {
+  margin-left: auto;
+  padding: 3px 7px;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  border-radius: 6px;
+  background: rgba(14, 165, 233, 0.09);
+  color: #bae6fd;
+  font-size: 9.5px;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, opacity 0.16s ease;
+}
+
+.chat-rollback:hover:not(:disabled) {
+  border-color: rgba(56, 189, 248, 0.58);
+  background: rgba(14, 165, 233, 0.18);
+}
+
+.chat-rollback:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .canvas-popover.tone-1 {
   border-color: rgba(167, 139, 250, 0.42);
 }

@@ -27,6 +27,7 @@ public class RunService {
 
     private static final Logger log = LoggerFactory.getLogger(RunService.class);
     private static final String EXECUTE_PATH = "/api/v1/internal/runs/execute";
+    private static final String ROLLBACK_PATH = "/api/v1/internal/runs/rollback";
 
     private final RestClient aiCoreRunRestClient;
     private final ObjectMapper objectMapper;
@@ -104,6 +105,62 @@ public class RunService {
                     .body(errorBody(
                             "AI_CORE_UNAVAILABLE",
                             "调用 AI Core 失败（" + elapsedMs + "ms）: " + ex.getMessage()
+                    ));
+        }
+    }
+
+    /**
+     * 代理单标注回滚：前端 -> BFF -> AI Core -> 沙盒 git reset --hard。
+     *
+     * <p>与 execute 一样保留 AI Core 的 HTTP 语义：commit 不存在 / checkpoint
+     * 不匹配返回 4xx，前端据此保留原有聊天记录并提示失败。</p>
+     */
+    public ResponseEntity<JsonNode> rollback(RollbackRunRequest request) {
+        long startedAt = System.nanoTime();
+        final String jsonBody;
+        try {
+            jsonBody = objectMapper.writeValueAsString(request);
+        } catch (JsonProcessingException ex) {
+            log.error("failed to serialize rollback request: {}", ex.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(errorBody(
+                            "ROLLBACK_REQUEST_SERIALIZATION_FAILED",
+                            "回滚请求序列化失败"
+                    ));
+        }
+
+        try {
+            ResponseEntity<JsonNode> response = aiCoreRunRestClient.post()
+                    .uri(ROLLBACK_PATH)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .body(jsonBody)
+                    .exchange((clientRequest, clientResponse) -> {
+                        JsonNode body = clientResponse.bodyTo(JsonNode.class);
+                        if (body == null) {
+                            body = errorBody(
+                                    "EMPTY_AI_CORE_RESPONSE",
+                                    "AI Core 返回了空回滚响应"
+                            );
+                        }
+                        return ResponseEntity.status(clientResponse.getStatusCode()).body(body);
+                    });
+
+            log.info(
+                    "rollback proxy completed threadId={} status={} elapsedMs={}",
+                    request.threadId(),
+                    response.getStatusCode(),
+                    elapsedMillis(startedAt)
+            );
+            return response;
+        } catch (RestClientException ex) {
+            long elapsedMs = elapsedMillis(startedAt);
+            log.error("rollback proxy failed elapsedMs={}: {}", elapsedMs, ex.getMessage());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(errorBody(
+                            "AI_CORE_UNAVAILABLE",
+                            "调用 AI Core 回滚失败（" + elapsedMs + "ms）: "
+                                    + ex.getMessage()
                     ));
         }
     }

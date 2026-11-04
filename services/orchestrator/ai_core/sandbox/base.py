@@ -31,6 +31,10 @@ class SandboxPatchError(SandboxError):
     """unified diff 应用失败。"""
 
 
+class SandboxGitError(SandboxError):
+    """沙盒内 Git checkpoint / rollback 失败。"""
+
+
 @dataclass(frozen=True)
 class SandboxHandle:
     """Provider 无关的沙盒句柄。"""
@@ -78,6 +82,21 @@ class SandboxProvider(ABC):
         返回 SandboxNotFoundError，让上层可以回退为创建新沙盒。
         """
         raise SandboxError(f"当前 Provider 不支持恢复沙盒句柄: {sandbox_id}")
+
+    def git_commit(self, sandbox_id: str, message: str) -> str:
+        """在沙盒项目内暂存全部改动并提交，返回完整 commit hash。
+
+        默认实现不支持 Git checkpoint；LocalDockerSandbox 覆盖。
+        """
+        raise SandboxGitError(f"当前 Provider 不支持 Git checkpoint: {sandbox_id}")
+
+    def git_reset_hard(self, sandbox_id: str, commit_hash: str) -> None:
+        """把沙盒工作区硬回滚到指定 commit。"""
+        raise SandboxGitError(f"当前 Provider 不支持 Git rollback: {sandbox_id}")
+
+    def git_baseline_commit(self, sandbox_id: str) -> str:
+        """返回沙盒初始基线 commit（root commit）。"""
+        raise SandboxGitError(f"当前 Provider 不支持 Git baseline: {sandbox_id}")
 
     @abstractmethod
     def apply_patch(

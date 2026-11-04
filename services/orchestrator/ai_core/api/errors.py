@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 from ai_core.sandbox.base import (
     SandboxError,
+    SandboxGitError,
     SandboxNotFoundError,
     SandboxPatchError,
     SandboxStartupError,
@@ -28,6 +29,11 @@ def sandbox_error_to_http(exc: SandboxError) -> HTTPException:
         return HTTPException(
             status_code=422,
             detail={"code": "SANDBOX_PATCH_FAILED", "message": str(exc)},
+        )
+    if isinstance(exc, SandboxGitError):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "SANDBOX_GIT_FAILED", "message": str(exc)},
         )
     if isinstance(exc, SandboxStartupError):
         return HTTPException(

@@ -73,12 +73,17 @@ class AnnotationChatMessage(CamelModel):
 
     前端负责展示会话，后端负责把同一 threadId 的历史与上一次修改记录
     一起送入 Planner / Coder，实现“不，我要蓝色”这类增量修改。
+
+    ``commitHash`` / ``turnCount`` 只出现在成功 Run 的助手消息上：它们是
+    前端“回滚到此步”按钮定位 Git checkpoint 与 thread checkpoint 的坐标。
     """
 
     id: str | None = Field(default=None, max_length=128)
     role: Literal["user", "assistant", "system"]
     content: str = Field(min_length=1, max_length=8000)
     run_id: str | None = Field(default=None, max_length=64)
+    commit_hash: str | None = Field(default=None, max_length=64)
+    turn_count: int | None = Field(default=None, ge=1)
     created_at: datetime | None = None
 
 
@@ -169,6 +174,19 @@ class VerifyResultModel(CamelModel):
     duration_ms: int = 0
 
 
+class RunCommitRecord(CamelModel):
+    """一次成功 Run 对应的沙盒 Git checkpoint。
+
+    批量提交时一个 Run 只产生一个全局 commit，但每个参与标注都有自己的
+    ``turnCount``。前端逐条助手消息挂载对应 thread 的 turn / commit。
+    """
+
+    thread_id: str
+    turn_count: int = Field(ge=1)
+    commit_hash: str
+    run_id: str
+
+
 class ExecuteRunResponse(CamelModel):
     run_id: str
     status: Literal["AWAITING_APPROVAL", "FAILED"]
@@ -183,4 +201,40 @@ class ExecuteRunResponse(CamelModel):
     messages: list[dict[str, Any]] = Field(default_factory=list)
     # 前端直接展示在迷你 Chatbox 中的助手回复，与服务端 thread 记录同文案。
     assistant_message: str = ""
+    # Git checkpoint：成功 Run 的全局提交 + 每个 thread 的轮次坐标。
+    commit_hash: str | None = None
+    turn_count: int = 0
+    baseline_commit: str | None = None
+    commits: list[RunCommitRecord] = Field(default_factory=list)
     error: str | None = None
+
+
+class RollbackRunRequest(CamelModel):
+    """把某个标注回滚到指定成功轮次。
+
+    ``commitHash`` 是全局代码快照；``threadId`` + ``turnCount`` / ``runId``
+    用于恢复 ThreadMemoryStore 中该圈对应的对话与修改记录 checkpoint。
+    """
+
+    sandbox_id: str = Field(min_length=1, max_length=64)
+    thread_id: str = Field(min_length=1, max_length=64)
+    commit_hash: str = Field(pattern=r"^[0-9a-f]{40}$")
+    run_id: str | None = Field(default=None, max_length=64)
+    turn_count: int | None = Field(default=None, ge=1)
+
+
+class RollbackRunResponse(CamelModel):
+    """回滚结果。
+
+    ``previewUrl`` 带 cache-busting 参数，前端替换 result.previewUrl 后
+    iframe 会强制重新加载，避免 reset 后仍显示旧 DOM。
+    """
+
+    sandbox_id: str
+    thread_id: str
+    commit_hash: str
+    turn_count: int | None = None
+    run_id: str | None = None
+    checkpoint_restored: bool = False
+    preview_url: str
+    preview_revision: str

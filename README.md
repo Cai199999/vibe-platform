@@ -2,15 +2,17 @@
 
 以前端可视化为抓手、多轮交互生成完整全栈应用的 Vibe Coding 平台。
 
-当前阶段：**M1 完成 · Phase 6 画布世界坐标与标注多轮对话**。画布最多 3 个
-标注 → `AnnotationEnvelope[]` → Java BFF → Python AI Core → LangGraph 单
-Agent 一次性规划 / 编码 / 写入 / 构建验证 → Docker 沙盒 → 项目内预览与
+当前阶段：**M1 完成 · Phase 7 沙盒 Git Checkpoint 与单圈 Undo**。画布最多
+3 个标注 → `AnnotationEnvelope[]` → Java BFF → Python AI Core → LangGraph
+单 Agent 一次性规划 / 编码 / 写入 / 构建验证 → Docker 沙盒 → 项目内预览与
 Diff，全链路已打通；工作台支持对比/展示两种布局、无缝缩放预览、多项目
 Tab、5 Tab 上限、关闭即销毁沙盒与拖拽排序。每个标注拥有独立 `threadId` /
 `chatHistory` 与迷你 Chatbox，可在同一个圈上连续多轮增量修改，后端复用
-同一沙盒并携带历史修改记录。模型可选 `auto` / `deepseek` / `mock`：配置
-`DEEPSEEK_API_KEY` 后即可对颜色、文案、字号、布局等任意 UI 属性生成修改，
-不再局限于 Mock 的固定示例。
+同一沙盒并携带历史修改记录。每轮成功 Run 都会在沙盒内生成 Git commit，
+Chatbox 可逐轮回滚代码与 thread 上下文；删除标注则回到该圈创建前的全局
+基线。模型可选 `auto` / `deepseek` / `mock`：配置 `DEEPSEEK_API_KEY` 后
+即可对颜色、文案、字号、布局等任意 UI 属性生成修改，不再局限于 Mock 的
+固定示例。
 
 ## 目录
 
@@ -29,6 +31,8 @@ scripts/platform_e2e_test.py          全链路 E2E（Vite 代理 → BFF → AI
 scripts/ui_e2e_test.py                浏览器 E2E（Playwright：双视图 / 缩放预览 / 项目导出 / 沙盒销毁 / Tab 上限）
 scripts/multi_annotation_e2e_test.py  浏览器 E2E（3 个标注 / 独立输入框 / 上限提示 / 批量提交 / 导出）
 scripts/multi_turn_chat_e2e_test.py   浏览器 E2E（平移缩放不漂移 / 单圈两轮对话 / 沙盒复用）
+scripts/rollback_e2e_test.py          浏览器 E2E（Git 提交顺序 / 逐轮回滚 / 回滚后续写）
+scripts/annotation_delete_rollback_e2e_test.py 浏览器 E2E（删除标注回到创建前基线 / 清除全部）
 docs/screenshots/                     M1 联调截图
 docker-compose.yml                    只编排平台自身服务
 ```
@@ -71,7 +75,8 @@ Browser ──/api──▶ platform-web(Vite proxy) ──▶ java-bff ──�
 1. 在画布上按住鼠标拖拽，圈选目标区域；选区旁自动弹出该标注的独立输入框。
 2. 一次最多圈选 **3 个区域**，每个区域填写自己的意图（如「改成蓝色」
    「文字改为提交」「放大一倍」）。浮层遮挡下一次圈选时，可点击视口工具栏
-   的 **隐藏标注输入**；**清除标注** 会同时清空全部圈与输入框。
+   的 **隐藏标注输入**；**清除标注** 会清空全部圈与输入框，并把沙盒代码
+   回滚到最早执行圈的创建前基线。
 3. 达到 3 个后继续圈选会被拦截并提示上限。点击 **提交标注**，前端把全部
    `AnnotationEnvelope` 打包为 `annotations: AnnotationEnvelope[]`，一次
    POST `/api/v1/runs`；旧版单 `annotation` 字段仍向后兼容。
@@ -105,6 +110,16 @@ planner -> coder -> applier -> verifier -> evaluator
    以蓝色为准；对话气泡展示历史，超出高度在浮层内部滚动。浮层锚点跟随
    世界坐标，但通过 `scale(1 / viewportScale)` 反向缩放保持屏幕字号恒定，
    放大画布后输入区不会被裁掉。
+10. **Git Checkpoint / Undo**：沙盒创建时立即 `git init` 并生成
+    `baseline: sandbox init` 根提交。每次 Run 通过 Verifier 后执行
+    `git add . && git commit -m "run: {runId} - turn: {turnCount}"`；
+    响应返回全局 `commitHash`、`baselineCommit` 与逐 thread 的
+    `commits[{threadId, turnCount, commitHash}]`。成功助手消息旁显示
+    `turn N · <short sha>` 与 **↩️ 回滚到此步**；后端按 thread checkpoint
+    校准目标后执行 `git reset --hard`，恢复该圈聊天历史 / runs / 源码快照，
+    并返回带 `?v=` 的 previewUrl 强制刷新 iframe。删除标注时回到该圈创建前
+    基线；「清除标注」回到最早执行圈的基线。跨标注覆盖限制与 M2 Event
+    Sourcing 重放方案见 `docs/memory/2026-11-04_M1_git_undo_rollback.md`。
 
 Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier 捕获日志后
 自动修复 1 次，最终返回 `AWAITING_APPROVAL`，方便稳定复现完整闭环。Mock
@@ -129,6 +144,10 @@ Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier �
 ![平移缩放后标注不漂移](docs/screenshots/m1-multiturn-zoom-no-drift.png)
 
 ![单圈两轮对话与最终结果](docs/screenshots/m1-multiturn-chat-result.png)
+
+![回滚到第一轮](docs/screenshots/m1-rollback-to-turn1.png)
+
+![回滚后继续一轮](docs/screenshots/m1-rollback-then-new-turn.png)
 
 ![5 个项目上限](docs/screenshots/phase4-tab-limit.png)
 
@@ -317,7 +336,30 @@ cover 缩放后完全覆盖预览屏幕（居中、无留白）→ 对比画布 
 `reusedSandbox=true`，最终 iframe 按钮为 `rgb(0, 0, 255)`；刷新后两轮对话
 仍从会话快照恢复。
 
-### 5. 分层验证
+### 5. 单圈回滚 / Git 提交顺序 E2E
+
+```bash
+/tmp/vibe-browser/bin/python scripts/rollback_e2e_test.py
+```
+
+验证：沙盒 Git 历史依次为 `baseline: sandbox init` → `run: ... - turn: 1` →
+`run: ... - turn: 2`；每条成功助手消息旁存在「回滚到此步」。回滚到 turn 1 后
+HEAD 指回第一轮 commit、聊天记录从 4 条截断为 2 条、预览从蓝色恢复为红色；
+继续发送「改成绿色」时重新使用 `turn: 2` 并生成全新 commit，旧 turn 2 commit
+不再是 HEAD 的祖先。后端响应 `checkpointRestored=true`，previewUrl 带
+`?v=` cache-busting。
+
+### 6. 删除标注 / 全局基线回滚 E2E
+
+```bash
+/tmp/vibe-browser/bin/python scripts/annotation_delete_rollback_e2e_test.py
+```
+
+场景 A（红）、B（绿）修改同一文件：B 在 A 之后创建，删除 B 后 HEAD 回到 A1，
+A 的聊天记录保留且预览恢复红色；再点「清除标注」回到沙盒 root baseline，
+预览恢复初始颜色。该用例明确覆盖 M1.5 “全局线性历史”限制。
+
+### 7. 分层验证
 
 ```bash
 python3 scripts/sandbox_e2e_test.py   # 沙盒生命周期 / 补丁 / 构建
@@ -325,7 +367,7 @@ python3 scripts/agent_e2e_test.py     # 批量标注 / 自动修复 / 3 次上�
 ./scripts/smoke-test.sh               # Java -> Python 健康检查
 ```
 
-### 6. 手动调用
+### 8. 手动调用
 
 ```bash
 curl -s http://127.0.0.1:5173/api/v1/health | python3 -m json.tool
@@ -341,6 +383,7 @@ curl -s http://127.0.0.1:8100/api/v1/health | python3 -m json.tool
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/v1/runs` | 接收画布标注，同步代理 AI Core 执行 |
+| POST | `/api/v1/runs/rollback` | 单标注 / 删除基线回滚：校验 40 位 commit 后代理 AI Core |
 | GET | `/api/v1/runs/{runId}/export` | 下载该 Run 的项目 tar.gz；`sandboxId` 可选 |
 | GET | `/api/v1/sandboxes/{sandboxId}/export` | 按沙盒下载项目 tar.gz |
 | DELETE | `/api/v1/sandboxes/{sandboxId}` | 代理 AI Core 销毁沙盒；404 幂等透传 |
@@ -354,9 +397,18 @@ AI Core 的 HTTP 状态与 JSON 原样返回：业务失败（重试耗尽）是
 单圈多轮修改额外使用：
 
 - 请求：`sandboxId` 复用上一轮沙盒；每个 annotation 携带
-  `threadId` 与 `chatHistory: [{id, role, content, runId?, createdAt?}]`。
+  `threadId` 与 `chatHistory: [{id, role, content, runId?, commitHash?,
+  turnCount?, createdAt?}]`。
 - 响应：`reusedSandbox` 表示是否复用；`assistantMessage` 与后端 thread
   记录同文案，前端直接追加到该圈聊天记录。
+- Git checkpoint：成功响应额外返回 `commitHash`、`turnCount`、
+  `baselineCommit`、`commits[{threadId, turnCount, commitHash, runId}]`。
+- 回滚请求：
+  `POST /api/v1/runs/rollback`
+  `{sandboxId, threadId, commitHash, runId?, turnCount?}`。
+  响应 `{sandboxId, threadId, commitHash, turnCount, runId,
+  checkpointRestored, previewUrl, previewRevision}`；`previewUrl` 带
+  `?v=`，用于强制刷新 iframe。
 
 > AI Core 客户端强制 HTTP/1.1。JDK HttpClient 默认尝试 h2c Upgrade，Uvicorn
 > 不支持升级，POST 请求体会丢失（表现为 FastAPI 422 missing body）。
@@ -395,6 +447,12 @@ LangGraph：
   `ThreadMemoryStore` 合并前端历史与进程内记录，生成
   `threadContext = {threadId, chatHistory, previousRuns}` 注入 Planner /
   Coder；同一圈的后续请求优先复用 `sandboxId`，并读取修改后的当前源码。
+- 每个成功 Run 生成 sandbox Git commit 与 thread checkpoint。checkpoint
+  保存 `{runId, turnCount, commitHash, chatHistory, runs, files}`；回滚时
+  `git reset --hard` 与 ThreadMemoryStore 恢复必须在同一个请求内完成。
+- 一个批量 Run 只生成一个全局 commit；每个 annotation 保留自己的
+  `turnCount`。删除标注回到创建前基线，M1.5 会丢弃其后的全局提交，M2
+  使用 Event Sourcing 重放未删除标注的意图。
 - `planner` 一次性读取全部标注和所有目标文件，输出综合计划；多个标注命中
   同一文件时只规划一次。
 - `coder` 一次生成包含全部修改的 patch 或完整 files；多文件 / 多标注时
