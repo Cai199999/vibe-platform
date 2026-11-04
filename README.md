@@ -107,9 +107,10 @@ planner -> coder -> applier -> verifier -> evaluator
    `chatHistory`。发送后立即只执行该圈，后端复用当前沙盒、读取上一轮修改
    后的源码，并把同圈历史与 `previousRuns` 通过 `threadContext` 注入
    Planner / Coder。用户先发「改成红色」再发「不，我要蓝色」时，最终源码
-   以蓝色为准；对话气泡展示历史，超出高度在浮层内部滚动。浮层锚点跟随
-   世界坐标，但通过 `scale(1 / viewportScale)` 反向缩放保持屏幕字号恒定，
-   放大画布后输入区不会被裁掉。
+   以蓝色为准；对话气泡展示历史，超出高度在浮层内部滚动。浮层是画布
+   子元素，宽度固定为 `320px` 世界单位，**不做反向缩放**：画布缩放到
+   50% / 100% / 150% 时，圆角、字号、输入框与浮层整体等比变化，像画在
+   画布上的一张图。浮层层级固定高于所有圈线（激活 320 / 默认 300+）。
 10. **Git Checkpoint / Undo**：沙盒创建时立即 `git init` 并生成
     `baseline: sandbox init` 根提交。每次 Run 通过 Verifier 后执行
     `git add . && git commit -m "run: {runId} - turn: {turnCount}"`；

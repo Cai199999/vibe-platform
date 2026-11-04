@@ -6,7 +6,8 @@
   2. 同一圈迷你 Chatbox 连续发送两轮指令，前端 threadId / chatHistory 持续增长；
   3. 第二轮复用同一沙盒（reusedSandbox=true），基于上一轮源码增量修改；
   4. 第一轮“改成红色”、第二轮“不，我要蓝色”，最终预览只能是蓝色；
-  5. 激活的浮层提升 z-index，失焦后恢复。
+  5. 激活的浮层提升 z-index，失焦后恢复；
+  6. 浮层跟随画布等比缩放（无反向补偿），缩放后内部比例不变。
 
 前置：
     docker compose up -d
@@ -74,6 +75,7 @@ def geometry(active) -> dict:
                 relativeY: (e.y + e.height / 2 - (c.y + c.height / 2)) / c.height,
                 stage: {x: s.x, y: s.y, width: s.width, height: s.height},
                 transform: getComputedStyle(viewport).transform,
+                scale: viewport.getBoundingClientRect().width / 1280,
             };
         }""")
 
@@ -180,14 +182,23 @@ def main() -> int:
             popover_after = popover.bounding_box()
             if not popover_after:
                 fail("缩放后浮层不可见")
-            if abs(popover_after["width"] - popover_before["width"]) > 2:
+            # 新语义：浮层不反向补偿，屏幕宽度 = 320 世界单位 × 画布缩放。
+            world_width_before = popover_before["width"] / before["scale"]
+            world_width_after = popover_after["width"] / zoomed["scale"]
+            if abs(world_width_before - 320) > 1 or abs(world_width_after - 320) > 1:
                 fail(
-                    "缩放后 Chatbox 宽度发生变化（反向缩放失效）: "
-                    f"{popover_before['width']} -> {popover_after['width']}"
+                    "Chatbox 未按固定世界宽度等比例缩放: "
+                    f"{world_width_before:.1f} -> {world_width_after:.1f}"
                 )
+            if zoomed["scale"] <= before["scale"] + 0.05:
+                fail(f"画布未实际放大: {before['scale']} -> {zoomed['scale']}")
+            popover_transform = popover.evaluate("el => getComputedStyle(el).transform")
+            if popover_transform != "none":
+                fail(f"浮层仍带独立 transform: {popover_transform}")
             print(
-                f"   Chatbox 屏幕宽度保持: {popover_before['width']:.0f} -> "
-                f"{popover_after['width']:.0f}px"
+                f"   Chatbox 世界宽度恒定 320: 屏幕 "
+                f"{popover_before['width']:.0f} -> {popover_after['width']:.0f}px "
+                f"(scale {before['scale']:.2f} -> {zoomed['scale']:.2f})"
             )
             page.screenshot(
                 path=str(SCREENSHOT_DIR / "m1-multiturn-zoom-no-drift.png"),

@@ -54,65 +54,54 @@ function readTarget(element) {
 
 /**
  * 浮层与圈使用同一套“世界坐标”（1280×720 设计视口）。
- * 整个 annotation-layer 与页面共享 translate + scale，因此圈的锚点永远
- * 和页面元素绑定；浮层内部再反向缩放抵消字号 / 尺寸变化。
+ *
+ * 浮层是 annotation-layer 的普通子元素，和页面共享父级 translate + scale，
+ * 不做任何 1/scale 反向补偿：缩放画布时圆角、字号、输入框与浮层一起等比
+ * 缩放，视觉上等同于画在画布上的一张图片。因此这里所有尺寸 / 间距都直接
+ * 使用世界单位，不再除以 scale。
  */
-function popoverStyleFor(rect, index, active, scale) {
+function popoverStyleFor(rect, index, active) {
   if (!rect) return null
   const width = VIEWPORT_BASE_WIDTH
   const height = VIEWPORT_BASE_HEIGHT
-  const safeScale = Math.max(scale, 0.001)
-  // 浮层通过 1/scale 抵消父级缩放，保持屏幕字号与宽度恒定，但锚点仍随
-  // 世界坐标移动。因此所有间距 / 尺寸在计算定位时要换算回世界单位。
-  const worldPopoverWidth = POPOVER_WIDTH / safeScale
-  const worldPopoverHeight = POPOVER_MAX_HEIGHT / safeScale
-  const worldGap = POPOVER_GAP / safeScale
   const leftPx = rect.x * width
   const rightPx = (rect.x + rect.width) * width
   const centerY = (rect.y + rect.height / 2) * height
   // 同时存在多个浮层时按顺序轻微错开，避免完全重叠。
-  const stagger = (index * 12) / safeScale
+  const stagger = index * 12
   const clampTop = (value) =>
     Math.min(
-      Math.max(10 / safeScale, value + stagger),
-      Math.max(10 / safeScale, height - worldPopoverHeight - 10 / safeScale),
+      Math.max(10, value + stagger),
+      Math.max(10, height - POPOVER_MAX_HEIGHT - 10),
     )
-  const zIndex = active ? 120 : 30 + index
-  const inverseScale = `scale(${1 / safeScale})`
+  // 浮层永远高于圈线层（圈最高 100），激活的浮层再抬高一层。
+  const zIndex = active ? 320 : 300 + index
 
-  if (width - rightPx >= worldPopoverWidth + worldGap) {
+  if (width - rightPx >= POPOVER_WIDTH + POPOVER_GAP) {
     return {
-      left: rightPx + worldGap,
-      top: clampTop(centerY - worldPopoverHeight / 2),
+      left: rightPx + POPOVER_GAP,
+      top: clampTop(centerY - POPOVER_MAX_HEIGHT / 2),
       zIndex,
-      transform: inverseScale,
-      transformOrigin: 'top left',
     }
   }
-  if (leftPx >= worldPopoverWidth + worldGap) {
+  if (leftPx >= POPOVER_WIDTH + POPOVER_GAP) {
     return {
-      right: width - leftPx + worldGap,
-      top: clampTop(centerY - worldPopoverHeight / 2),
+      right: width - leftPx + POPOVER_GAP,
+      top: clampTop(centerY - POPOVER_MAX_HEIGHT / 2),
       zIndex,
-      transform: inverseScale,
-      transformOrigin: 'top left',
     }
   }
 
-  // 窄屏兜底：横跨选区下方 / 上方，宽度由 left/right 自适应。
-  const below = (rect.y + rect.height) * height + worldGap
-  const above = rect.y * height - worldPopoverHeight - worldGap
+  // 窄屏兜底：横跨选区下方 / 上方，固定宽度水平居中。
+  const below = (rect.y + rect.height) * height + POPOVER_GAP
+  const above = rect.y * height - POPOVER_MAX_HEIGHT - POPOVER_GAP
   const top =
-    below + worldPopoverHeight <= height - 10 / safeScale
-      ? below
-      : Math.max(10 / safeScale, above)
+    below + POPOVER_MAX_HEIGHT <= height - 10 ? below : Math.max(10, above)
   return {
-    left: Math.max(10 / safeScale, (width - worldPopoverWidth) / 2),
-    width: worldPopoverWidth,
+    left: Math.max(10, (width - POPOVER_WIDTH) / 2),
+    width: POPOVER_WIDTH,
     top: clampTop(top),
     zIndex,
-    transform: inverseScale,
-    transformOrigin: 'top left',
   }
 }
 
@@ -131,7 +120,6 @@ function AnnotationPopover({
   pendingAction,
   active,
   panReady,
-  scale,
   inputRef,
   onChange,
   onRemove,
@@ -142,8 +130,8 @@ function AnnotationPopover({
 }) {
   const historyRef = useRef(null)
   const style = useMemo(
-    () => popoverStyleFor(annotation.rect, index, active, scale),
-    [annotation.rect, index, active, scale],
+    () => popoverStyleFor(annotation.rect, index, active),
+    [annotation.rect, index, active],
   )
   const history = annotation.chatHistory ?? []
 
@@ -571,7 +559,6 @@ export default function CanvasStage({
                   pendingAction={pendingAnnotationId === annotation.id ? pendingAction : null}
                   active={annotation.id === activeAnnotationId}
                   panReady={viewport.spaceHeld}
-                  scale={viewport.scale}
                   inputRef={(node) => {
                     if (node) inputRefs.current.set(annotation.id, node)
                     else inputRefs.current.delete(annotation.id)

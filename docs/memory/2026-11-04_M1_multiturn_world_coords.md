@@ -107,8 +107,9 @@ MULTI-TURN CHAT E2E: PASS
 
 - ThreadMemoryStore 是进程内存储，M2 将迁移到 Redis / MySQL；跨进程重启的
   历史由前端 `chatHistory` 兜底，`previousRuns` 会丢失。
-- Chatbox 锚点随世界坐标移动，但内部通过 `scale(1 / viewportScale)` 抵消
-  画布缩放，保持屏幕字号与 320px 宽度恒定；圈本身仍使用父级完整矩阵。
-  若后续需要浮层严格随页面缩放，可移除该反向缩放。
+- Chatbox 锚点随世界坐标移动。**后续修订（同日）**：已移除
+  `scale(1 / viewportScale)` 反向补偿，浮层改为固定 `320px` 世界宽度并
+  完整继承画布矩阵，缩放时圆角 / 字号 / 输入框严格等比变化。验证见
+  `scripts/popover_equal_scale_e2e_test.py`。
 - DeepSeek 真实链路未在本次测试中调用（`.env` 的 Key 为空，health 显示
   `llm: mock`）；请求体、提示词和 threadContext 已通过 Mock / 契约验证。

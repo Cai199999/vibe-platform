@@ -881,7 +881,9 @@ body.is-viewport-panning * {
   z-index: 30;
   display: flex;
   flex-direction: column;
-  width: min(320px, calc(100% - 24px));
+  /* 固定世界宽度：浮层跟随 .canvas-viewport 的 transform 等比缩放，
+     不能用百分比宽度，否则缩放时布局比例会随视口变化而畸变。 */
+  width: 320px;
   max-height: 360px;
   padding: 12px;
   overflow: hidden;
@@ -906,8 +908,8 @@ body.is-viewport-panning * {
     0 0 0 3px rgba(56, 189, 248, 0.09);
 }
 
-/* 浮层使用 inline transform: scale(1/viewportScale) 抵消画布缩放；
-   关键帧只做透明度，避免覆盖该反向缩放矩阵。 */
+/* 浮层不再做反向缩放：它作为画布子元素与页面一起等比缩放。
+   关键帧只做透明度，不写 transform，避免覆盖画布自身的缩放矩阵。 */
 @keyframes popover-in {
   from {
     opacity: 0;
