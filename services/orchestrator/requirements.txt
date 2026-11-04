@@ -1,0 +1,13 @@
+# Web / 配置
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+
+# LangGraph 编排（M2 实现具体 Graph；M1 仅引入依赖与运行时）
+langgraph==0.2.62
+langchain==0.3.14
+langchain-openai==0.3.0
+
+# 内部 HTTP 调用（后续调用 Sandbox / 模型网关）
+httpx==0.28.1

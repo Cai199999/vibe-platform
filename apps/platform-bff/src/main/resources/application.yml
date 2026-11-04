@@ -1,0 +1,61 @@
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: java-bff
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+  # 复用 ~/Workspace/infra 的 MySQL，不在 Compose 中重复部署。
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:host.docker.internal}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:geo_ai_db}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:root}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      pool-name: vibe-bff-pool
+      maximum-pool-size: 10
+      minimum-idle: 1
+      connection-timeout: 3000
+      validation-timeout: 2000
+
+  # 复用 ~/Workspace/infra 的 Redis。
+  data:
+    redis:
+      host: ${REDIS_HOST:host.docker.internal}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2s
+      connect-timeout: 2s
+
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+# Python AI Core 内部调用地址。
+# 容器内使用 Docker 自定义网络的服务名 python-ai；本地 IDE 调试可改为 http://localhost:8100。
+ai-core:
+  base-url: ${AI_CORE_BASE_URL:http://localhost:8100}
+  connect-timeout-ms: ${AI_CORE_CONNECT_TIMEOUT_MS:2000}
+  read-timeout-ms: ${AI_CORE_READ_TIMEOUT_MS:3000}
+
+# MinIO 仅做客户端配置，M1 启动时懒连接。
+minio:
+  endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+  access-key: ${MINIO_ACCESS_KEY:admin}
+  secret-key: ${MINIO_SECRET_KEY:admin123}
+  bucket: ${MINIO_BUCKET:vibe-platform}
+  secure: ${MINIO_SECURE:false}
+
+info:
+  app:
+    name: java-bff
+    version: 0.1.0
+
+logging:
+  level:
+    root: INFO
+    com.vibeplatform.bff: INFO

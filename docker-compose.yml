@@ -1,0 +1,101 @@
+# ============================================================
+# vibe-platform 本地开发编排
+#
+# 只编排平台自身服务：
+#   - java-bff   : Spring Boot BFF，宿主 8080
+#   - python-ai  : FastAPI AI Core，宿主 8100
+#
+# MySQL / Redis / MinIO 复用 ~/Workspace/infra 中已有的容器，
+# 本文件绝对不重复部署这些中间件。
+# ============================================================
+
+name: vibe-platform
+
+services:
+  python-ai:
+    build:
+      context: ./services/orchestrator
+      dockerfile: Dockerfile
+    image: vibe-platform/python-ai:dev
+    container_name: vibe-python-ai
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      SERVICE_NAME: python-ai
+      SERVICE_VERSION: 0.1.0
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      REDIS_HOST: ${REDIS_HOST:-host.docker.internal}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+    ports:
+      - "8100:8100"
+    extra_hosts:
+      # 让容器通过 host.docker.internal 访问宿主机上已有的中间件。
+      - "host.docker.internal:host-gateway"
+    networks:
+      - vibe-platform-net
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/api/v1/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  java-bff:
+    build:
+      context: ./apps/platform-bff
+      dockerfile: Dockerfile
+    image: vibe-platform/java-bff:dev
+    container_name: vibe-java-bff
+    environment:
+      SERVER_PORT: 8080
+      APP_ENV: ${APP_ENV:-local}
+
+      # 宿主机已有 Docker MySQL / Redis / MinIO
+      MYSQL_HOST: ${MYSQL_HOST:-host.docker.internal}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-geo_ai_db}
+      MYSQL_USER: ${MYSQL_USER:-root}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-root}
+
+      REDIS_HOST: ${REDIS_HOST:-host.docker.internal}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://host.docker.internal:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-admin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-admin123}
+      MINIO_BUCKET: ${MINIO_BUCKET:-vibe-platform}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+
+      # 同一自定义网络内，直接用服务名通信；证明跨语言调用。
+      AI_CORE_BASE_URL: http://python-ai:8100
+      AI_CORE_CONNECT_TIMEOUT_MS: 2000
+      AI_CORE_READ_TIMEOUT_MS: 3000
+    ports:
+      - "8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - vibe-platform-net
+    depends_on:
+      python-ai:
+        condition: service_healthy
+    healthcheck:
+      # 该端点会继续调用 python-ai/internal/ping，因此这是端到端健康检查。
+      test:
+        - CMD-SHELL
+        - "curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null || exit 1"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
+
+networks:
+  vibe-platform-net:
+    name: vibe-platform-net
+    driver: bridge

@@ -1,0 +1,45 @@
+# 环境与密钥
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Java
+target/
+*.class
+*.jar
+*.war
+.mvn/wrapper/maven-wrapper.jar
+
+# 日志与临时文件
+*.log
+logs/
+tmp/
+.tmp/
+
+# 数据库
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# 运行时
+node_modules/
+coverage/
