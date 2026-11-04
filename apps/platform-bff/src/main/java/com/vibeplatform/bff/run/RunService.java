@@ -28,6 +28,11 @@ public class RunService {
     private static final Logger log = LoggerFactory.getLogger(RunService.class);
     private static final String EXECUTE_PATH = "/api/v1/internal/runs/execute";
     private static final String ROLLBACK_PATH = "/api/v1/internal/runs/rollback";
+    private static final String RUN_PATH = "/api/v1/internal/runs/{runId}";
+    private static final String CLARIFICATIONS_PATH =
+            "/api/v1/internal/runs/{runId}/clarifications";
+    private static final String CLARIFICATION_ANSWER_PATH =
+            "/api/v1/internal/runs/{runId}/clarifications/{clarificationId}/answers";
 
     private final RestClient aiCoreRunRestClient;
     private final ObjectMapper objectMapper;
@@ -160,6 +165,126 @@ public class RunService {
                     .body(errorBody(
                             "AI_CORE_UNAVAILABLE",
                             "调用 AI Core 回滚失败（" + elapsedMs + "ms）: "
+                                    + ex.getMessage()
+                    ));
+        }
+    }
+
+    /**
+     * 提交澄清答案并后台恢复状态机，AI Core 返回 202。
+     *
+     * <p>答案接口不持有长连接；前端随后用 lastSeq 重放事件流。</p>
+     */
+    public ResponseEntity<JsonNode> answerClarification(
+            String runId,
+            String clarificationId,
+            JsonNode body
+    ) {
+        return postJson(
+                CLARIFICATION_ANSWER_PATH,
+                body,
+                "clarification answer",
+                runId,
+                clarificationId
+        );
+    }
+
+    public ResponseEntity<JsonNode> getRun(String runId) {
+        return getJson(RUN_PATH, "run snapshot", runId);
+    }
+
+    public ResponseEntity<JsonNode> getClarifications(String runId) {
+        return getJson(CLARIFICATIONS_PATH, "clarifications", runId);
+    }
+
+    private ResponseEntity<JsonNode> postJson(
+            String path,
+            JsonNode body,
+            String operation,
+            Object... uriVariables
+    ) {
+        long startedAt = System.nanoTime();
+        final String jsonBody;
+        try {
+            jsonBody = body == null ? "{}" : objectMapper.writeValueAsString(body);
+        } catch (JsonProcessingException ex) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(errorBody("REQUEST_SERIALIZATION_FAILED",
+                            operation + " 请求序列化失败"));
+        }
+        try {
+            ResponseEntity<JsonNode> response = aiCoreRunRestClient.post()
+                    .uri(path, uriVariables)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .body(jsonBody)
+                    .exchange((clientRequest, clientResponse) -> {
+                        JsonNode responseBody = clientResponse.bodyTo(JsonNode.class);
+                        if (responseBody == null) {
+                            responseBody = errorBody(
+                                    "EMPTY_AI_CORE_RESPONSE",
+                                    "AI Core 返回了空响应"
+                            );
+                        }
+                        return ResponseEntity.status(clientResponse.getStatusCode())
+                                .body(responseBody);
+                    });
+            log.info(
+                    "{} proxy completed status={} elapsedMs={}",
+                    operation,
+                    response.getStatusCode(),
+                    elapsedMillis(startedAt)
+            );
+            return response;
+        } catch (RestClientException ex) {
+            long elapsedMs = elapsedMillis(startedAt);
+            log.error("{} proxy failed elapsedMs={}: {}",
+                    operation, elapsedMs, ex.getMessage());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(errorBody(
+                            "AI_CORE_UNAVAILABLE",
+                            "调用 AI Core 失败（" + elapsedMs + "ms）: "
+                                    + ex.getMessage()
+                    ));
+        }
+    }
+
+    private ResponseEntity<JsonNode> getJson(
+            String path,
+            String operation,
+            Object... uriVariables
+    ) {
+        long startedAt = System.nanoTime();
+        try {
+            ResponseEntity<JsonNode> response = aiCoreRunRestClient.get()
+                    .uri(path, uriVariables)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .exchange((clientRequest, clientResponse) -> {
+                        JsonNode responseBody = clientResponse.bodyTo(JsonNode.class);
+                        if (responseBody == null) {
+                            responseBody = errorBody(
+                                    "EMPTY_AI_CORE_RESPONSE",
+                                    "AI Core 返回了空响应"
+                            );
+                        }
+                        return ResponseEntity.status(clientResponse.getStatusCode())
+                                .body(responseBody);
+                    });
+            log.info(
+                    "{} proxy completed status={} elapsedMs={}",
+                    operation,
+                    response.getStatusCode(),
+                    elapsedMillis(startedAt)
+            );
+            return response;
+        } catch (RestClientException ex) {
+            long elapsedMs = elapsedMillis(startedAt);
+            log.error("{} proxy failed elapsedMs={}: {}",
+                    operation, elapsedMs, ex.getMessage());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(errorBody(
+                            "AI_CORE_UNAVAILABLE",
+                            "调用 AI Core 失败（" + elapsedMs + "ms）: "
                                     + ex.getMessage()
                     ));
         }

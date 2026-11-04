@@ -3,21 +3,62 @@ import DiffView from './DiffView.jsx'
 import ScaledPreview from './ScaledPreview.jsx'
 
 /**
- * 没有真实节点事件时用时间轴模拟进度，避免界面看起来卡死。
- * 只展示用户能理解的三步，不暴露 Planner / Coder / Verifier 等内部实现。
+ * 时间轴：直接渲染后端 SSE 的 node.started / node.finished 事件。
+ * 不再用固定 STAGES 假装进度——节点重跑、自动修复都按真实事件展示。
  */
-const STAGES = [
-  { at: 0, title: '理解修改意图' },
-  { at: 5, title: '生成代码' },
-  { at: 12, title: '验证构建' },
-]
+const TIMELINE_STATUS_ICON = {
+  running: null,
+  ok: '✓',
+  paused: 'Ⅱ',
+  error: '!',
+  skipped: '–',
+}
 
-const stageIndexFor = (elapsed) => {
-  let index = 0
-  STAGES.forEach((stage, i) => {
-    if (elapsed >= stage.at) index = i
-  })
-  return index
+const formatDuration = (ms) => {
+  if (ms === null || ms === undefined) return ''
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`
+}
+
+function Timeline({ items }) {
+  if (!items?.length) {
+    return (
+      <div className="timeline-empty">
+        <span className="mini-spinner" aria-hidden="true" />
+        <p>正在连接 Agent…</p>
+      </div>
+    )
+  }
+  return (
+    <ol className="run-timeline" aria-label="Agent 执行时间轴">
+      {items.map((item) => {
+        const status = item.status || 'running'
+        return (
+          <li key={item.id} className={`timeline-item is-${status}`}>
+            <span className="timeline-marker" aria-hidden="true">
+              {status === 'running' ? (
+                <span className="mini-spinner" />
+              ) : (
+                TIMELINE_STATUS_ICON[status] ?? '✓'
+              )}
+            </span>
+            <div className="timeline-body">
+              <div className="timeline-title">
+                <strong>{item.label || item.node}</strong>
+                {item.durationMs !== null && item.durationMs !== undefined && (
+                  <span className="timeline-duration">
+                    {formatDuration(item.durationMs)}
+                  </span>
+                )}
+              </div>
+              {(item.summary || item.message) && (
+                <p>{item.summary || item.message}</p>
+              )}
+            </div>
+          </li>
+        )
+      })}
+    </ol>
+  )
 }
 
 function StatusPill({ status }) {
@@ -30,40 +71,42 @@ function StatusPill({ status }) {
   )
 }
 
-function LoadingState({ elapsed }) {
-  const stageIndex = stageIndexFor(elapsed)
-  const stage = STAGES[stageIndex]
-
+function LoadingState({ elapsed, timeline }) {
   return (
-    <div className="loading-state runtime-loading">
-      <div className="orbit" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </div>
-      <div className="loading-copy">
-        <h3 className="loading-title">正在修改</h3>
+    <div className="loading-state runtime-loading is-timeline">
+      <div className="loading-copy timeline-head">
+        <h3 className="loading-title">Agent 正在执行</h3>
         <p className="muted">{elapsed < 1 ? '<1' : elapsed}s</p>
-        <p className="loading-step">
-          <span>
-            {stageIndex + 1} / {STAGES.length}
-          </span>
-          {stage.title}
-        </p>
       </div>
+      <Timeline items={timeline} />
+    </div>
+  )
+}
 
-      <div className="stage-dots" aria-hidden="true">
-        {STAGES.map((item, index) => (
-          <i
-            key={item.title}
-            className={index < stageIndex ? 'is-done' : index === stageIndex ? 'is-active' : ''}
-          />
-        ))}
+function PausedState({ timeline, clarification, onGoToCanvas }) {
+  return (
+    <div className="loading-state runtime-loading is-paused">
+      <div className="loading-copy timeline-head">
+        <h3 className="loading-title">等待你确认</h3>
+        <p className="muted">意图还不够明确，Agent 已暂停执行。</p>
       </div>
-
-      <div className="progress-track">
-        <span />
-      </div>
+      <Timeline items={timeline} />
+      {clarification?.questions?.length > 0 && (
+        <ul className="paused-questions">
+          {clarification.questions.map((question) => (
+            <li key={question.questionId}>{question.prompt}</li>
+          ))}
+        </ul>
+      )}
+      {onGoToCanvas && (
+        <button
+          className="ghost-button paused-action"
+          type="button"
+          onClick={onGoToCanvas}
+        >
+          去画布回答
+        </button>
+      )}
     </div>
   )
 }
@@ -226,9 +269,18 @@ export default function RuntimePanel({
   expanded = false,
   visible = true,
   onRetry,
+  onGoToCanvas,
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false)
-  const { submitting, elapsed, result, error, annotations = [] } = run
+  const {
+    submitting,
+    elapsed,
+    result,
+    error,
+    annotations = [],
+    timeline = [],
+    clarification = null,
+  } = run
   const previewUrl = result?.previewUrl
   const success = result?.status === 'AWAITING_APPROVAL'
   const diffLines = result?.generatedPatch ? result.generatedPatch.split('\n').length : 0
@@ -237,7 +289,10 @@ export default function RuntimePanel({
 
   let stateLabel = 'IDLE'
   let stateClass = 'is-idle'
-  if (submitting) {
+  if (clarification) {
+    stateLabel = 'PAUSED · 待确认'
+    stateClass = 'is-paused'
+  } else if (submitting) {
     stateLabel = `RUNNING · ${elapsed < 1 ? '<1' : elapsed}s`
     stateClass = 'is-running'
   } else if (error) {
@@ -277,11 +332,21 @@ export default function RuntimePanel({
 
         {submitting && (
           <div className="runtime-overlay">
-            <LoadingState elapsed={elapsed} />
+            <LoadingState elapsed={elapsed} timeline={timeline} />
           </div>
         )}
 
-        {!submitting && error && (
+        {!submitting && clarification && (
+          <div className="runtime-overlay">
+            <PausedState
+              timeline={timeline}
+              clarification={clarification}
+              onGoToCanvas={onGoToCanvas}
+            />
+          </div>
+        )}
+
+        {!submitting && !clarification && error && (
           <div className="runtime-overlay">
             <div className="error-state runtime-error">
               <span className="error-code">RUN_FAILED</span>
@@ -292,19 +357,19 @@ export default function RuntimePanel({
           </div>
         )}
 
-        {!submitting && !error && !result && (
+        {!submitting && !clarification && !error && !result && (
           <div className="runtime-overlay">
             <IdleState hasAnnotation={annotations.length > 0} />
           </div>
         )}
 
-        {!submitting && !error && result && !previewUrl && (
+        {!submitting && !clarification && !error && result && !previewUrl && (
           <div className="runtime-overlay">
             <p className="muted">没有可用的预览地址。</p>
           </div>
         )}
 
-        {!submitting && !error && previewOffline && (
+        {!submitting && !clarification && !error && previewOffline && (
           <div className="runtime-overlay">
             <div className="error-state runtime-error">
               <span className="error-code">PREVIEW_OFFLINE</span>
@@ -321,7 +386,7 @@ export default function RuntimePanel({
           </div>
         )}
 
-        {!submitting && !error && result && !previewOffline && (
+        {!submitting && !clarification && !error && result && !previewOffline && (
           <div className="runtime-result-overlay">
             <div className="runtime-result-status">
               <StatusPill status={result.status} />

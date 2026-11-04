@@ -47,6 +47,25 @@ class AgentState(TypedDict, total=False):
     plan: str
     generated_patch: str
     generated_files: dict[str, str]
+    # 一次生成对应的补丁 ID，patch.proposed / patch.applied 共用。
+    patch_id: str
+
+    # ---- HITL 澄清 ----
+    # 当前计划置信度与是否需要澄清；由 Planner 写入、clarify_gate 读取。
+    plan_confidence: float
+    plan_needs_clarification: bool
+    # 当前待回答的问题（暂停后由 checkpoint 保留）。
+    clarification: dict[str, Any] | None
+    # 已经回答的轮次与结构化答案。
+    clarification_round: int
+    clarification_answers: list[dict[str, Any]]
+    clarification_outcome: Literal["proceed", "replan", "exhausted"]
+    clarification_mode: Literal["auto", "always", "off"]
+    max_clarification_rounds: int
+    confidence_threshold: float
+    # 澄清有效期（小时），由 Service 从 Settings 注入，供 clarify_gate
+    # 计算 expiresAt。
+    clarification_ttl_hours: int
 
     # ---- 校验与修复 ----
     verify_result: VerifyState
@@ -64,6 +83,8 @@ class AgentState(TypedDict, total=False):
         "VERIFYING",
         "REPAIRING",
         "AWAITING_APPROVAL",
+        "AWAITING_CLARIFICATION",
+        "EXPIRED",
         "FAILED",
     ]
     error: str | None

@@ -6,6 +6,7 @@ import ProjectWorkspace from '../components/ProjectWorkspace.jsx'
 import WorkspaceTabs from '../components/WorkspaceTabs.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { useWorkspace } from '../workspace/useWorkspace.js'
+import { streamRun } from '../workspace/runStream.js'
 import { INITIAL_APP } from '../mockProject.js'
 
 const TARGET_FILE = 'src/App.jsx'
@@ -30,6 +31,13 @@ const EMPTY_RUN = {
   lastInstruction: '',
   // 同一项目可能执行多次，每次都会生成新沙盒；关闭项目时需全部销毁。
   sandboxIds: [],
+  // M2 SSE：当前 runId / 最后一条事件 seq / 实时时间轴 / 待澄清问题。
+  runId: null,
+  lastSeq: 0,
+  timeline: [],
+  clarification: null,
+  // patch.proposed 的截断 diff，用于详情抽屉；完整结果仍以终态为准。
+  patchPreview: '',
 }
 
 // 已完成 Run 的轻量会话快照：刷新页面后仍能显示「查看效果」，
@@ -302,6 +310,219 @@ async function extractError(response) {
   return `HTTP ${response.status} ${response.statusText || ''}`.trim()
 }
 
+/**
+ * SSE 事件 -> 时间轴。
+ *
+ * 节点可能因为 LangGraph 恢复 / 自动修复而重跑，因此按
+ * node + round + attempt 生成稳定 key；重放同一条事件不会产生重复行。
+ */
+function reduceTimeline(timeline, event) {
+  const payload = event.payload ?? {}
+  if (event.type === 'node.started') {
+    const key = `${payload.node}:${payload.round ?? 0}:${payload.attempt ?? 0}`
+    if (timeline.some((item) => item.id === key)) {
+      return timeline.map((item) =>
+        item.id === key ? { ...item, status: 'running', durationMs: null } : item,
+      )
+    }
+    return [
+      ...timeline,
+      {
+        id: key,
+        node: payload.node,
+        label: payload.label || payload.node,
+        status: 'running',
+        attempt: payload.attempt ?? 0,
+        round: payload.round ?? 0,
+        durationMs: null,
+        summary: '',
+        message: '',
+      },
+    ]
+  }
+
+  if (event.type === 'node.progress') {
+    return timeline.map((item) =>
+      item.node === payload.node && item.status === 'running'
+        ? { ...item, message: payload.message || item.message }
+        : item,
+    )
+  }
+
+  if (event.type === 'node.finished') {
+    const index = [...timeline]
+      .map((item, itemIndex) => ({ item, itemIndex }))
+      .reverse()
+      .find(
+        ({ item }) => item.node === payload.node && item.status === 'running',
+      )?.itemIndex
+    if (index === undefined) {
+      return [
+        ...timeline,
+        {
+          id: `${payload.node}:finished:${event.seq}`,
+          node: payload.node,
+          label: payload.node,
+          status: payload.status || 'ok',
+          durationMs: payload.durationMs ?? null,
+          summary: payload.summary || '',
+          message: '',
+        },
+      ]
+    }
+    return timeline.map((item, itemIndex) =>
+      itemIndex === index
+        ? {
+            ...item,
+            status: payload.status || 'ok',
+            durationMs: payload.durationMs ?? item.durationMs,
+            summary: payload.summary || item.summary,
+            message: '',
+          }
+        : item,
+    )
+  }
+
+  if (event.type === 'verify.passed' || event.type === 'verify.failed') {
+    return timeline.map((item) =>
+      item.node === 'verifier' && item.status === 'running'
+        ? {
+            ...item,
+            status: event.type === 'verify.passed' ? 'ok' : 'error',
+            durationMs: payload.durationMs ?? item.durationMs,
+          }
+        : item,
+    )
+  }
+
+  if (event.type === 'repair.started') {
+    return [
+      ...timeline,
+      {
+        id: `repair:${payload.attempt}:${event.seq}`,
+        node: 'repair',
+        label: `自动修复 ${payload.attempt}/${payload.maxAttempts}`,
+        status: 'running',
+        durationMs: null,
+        summary: payload.reason || '',
+        message: '',
+      },
+    ]
+  }
+
+  return timeline
+}
+
+function timelineMessages(timeline) {
+  return timeline
+    .filter((item) => item.summary || item.message)
+    .map((item) => ({
+      node: item.node,
+      content: item.summary || item.message,
+      level: item.status === 'error' ? 'error' : 'info',
+    }))
+}
+
+function resultFromTerminalEvent(run, event) {
+  const payload = event.payload ?? {}
+  const success = event.type === 'run.succeeded'
+  return {
+    runId: event.runId,
+    status: success ? payload.status || 'AWAITING_APPROVAL' : 'FAILED',
+    sandboxId: payload.sandboxId ?? '',
+    previewUrl: payload.previewUrl ?? '',
+    commitHash: payload.commitHash ?? null,
+    baselineCommit: payload.baselineCommit ?? null,
+    retryCount: payload.retryCount ?? 0,
+    turnCount: payload.turnCount ?? 0,
+    commits: payload.commits ?? [],
+    assistantMessage:
+      payload.assistantMessage ||
+      (success ? '已更新预览，可以继续提出修改。' : ''),
+    error: success ? null : payload.message || '构建验证未通过',
+    generatedPatch: run.patchPreview || '',
+    verifyResult: null,
+    messages: timelineMessages(run.timeline),
+  }
+}
+
+/**
+ * 终态事件落地：更新标注的 Git 坐标、追加助手消息、记录沙盒。
+ * annotationId 为空表示批量提交，所有参与标注都收到同一条 run 级回复。
+ */
+function finalizeFromResult(run, result, annotationId) {
+  const annotations = run.annotations.map((annotation) => {
+    if (annotationId && annotation.id !== annotationId) return annotation
+    const commit = result.commits?.find(
+      (item) =>
+        item.threadId === annotation.threadId ||
+        item.threadId === annotation.id,
+    )
+    return {
+      ...annotation,
+      lastRunId: result.runId,
+      lastSandboxId: result.sandboxId,
+      baseCommitHash:
+        annotation.baseCommitHash || result.baselineCommit || null,
+      lastCommitHash: result.commitHash || annotation.lastCommitHash,
+      lastTurnCount:
+        commit?.turnCount || result.turnCount || annotation.lastTurnCount,
+      chatHistory: appendAssistantMessage(annotation, result),
+    }
+  })
+  return {
+    ...run,
+    result,
+    error:
+      result.status === 'FAILED'
+        ? result.error || '构建验证未通过'
+        : null,
+    annotations,
+    sandboxIds:
+      result.sandboxId && !run.sandboxIds.includes(result.sandboxId)
+        ? [...run.sandboxIds, result.sandboxId]
+        : run.sandboxIds,
+    submitting: false,
+    pendingAnnotationId: null,
+    pendingAction: null,
+    clarification: null,
+  }
+}
+
+function applyStreamEvent(run, event, annotationId) {
+  const payload = event.payload ?? {}
+  const base = {
+    ...run,
+    runId: event.runId || run.runId,
+    lastSeq: Math.max(run.lastSeq ?? 0, event.seq ?? 0),
+    timeline: reduceTimeline(run.timeline ?? [], event),
+  }
+
+  if (event.type === 'patch.proposed') {
+    return { ...base, patchPreview: payload.diffPreview || base.patchPreview }
+  }
+  if (event.type === 'clarification.required') {
+    return {
+      ...base,
+      clarification: payload,
+      submitting: false,
+      pendingAnnotationId: null,
+      pendingAction: null,
+    }
+  }
+  if (event.type === 'clarification.answered') {
+    return { ...base, clarification: null }
+  }
+  if (event.type === 'run.succeeded' || event.type === 'run.failed') {
+    return finalizeFromResult(
+      base,
+      resultFromTerminalEvent(base, event),
+      annotationId,
+    )
+  }
+  return base
+}
+
 function EmptyWorkspace({ onNewProject }) {
   return (
     <div className="workspace-empty">
@@ -347,8 +568,19 @@ export default function WorkspacePage() {
   const [exportingProjectId, setExportingProjectId] = useState(null)
   const [exportNotice, setExportNotice] = useState(null)
   const inflightRef = useRef(new Set())
+  // 每个项目最多一个 SSE 连接；关闭 Tab / 重新提交时主动 abort。
+  const streamControllersRef = useRef(new Map())
   // 记录已关闭项目，防止关闭瞬间仍在执行的 Run 回写状态或泄漏沙盒。
   const closedProjectsRef = useRef(new Set())
+
+  // 页面卸载 / 切换项目时关闭所有 SSE，避免后台继续占用连接。
+  useEffect(
+    () => () => {
+      streamControllersRef.current.forEach((controller) => controller.abort())
+      streamControllersRef.current.clear()
+    },
+    [],
+  )
 
   // 刷新页面后恢复已完成的预览；只持久化会话内结果，不写入 localStorage。
   useEffect(() => {
@@ -643,19 +875,141 @@ export default function WorkspacePage() {
       ? INITIAL_APP
       : (project.files?.[TARGET_FILE] ?? INITIAL_APP)
 
-  const postRun = async (payload) => {
-    const response = await fetch('/api/v1/runs', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${session?.token ?? ''}`,
-      },
-      body: JSON.stringify(payload),
-    })
-    if (!response.ok) {
-      throw new Error(await extractError(response))
+  /**
+   * 启动 / 恢复 SSE 并持续把事件写入项目状态。
+   *
+   * HTTP 4xx（参数 / 模型配置）在流开始前返回，直接走 catch；流开始后的
+   * 业务错误由 run.failed 事件表达，不抛异常。
+   */
+  const startRunStream = async (
+    projectId,
+    payload,
+    annotationId,
+    { replay = false, runId = null, afterSeq = 0 } = {},
+  ) => {
+    const controller = new AbortController()
+    streamControllersRef.current.get(projectId)?.abort()
+    streamControllersRef.current.set(projectId, controller)
+
+    try {
+      await streamRun({
+        payload,
+        runId: runId || payload?.runId,
+        replay,
+        afterSeq,
+        token: session?.token,
+        signal: controller.signal,
+        onEvent: (event) => {
+          if (closedProjectsRef.current.has(projectId)) {
+            // 用户关闭项目后 Run 仍会完成；终态到达时销毁后端新沙盒，
+            // 避免前端不再持有 sandboxId 导致容器泄漏。
+            if (
+              event.type === 'run.succeeded' ||
+              event.type === 'run.failed'
+            ) {
+              void destroySandbox(event.payload?.sandboxId, session?.token)
+            }
+            return
+          }
+          patchRun(projectId, (previous) =>
+            applyStreamEvent(previous, event, annotationId),
+          )
+        },
+      })
+    } catch (cause) {
+      if (cause?.name === 'AbortError') return
+      if (closedProjectsRef.current.has(projectId)) return
+      const message = `事件流失败：${cause?.message || cause}`
+      patchRun(projectId, (previous) => ({
+        ...previous,
+        submitting: false,
+        pendingAnnotationId: null,
+        pendingAction: null,
+        error: message,
+        annotations: previous.annotations.map((annotation) =>
+          !annotationId || annotation.id === annotationId
+            ? {
+                ...annotation,
+                chatHistory: appendAssistantMessage(annotation, null, message),
+              }
+            : annotation,
+        ),
+      }))
+    } finally {
+      streamControllersRef.current.delete(projectId)
+      inflightRef.current.delete(projectId)
+      // 终态 / 澄清 / 出错都已显式结束；这里只兜底清理 submitting。
+      patchRun(projectId, (previous) =>
+        previous.submitting
+          ? {
+              ...previous,
+              submitting: false,
+              pendingAnnotationId: null,
+              pendingAction: null,
+            }
+          : previous,
+      )
     }
-    return response.json()
+  }
+
+  /**
+   * 提交 HITL 答案：POST 202 后用 lastSeq 恢复 SSE，时间轴继续推进。
+   */
+  const handleClarificationAnswer = async (
+    projectId,
+    annotationId,
+    clarification,
+    answers,
+  ) => {
+    const run = runStates[projectId] ?? EMPTY_RUN
+    if (
+      !run.runId ||
+      !clarification?.clarificationId ||
+      run.submitting ||
+      inflightRef.current.has(projectId)
+    ) {
+      return
+    }
+    inflightRef.current.add(projectId)
+    patchRun(projectId, {
+      submitting: true,
+      pendingAnnotationId: annotationId,
+      pendingAction: 'run',
+      clarification: null,
+      error: null,
+    })
+
+    try {
+      const response = await fetch(
+        `/api/v1/runs/${encodeURIComponent(run.runId)}/clarifications/${encodeURIComponent(clarification.clarificationId)}/answers`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session?.token ?? ''}`,
+          },
+          body: JSON.stringify({ answers, expectedVersion: clarification.round }),
+        },
+      )
+      if (!response.ok) {
+        throw new Error(await extractError(response))
+      }
+      // 202 已把 clarification.answered 写入事件缓冲；从 lastSeq 重放即可
+      // 接上同一时间轴，不重复执行 Run。
+      await startRunStream(projectId, null, annotationId, {
+        replay: true,
+        runId: run.runId,
+        afterSeq: run.lastSeq,
+      })
+    } catch (cause) {
+      patchRun(projectId, {
+        submitting: false,
+        pendingAnnotationId: null,
+        pendingAction: null,
+        error: `提交澄清失败：${cause?.message || cause}`,
+      })
+      inflightRef.current.delete(projectId)
+    }
   }
 
   /**
@@ -672,6 +1026,7 @@ export default function WorkspacePage() {
       !annotation ||
       !instruction ||
       run.submitting ||
+      run.clarification ||
       inflightRef.current.has(projectId)
     ) {
       return
@@ -695,6 +1050,12 @@ export default function WorkspacePage() {
       startedAt,
       error: null,
       lastInstruction: instruction,
+      // 新一轮 Run：重置事件坐标与时间轴。
+      runId: null,
+      lastSeq: 0,
+      timeline: [],
+      patchPreview: '',
+      clarification: null,
       // 输入框清空，对话气泡保留本轮用户指令。
       annotations: previous.annotations.map((item) =>
         item.id === annotationId
@@ -724,65 +1085,8 @@ export default function WorkspacePage() {
       },
     }
 
-    try {
-      const result = await postRun(payload)
-      if (closedProjectsRef.current.has(projectId)) {
-        await destroySandbox(result.sandboxId, session?.token)
-        return
-      }
-      patchRun(projectId, (previous) => ({
-        ...previous,
-        result,
-        error:
-          result.status === 'FAILED'
-            ? result.error || '构建验证未通过'
-            : null,
-        annotations: previous.annotations.map((item) =>
-          item.id === annotationId
-            ? {
-                ...item,
-                lastRunId: result.runId,
-                lastSandboxId: result.sandboxId,
-                // 第一轮成功后才拿到沙盒 root commit；只补空值，绝不覆盖
-                // 圈选时已经确定的真实基线。
-                baseCommitHash:
-                  item.baseCommitHash || result.baselineCommit || null,
-                lastCommitHash: result.commitHash || item.lastCommitHash,
-                lastTurnCount:
-                  result.commits?.[0]?.turnCount ||
-                  result.turnCount ||
-                  item.lastTurnCount,
-                chatHistory: appendAssistantMessage(item, result),
-              }
-            : item,
-        ),
-        sandboxIds:
-          result.sandboxId && !previous.sandboxIds.includes(result.sandboxId)
-            ? [...previous.sandboxIds, result.sandboxId]
-            : previous.sandboxIds,
-      }))
-    } catch (cause) {
-      const message = `网络请求失败：${cause?.message || cause}`
-      patchRun(projectId, (previous) => ({
-        ...previous,
-        error: message,
-        annotations: previous.annotations.map((item) =>
-          item.id === annotationId
-            ? {
-                ...item,
-                chatHistory: appendAssistantMessage(item, null, message),
-              }
-            : item,
-        ),
-      }))
-    } finally {
-      inflightRef.current.delete(projectId)
-      patchRun(projectId, {
-        submitting: false,
-        pendingAnnotationId: null,
-        pendingAction: null,
-      })
-    }
+    // 时间轴 / 终态处理全部由 SSE reducer 完成；这里只负责发起连接。
+    await startRunStream(projectId, payload, annotationId)
   }
 
   const handleSubmit = async (projectId) => {
@@ -795,6 +1099,7 @@ export default function WorkspacePage() {
       annotations.length === 0 ||
       instructions.some((text) => !text) ||
       run.submitting ||
+      run.clarification ||
       inflightRef.current.has(projectId)
     ) {
       return
@@ -821,6 +1126,11 @@ export default function WorkspacePage() {
       result: null,
       error: null,
       lastInstruction,
+      runId: null,
+      lastSeq: 0,
+      timeline: [],
+      patchPreview: '',
+      clarification: null,
       annotations: sendEntries,
     })
 
@@ -843,61 +1153,8 @@ export default function WorkspacePage() {
       },
     }
 
-    try {
-      const result = await postRun(payload)
-      if (closedProjectsRef.current.has(projectId)) {
-        // 提交后用户立即关闭了项目：后端仍会完成本次 Run，
-        // 前端拿到结果后立刻销毁新生成的沙盒，避免资源泄漏。
-        await destroySandbox(result.sandboxId, session?.token)
-        return
-      }
-      patchRun(projectId, (previous) => ({
-        ...previous,
-        result,
-        error:
-          result.status === 'FAILED'
-            ? result.error || '构建验证未通过'
-            : null,
-        annotations: previous.annotations.map((annotation) => {
-          const commit = result.commits?.find(
-            (item) =>
-              item.threadId === annotation.threadId ||
-              item.threadId === annotation.id,
-          )
-          return {
-            ...annotation,
-            lastRunId: result.runId,
-            lastSandboxId: result.sandboxId,
-            baseCommitHash:
-              annotation.baseCommitHash || result.baselineCommit || null,
-            lastCommitHash: result.commitHash || annotation.lastCommitHash,
-            lastTurnCount: commit?.turnCount || annotation.lastTurnCount,
-            chatHistory: appendAssistantMessage(annotation, result),
-          }
-        }),
-        sandboxIds:
-          result.sandboxId && !previous.sandboxIds.includes(result.sandboxId)
-            ? [...previous.sandboxIds, result.sandboxId]
-            : previous.sandboxIds,
-      }))
-    } catch (cause) {
-      const message = `网络请求失败：${cause?.message || cause}`
-      patchRun(projectId, (previous) => ({
-        ...previous,
-        error: message,
-        annotations: previous.annotations.map((annotation) => ({
-          ...annotation,
-          chatHistory: appendAssistantMessage(annotation, null, message),
-        })),
-      }))
-    } finally {
-      inflightRef.current.delete(projectId)
-      patchRun(projectId, {
-        submitting: false,
-        pendingAnnotationId: null,
-        pendingAction: null,
-      })
-    }
+    // 批量提交同样走 SSE；annotationId=null 表示终态回复写给全部标注。
+    await startRunStream(projectId, payload, null)
   }
 
   /**
@@ -1086,6 +1343,8 @@ export default function WorkspacePage() {
     const sandboxIds = runStates[projectId]?.sandboxIds ?? []
     closedProjectsRef.current.add(projectId)
     inflightRef.current.delete(projectId)
+    streamControllersRef.current.get(projectId)?.abort()
+    streamControllersRef.current.delete(projectId)
     closeTab(projectId)
     setRunStates((previous) => {
       if (!(projectId in previous)) return previous
@@ -1191,6 +1450,14 @@ export default function WorkspacePage() {
                 }
                 onAnnotationSend={(annotationId) =>
                   handleAnnotationSend(project.id, annotationId)
+                }
+                onClarificationAnswer={(annotationId, clarification, answers) =>
+                  handleClarificationAnswer(
+                    project.id,
+                    annotationId,
+                    clarification,
+                    answers,
+                  )
                 }
                 onAnnotationRollback={(annotationId, message) =>
                   handleAnnotationRollback(project.id, annotationId, message)

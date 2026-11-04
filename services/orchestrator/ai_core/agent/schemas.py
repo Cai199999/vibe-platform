@@ -123,6 +123,11 @@ class RunOptions(CamelModel):
       - add_button : 忽略具体的颜色 / 文案解析，直接插入一个新增按钮，
                      用于无密钥环境验证 ADD 组件的完整 E2E；
       - none       : 直接生成正确代码。
+
+    clarification_mode：
+      - auto  : 置信度低于阈值或缺少关键槽位时中断（默认）；
+      - always: 即使高置信度也先确认范围（调试用）；
+      - off   : 禁用 HITL，按当前最佳计划执行（降级 / 回归用）。
     """
 
     llm_provider: Literal["auto", "mock", "deepseek"] = "auto"
@@ -131,6 +136,10 @@ class RunOptions(CamelModel):
     )
     max_retries: int = Field(default=3, ge=0, le=3)
     keep_sandbox: bool = True
+    clarification_mode: Literal["auto", "always", "off"] = "auto"
+    max_clarification_rounds: int = Field(default=3, ge=1, le=3)
+    # None 时使用服务端配置 AGENT_CLARIFICATION_THRESHOLD。
+    confidence_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class ExecuteRunRequest(CamelModel):
@@ -196,9 +205,106 @@ class RunCommitRecord(CamelModel):
     run_id: str
 
 
+# ------------------------------------------------------------
+# HITL 澄清
+# ------------------------------------------------------------
+class ClarificationOption(CamelModel):
+    value: str
+    label: str
+
+
+class ClarificationQuestion(CamelModel):
+    """问题字段与 03.API接口设计.md §3.7.1 对齐。"""
+
+    question_id: str
+    type: Literal[
+        "single_choice",
+        "multi_choice",
+        "free_text",
+        "entity_fields",
+        "schema_fields",
+    ]
+    prompt: str
+    required: bool = True
+    options: list[ClarificationOption] = Field(default_factory=list)
+    default_value: Any | None = None
+    schema_payload: dict[str, Any] | None = Field(default=None, alias="schema")
+
+
+class Clarification(CamelModel):
+    """一次待回答的澄清轮次。"""
+
+    clarification_id: str
+    run_id: str | None = None
+    annotation_id: str | None = None
+    thread_id: str | None = None
+    round: int = Field(default=1, ge=1)
+    max_rounds: int = Field(default=3, ge=1, le=3)
+    status: Literal["PENDING", "ANSWERED", "EXPIRED"] = "PENDING"
+    reason: str = "ambiguous_intent"
+    questions: list[ClarificationQuestion] = Field(default_factory=list)
+    expires_at: datetime | None = None
+    answered_at: datetime | None = None
+
+
+class ClarificationAnswer(CamelModel):
+    question_id: str
+    value: Any = None
+    text: str | None = Field(default=None, max_length=1000)
+
+
+class ClarificationAnswersRequest(CamelModel):
+    answers: list[ClarificationAnswer] = Field(default_factory=list, max_length=10)
+    use_defaults: bool = False
+    comment: str | None = Field(default=None, max_length=1000)
+    expected_version: int | None = None
+    # 内部兼容：POST /runs/{runId}/clarifications 没有 clarificationId
+    # 路径参数时，可放在 body；公开 BFF 仍以路径参数为准。
+    clarification_id: str | None = Field(default=None, max_length=128)
+
+
+class ClarificationStatus(CamelModel):
+    clarification_id: str
+    status: Literal["ANSWERED"]
+    answered_at: datetime
+
+
+class ClarificationRunStatus(CamelModel):
+    run_id: str
+    status: str
+
+
+class ClarificationAnswerResponse(CamelModel):
+    clarification: ClarificationStatus
+    run: ClarificationRunStatus
+
+
+class ClarificationListResponse(CamelModel):
+    run_id: str
+    clarifications: list[Clarification] = Field(default_factory=list)
+
+
+class RunSnapshotResponse(CamelModel):
+    """GET /runs/{runId} 的轻量快照；完整结果仍以 SSE 终态 payload 为准。"""
+
+    run_id: str
+    status: str
+    sandbox_id: str = ""
+    preview_url: str = ""
+    clarification: Clarification | None = None
+    assistant_message: str = ""
+    error: str | None = None
+    last_seq: int = 0
+
+
 class ExecuteRunResponse(CamelModel):
     run_id: str
-    status: Literal["AWAITING_APPROVAL", "FAILED"]
+    status: Literal[
+        "AWAITING_APPROVAL",
+        "AWAITING_CLARIFICATION",
+        "EXPIRED",
+        "FAILED",
+    ]
     sandbox_id: str
     preview_url: str
     reused_sandbox: bool = False
@@ -215,6 +321,8 @@ class ExecuteRunResponse(CamelModel):
     turn_count: int = 0
     baseline_commit: str | None = None
     commits: list[RunCommitRecord] = Field(default_factory=list)
+    # HITL：仅 AWAITING_CLARIFICATION 时非空。
+    clarification: Clarification | None = None
     error: str | None = None
 
 

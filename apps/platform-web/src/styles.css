@@ -1075,6 +1075,149 @@ body.is-viewport-panning * {
   cursor: not-allowed;
 }
 
+/* HITL：状态机暂停后，浮层内展开的澄清表单。 */
+.popover-clarification {
+  flex-shrink: 0;
+  max-height: 232px;
+  margin: 0 0 9px;
+  padding: 9px 10px;
+  overflow-y: auto;
+  border: 1px solid rgba(251, 191, 36, 0.32);
+  border-radius: 10px;
+  background: rgba(251, 191, 36, 0.07);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(251, 191, 36, 0.3) transparent;
+}
+
+.popover-clarification.is-expired {
+  border-color: rgba(251, 113, 133, 0.32);
+  background: rgba(251, 113, 133, 0.07);
+}
+
+.clarification-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.clarification-badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.16);
+  color: #fde68a;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.clarification-round {
+  color: rgba(148, 163, 184, 0.72);
+  font-size: 9px;
+}
+
+.clarification-lead {
+  margin: 0 0 8px;
+  color: #cbd5e1;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.clarification-question + .clarification-question {
+  margin-top: 9px;
+}
+
+.clarification-label {
+  margin: 0 0 5px;
+  color: #e2e8f0;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.clarification-label em {
+  margin-left: 3px;
+  color: #fca5a5;
+  font-style: normal;
+}
+
+.clarification-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.clarification-option {
+  padding: 4px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 7px;
+  background: rgba(2, 6, 23, 0.55);
+  color: #cbd5e1;
+  font-size: 10px;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
+}
+
+.clarification-option:hover:not(:disabled) {
+  border-color: rgba(56, 189, 248, 0.5);
+  color: #e0f2fe;
+}
+
+.clarification-option.is-selected {
+  border-color: rgba(56, 189, 248, 0.7);
+  background: rgba(56, 189, 248, 0.18);
+  color: #bae6fd;
+}
+
+.clarification-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.clarification-input {
+  width: 100%;
+  margin-top: 5px;
+  padding: 6px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 7px;
+  background: rgba(2, 6, 23, 0.72);
+  color: var(--text);
+  font-size: 10.5px;
+  outline: none;
+}
+
+.clarification-input:focus {
+  border-color: rgba(56, 189, 248, 0.6);
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.12);
+}
+
+.clarification-submit {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  margin-top: 9px;
+  padding: 6px 10px;
+  border: 1px solid rgba(56, 189, 248, 0.34);
+  border-radius: 8px;
+  background: rgba(14, 165, 233, 0.16);
+  color: #bae6fd;
+  font-size: 10.5px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 0.16s ease, opacity 0.16s ease;
+}
+
+.clarification-submit:hover:not(:disabled) {
+  background: rgba(14, 165, 233, 0.28);
+}
+
+.clarification-submit:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
 .canvas-popover.tone-1 {
   border-color: rgba(167, 139, 250, 0.42);
 }
@@ -2858,6 +3001,12 @@ body.is-viewport-panning * {
   color: #fecdd3;
 }
 
+.runtime-state.is-paused {
+  border-color: rgba(251, 191, 36, 0.3);
+  background: rgba(251, 191, 36, 0.09);
+  color: #fde68a;
+}
+
 .runtime-scroll {
   flex: 1;
   min-height: 0;
@@ -3153,6 +3302,174 @@ body.is-viewport-panning * {
 
 .runtime-overlay .progress-track {
   width: 100%;
+}
+
+/* 真实 SSE 时间轴：节点状态由后端事件驱动。 */
+.loading-state.is-timeline,
+.loading-state.is-paused {
+  gap: 0;
+}
+
+.timeline-head {
+  flex-shrink: 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.timeline-head .loading-title {
+  margin: 0;
+}
+
+.run-timeline {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 12px 0 0;
+  padding: 0 2px 0 0;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(56, 189, 248, 0.3) transparent;
+}
+
+.run-timeline::-webkit-scrollbar {
+  width: 5px;
+}
+
+.run-timeline::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.3);
+}
+
+.timeline-item {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  padding: 0 0 13px;
+}
+
+.timeline-item:not(:last-child)::before {
+  position: absolute;
+  top: 18px;
+  bottom: 0;
+  left: 8px;
+  width: 1px;
+  background: rgba(148, 163, 184, 0.18);
+  content: '';
+}
+
+.timeline-item.is-ok:not(:last-child)::before {
+  background: rgba(52, 211, 153, 0.28);
+}
+
+.timeline-item.is-error:not(:last-child)::before {
+  background: rgba(251, 113, 133, 0.3);
+}
+
+.timeline-marker {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  margin-top: 1px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 50%;
+  background: rgba(2, 6, 23, 0.9);
+  color: var(--faint);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.timeline-item.is-running .timeline-marker {
+  border-color: rgba(56, 189, 248, 0.6);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.28);
+}
+
+.timeline-item.is-ok .timeline-marker {
+  border-color: rgba(52, 211, 153, 0.5);
+  color: #6ee7b7;
+}
+
+.timeline-item.is-paused .timeline-marker {
+  border-color: rgba(251, 191, 36, 0.55);
+  color: #fde68a;
+}
+
+.timeline-item.is-error .timeline-marker {
+  border-color: rgba(251, 113, 133, 0.55);
+  color: #fecdd3;
+}
+
+.timeline-marker .mini-spinner {
+  width: 9px;
+  height: 9px;
+}
+
+.timeline-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.timeline-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.timeline-title strong {
+  color: #e2e8f0;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.timeline-duration {
+  flex: none;
+  color: rgba(148, 163, 184, 0.62);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 9px;
+}
+
+.timeline-body p {
+  margin: 3px 0 0;
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.timeline-item.is-error .timeline-body p {
+  color: #fda4af;
+}
+
+.timeline-empty {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 18px 0 4px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.timeline-empty p {
+  margin: 0;
+}
+
+.paused-questions {
+  flex-shrink: 0;
+  margin: 10px 0 0;
+  padding: 10px 12px 10px 26px;
+  border: 1px solid rgba(251, 191, 36, 0.24);
+  border-radius: 9px;
+  background: rgba(251, 191, 36, 0.06);
+  color: #fde68a;
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.paused-action {
+  flex-shrink: 0;
+  margin-top: 10px;
 }
 
 .runtime-overlay .runtime-error {

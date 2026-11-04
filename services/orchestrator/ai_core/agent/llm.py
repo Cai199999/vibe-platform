@@ -37,7 +37,16 @@ class AgentLLMConfigurationError(AgentLLMError):
 
 @dataclass(frozen=True)
 class PlanResult:
+    """Planner 输出。
+
+    ``confidence_score`` 与 ``clarification`` 是 HITL 的唯一触发依据；
+    Graph 不再靠自然语言关键词猜测是否该中断。
+    """
+
     plan: str
+    confidence_score: float = 1.0
+    needs_clarification: bool = False
+    clarification: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +66,7 @@ class AgentLLM:
         annotations: list[dict[str, Any]],
         current_files: dict[str, str],
         previous_errors: str | None = None,
+        clarification_answers: list[dict[str, Any]] | None = None,
     ) -> PlanResult:
         raise NotImplementedError
 
@@ -130,6 +140,7 @@ class MockAgentLLM(AgentLLM):
         annotations: list[dict[str, Any]],
         current_files: dict[str, str],
         previous_errors: str | None = None,
+        clarification_answers: list[dict[str, Any]] | None = None,
     ) -> PlanResult:
         lines = [
             f"1. 读取目标文件，综合分析 {len(annotations)} 个标注需求：",
@@ -163,7 +174,32 @@ class MockAgentLLM(AgentLLM):
                 f"{6 if history_count else 5}. 上一轮构建失败："
                 "先修复错误日志，再保证全部标注生效"
             )
-        return PlanResult(plan="\n".join(lines))
+
+        # Mock 用确定性规则模拟 Planner 的 confidence_score：只在“真的无法
+        # 从指令中提取任何可执行属性”时要求澄清，避免把现有 E2E 指令
+        # （改成蓝色 / 文字改为… / 放大一倍 / 添加红色按钮）误判为模糊。
+        clarification = (
+            None if clarification_answers else _mock_clarification(annotations)
+        )
+        if clarification:
+            lines.insert(0, "0. 当前信息不足，需要先向用户确认目标属性 / 新增内容")
+            return PlanResult(
+                plan="\n".join(lines),
+                confidence_score=0.32,
+                needs_clarification=True,
+                clarification=clarification,
+            )
+
+        if clarification_answers:
+            lines.append(
+                "6. 用户已澄清："
+                + "；".join(
+                    f"{item.get('questionId') or item.get('question_id')}: "
+                    f"{item.get('value') or item.get('text')}"
+                    for item in clarification_answers
+                )
+            )
+        return PlanResult(plan="\n".join(lines), confidence_score=0.92)
 
     def generate(
         self,
@@ -321,10 +357,20 @@ class DeepSeekAgentLLM(AgentLLM):
         annotations: list[dict[str, Any]],
         current_files: dict[str, str],
         previous_errors: str | None = None,
+        clarification_answers: list[dict[str, Any]] | None = None,
     ) -> PlanResult:
         system = (
             "你是资深前端架构师。一次请求包含 1~3 个画布标注，你必须综合分析"
             "全部标注，输出一份统一、可执行的修改计划。\n"
+            "只输出一个 JSON 对象，不要输出 Markdown 代码围栏或解释文字。\n"
+            "JSON 格式：\n"
+            '{"plan":"逐条说明每个标注要改什么、保持什么不变、如何验证",'
+            '"confidence_score":0.0到1.0,'
+            '"needs_clarification":false,'
+            '"clarification":null或{"reason":"...","annotationId":"...",'
+            '"questions":[{"questionId":"q1","type":"single_choice",'
+            '"prompt":"...","required":true,"options":[{"value":"color",'
+            '"label":"颜色"}],"defaultValue":"color"}]}}\n\n'
             "要求：\n"
             "- 逐条列出每个标注的目标组件、要修改的属性（颜色 / 文案 / 字号 /"
             " 间距 / 布局 / 结构等）与验收标准；\n"
@@ -338,17 +384,41 @@ class DeepSeekAgentLLM(AgentLLM):
             "- 历史修改已经体现在当前源码中。本轮只需生成相对当前源码的增量修改，"
             "不得回退用户没有要求撤销的其它属性；\n"
             "- 明确指出多个标注之间是否可能冲突，以及最终以什么结果为准；\n"
-            "- 只描述要改什么、保持什么不变、如何验证；不要输出代码。"
+            "- 只描述要改什么、保持什么不变、如何验证；不要输出代码。\n\n"
+            "HITL 规则：\n"
+            "- confidence_score 必须反映你对“能否直接执行”的真实把握；"
+            "只有 < 0.7 或缺少关键槽位时才 needs_clarification=true；\n"
+            "- 用户只说“改好看点 / 优化一下 / 大气一点”而没有颜色、字号、"
+            "间距、布局、文案等可执行属性时，必须询问具体视觉维度；\n"
+            "- ADD 只说“加点东西”而没说明组件类型或文案时，必须询问；\n"
+            "- 每轮 1~3 个问题；问题字段固定为 questionId/type/prompt/"
+            "required/options/defaultValue；type 只允许 single_choice / "
+            "multi_choice / free_text。\n\n"
+            "全栈引导：\n"
+            "- 如果用户描述的是业务需求（登录、注册、订单、列表增删改查、"
+            "数据保存、接口、数据库、权限等），而不是纯视觉修改，先判断需求"
+            "是否明确包含“前端界面 / 后端接口 / 数据库”的范围；\n"
+            "- 缺少范围时 needs_clarification=true，问题必须引导用户确认："
+            "“本次先生成前端界面，还是同时生成后端接口和数据库？”；\n"
+            "- 当前能力只有前端时，不得擅自承诺或生成后端 / 数据库代码；"
+            "用户明确要求全栈时在 plan 中标注 fullstack_requested=true，"
+            "由上层能力开关决定是否继续。"
         )
         files_block = _format_files(current_files, 16000)
+        answers_block = (
+            json.dumps(clarification_answers, ensure_ascii=False)
+            if clarification_answers
+            else "无"
+        )
         human = (
             f"画布标注（AnnotationEnvelope[]）:\n"
             f"{json.dumps(annotations, ensure_ascii=False)}\n\n"
             f"目标文件当前内容:\n{files_block}\n\n"
+            f"用户已澄清的回答:\n{answers_block}\n\n"
             f"上一轮错误（如有）:\n{_truncate(previous_errors or '无', 4000)}"
         )
         content = self._invoke(system, human)
-        return PlanResult(plan=content.strip())
+        return _parse_plan_result(content, annotations)
 
     def generate(
         self,
@@ -452,6 +522,263 @@ class DeepSeekAgentLLM(AgentLLM):
 # ------------------------------------------------------------
 # 通用工具
 # ------------------------------------------------------------
+def _parse_plan_result(raw: str, annotations: list[dict[str, Any]]) -> PlanResult:
+    """解析 Planner JSON；解析失败时降级为“按文本计划执行、不中断”。
+
+    模型偶发不按 JSON 输出时，宁可继续执行已有计划，也不能因为解析失败
+    把每个请求都变成澄清，导致产品不可用。
+    """
+    try:
+        payload = _extract_json(raw)
+    except AgentLLMError:
+        return PlanResult(plan=raw.strip(), confidence_score=0.8)
+
+    plan = str(payload.get("plan") or raw).strip()
+    try:
+        confidence = float(payload.get("confidence_score", 0.8))
+    except (TypeError, ValueError):
+        confidence = 0.8
+    confidence = max(0.0, min(1.0, confidence))
+    needs = bool(payload.get("needs_clarification"))
+    clarification = payload.get("clarification")
+    if not needs or not isinstance(clarification, dict):
+        return PlanResult(
+            plan=plan,
+            confidence_score=confidence,
+            needs_clarification=False,
+        )
+
+    normalized = _normalize_clarification(clarification, annotations)
+    if normalized is None:
+        return PlanResult(plan=plan, confidence_score=confidence)
+    return PlanResult(
+        plan=plan,
+        confidence_score=confidence,
+        needs_clarification=True,
+        clarification=normalized,
+    )
+
+
+_ALLOWED_QUESTION_TYPES = {
+    "single_choice",
+    "multi_choice",
+    "free_text",
+    "entity_fields",
+    "schema_fields",
+}
+
+
+def _normalize_clarification(
+    clarification: dict[str, Any],
+    annotations: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """把模型输出收敛为 API 契约；问题不合法时返回 None。"""
+    questions: list[dict[str, Any]] = []
+    raw_questions = clarification.get("questions")
+    if not isinstance(raw_questions, list):
+        return None
+    for index, raw in enumerate(raw_questions[:3], start=1):
+        if not isinstance(raw, dict):
+            continue
+        question_type = str(raw.get("type") or raw.get("kind") or "").strip()
+        if question_type not in _ALLOWED_QUESTION_TYPES:
+            question_type = "free_text"
+        prompt = str(raw.get("prompt") or raw.get("question") or "").strip()
+        if not prompt:
+            continue
+        options: list[dict[str, str]] = []
+        for option in raw.get("options") or []:
+            if not isinstance(option, dict):
+                continue
+            value = str(option.get("value") or "").strip()
+            label = str(option.get("label") or value).strip()
+            if value:
+                options.append({"value": value, "label": label})
+        questions.append(
+            {
+                "questionId": str(
+                    raw.get("questionId") or raw.get("question_id") or f"q{index}"
+                ),
+                "type": question_type,
+                "prompt": prompt[:300],
+                "required": bool(raw.get("required", True)),
+                "options": options,
+                "defaultValue": raw.get("defaultValue", raw.get("default_value")),
+            }
+        )
+    if not questions:
+        return None
+
+    annotation_id = clarification.get("annotationId") or clarification.get(
+        "annotation_id"
+    )
+    if not annotation_id and annotations:
+        annotation_id = _annotation_id(annotations[0])
+    return {
+        "reason": str(clarification.get("reason") or "ambiguous_intent")[:120],
+        "annotationId": annotation_id,
+        "questions": questions,
+    }
+
+
+def _annotation_id(annotation: dict[str, Any]) -> str | None:
+    value = annotation.get("annotationId") or annotation.get("annotation_id")
+    return str(value) if value else None
+
+
+def _mock_clarification(
+    annotations: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Mock 的确定性置信度规则，用于无密钥 E2E 验证 HITL。"""
+    for annotation in annotations:
+        text = _annotation_text(annotation)
+        annotation_id = _annotation_id(annotation)
+        if _is_vague_instruction(text):
+            return {
+                "reason": "ambiguous_visual_intent",
+                "annotationId": annotation_id,
+                "questions": [
+                    {
+                        "questionId": "q_visual_dimension",
+                        "type": "single_choice",
+                        "prompt": "你希望优先调整哪一项？",
+                        "required": True,
+                        "options": [
+                            {"value": "color", "label": "颜色"},
+                            {"value": "font", "label": "字号 / 字体"},
+                            {"value": "spacing", "label": "间距"},
+                            {"value": "layout", "label": "布局"},
+                        ],
+                        "defaultValue": "color",
+                    },
+                    {
+                        "questionId": "q_free_text",
+                        "type": "free_text",
+                        "prompt": "或者直接描述你想要的效果（例如：把按钮改成红色）",
+                        "required": False,
+                    },
+                ],
+            }
+        if _annotation_action(annotation) == "ADD" and not _has_component_type(text):
+            return {
+                "reason": "missing_component_type",
+                "annotationId": annotation_id,
+                "questions": [
+                    {
+                        "questionId": "q_component_type",
+                        "type": "single_choice",
+                        "prompt": "要新增什么组件？",
+                        "required": True,
+                        "options": [
+                            {"value": "button", "label": "按钮"},
+                            {"value": "card", "label": "卡片"},
+                            {"value": "input", "label": "输入框"},
+                            {"value": "text", "label": "文案 / 标题"},
+                        ],
+                        "defaultValue": "button",
+                    },
+                    {
+                        "questionId": "q_component_content",
+                        "type": "free_text",
+                        "prompt": "组件文案或用途是什么？",
+                        "required": False,
+                    },
+                ],
+            }
+    return None
+
+
+_VAGUE_TOKENS = (
+    "好看",
+    "大气",
+    "高级",
+    "美观",
+    "漂亮",
+    "美化",
+    "润色",
+    "优化一下",
+    "调整一下",
+    "改一下",
+    "弄一下",
+    "改改",
+)
+_CONCRETE_TOKENS = (
+    "颜色",
+    "红色",
+    "蓝色",
+    "绿色",
+    "紫色",
+    "橙色",
+    "黄色",
+    "粉色",
+    "黑色",
+    "白色",
+    "字号",
+    "字体",
+    "大小",
+    "间距",
+    "布局",
+    "文案",
+    "文字",
+    "文本",
+    "按钮",
+    "添加",
+    "新增",
+    "插入",
+    "删除",
+    "隐藏",
+    "显示",
+    "放大",
+    "缩小",
+    "宽度",
+    "高度",
+    "圆角",
+    "背景",
+    "对齐",
+    "居中",
+    "换行",
+    "图标",
+    "图片",
+    "链接",
+    "输入框",
+    "卡片",
+    "标题",
+    "边框",
+    "阴影",
+    "动画",
+)
+_COMPONENT_TOKENS = (
+    "按钮",
+    "卡片",
+    "输入框",
+    "标题",
+    "文案",
+    "文字",
+    "图片",
+    "链接",
+    "图标",
+    "表格",
+    "列表",
+    "弹窗",
+    "表单",
+    "导航",
+    "标签",
+)
+
+
+def _is_vague_instruction(text: str) -> bool:
+    lowered = text.strip().lower()
+    if not lowered:
+        return True
+    if not any(token in lowered for token in _VAGUE_TOKENS):
+        return False
+    return not any(token in lowered for token in _CONCRETE_TOKENS)
+
+
+def _has_component_type(text: str) -> bool:
+    return any(token in text for token in _COMPONENT_TOKENS)
+
+
 def _annotation_text(annotation: dict[str, Any]) -> str:
     payload = annotation.get("payload") or {}
     text = str(payload.get("text") or "").strip()

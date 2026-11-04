@@ -28,6 +28,7 @@ function ProjectWorkspaceInner({
   onAnnotationActionChange,
   onAnnotationRemove,
   onAnnotationSend,
+  onClarificationAnswer,
   onAnnotationRollback,
   onClearAnnotations,
   onSubmit,
@@ -99,13 +100,15 @@ function ProjectWorkspaceInner({
           <button
             className="submit-annotations"
             type="button"
-            disabled={!submitReady || submitting}
+            disabled={!submitReady || submitting || Boolean(run.clarification)}
             title={
-              submitReady
-                ? `提交全部 ${annotations.length} 个标注`
-                : annotations.length === 0
-                  ? '请先在画布上圈选组件'
-                  : '请为每个标注填写修改意图'
+              run.clarification
+                ? '请先回答画布浮层中的澄清问题'
+                : submitReady
+                  ? `提交全部 ${annotations.length} 个标注`
+                  : annotations.length === 0
+                    ? '请先在画布上圈选组件'
+                    : '请为每个标注填写修改意图'
             }
             onClick={onSubmit}
           >
@@ -201,6 +204,8 @@ function ProjectWorkspaceInner({
             onAnnotationActionChange={onAnnotationActionChange}
             onAnnotationRemove={onAnnotationRemove}
             onAnnotationSend={onAnnotationSend}
+            onClarificationAnswer={onClarificationAnswer}
+            clarification={run.clarification}
             onAnnotationRollback={onAnnotationRollback}
             pendingAnnotationId={run.pendingAnnotationId}
             pendingAction={run.pendingAction}
@@ -229,6 +234,7 @@ function ProjectWorkspaceInner({
             expanded
             visible={active && previewVisible}
             onRetry={submitReady ? onRetry : undefined}
+            onGoToCanvas={() => setMode('canvas')}
           />
         </div>
       </div>

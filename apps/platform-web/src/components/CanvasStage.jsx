@@ -105,6 +105,15 @@ function popoverStyleFor(rect, index, active) {
   }
 }
 
+// HITL：不同触发原因对应不同的引导文案，方便用户理解为什么被中断。
+const CLARIFICATION_REASON_TEXT = {
+  ambiguous_intent: '这个需求还不够明确，确认几个细节后我再开始改：',
+  ambiguous_visual_intent: '“好看”没有唯一答案，先确认你更在意哪一项：',
+  missing_component_type: '新增组件还缺少关键信息，确认后我再开始改：',
+  low_confidence: '我还不确定你的具体意图，先确认一下：',
+  fullstack_scope: '这看起来是一个业务需求，先确认改动范围：',
+}
+
 /**
  * 单个标注旁的迷你 Chatbox。
  *
@@ -124,6 +133,9 @@ function AnnotationPopover({
   onActionChange,
   onRemove,
   onSend,
+  onClarificationAnswer,
+  clarification,
+  clarificationPending,
   onRollback,
   onActivate,
   onDeactivate,
@@ -134,11 +146,27 @@ function AnnotationPopover({
     [annotation.rect, index, active],
   )
   const history = annotation.chatHistory ?? []
+  const [answers, setAnswers] = useState({})
 
   useEffect(() => {
     const node = historyRef.current
     if (node) node.scrollTop = node.scrollHeight
-  }, [history.length, pending])
+  }, [history.length, pending, clarification])
+
+  // 新一轮澄清使用独立草稿；默认值（如“颜色”）预选，用户可直接提交。
+  useEffect(() => {
+    if (!clarification) {
+      setAnswers({})
+      return
+    }
+    const initial = {}
+    clarification.questions?.forEach((question) => {
+      if (question.defaultValue !== undefined && question.defaultValue !== null) {
+        initial[question.questionId] = question.defaultValue
+      }
+    })
+    setAnswers(initial)
+  }, [clarification?.clarificationId])
 
   if (!style) return null
 
@@ -146,6 +174,53 @@ function AnnotationPopover({
   const rollingBack = sending && pendingAction === 'rollback'
   // 兼容旧项目状态：没有显式 action 时按是否命中元素推断。
   const action = annotation.action ?? (annotation.target ? 'MODIFY' : 'ADD')
+
+  const setAnswer = (questionId, value) => {
+    setAnswers((previous) => ({ ...previous, [questionId]: value }))
+  }
+
+  const toggleMultiAnswer = (questionId, value) => {
+    setAnswers((previous) => {
+      const current = Array.isArray(previous[questionId])
+        ? previous[questionId]
+        : []
+      return {
+        ...previous,
+        [questionId]: current.includes(value)
+          ? current.filter((item) => item !== value)
+          : [...current, value],
+      }
+    })
+  }
+
+  const clarificationComplete = Boolean(
+    clarification?.questions?.every((question) => {
+      if (!question.required) return true
+      const value = answers[question.questionId]
+      if (Array.isArray(value)) return value.length > 0
+      return value !== undefined && value !== null && String(value).trim() !== ''
+    }),
+  )
+
+  const submitClarification = () => {
+    if (!clarification || !clarificationComplete) return
+    const payload = clarification.questions
+      .map((question) => {
+        const value = answers[question.questionId]
+        if (Array.isArray(value)) {
+          return value.length > 0
+            ? { questionId: question.questionId, value }
+            : null
+        }
+        if (value === undefined || value === null || String(value).trim() === '') {
+          return null
+        }
+        return { questionId: question.questionId, value }
+      })
+      .filter(Boolean)
+    onClarificationAnswer?.(annotation.id, clarification, payload)
+  }
+
   return (
     <form
       className={`canvas-popover tone-${index % 3} ${active ? 'is-active' : ''}`}
@@ -173,6 +248,8 @@ function AnnotationPopover({
       }}
       onSubmit={(event) => {
         event.preventDefault()
+        // 澄清挂起期间禁止再次触发 Run，否则会撞上后端 RUN_BUSY。
+        if (clarificationPending) return
         onSend?.(annotation.id)
       }}
     >
@@ -191,7 +268,7 @@ function AnnotationPopover({
               className={action === option.value ? 'is-active' : ''}
               aria-pressed={action === option.value}
               title={option.title}
-              disabled={submitting}
+              disabled={submitting || Boolean(clarification)}
               onClick={() => onActionChange?.(annotation.id, option.value)}
             >
               {option.label}
@@ -203,7 +280,7 @@ function AnnotationPopover({
           type="button"
           title="删除这个标注"
           aria-label={`删除标注 ${index + 1}`}
-          disabled={submitting}
+          disabled={submitting || Boolean(clarification)}
           onClick={() => onRemove?.(annotation.id)}
         >
           ×
@@ -250,20 +327,129 @@ function AnnotationPopover({
         </div>
       )}
 
+      {/* HITL 澄清气泡：暂停状态机后，用户在这里补全意图再恢复执行。 */}
+      {clarification && (
+        <div
+          className={`popover-clarification ${clarification.status === 'EXPIRED' ? 'is-expired' : ''}`}
+          role="group"
+          aria-label="Agent 需要确认"
+        >
+          <div className="clarification-head">
+            <span className="clarification-badge">Agent 需要确认</span>
+            {clarification.round > 0 && (
+              <span className="clarification-round">
+                第 {clarification.round}/{clarification.maxRounds ?? 3} 轮
+              </span>
+            )}
+          </div>
+          <p className="clarification-lead">
+            {clarification.status === 'EXPIRED'
+              ? '这轮确认已过期，请重新发送修改意图。'
+              : CLARIFICATION_REASON_TEXT[clarification.reason] ??
+                '请补充以下信息，确认后我继续执行：'}
+          </p>
+
+          {clarification.status !== 'EXPIRED' &&
+            clarification.questions?.map((question) => {
+              const value = answers[question.questionId]
+              const hasOptions = (question.options?.length ?? 0) > 0
+              const multi = question.type === 'multi_choice'
+              // entity_fields / schema_fields 暂未提供结构化表单，
+              // 降级为自由文本，保证 M2 不会因为未知题型卡死。
+              const freeText = question.type === 'free_text' || !hasOptions
+              const inputValue =
+                typeof value === 'string' || typeof value === 'number'
+                  ? String(value)
+                  : ''
+              return (
+                <div className="clarification-question" key={question.questionId}>
+                  <p className="clarification-label">
+                    {question.prompt}
+                    {question.required && (
+                      <em aria-label="必填" title="必填">
+                        *
+                      </em>
+                    )}
+                  </p>
+
+                  {hasOptions && (
+                    <div className="clarification-options">
+                      {question.options.map((option) => {
+                        const selected = multi
+                          ? Array.isArray(value) && value.includes(option.value)
+                          : value === option.value
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            className={`clarification-option ${selected ? 'is-selected' : ''}`}
+                            aria-pressed={selected}
+                            disabled={submitting}
+                            onClick={() =>
+                              multi
+                                ? toggleMultiAnswer(question.questionId, option.value)
+                                : setAnswer(question.questionId, option.value)
+                            }
+                          >
+                            {option.label}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                  {freeText && (
+                    <input
+                      className="clarification-input"
+                      type="text"
+                      value={inputValue}
+                      maxLength={200}
+                      placeholder={
+                        hasOptions ? '也可以直接补充说明…' : '输入你的回答…'
+                      }
+                      disabled={submitting}
+                      onChange={(event) =>
+                        setAnswer(question.questionId, event.target.value)
+                      }
+                    />
+                  )}
+                </div>
+              )
+            })}
+
+          {clarification.status !== 'EXPIRED' && (
+            <button
+              className="clarification-submit"
+              type="button"
+              disabled={submitting || !clarificationComplete}
+              onClick={submitClarification}
+            >
+              {submitting ? (
+                <span className="mini-spinner" aria-label="执行中" />
+              ) : (
+                '确认并继续'
+              )}
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="popover-row">
         <input
           ref={inputRef}
           type="text"
           value={annotation.intent}
           maxLength={120}
-          placeholder="描述修改意图..."
-          disabled={submitting}
+          placeholder={clarificationPending ? '请先回答上方问题…' : '描述修改意图...'}
+          disabled={submitting || clarificationPending}
           onChange={(event) => onChange?.(annotation.id, event.target.value)}
         />
         <button
           className="popover-send"
           type="submit"
-          disabled={submitting || !annotation.intent.trim()}
+          disabled={
+            submitting || clarificationPending || !annotation.intent.trim()
+          }
           title="只对当前圈执行一次增量修改"
         >
           {sending ? <span className="mini-spinner" aria-label="执行中" /> : '发送'}
@@ -292,6 +478,8 @@ export default function CanvasStage({
   onAnnotationActionChange,
   onAnnotationRemove,
   onAnnotationSend,
+  onClarificationAnswer,
+  clarification,
   onAnnotationRollback,
   pendingAnnotationId,
   pendingAction,
@@ -577,6 +765,16 @@ export default function CanvasStage({
                   onActionChange={onAnnotationActionChange}
                   onRemove={onAnnotationRemove}
                   onSend={onAnnotationSend}
+                  onClarificationAnswer={onClarificationAnswer}
+                  clarificationPending={Boolean(clarification)}
+                  clarification={
+                    clarification &&
+                    (clarification.annotationId === annotation.id ||
+                      (clarification.threadId &&
+                        clarification.threadId === annotation.threadId))
+                      ? clarification
+                      : null
+                  }
                   onRollback={onAnnotationRollback}
                   onActivate={activateAnnotation}
                   onDeactivate={deactivateAnnotation}

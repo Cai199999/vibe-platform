@@ -1,12 +1,15 @@
 package com.vibeplatform.bff.config;
 
+import io.netty.channel.ChannelOption;
 import java.net.http.HttpClient;
 import java.time.Duration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.reactive.function.client.WebClient;
 
 /**
  * AI Core HTTP 客户端。
@@ -41,6 +44,31 @@ public class AiCoreClientConfig {
                 properties.runConnectTimeoutMs(),
                 properties.runReadTimeoutMs()
         );
+    }
+
+    /**
+     * SSE 专用 WebClient。
+     *
+     * <p>只设置连接超时，不设置整体 responseTimeout：一次全栈 Run 可能持续
+     * 数分钟，流式响应的生命周期由上游事件与客户端断开决定。Reactor Netty
+     * 的事件循环在等待上游数据时不占用 Servlet 工作线程。</p>
+     */
+    @Bean
+    public WebClient aiCoreStreamWebClient(AiCoreProperties properties) {
+        reactor.netty.http.client.HttpClient httpClient =
+                reactor.netty.http.client.HttpClient.create()
+                        .option(
+                                ChannelOption.CONNECT_TIMEOUT_MILLIS,
+                                properties.runConnectTimeoutMs()
+                        )
+                        .compress(false);
+
+        return WebClient.builder()
+                .baseUrl(properties.baseUrl())
+                .clientConnector(new ReactorClientHttpConnector(httpClient))
+                .codecs(configurer ->
+                        configurer.defaultCodecs().maxInMemorySize(1024 * 1024))
+                .build();
     }
 
     private RestClient buildRestClient(String baseUrl, int connectTimeoutMs, int readTimeoutMs) {
