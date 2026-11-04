@@ -111,15 +111,26 @@ def main() -> int:
         placeholder = popover.locator("input").get_attribute("placeholder")
         if placeholder != "描述修改意图...":
             fail(f"占位符未精简: {placeholder!r}")
-        # 关闭按钮的 × 是唯一保留的字符；标题区不应再有“标注 1/1”或组件类型。
-        head_text = (popover.locator(".popover-head").text_content() or "").strip()
-        if head_text.replace("×", "").strip():
+        # 标题区只保留颜色圆点、操作类型切换与关闭按钮；
+        # 不应再有“标注 1/1”或组件类型标签。
+        mode_buttons = popover.locator(".popover-action button")
+        mode_labels = mode_buttons.all_inner_texts()
+        if mode_labels != ["修改", "新增"]:
+            fail(f"操作类型切换异常: {mode_labels}")
+        head_text = (
+            (popover.locator(".popover-head").text_content() or "")
+            .replace("×", "")
+            .replace("修改", "")
+            .replace("新增", "")
+            .strip()
+        )
+        if head_text:
             fail(f"浮层标题仍有文字: {head_text!r}")
         if popover.locator(".popover-target").count():
             fail("浮层仍显示组件类型标签")
         if popover.locator(".popover-hint").count():
             fail("空闲状态仍显示底部说明")
-        print("   标题仅保留颜色圆点；占位符：描述修改意图...；无底部说明")
+        print("   标题仅保留颜色圆点、修改/新增切换；占位符：描述修改意图...")
 
         hint = active.locator(".canvas-hint")
         expect(hint).to_be_visible()

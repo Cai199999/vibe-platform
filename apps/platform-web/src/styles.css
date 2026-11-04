@@ -935,6 +935,42 @@ body.is-viewport-panning * {
   box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
 }
 
+/* 修改 / 新增 切换：极淡的分段控件，激活态才使用强调色。 */
+.popover-action {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: rgba(2, 6, 23, 0.55);
+}
+
+.popover-action button {
+  padding: 2px 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--faint);
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: color 0.14s ease, background 0.14s ease;
+}
+
+.popover-action button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.popover-action button.is-active {
+  background: rgba(56, 189, 248, 0.16);
+  color: #7dd3fc;
+}
+
+.popover-action button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 /* 同一圈的多轮对话记录：超出高度在浮层内部滚动，不撑破画布。 */
 .popover-chat {
   display: flex;

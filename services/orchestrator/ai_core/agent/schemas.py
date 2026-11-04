@@ -93,6 +93,11 @@ class AnnotationEnvelope(CamelModel):
     version: int = 1
     annotation_id: str = Field(min_length=1, max_length=128)
     type: Literal["note", "draw", "drag", "visual-draw"] = "note"
+    # 操作类型：MODIFY 修改已有元素；ADD 在圈选区域新增组件。
+    # 前端可在浮层内切换，也会根据“圈中没有命中元素”与“添加/新建”等
+    # 指令自动推断。ADD 时 target 可以为空，模型需依据 worldTarget 选区
+    # 与源码结构自行选择父级 / 兄弟级插入点。
+    action: Literal["MODIFY", "ADD"] = "MODIFY"
     world_target: dict[str, Any] = Field(default_factory=dict)
     target: AnnotationTarget | None = None
     intent: AnnotationIntent | None = None
@@ -115,11 +120,15 @@ class RunOptions(CamelModel):
     mock_scenario 仅对 Mock LLM 生效：
       - fail_first : 第一次生成故意写错，用于验证自动修复闭环；
       - always_fail: 每次生成都写错，用于验证 3 次硬上限；
+      - add_button : 忽略具体的颜色 / 文案解析，直接插入一个新增按钮，
+                     用于无密钥环境验证 ADD 组件的完整 E2E；
       - none       : 直接生成正确代码。
     """
 
     llm_provider: Literal["auto", "mock", "deepseek"] = "auto"
-    mock_scenario: Literal["none", "fail_first", "always_fail"] = "fail_first"
+    mock_scenario: Literal["none", "fail_first", "always_fail", "add_button"] = (
+        "fail_first"
+    )
     max_retries: int = Field(default=3, ge=0, le=3)
     keep_sandbox: bool = True
 

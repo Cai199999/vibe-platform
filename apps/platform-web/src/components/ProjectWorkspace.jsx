@@ -25,6 +25,7 @@ function ProjectWorkspaceInner({
   onModelProviderChange,
   onAnnotationAdd,
   onAnnotationIntentChange,
+  onAnnotationActionChange,
   onAnnotationRemove,
   onAnnotationSend,
   onAnnotationRollback,
@@ -197,6 +198,7 @@ function ProjectWorkspaceInner({
             annotations={annotations}
             onAnnotationAdd={onAnnotationAdd}
             onAnnotationIntentChange={onAnnotationIntentChange}
+            onAnnotationActionChange={onAnnotationActionChange}
             onAnnotationRemove={onAnnotationRemove}
             onAnnotationSend={onAnnotationSend}
             onAnnotationRollback={onAnnotationRollback}

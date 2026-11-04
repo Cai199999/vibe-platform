@@ -134,6 +134,22 @@ function findTargetLine(source, marker) {
   return offset >= 0 ? source.slice(0, offset).split('\n').length : 1
 }
 
+// “添加 / 新建 / 插入 / add” 等动词优先于圈选命中结果：即使用户圈到了
+// 卡片本身，只要指令是在新增内容，就按 ADD 处理，避免模型去改卡片颜色。
+const ADD_INTENT_PATTERN = /添加|新增|新建|插入|加一个|加个|(?:^|\s)add\s/i
+
+/**
+ * 自动推断操作类型：
+ *  - 圈中没有命中任何 data-vibe-target（空白区域）→ ADD；
+ *  - 指令包含新增语义 → ADD；
+ *  - 其余命中已有元素 → MODIFY。
+ * 用户手动点选浮层内的“修改 / 新增”后 actionSource=manual，不再自动覆盖。
+ */
+function inferAnnotationAction(target, intent) {
+  if (ADD_INTENT_PATTERN.test(intent ?? '')) return 'ADD'
+  return target ? 'MODIFY' : 'ADD'
+}
+
 /**
  * 将画布上的一个归一化选区组装为 AnnotationEnvelope。
  * worldTarget 保留归一化坐标；target 记录圈选命中的元素，帮助模型把
@@ -142,19 +158,41 @@ function findTargetLine(source, marker) {
 function buildAnnotation(entry, source) {
   const rect = entry.rect
   const instruction = entry.intent.trim()
-  const target = entry.target ?? {
-    marker: 'cta-button',
-    selector: "[data-vibe-target='cta-button']",
-    label: '按钮',
-    role: 'button',
-    component: 'App',
-    tag: 'button',
-  }
-  const line = findTargetLine(source, target.marker)
+  // 旧 localStorage 里的标注没有 action：按指令与是否命中元素即时推断。
+  const action =
+    entry.action === 'ADD' || entry.action === 'MODIFY'
+      ? entry.action
+      : inferAnnotationAction(entry.target, instruction)
+  // ADD 且没有命中元素时 target 保持为空：后端按 worldTarget 几何位置
+  // 自行选择容器。MODIFY 没有命中元素时才回退到默认 CTA，保持旧行为。
+  const target =
+    entry.target ??
+    (action === 'ADD'
+      ? null
+      : {
+          marker: 'cta-button',
+          selector: "[data-vibe-target='cta-button']",
+          label: '按钮',
+          role: 'button',
+          component: 'App',
+          tag: 'button',
+        })
+  const line = findTargetLine(source, target?.marker)
+  const acceptance =
+    action === 'ADD'
+      ? [
+          `在${target?.label || '圈选区域'}新增组件：${instruction}`,
+          '原有 DOM 结构、布局、文案与交互保持不变',
+        ]
+      : [
+          `按指令修改${target?.label || '目标组件'}：${instruction}`,
+          '其余布局、文案与交互保持不变',
+        ]
   return {
     version: 1,
     annotationId: entry.id,
     type: 'drag',
+    action,
     worldTarget: {
       x: Number(rect.x.toFixed(6)),
       y: Number(rect.y.toFixed(6)),
@@ -162,32 +200,31 @@ function buildAnnotation(entry, source) {
       height: Number(rect.height.toFixed(6)),
       coordinateSpace: 'normalized',
     },
-    target: {
-      mode: 'source',
-      source: {
-        file: TARGET_FILE,
-        line,
-        column: 7,
-        component: target.component || 'App',
-        sourceKind: 'jsx',
-      },
-      selector: target.selector,
-      snippet: {
-        startLine: 1,
-        endLine: source.split('\n').length,
-        content: source,
-        hash: 'sha256:canvas-demo',
-      },
-    },
+    target: target
+      ? {
+          mode: 'source',
+          source: {
+            file: TARGET_FILE,
+            line,
+            column: 7,
+            component: target.component || 'App',
+            sourceKind: 'jsx',
+          },
+          selector: target.selector,
+          snippet: {
+            startLine: 1,
+            endLine: source.split('\n').length,
+            content: source,
+            hash: 'sha256:canvas-demo',
+          },
+        }
+      : null,
     intent: {
       kind: 'UI_ONLY',
       ui: {
         summary: instruction,
-        acceptance: [
-          `按指令修改${target.label || '目标组件'}：${instruction}`,
-          '其余布局、文案与交互保持不变',
-        ],
-        elementRole: target.role || 'button',
+        acceptance,
+        elementRole: target?.role || 'container',
       },
     },
     payload: {
@@ -397,6 +434,9 @@ export default function WorkspacePage() {
             id: newId('ann'),
             rect,
             target,
+            // 空白区域默认 ADD；命中元素默认 MODIFY，输入“添加”后自动切换。
+            action: inferAnnotationAction(target, ''),
+            actionSource: 'auto',
             intent: '',
             createdAt: new Date().toISOString(),
             // 每个标注 = 一个独立 Agent thread，后续对话复用同一个 id。
@@ -418,7 +458,28 @@ export default function WorkspacePage() {
     patchRun(projectId, (previous) => ({
       ...previous,
       annotations: previous.annotations.map((annotation) =>
-        annotation.id === annotationId ? { ...annotation, intent } : annotation,
+        annotation.id === annotationId
+          ? {
+              ...annotation,
+              intent,
+              // 自动模式随文案实时切换；手动选择过类型后尊重用户选择。
+              action:
+                annotation.actionSource === 'manual'
+                  ? annotation.action
+                  : inferAnnotationAction(annotation.target, intent),
+            }
+          : annotation,
+      ),
+    }))
+  }
+
+  const handleAnnotationActionChange = (projectId, annotationId, action) => {
+    patchRun(projectId, (previous) => ({
+      ...previous,
+      annotations: previous.annotations.map((annotation) =>
+        annotation.id === annotationId
+          ? { ...annotation, action, actionSource: 'manual' }
+          : annotation,
       ),
     }))
   }
@@ -1121,6 +1182,9 @@ export default function WorkspacePage() {
                 onAnnotationAdd={(payload) => handleAnnotationAdd(project.id, payload)}
                 onAnnotationIntentChange={(annotationId, intent) =>
                   handleAnnotationIntentChange(project.id, annotationId, intent)
+                }
+                onAnnotationActionChange={(annotationId, action) =>
+                  handleAnnotationActionChange(project.id, annotationId, action)
                 }
                 onAnnotationRemove={(annotationId) =>
                   handleAnnotationRemove(project.id, annotationId)

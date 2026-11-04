@@ -77,8 +77,10 @@ def render_vibe_context(
         intent = annotation.intent
         ui = intent.ui if intent else None
         summary = _instruction(annotation)
+        action_label = "新增组件" if annotation.action == "ADD" else "修改"
         lines.append(
-            f"{index}. **标注 {index}** · `{_target_file(annotation, fallback_file)}`"
+            f"{index}. **标注 {index}** · {action_label}"
+            f" · `{_target_file(annotation, fallback_file)}`"
             f" · {summary}"
         )
 
@@ -99,6 +101,7 @@ def render_vibe_context(
             [
                 f"### 标注 {index} · `{annotation.annotation_id}`",
                 "",
+                f"- 操作类型：`{'ADD（新增组件）' if annotation.action == 'ADD' else 'MODIFY（修改已有元素）'}`",
                 f"- 目标文件：`{_target_file(annotation, fallback_file)}`",
                 f"- 组件：`{source.component if source and source.component else '未知'}`",
                 f"- 选择器：`{target.selector if target and target.selector else '未提供'}`",

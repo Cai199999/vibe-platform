@@ -2,8 +2,9 @@
 
 以前端可视化为抓手、多轮交互生成完整全栈应用的 Vibe Coding 平台。
 
-当前阶段：**M1 完成 · Phase 7 沙盒 Git Checkpoint 与单圈 Undo**。画布最多
-3 个标注 → `AnnotationEnvelope[]` → Java BFF → Python AI Core → LangGraph
+当前阶段：**M1 完成 · Phase 7 沙盒 Git Checkpoint 与单圈 Undo +
+ADD 组件**。画布最多 3 个标注 → `AnnotationEnvelope[]`（`action` 为
+`MODIFY` 修改已有元素 / `ADD` 新增组件）→ Java BFF → Python AI Core → LangGraph
 单 Agent 一次性规划 / 编码 / 写入 / 构建验证 → Docker 沙盒 → 项目内预览与
 Diff，全链路已打通；工作台支持对比/展示两种布局、无缝缩放预览、多项目
 Tab、5 Tab 上限、关闭即销毁沙盒与拖拽排序。每个标注拥有独立 `threadId` /
@@ -33,6 +34,7 @@ scripts/multi_annotation_e2e_test.py  浏览器 E2E（3 个标注 / 独立输入
 scripts/multi_turn_chat_e2e_test.py   浏览器 E2E（平移缩放不漂移 / 单圈两轮对话 / 沙盒复用）
 scripts/rollback_e2e_test.py          浏览器 E2E（Git 提交顺序 / 逐轮回滚 / 回滚后续写）
 scripts/annotation_delete_rollback_e2e_test.py 浏览器 E2E（删除标注回到创建前基线 / 清除全部）
+scripts/add_component_e2e_test.py     浏览器 E2E（圈选卡片内部 → ADD 红色提交按钮 → 构建/预览）
 docs/screenshots/                     M1 联调截图
 docker-compose.yml                    只编排平台自身服务
 ```
@@ -74,9 +76,11 @@ Browser ──/api──▶ platform-web(Vite proxy) ──▶ java-bff ──�
 
 1. 在画布上按住鼠标拖拽，圈选目标区域；选区旁自动弹出该标注的独立输入框。
 2. 一次最多圈选 **3 个区域**，每个区域填写自己的意图（如「改成蓝色」
-   「文字改为提交」「放大一倍」）。浮层遮挡下一次圈选时，可点击视口工具栏
-   的 **隐藏标注输入**；**清除标注** 会清空全部圈与输入框，并把沙盒代码
-   回滚到最早执行圈的创建前基线。
+   「文字改为提交」「放大一倍」「添加一个红色的提交按钮」）。浮层内提供
+   **修改 / 新增** 切换：圈中没有命中具体元素、或指令包含“添加 / 新建 /
+   插入”时自动切到 `ADD`，用户也可以手动覆盖。浮层遮挡下一次圈选时，可
+   点击视口工具栏的 **隐藏标注输入**；**清除标注** 会清空全部圈与输入框，
+   并把沙盒代码回滚到最早执行圈的创建前基线。
 3. 达到 3 个后继续圈选会被拦截并提示上限。点击 **提交标注**，前端把全部
    `AnnotationEnvelope` 打包为 `annotations: AnnotationEnvelope[]`，一次
    POST `/api/v1/runs`；旧版单 `annotation` 字段仍向后兼容。
@@ -124,9 +128,12 @@ planner -> coder -> applier -> verifier -> evaluator
 
 Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier 捕获日志后
 自动修复 1 次，最终返回 `AWAITING_APPROVAL`，方便稳定复现完整闭环。Mock
-能确定性解析常见颜色 / 文案 / 放大缩小指令并合并应用 3 个标注，但它不是
-通用模型；布局、间距、结构等任意修改请选择 `deepseek`（或 `auto`）。
-单圈 Chatbox 发送固定使用 `mockScenario=none`，确保多轮交互即时返回。
+能确定性解析常见颜色 / 文案 / 放大缩小指令并合并应用 3 个标注；识别到
+“添加 / 新增 / 新建 / 插入”时，会向命中容器末尾或目标元素之后插入完整
+`<button>` JSX，不覆盖原有 DOM。`mockScenario=add_button` 可强制走新增
+分支，用于无密钥 E2E。Mock 不是通用模型；布局、间距、结构等任意修改请
+选择 `deepseek`（或 `auto`）。单圈 Chatbox 发送固定使用
+`mockScenario=none`，确保多轮交互即时返回。
 
 ![登录页](docs/screenshots/phase2-login.png)
 
@@ -139,6 +146,8 @@ Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier �
 ![项目导出入口](docs/screenshots/phase4-export.png)
 
 ![3 个标注与独立输入框](docs/screenshots/m1-three-annotations.png)
+
+![圈选卡片内部新增红色提交按钮](docs/screenshots/m1-add-component-preview.png)
 
 ![3 处修改同时生效](docs/screenshots/m1-multi-annotation-result.png)
 
@@ -360,7 +369,18 @@ HEAD 指回第一轮 commit、聊天记录从 4 条截断为 2 条、预览从�
 A 的聊天记录保留且预览恢复红色；再点「清除标注」回到沙盒 root baseline，
 预览恢复初始颜色。该用例明确覆盖 M1.5 “全局线性历史”限制。
 
-### 7. 分层验证
+### 7. 新增组件 E2E
+
+```bash
+/tmp/vibe-browser/bin/python scripts/add_component_e2e_test.py
+```
+
+在画布上圈选大卡片内部，输入「添加一个红色的提交按钮」，校验浮层
+`data-action` 自动从 `MODIFY` 切到 `ADD`、手动切换可覆盖；提交后 Mock 在
+卡片内插入 `button.vibe-added-button`，`npm run build` 通过，预览 iframe
+中新增按钮文本为「提交」、背景为 `rgb(255, 0, 0)`，原有 CTA 仍保留。
+
+### 8. 分层验证
 
 ```bash
 python3 scripts/sandbox_e2e_test.py   # 沙盒生命周期 / 补丁 / 构建
@@ -368,7 +388,7 @@ python3 scripts/agent_e2e_test.py     # 批量标注 / 自动修复 / 3 次上�
 ./scripts/smoke-test.sh               # Java -> Python 健康检查
 ```
 
-### 8. 手动调用
+### 9. 手动调用
 
 ```bash
 curl -s http://127.0.0.1:5173/api/v1/health | python3 -m json.tool
@@ -444,6 +464,10 @@ AI Core 的 HTTP 状态与 JSON 原样返回：业务失败（重试耗尽）是
 （1~3 个；旧版单 `annotation` 自动归一为单元素数组），创建沙盒并同步执行
 LangGraph：
 
+- 每个 annotation 携带 `action: "MODIFY" | "ADD"`。`MODIFY` 修改已有元素；
+  `ADD` 要求模型保留原有 DOM，在选区对应的父级 / 兄弟级节点插入完整 JSX，
+  `target` 可为空并由 `worldTarget` 几何位置决定插入点。Planner / Coder
+  的 System Prompt 均显式约束这一点。
 - 每个 annotation 可携带 `threadId` / `chatHistory` / `sandboxId`。服务端
   `ThreadMemoryStore` 合并前端历史与进程内记录，生成
   `threadContext = {threadId, chatHistory, previousRuns}` 注入 Planner /
@@ -463,8 +487,9 @@ LangGraph：
 - `verifier` 只执行一次 `npm run build`；失败日志写入状态并由 `coder` 整体
   重试，`retry_count` 硬上限为 3，预算耗尽返回 `FAILED`。
 - Mock 场景：`fail_first`（首次写错，验证自动修复）、`always_fail`
-  （验证 3 次上限）、`none`（直接成功）。`agent_e2e_test.py` 还验证第 4 个
-  标注会被 Pydantic 以 422 拒绝。
+  （验证 3 次上限）、`add_button`（强制新增按钮，用于 ADD E2E）、`none`
+  （直接成功）。`agent_e2e_test.py` 还验证第 4 个标注会被 Pydantic 以 422
+  拒绝。
 
 ### 接入真实 DeepSeek
 

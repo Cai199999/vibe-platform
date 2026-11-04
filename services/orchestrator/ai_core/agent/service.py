@@ -599,6 +599,9 @@ class RunExecutionService:
                     "index": index,
                     "annotation_id": annotation.annotation_id,
                     "thread_id": thread_id,
+                    # MODIFY / ADD 的显式副本：提示词与 Mock 不必再猜测，
+                    # 同时保留 annotation.action 供模型读取完整信封。
+                    "action": annotation.action,
                     "annotation": annotation_payload,
                     "intent_kind": intent.kind if intent else "UI_ONLY",
                     "instruction": str(annotation.payload.get("text") or "").strip(),

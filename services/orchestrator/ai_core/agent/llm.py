@@ -121,7 +121,7 @@ class MockAgentLLM(AgentLLM):
     """
 
     def __init__(self, scenario: str = "fail_first") -> None:
-        if scenario not in {"fail_first", "always_fail", "none"}:
+        if scenario not in {"fail_first", "always_fail", "add_button", "none"}:
             raise AgentLLMConfigurationError(f"未知 mock_scenario: {scenario}")
         self.scenario = scenario
 
@@ -135,8 +135,11 @@ class MockAgentLLM(AgentLLM):
             f"1. 读取目标文件，综合分析 {len(annotations)} 个标注需求：",
         ]
         for index, annotation in enumerate(annotations, start=1):
+            action = _annotation_action(annotation)
+            action_label = "新增组件" if action == "ADD" else "修改已有元素"
             lines.append(
-                f"   - 标注 {index}（{_annotation_selector(annotation)}）："
+                f"   - 标注 {index}（{action_label} · "
+                f"{_annotation_selector(annotation) or '画布空白区域'}）："
                 f"{_annotation_text(annotation)}"
             )
         history_count = sum(
@@ -232,12 +235,26 @@ class MockAgentLLM(AgentLLM):
         cleaned = "\n".join(lines)
         return cleaned + "\n" if code.endswith("\n") else cleaned
 
-    @classmethod
-    def _apply_instruction(cls, code: str, annotation: dict[str, Any]) -> str:
-        """把单条自然语言指令映射为确定性 Mock 修改。"""
+    def _apply_instruction(self, code: str, annotation: dict[str, Any]) -> str:
+        """把单条自然语言指令映射为确定性 Mock 修改。
+
+        ADD 分支优先于 MODIFY：action=ADD、mock_scenario=add_button 或
+        指令包含“添加 / 新建 / 插入”时，直接向最合适的容器末尾插入一个
+        完整 JSX 按钮，而不是覆盖原有元素。
+        """
         instruction = _annotation_text(annotation)
+        if not instruction:
+            return code
+
+        if (
+            self.scenario == "add_button"
+            or _annotation_action(annotation) == "ADD"
+            or _is_add_intent(instruction)
+        ):
+            return _insert_button(code, annotation, instruction)
+
         selector = _annotation_selector(annotation)
-        if not selector or not instruction:
+        if not selector:
             return code
 
         color = _detect_color(instruction)
@@ -311,6 +328,9 @@ class DeepSeekAgentLLM(AgentLLM):
             "要求：\n"
             "- 逐条列出每个标注的目标组件、要修改的属性（颜色 / 文案 / 字号 /"
             " 间距 / 布局 / 结构等）与验收标准；\n"
+            "- 每个标注带 action：MODIFY 表示修改已有元素；ADD 表示在圈选"
+            "区域新增组件。ADD 时必须在计划中给出插入位置（父级容器或兄弟"
+            "节点）与新增内容，禁止把新增内容伪造成“修改某个已有元素”；\n"
             "- 每个标注可能带 threadContext.chatHistory（同一圈的多轮对话）和"
             " previousRuns（上一轮修改记录）。必须理解上下文，例如用户先说"
             "“改成红色”，再说“不，我要蓝色”，最终结果只能是蓝色；不要同时保留"
@@ -360,6 +380,17 @@ class DeepSeekAgentLLM(AgentLLM):
             "基于历史对话与当前源码做增量修改，以最新用户指令为准；用户否定"
             "上一轮方案时（如“不，我要蓝色”），最终代码只能体现新方案，同时"
             "保留其它未被否定的属性；\n"
+            "- 标注的 action 字段决定操作类型：MODIFY 修改已有元素；ADD 新增"
+            "组件。ADD 时必须保留原有 DOM 结构，不得删除或覆盖已有节点；"
+            "请结合 target.selector、target.source.component 与 worldTarget"
+            " 选区中心，找到最合适的父级或兄弟级节点，插入完整的、可编译的"
+            " JSX。优先插入到目标容器内部末尾；如果目标只是文字 / 按钮等叶子"
+            "元素，则插到该元素之后作为兄弟节点。target 为空（用户圈了空白"
+            "区域）时，按选区几何位置选择页面中覆盖该区域的容器，绝不能把"
+            "新增内容写到已有元素内部破坏结构；\n"
+            "- ADD 生成的新元素必须有可辨识的文本与样式（如 className / style"
+            " / 已有 CSS 类），新增按钮需保证点击区域可见；同一 thread 多轮"
+            " ADD 时不要重复插入完全相同的组件，除非用户明确要求再来一个；\n"
             "- 如果上一轮构建失败，必须针对错误日志修复，同时保证全部标注仍然"
             "生效，而不是重复原方案。"
         )
@@ -454,6 +485,133 @@ def _annotation_target_file(
     if path in current_files:
         return path
     return fallback
+
+
+def _annotation_action(annotation: dict[str, Any]) -> str:
+    """读取操作类型，兼容旧客户端（缺省 MODIFY）与大小写差异。"""
+    return str(annotation.get("action") or "MODIFY").upper()
+
+
+_ADD_INTENT_TOKENS = ("添加", "新增", "新建", "插入", "加一个", "加个", "add ")
+
+
+def _is_add_intent(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        token in lowered if token.isascii() else token in text
+        for token in _ADD_INTENT_TOKENS
+    )
+
+
+def _detect_button_label(text: str) -> str:
+    """从“添加一个红色的提交按钮”中提取按钮文案“提交”。"""
+    patterns = (
+        re.compile(
+            r"(?:添加|新增|新建|插入|加)(?:一个|个|一条|一段)?\s*"
+            r"[^，。；\n]{0,10}?(?:的)?([^，。；\n]{1,12}?)按钮"
+        ),
+        re.compile(
+            r"(?:按钮|文字|文案)[^，。；\n]{0,6}?"
+            r"[：:为是]?\s*[“\"'‘]([^”\"'’]+)[”\"'’]"
+        ),
+    )
+    for pattern in patterns:
+        match = pattern.search(text)
+        if not match:
+            continue
+        label = match.group(1).strip()
+        for word, _color in _COLOR_WORDS:
+            if word.isascii():
+                label = re.sub(rf"\b{re.escape(word)}\b", "", label, flags=re.I)
+            else:
+                label = label.replace(word, "")
+        label = label.strip().strip("的").strip()
+        if label:
+            return label[:12]
+    if "提交" in text:
+        return "提交"
+    return "新增"
+
+
+def _next_added_button_id(code: str) -> str:
+    """复用已经存在的 data-vibe-target 命名，避免多次新增时冲突。"""
+    if 'data-vibe-target="added-button"' not in code:
+        return "added-button"
+    index = 2
+    while f'data-vibe-target="added-button-{index}"' in code:
+        index += 1
+    return f"added-button-{index}"
+
+
+def _line_indent(code: str, index: int) -> str:
+    """返回 index 所在行的前导缩进。"""
+    line_start = code.rfind("\n", 0, index) + 1
+    match = re.match(r"[ \t]*", code[line_start:])
+    return match.group(0) if match else ""
+
+
+def _insert_button(code: str, annotation: dict[str, Any], instruction: str) -> str:
+    """向目标容器末尾（无法确定容器时插到目标元素之后）插入完整 JSX 按钮。
+
+    插入点选择原则：
+      1. 命中 card / section 等内容容器：插到容器闭合标签之前，成为父子关系；
+      2. 命中 button / p / h1 等叶子元素：插到该元素闭合标签之后，成为兄弟；
+      3. 没有 target（用户在空白区域圈选）：回退到页面主容器末尾。
+    这样不会把 `<button>` 塞进 `<p>` / `<h1>` 内部，保证 JSX 结构合法。
+    """
+    label = _detect_button_label(instruction)
+    color = _detect_color(instruction) or "#2563eb"
+    button_id = _next_added_button_id(code)
+    button = (
+        f'<button className="vibe-added-button" data-vibe-target="{button_id}" '
+        f"type=\"button\" style={{{{ backgroundColor: '{color}', color: '#fff', "
+        "border: 0, borderRadius: '999px', padding: '12px 24px', "
+        "marginTop: '16px', fontSize: '14px', fontWeight: 600, "
+        f"cursor: 'pointer' }}}}>{label}</button>"
+    )
+
+    selector = _annotation_selector(annotation)
+    marker_match = re.search(r"data-vibe-target\s*=\s*['\"]([^'\"]+)['\"]", selector)
+    marker = marker_match.group(1) if marker_match else ""
+
+    # 1) 内容容器：优先插入到容器内部末尾。
+    if marker in {"card", ""}:
+        closing = code.rfind("</section>")
+        if closing >= 0:
+            indent = _line_indent(code, closing) + "  "
+            line_start = code.rfind("\n", 0, closing) + 1
+            return code[:line_start] + f"{indent}{button}\n" + code[line_start:]
+        # 没有 section（例如导出后被简化）时退到 main 内部。
+        closing_main = code.rfind("</main>")
+        if closing_main >= 0:
+            indent = _line_indent(code, closing_main) + "  "
+            line_start = code.rfind("\n", 0, closing_main) + 1
+            return code[:line_start] + f"{indent}{button}\n" + code[line_start:]
+
+    # 2) 叶子元素：插到目标闭合标签之后，成为兄弟节点。
+    if marker:
+        opening = re.search(
+            r"<([a-zA-Z][\w-]*)[^>]*data-vibe-target\s*=\s*['\"]"
+            + re.escape(marker)
+            + r"['\"][^>]*>",
+            code,
+        )
+        if opening:
+            tag = opening.group(1)
+            close_index = code.find(f"</{tag}>", opening.end())
+            if close_index >= 0:
+                insert_at = close_index + len(f"</{tag}>")
+                indent = _line_indent(code, opening.start())
+                return code[:insert_at] + f"\n{indent}{button}" + code[insert_at:]
+
+    # 3) 最终兜底：插到最后一个 </section> 或 </main> 之前。
+    for closing_tag in ("</section>", "</main>"):
+        closing = code.rfind(closing_tag)
+        if closing >= 0:
+            indent = _line_indent(code, closing) + "  "
+            line_start = code.rfind("\n", 0, closing) + 1
+            return code[:line_start] + f"{indent}{button}\n" + code[line_start:]
+    return code
 
 
 def _detect_color(text: str) -> str | None:

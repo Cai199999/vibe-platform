@@ -121,6 +121,7 @@ function AnnotationPopover({
   panReady,
   inputRef,
   onChange,
+  onActionChange,
   onRemove,
   onSend,
   onRollback,
@@ -143,6 +144,8 @@ function AnnotationPopover({
 
   const sending = Boolean(submitting && pending)
   const rollingBack = sending && pendingAction === 'rollback'
+  // 兼容旧项目状态：没有显式 action 时按是否命中元素推断。
+  const action = annotation.action ?? (annotation.target ? 'MODIFY' : 'ADD')
   return (
     <form
       className={`canvas-popover tone-${index % 3} ${active ? 'is-active' : ''}`}
@@ -150,6 +153,7 @@ function AnnotationPopover({
       role="dialog"
       aria-label={`标注 ${index + 1} 多轮对话`}
       data-annotation-id={annotation.id}
+      data-action={action}
       onPointerDown={(event) => {
         // 中键 / 空格+左键是全局平移手势：即使从浮层上按下也必须继续
         // 冒泡给画布，否则浮层覆盖画布中心时会出现“中间区域无法拖动”的死角。
@@ -174,6 +178,26 @@ function AnnotationPopover({
     >
       <div className="popover-head">
         <span className="popover-dot" aria-label={`标注 ${index + 1}`} />
+        {/* 操作类型切换：修改已有元素 / 在选区新增组件。
+            默认根据圈选是否命中元素与文案自动推断，用户可手动覆盖。 */}
+        <div className="popover-action" role="group" aria-label="操作类型">
+          {[
+            { value: 'MODIFY', label: '修改', title: '修改圈选到的已有元素' },
+            { value: 'ADD', label: '新增', title: '在圈选区域新增一个组件' },
+          ].map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={action === option.value ? 'is-active' : ''}
+              aria-pressed={action === option.value}
+              title={option.title}
+              disabled={submitting}
+              onClick={() => onActionChange?.(annotation.id, option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
         <button
           className="popover-remove"
           type="button"
@@ -265,6 +289,7 @@ export default function CanvasStage({
   annotations = [],
   onAnnotationAdd,
   onAnnotationIntentChange,
+  onAnnotationActionChange,
   onAnnotationRemove,
   onAnnotationSend,
   onAnnotationRollback,
@@ -549,6 +574,7 @@ export default function CanvasStage({
                     else inputRefs.current.delete(annotation.id)
                   }}
                   onChange={onAnnotationIntentChange}
+                  onActionChange={onAnnotationActionChange}
                   onRemove={onAnnotationRemove}
                   onSend={onAnnotationSend}
                   onRollback={onAnnotationRollback}
