@@ -8,6 +8,7 @@
     - 两种模式往返时组件零卸载，画布标注与 iframe / HMR 状态不丢失
     - 预览 iframe 等比缩放居中、外层无滚动条、iframe body 隐藏滚动条
     - Agent 完成后「查看效果」快捷切换
+    - 沙盒被外部销毁时预览显示连接失败，并可一键重新执行
     - 关闭 Tab = 删除项目 + 销毁 Docker 沙盒（通过 BFF 调用 Python internal API）
     - 最多 5 个 Tab；新建项目按存活数量递增命名且不重名
 
@@ -24,6 +25,7 @@
     docs/screenshots/phase4-loading.png
     docs/screenshots/phase4-preview-mode.png
     docs/screenshots/phase4-dual-mode.png
+    docs/screenshots/phase4-preview-offline.png
     docs/screenshots/phase4-tab-limit.png
     docs/screenshots/phase4-account.png
 """
@@ -252,10 +254,14 @@ def main() -> None:
         page = browser.new_page(viewport={"width": 1680, "height": 1050})
 
         console_errors: list[str] = []
+        # 失联演练会故意制造 ERR_CONNECTION_REFUSED / 旧沙盒 404，这段时间不收集。
+        console_state = {"suppress": False}
         page.on(
             "console",
             lambda message: (
-                console_errors.append(message.text) if message.type == "error" else None
+                console_errors.append(message.text)
+                if message.type == "error" and not console_state["suppress"]
+                else None
             ),
         )
 
@@ -461,7 +467,43 @@ def main() -> None:
         )
         print("   刷新后预览与沙盒信息均恢复，关闭项目仍可追踪沙盒")
 
-        print("\n== 9. 关闭项目：删除状态并销毁沙盒容器 ==")
+        print("\n== 9. 沙盒被外部销毁：预览显示连接失败并可重新执行 ==")
+        console_state["suppress"] = True
+        removed = subprocess.run(
+            ["docker", "rm", "-f", f"vibe-sandbox-{sandbox_id}"],
+            capture_output=True,
+            text=True,
+        )
+        if removed.returncode != 0:
+            fail(f"无法模拟沙盒失联: {removed.stderr.strip()}")
+
+        active.get_by_role("button", name="画布", exact=True).click()
+        expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
+        active.get_by_role("button", name="预览", exact=True).click()
+        offline = active.locator(".runtime-error")
+        expect(offline).to_be_visible(timeout=15_000)
+        expect(offline).to_contain_text("预览连接失败")
+        retry = offline.get_by_role("button", name="重新执行 Agent")
+        expect(retry).to_be_visible()
+        page.screenshot(
+            path=str(SCREENSHOT_DIR / "phase4-preview-offline.png"), full_page=True
+        )
+
+        retry.click()
+        expect(active.locator(".runtime-result-overlay")).to_be_visible(timeout=120_000)
+        recreated_sandbox_id = active.locator(".runtime-panel").get_attribute(
+            "data-sandbox-id"
+        )
+        if not recreated_sandbox_id or recreated_sandbox_id == sandbox_id:
+            fail(f"重新执行后未创建新沙盒: {recreated_sandbox_id}")
+        sandbox_id = recreated_sandbox_id
+        frame = page.frame_locator(".tab-window.is-active .runtime-preview-frame")
+        expect(frame.locator("button")).to_have_css(
+            "background-color", "rgb(255, 0, 0)"
+        )
+        print(f"   失联提示正确，重新执行后新沙盒: {sandbox_id}")
+
+        print("\n== 10. 关闭项目：删除状态并销毁沙盒容器 ==")
         page.locator(".workspace-tab.is-active .tab-close").click()
         expect(page.locator(".workspace-tab")).to_have_count(1)
         page.locator(".project-switcher-button").click()
@@ -471,8 +513,9 @@ def main() -> None:
         page.keyboard.press("Escape")
         wait_sandbox_removed(sandbox_id)
         print(f"   项目已删除，容器 vibe-sandbox-{sandbox_id} 已销毁")
+        console_state["suppress"] = False
 
-        print("\n== 10. 同时打开 5 个项目，触发上限 ==")
+        print("\n== 11. 同时打开 5 个项目，触发上限 ==")
         for _ in range(4):
             open_new_project(page)
         expect(page.locator(".workspace-tab")).to_have_count(5)
@@ -496,7 +539,7 @@ def main() -> None:
         page.keyboard.press("Escape")
         print("   5 个 Tab 时新建入口已禁用并展示上限提示")
 
-        print("\n== 11. 关闭项目 2 后新建，按存活数量递增且不重名 ==")
+        print("\n== 12. 关闭项目 2 后新建，按存活数量递增且不重名 ==")
         page.locator(".workspace-tab", has_text="未命名项目 2").locator(
             ".tab-close"
         ).click()
@@ -512,7 +555,7 @@ def main() -> None:
             fail(f"项目名称出现重复: {names}")
         print("   关闭项目 2 后，新项目按存活数递增为「未命名项目 7」")
 
-        print("\n== 12. 账户设置、退出与账号密码登录 ==")
+        print("\n== 13. 账户设置、退出与账号密码登录 ==")
         page.locator(".avatar-button").click()
         page.get_by_role("menuitem", name="账户设置").click()
         expect(page.locator(".account-dialog")).to_be_visible()
@@ -541,7 +584,7 @@ def main() -> None:
         browser.close()
 
     print(
-        "\nPASS: 对比/展示模式 → 缩放预览 → 沙盒销毁 → 5 Tab 上限 → 账户体系 全流程通过"
+        "\nPASS: 对比/展示模式 → 缩放预览 → 失联恢复 → 沙盒销毁 → 5 Tab 上限 → 账户体系 全流程通过"
     )
 
 

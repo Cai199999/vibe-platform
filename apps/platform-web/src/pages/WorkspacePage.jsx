@@ -18,6 +18,8 @@ const EMPTY_RUN = {
   startedAt: null,
   result: null,
   error: null,
+  // 最近一次指令用于预览失联后一键重新执行。
+  lastInstruction: '',
   // 同一项目可能执行多次，每次都会生成新沙盒；关闭项目时需全部销毁。
   sandboxIds: [],
 }
@@ -44,6 +46,7 @@ function loadRunStates(projects) {
         annotation: saved.annotation ?? null,
         result: saved.result ?? null,
         error: saved.error ?? null,
+        lastInstruction: saved.lastInstruction ?? '',
         sandboxIds,
       }
     })
@@ -194,6 +197,7 @@ export default function WorkspacePage() {
         annotation: run.annotation,
         result: run.result,
         error: run.error,
+        lastInstruction: run.lastInstruction,
         sandboxIds: run.sandboxIds,
       }
     })
@@ -279,6 +283,7 @@ export default function WorkspacePage() {
       result: null,
       error: null,
       intent: '',
+      lastInstruction: text,
     })
 
     const source = project.files?.[TARGET_FILE] ?? INITIAL_APP
@@ -331,6 +336,16 @@ export default function WorkspacePage() {
       inflightRef.current.delete(projectId)
       patchRun(projectId, { submitting: false })
     }
+  }
+
+  /**
+   * 预览沙盒失联后，用最近一次指令重新执行。
+   * 仍复用原画布标注；没有历史指令（旧会话）时由 UI 引导用户手动重发。
+   */
+  const handleRetry = (projectId) => {
+    const run = runStates[projectId]
+    if (!run?.lastInstruction || !run.annotation) return
+    void handleSubmit(projectId, run.lastInstruction)
   }
 
   /**
@@ -432,6 +447,7 @@ export default function WorkspacePage() {
                 onIntentChange={(intent) => handleIntentChange(project.id, intent)}
                 onClearAnnotation={() => handleClearAnnotation(project.id)}
                 onSubmit={(instruction) => handleSubmit(project.id, instruction)}
+                onRetry={() => handleRetry(project.id)}
               />
             )
           })}

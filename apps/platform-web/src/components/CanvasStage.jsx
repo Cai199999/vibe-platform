@@ -30,6 +30,7 @@ export default function CanvasStage({
   onSubmit,
   submitting,
   disabled,
+  applied = false,
 }) {
   const stageRef = useRef(null)
   const inputRef = useRef(null)
@@ -177,7 +178,11 @@ export default function CanvasStage({
               <p className="mock-copy">
                 在画布上圈选任意组件，写下修改意图。Agent 会生成代码、运行构建，并自动修复错误。
               </p>
-              <button className="mock-cta" data-vibe-target="cta-button" type="button">
+              <button
+                className={`mock-cta ${applied ? 'is-applied' : ''}`}
+                data-vibe-target="cta-button"
+                type="button"
+              >
                 开始体验
               </button>
               <span className="cta-hint">圈选我，然后输入“改颜色”</span>

@@ -526,6 +526,15 @@ code {
   transition: background 0.2s ease;
 }
 
+/* Agent 成功后的演示改色同步回画布，避免画布与预览出现明显色差。 */
+.mock-cta.is-applied {
+  background: #ff0000;
+}
+
+.mock-cta.is-applied:hover {
+  background: #e60000;
+}
+
 .cta-hint {
   margin-left: 14px;
   color: var(--faint);
@@ -2905,6 +2914,17 @@ code {
 
 .runtime-error {
   padding-top: 6px;
+}
+
+.runtime-error .ghost-button {
+  margin-top: 14px;
+}
+
+.runtime-offline-url {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px;
 }
 
 /* ------------------------------------------------------------------ */

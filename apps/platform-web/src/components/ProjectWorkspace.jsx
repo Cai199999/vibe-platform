@@ -21,6 +21,7 @@ export default function ProjectWorkspace({
   onIntentChange,
   onClearAnnotation,
   onSubmit,
+  onRetry,
 }) {
   // 当前布局：compare = 单屏切换，dual = 双屏同显。
   const [viewMode, setViewMode] = useState('compare')
@@ -128,6 +129,7 @@ export default function ProjectWorkspace({
             onSubmit={onSubmit}
             submitting={submitting}
             disabled={submitting}
+            applied={run.result?.status === 'AWAITING_APPROVAL'}
           />
 
           {previewReady && viewMode === 'compare' && mode === 'canvas' && (
@@ -150,6 +152,7 @@ export default function ProjectWorkspace({
             projectName={project.name}
             expanded
             visible={active && previewVisible}
+            onRetry={run.lastInstruction ? onRetry : undefined}
           />
         </div>
       </div>

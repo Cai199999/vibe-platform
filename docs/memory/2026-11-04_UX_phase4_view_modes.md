@@ -44,6 +44,11 @@
   使用 `scrolling="no"`，双重保证不出现原生滚动条。
 - 画布、iframe、chrome 与舞台统一使用 `#0f172a`（`--screen-bg`），不再使用
   纯黑，边缘完全融合。
+- 预览 URL 通过 `fetch(..., { mode: 'no-cors' })` 探活；容器被外部销毁后显示
+  `PREVIEW_OFFLINE` 覆盖层，并提供「重新执行 Agent」。`lastInstruction` 随
+  Run 快照写入 sessionStorage，重试时复用原标注，不需要重新圈选。
+- Agent 成功后画布 Mock 按钮同步变红（`.mock-cta.is-applied`），避免对比模式
+  下画布与预览的内容状态明显不一致。
 - RuntimePanel 改为「42px chrome + 全出血 stage」：
   - chrome 与 CanvasStage 的浏览器栏等高，双屏左右严格对齐；
   - 状态 pill、修复次数、详情按钮以底部浮层覆盖；
@@ -87,10 +92,13 @@
 5. iframe 内按钮仍为 `rgb(255, 0, 0)`，body `overflow:hidden`。
 6. 详情抽屉展示 Diff 与 sandboxId，关闭后恢复预览。
 7. 刷新后恢复画布模式、CTA 与 sandboxId；关闭 Tab 后 Docker 容器销毁。
-8. 5 Tab 上限、按存活数量递增命名且无重复、账户体系均通过。
+8. 外部 `docker rm -f` 当前沙盒后切回预览，显示 PREVIEW_OFFLINE；点击
+   「重新执行 Agent」会创建新沙盒并恢复红色按钮预览。
+9. 5 Tab 上限、按存活数量递增命名且无重复、账户体系均通过。
 
 截图：`phase4-canvas-mode.png`、`phase4-preview-mode.png`、
-`phase4-dual-mode.png`、`phase4-tab-limit.png`、`phase4-account.png`。
+`phase4-dual-mode.png`、`phase4-preview-offline.png`、
+`phase4-tab-limit.png`、`phase4-account.png`。
 
 ## 踩坑记录
 

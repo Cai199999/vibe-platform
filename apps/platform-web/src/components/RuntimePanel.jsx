@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import DiffView from './DiffView.jsx'
 import ScaledPreview from './ScaledPreview.jsx'
 
@@ -175,6 +175,62 @@ function RunDetails({ result, onClose }) {
 }
 
 /**
+ * 预览 URL 存活探测。
+ *
+ * 沙盒容器可能在页面刷新、服务重启或清理后被销毁，但 sessionStorage 里仍
+ * 保留旧的 previewUrl。此时 iframe 只会显示浏览器自己的“连接失败”页面。
+ * 用 no-cors 请求探活：能连上就返回 opaque response，连接拒绝会 reject。
+ */
+function usePreviewConnection(previewUrl, active) {
+  const [status, setStatus] = useState('idle')
+
+  useEffect(() => {
+    if (!previewUrl || !active) {
+      setStatus('idle')
+      return undefined
+    }
+
+    let cancelled = false
+    const controller = new AbortController()
+    // 端口被防火墙丢包时 fetch 可能长时间挂起，4s 后强制判定失联。
+    const timeout = window.setTimeout(() => controller.abort(), 4000)
+    setStatus('checking')
+
+    const probe = async () => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await fetch(previewUrl, {
+            mode: 'no-cors',
+            cache: 'no-store',
+            signal: controller.signal,
+          })
+          window.clearTimeout(timeout)
+          if (!cancelled) setStatus('online')
+          return
+        } catch {
+          if (cancelled) return
+          if (attempt === 0) {
+            // Vite 刚启动时可能有一瞬间不可达，重试一次再判定失败。
+            await new Promise((resolve) => setTimeout(resolve, 400))
+          }
+        }
+      }
+      window.clearTimeout(timeout)
+      if (!cancelled) setStatus('offline')
+    }
+
+    void probe()
+    return () => {
+      cancelled = true
+      window.clearTimeout(timeout)
+      controller.abort()
+    }
+  }, [previewUrl, active])
+
+  return status
+}
+
+/**
  * 每个 Tab 独立的“沙盒屏幕”。
  *
  * 结构固定为「chrome 顶栏 + 全出血预览画布」：
@@ -182,12 +238,20 @@ function RunDetails({ result, onClose }) {
  *  - 预览内容使用 ScaledPreview 等比缩放，外层不产生滚动条；
  *  - 状态、详情与 Diff 以浮层 / 抽屉覆盖在画布上，不挤压 iframe 尺寸。
  */
-export default function RuntimePanel({ run, projectName, expanded = false, visible = true }) {
+export default function RuntimePanel({
+  run,
+  projectName,
+  expanded = false,
+  visible = true,
+  onRetry,
+}) {
   const [detailsOpen, setDetailsOpen] = useState(false)
   const { submitting, elapsed, result, error, annotation } = run
   const previewUrl = result?.previewUrl
   const success = result?.status === 'AWAITING_APPROVAL'
   const diffLines = result?.generatedPatch ? result.generatedPatch.split('\n').length : 0
+  const connection = usePreviewConnection(previewUrl, visible && !submitting)
+  const previewOffline = connection === 'offline'
 
   let stateLabel = 'IDLE'
   let stateClass = 'is-idle'
@@ -198,8 +262,8 @@ export default function RuntimePanel({ run, projectName, expanded = false, visib
     stateLabel = 'FAILED'
     stateClass = 'is-failed'
   } else if (result) {
-    stateLabel = success ? 'READY' : 'FAILED'
-    stateClass = success ? 'is-ready' : 'is-failed'
+    stateLabel = previewOffline ? 'OFFLINE' : success ? 'READY' : 'FAILED'
+    stateClass = previewOffline ? 'is-failed' : success ? 'is-ready' : 'is-failed'
   }
 
   return (
@@ -261,7 +325,25 @@ export default function RuntimePanel({ run, projectName, expanded = false, visib
           </div>
         )}
 
-        {!submitting && !error && result && (
+        {!submitting && !error && previewOffline && (
+          <div className="runtime-overlay">
+            <div className="error-state runtime-error">
+              <span className="error-code">PREVIEW_OFFLINE</span>
+              <h3>预览连接失败</h3>
+              <p>沙盒容器可能已被销毁、重启或端口已释放，当前地址无法连接。</p>
+              <p className="muted runtime-offline-url">{previewUrl}</p>
+              {onRetry ? (
+                <button className="ghost-button" type="button" onClick={onRetry}>
+                  重新执行 Agent
+                </button>
+              ) : (
+                <p className="muted">请切回画布，重新发送一次修改指令。</p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {!submitting && !error && result && !previewOffline && (
           <div className="runtime-result-overlay">
             <div className="runtime-result-status">
               <StatusPill status={result.status} />
