@@ -117,18 +117,20 @@ platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
   仍用 `display:none`。切换不会重建 React 组件或 iframe，圈选标注、浮层草稿
   与 Vite HMR WebSocket 连接全部保留。
 - 预览区与画布容器等高同宽：顶部 chrome 固定 42px，下方画面填满剩余空间；
-  `.project-viewport`、`.runtime-stage`、`.canvas-stage` 等外层全部
-  `overflow:hidden`。
-- 画布与预览共用 `useFillViewport`：以 1024px 为逻辑宽度，
-  `scale = 容器宽 / 1024`，逻辑高度取 `容器高 / scale`，最后用
-  `transform-origin: top left; transform: scale(scale)` 铺满容器。缩放后
-  iframe 宽高严格等于预览屏幕，不存在黑边；画布 Mock 页面使用同一套参数，
-  因此两边卡片尺寸、位置与垂直中心像素级一致。
+  `.canvas-frame` / `.runtime-panel` 都由父级 `.viewport-pane` 绝对定位
+  `inset:0`，内部元素无法把框架撑高；`.project-viewport`、`.runtime-stage`、
+  `.canvas-stage` 等外层全部 `overflow:hidden`。
+- 画布与预览共用 `useFillViewport`：固定 1280×720 设计视口，
+  `scale = max(容器宽 / 1280, 容器高 / 720)`（cover），再用
+  `translate(offsetX, offsetY) scale(scale)` 居中铺满，多出的方向由外层
+  `overflow:hidden` 裁切。这样无论容器比例如何都不会出现黑边；画布 Mock 与
+  iframe 使用完全相同的 scale / offset，因此卡片尺寸、位置与垂直中心一致。
 - 画布、iframe、chrome 与舞台统一使用 `#0f172a`，边缘完全融合；
   iframe 加 `scrolling="no"`，沙盒模板的 `html/body/#root` 也设
   `overflow:hidden`，内外都不会出现原生滚动条。
-- 结果状态、自动修复次数与「详情 / 代码 Diff」以浮层/抽屉覆盖在预览上，
-  不挤压 iframe 尺寸。
+- 结果状态、自动修复次数与「详情 / 代码 Diff」是 `position:absolute;
+  bottom:0; z-index:10` 的悬浮 HUD（半透明深色 + backdrop blur），覆盖在
+  iframe 底部，不参与布局，绝不挤压预览高度。
 - 预览 URL 会用 `no-cors` 请求探活；若容器已被销毁、服务重启或端口释放，
   预览区显示 **PREVIEW_OFFLINE / 预览连接失败**，而不是浏览器自带的错误页，
   并提供 **重新执行 Agent**（复用最近一次指令与画布标注）创建新沙盒。
@@ -200,8 +202,9 @@ python3 scripts/ui_e2e_test.py
 真实浏览器中验证未登录跳转 → 一键登录 → 新建项目 → 拖拽 Tab 排序 →
 刷新验证 localStorage 持久化 → 画布圈选并发送意图 → 执行中状态反馈 →
 **查看效果**切换全屏预览并校验 iframe 按钮 `rgb(255, 0, 0)` → 对比/展示
-模式往返，比对画布与预览面板宽高、检查外层无滚动条、iframe 缩放后严格铺满
-预览屏幕（左上角原点）→ 对比画布 Mock 卡片与 iframe 内卡片的宽高/垂直中心 →
+模式往返，比对画布与预览面板宽高、检查外层无滚动条、iframe 以 1280×720
+cover 缩放后完全覆盖预览屏幕（居中、无留白）→ 对比画布 Mock 卡片与 iframe
+内卡片的宽高/偏移/垂直中心 →
 用 DOM 节点标记验证组件零重挂载 → 详情抽屉中的 Diff 与沙盒信息 →
 **刷新恢复预览结果** → 外部删除沙盒容器，验证 PREVIEW_OFFLINE 提示与
 **重新执行 Agent** 创建新沙盒 → 关闭 Tab 并通过 Docker CLI 确认容器已销毁 →

@@ -29,19 +29,24 @@
 
 ### 无缝等比预览（`ScaledPreview.jsx` / `RuntimePanel.jsx`）
 
-- 新增 `useFillViewport`：固定逻辑宽度 `1024px`，
-  `scale = containerWidth / 1024`，逻辑高度取 `containerHeight / scale`。
-  iframe 用 `transform-origin: top left; transform: scale(scale)` 后宽高严格
-  等于预览屏幕，彻底消除 contain 方案的左右黑边。
-- `CanvasStage` 的 Mock 页面使用同一 hook 与同一套卡片样式（720px 卡片、
-  相同 padding / 字号 / 行高），因此画布与 iframe 内的卡片在宽高和垂直中心
-  上像素级对齐；E2E 直接比较两者 boundingBox。
+- `useFillViewport` 使用固定 **1280×720** 设计视口（沙盒默认桌面尺寸），
+  `scale = max(containerWidth / 1280, containerHeight / 720)`（cover），
+  再以 `translate(offsetX, offsetY) scale(scale)` 居中；多出的方向由外层
+  `overflow:hidden` 裁切。contain 会留黑边，固定 16:9 + 非等比拉伸会变形，
+  cover 是「固定视口 + 铺满容器 + 不变形」三者同时成立的唯一方案。
+- iframe 的 `width/height` 固定为 1280×720，沙盒页面按 1280×720 排版；
+  画布 Mock 的 `.canvas-viewport` 使用完全相同的尺寸、scale 与 offset。
+- `CanvasStage` 的 Mock 页面与 iframe 内页面使用同一套卡片样式（720px 卡片、
+  `border-box`、零 `p` 外边距、相同字号/行高），E2E 直接比较两者 boundingBox
+  以及相对屏幕的左上角偏移和垂直中心。
 - 只用 transform 缩放，不修改 `src`、不重建 iframe；切换布局只改变 scale，
   HMR WebSocket 与页面状态保持不变。
 - `.project-viewport`、`.viewport-pane`、`.runtime-stage`、
   `.runtime-preview-screen`、`.canvas-stage` 全部 `overflow:hidden`。
 - 沙盒模板与初始 App 都设置 `html/body { overflow:hidden }`；iframe 同时
   使用 `scrolling="no"`，双重保证不出现原生滚动条。
+- `.canvas-frame` 与 `.runtime-panel` 都相对父级 `.viewport-pane` 绝对定位
+  `inset:0`，高度完全由 pane 控制，内部内容不能把框架撑高。
 - 画布、iframe、chrome 与舞台统一使用 `#0f172a`（`--screen-bg`），不再使用
   纯黑，边缘完全融合。
 - 预览 URL 通过 `fetch(..., { mode: 'no-cors' })` 探活；容器被外部销毁后显示
@@ -52,7 +57,9 @@
   会导致画布与预览卡片宽高、垂直位置不一致，这是对比模式“框不一样”的根因。
 - RuntimePanel 改为「42px chrome + 全出血 stage」：
   - chrome 与 CanvasStage 的浏览器栏等高，双屏左右严格对齐；
-  - 状态 pill、修复次数、详情按钮以底部浮层覆盖；
+  - 状态 pill、修复次数、详情按钮改为 `position:absolute; bottom:0;
+    left:0; right:0; z-index:10` 的全宽 HUD，半透明深色 + backdrop blur，
+    悬浮在 iframe 上方，不占用任何布局高度；
   - Diff / 运行元信息放入 `.runtime-drawer` 覆盖层，不挤压 iframe；
   - Loading / Idle / Error 都是 stage 内的居中覆盖层，不产生滚动。
 
@@ -86,11 +93,11 @@
 1. 对比模式默认画布，圈选并完成 Agent；「查看效果」切到全屏预览。
 2. 切到展示模式：两个面板同时可见，`.canvas-frame` 与 `.runtime-panel`
    宽高一致；外层容器 overflow hidden 且无滚动距离。
-3. iframe 应用 `top left` 原点的 transform scale，缩放后宽高与预览屏幕一致；
-   画布 stage 与预览 screen 同宽同高，两侧卡片相对屏幕的左上角偏移、宽高与
-   垂直中心偏差均不超过 2px。实测对比模式 1113.8×400.9、offset
-   `(235.1,103.0)` vs `(235.1,102.8)`；展示模式 542.8×195.4、offset
-   `(114.6,192.8)` vs `(114.6,192.9)`。
+3. iframe 以 1280×720 为设计视口、`top left` 原点 cover 缩放：宽高都不小于
+   预览屏幕、至少一个方向严丝合缝、水平/垂直居中。画布 stage 与预览 screen
+   同宽同高，两侧卡片相对屏幕的左上角偏移、宽高与垂直中心偏差均不超过 2px。
+   实测对比模式 891.0×320.7、offset `(346.5,143.1)` vs `(346.5,143.1)`；
+   展示模式 581.0×209.1、offset `(95.5,185.9)` vs `(95.5,185.9)`。
 4. 在 DOM 上标记 canvas / iframe 节点，往返对比/展示与画布/预览后仍是
    同一节点，证明零重挂载。
 5. iframe 内按钮仍为 `rgb(255, 0, 0)`，body `overflow:hidden`。
@@ -111,17 +118,21 @@
 - 外层 `overflow:hidden` 不代表 `scrollWidth == clientWidth`：绝对定位的
   transform 仍会扩大滚动范围。测试只对真正会滚动的容器断言 scroll 尺寸，
   对 `runtime-preview-screen` 断言 computed overflow。
-- 只按宽度缩放时，iframe 逻辑高度必须取 `containerH / scale`，否则要么留白
-  要么纵向裁切；这也是画布与预览能严格对齐的关键。
 - 沙盒初始 App 默认 `content-box`，卡片会出现 `720 + padding + border` 的
   实际宽度；必须显式 `box-sizing: border-box`，否则和画布卡片宽度对不上。
 - 沙盒 `<p>` 默认外边距会撑高卡片，初始 App 的 kicker/copy 必须 `margin:0`，
   否则两侧卡片高度和垂直中心不一致。
-- 不要用固定 1024×640 + contain，容器比例一变就出现黑边；也不要 cover，
-  会裁切内容。宽度铺满 + 高度推导是当前形态下唯一稳定解。
+- 固定 1280×720 + contain 在宽高比不一致时必然留黑边；固定宽高 + 非等比拉伸
+  会变形。cover（取较大比例 + 居中 + 裁切）才能同时满足「固定设计视口」
+  与「铺满容器」；当前页面核心卡片居中，裁切只发生在页面边缘。
+- 画布 Mock 的响应式规则（如手机断点单独改 `padding`）必须以 1280×720
+  设计视口为准，不能跟随真实浏览器视口，否则会与 iframe 内页面产生差异。
+- cover 会让 `.canvas-stage` 的 `scrollWidth > clientWidth`，这是被裁剪的
+  预期结果；只要 computed `overflow:hidden`，用户无法滚动。E2E 只对真正
+  需要无滚动的外层容器断言 scroll 尺寸。
 
 ## 遗留
 
 - 直接关闭浏览器标签页不会触发前端 cleanup，仍需服务端 TTL / 孤儿容器回收。
-- 预览逻辑宽度固定 1024px，后续可增加设备尺寸选择（桌面/平板/手机）。
+- 预览设计视口固定 1280×720，后续可增加设备尺寸选择（桌面/平板/手机）。
 - 导入项目仍是占位；任意页面若要完整适配，可考虑读取文档尺寸后动态缩放。

@@ -2309,10 +2309,14 @@ code {
   background: var(--screen-bg);
 }
 
+/* 画布与预览的框架高度完全由父级 pane 决定，内部元素不得把框架撑开。 */
 .viewport-pane .canvas-frame {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
-  height: 100%;
+  height: auto;
+  min-height: 0;
   border: 0;
   border-radius: 0;
   box-shadow: none;
@@ -2394,6 +2398,10 @@ code {
 }
 
 .viewport-pane .runtime-panel {
+  position: absolute;
+  inset: 0;
+  height: auto;
+  min-height: 0;
   border: 0;
   border-radius: 0;
 }
@@ -2726,23 +2734,25 @@ code {
   background: rgba(17, 8, 14, 0.94);
 }
 
-/* 结果状态与操作浮层不占据 iframe 空间。 */
+/* 结果状态与操作栏是悬浮 HUD：绝对定位在 iframe 上方，绝不参与布局，
+   因此不会挤压预览高度。 */
 .runtime-result-overlay {
   position: absolute;
-  right: 12px;
-  bottom: 12px;
-  left: 12px;
-  z-index: 6;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 8px 10px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 13px;
-  background: rgba(2, 6, 23, 0.78);
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.34);
-  backdrop-filter: blur(12px);
+  padding: 10px 14px;
+  border: 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 0;
+  background: rgba(2, 6, 23, 0.82);
+  box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(14px);
   pointer-events: none;
 }
 
@@ -3076,22 +3086,8 @@ code {
     border-radius: 18px;
   }
 
-  .canvas-stage {
-    height: 380px;
-  }
-
-  .mock-page {
-    padding: 20px;
-  }
-
-  .mock-card {
-    padding: 26px;
-  }
-
-  .cta-hint {
-    display: block;
-    margin: 10px 0 0;
-  }
+  /* 画布 Mock 页面必须始终保持 1280×720 的沙盒版式，不能按浏览器视口
+     单独改 padding，否则会与 iframe 内页面产生尺寸差异。 */
 
   .studio-tip {
     margin-left: 0;

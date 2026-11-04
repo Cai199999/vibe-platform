@@ -1,23 +1,24 @@
 import { useCallback, useLayoutEffect, useState } from 'react'
 
 /**
- * 画布与沙盒预览共用的“填充视口”计算。
+ * 画布与沙盒预览共用的“固定设计视口 + 等比铺满”计算。
  *
- * 设计宽度固定为 1024px：内容始终按桌面版式排版，再由 transform 缩放。
- *   scale = 容器宽度 / 1024
- *   逻辑高度 = 容器高度 / scale
+ * 设计视口固定为 1280×720（沙盒默认桌面视口），内容始终按该尺寸排版，
+ * 再由 transform 统一缩放：
+ *   scale = max(容器宽 / 1280, 容器高 / 720)   // cover，保证宽高都铺满
+ *   offsetX / offsetY = 剩余空间 / 2             // 多出的方向居中裁切
  *
- * 缩放后宽高都严格等于容器，因此不会出现 contain 方案的黑边，也不会像
- * cover 那样裁掉内容。CanvasStage 与 ScaledPreview 使用同一套参数，
- * 保证画布与预览中的页面在任意布局下都是同样的尺寸与位置。
+ * 使用 cover 而不是 contain：contain 会在宽高比不一致时留下黑边；cover 则
+ * 保证预览与画布都严格铺满容器，不出现任何留白。两者使用完全相同的
+ * scale 与 offset，因此卡片尺寸、位置和垂直中心始终像素级一致。
  */
-export const VIEWPORT_BASE_WIDTH = 1024
+export const VIEWPORT_BASE_WIDTH = 1280
+export const VIEWPORT_BASE_HEIGHT = 720
+
+const EMPTY_VIEWPORT = { scale: 0, offsetX: 0, offsetY: 0 }
 
 export default function useFillViewport(containerRef) {
-  const [{ scale, logicalHeight }, setViewport] = useState({
-    scale: 0,
-    logicalHeight: 0,
-  })
+  const [viewport, setViewport] = useState(EMPTY_VIEWPORT)
 
   const recalc = useCallback(() => {
     const node = containerRef.current
@@ -28,8 +29,15 @@ export default function useFillViewport(containerRef) {
       // display:none 的休眠 Tab 保持上一次比例，重新可见后 ResizeObserver 会重算。
       return
     }
-    const nextScale = width / VIEWPORT_BASE_WIDTH
-    setViewport({ scale: nextScale, logicalHeight: height / nextScale })
+    const scale = Math.max(
+      width / VIEWPORT_BASE_WIDTH,
+      height / VIEWPORT_BASE_HEIGHT,
+    )
+    setViewport({
+      scale,
+      offsetX: (width - VIEWPORT_BASE_WIDTH * scale) / 2,
+      offsetY: (height - VIEWPORT_BASE_HEIGHT * scale) / 2,
+    })
   }, [containerRef])
 
   useLayoutEffect(() => {
@@ -41,5 +49,5 @@ export default function useFillViewport(containerRef) {
     return () => observer.disconnect()
   }, [containerRef, recalc])
 
-  return { scale, logicalHeight, recalc }
+  return { ...viewport, recalc }
 }

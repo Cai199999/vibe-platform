@@ -146,6 +146,11 @@ def assert_no_outer_scroll(active, label: str) -> None:
             }""")
         if metrics["overflowX"] != "hidden" or metrics["overflowY"] != "hidden":
             fail(f"{label} {selector} 未设置 overflow:hidden: {metrics}")
+        # cover 缩放会故意让画布 viewport 超出舞台，超出部分由 overflow:hidden
+        # 裁切，因此 canvas-stage 的 scrollWidth 可以大于 clientWidth，但仍然
+        # 不可滚动；其余外层容器必须完全没有滚动距离。
+        if selector == ".canvas-stage":
+            continue
         if metrics["scrollWidth"] > metrics["clientWidth"] + 1:
             fail(f"{label} {selector} 出现横向滚动: {metrics}")
         if metrics["scrollHeight"] > metrics["clientHeight"] + 1:
@@ -153,7 +158,11 @@ def assert_no_outer_scroll(active, label: str) -> None:
 
 
 def assert_scaled_preview(active, label: str) -> None:
-    """iframe 必须以左上角为原点缩放，并在宽高上严格铺满预览屏幕。"""
+    """iframe 必须以 1280×720 为设计视口，cover 缩放后完全覆盖预览屏幕。
+
+    cover 允许画面在某一方向超出容器（多余部分由外层 overflow:hidden 裁切），
+    但必须满足：宽高都不小于屏幕、居中、且至少一个方向严丝合缝，不能留黑边。
+    """
     metrics = active.locator(".runtime-preview-screen").evaluate("""el => {
             const frame = el.querySelector('.runtime-preview-frame');
             const screen = el.getBoundingClientRect();
@@ -173,14 +182,28 @@ def assert_scaled_preview(active, label: str) -> None:
         fail(f"{label} iframe 已被卸载")
     if metrics["transformOrigin"] not in ("0px 0px", "left top", "0 0"):
         fail(f"{label} transform-origin 不是 top left: {metrics}")
-    if abs(metrics["frame"]["width"] - metrics["screen"]["width"]) > 2:
-        fail(f"{label} iframe 缩放后未铺满宽度: {metrics}")
-    if abs(metrics["frame"]["height"] - metrics["screen"]["height"]) > 2:
-        fail(f"{label} iframe 缩放后未铺满高度: {metrics}")
-    if abs(metrics["frame"]["x"] - metrics["screen"]["x"]) > 1:
-        fail(f"{label} iframe 未与预览屏幕左对齐: {metrics}")
-    if abs(metrics["frame"]["y"] - metrics["screen"]["y"]) > 1:
-        fail(f"{label} iframe 未与预览屏幕顶部对齐: {metrics}")
+
+    screen = metrics["screen"]
+    frame = metrics["frame"]
+    if frame["width"] + 1 < screen["width"]:
+        fail(f"{label} iframe 缩放后未覆盖宽度: {metrics}")
+    if frame["height"] + 1 < screen["height"]:
+        fail(f"{label} iframe 缩放后未覆盖高度: {metrics}")
+    # 至少一个方向必须刚好等于屏幕尺寸，否则说明缩放比例算错、出现留白。
+    if (
+        abs(frame["width"] - screen["width"]) > 2
+        and abs(frame["height"] - screen["height"]) > 2
+    ):
+        fail(f"{label} iframe 两个方向都未对齐屏幕: {metrics}")
+
+    frame_center_x = frame["x"] + frame["width"] / 2
+    screen_center_x = screen["x"] + screen["width"] / 2
+    frame_center_y = frame["y"] + frame["height"] / 2
+    screen_center_y = screen["y"] + screen["height"] / 2
+    if abs(frame_center_x - screen_center_x) > 1:
+        fail(f"{label} iframe 未在预览屏幕内水平居中: {metrics}")
+    if abs(frame_center_y - screen_center_y) > 1:
+        fail(f"{label} iframe 未在预览屏幕内垂直居中: {metrics}")
 
 
 def assert_pane_stack(active, visible: str, hidden: str, label: str) -> None:
@@ -258,8 +281,7 @@ def assert_canvas_preview_parity(page, active, label: str) -> None:
     ):
         if abs(left_a - left_b) > 2:
             fail(
-                f"{label} 画布与预览卡片{name}不一致: "
-                f"{left_a:.1f} vs {left_b:.1f}"
+                f"{label} 画布与预览卡片{name}不一致: " f"{left_a:.1f} vs {left_b:.1f}"
             )
 
     print(

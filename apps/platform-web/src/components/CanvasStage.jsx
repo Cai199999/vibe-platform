@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import useFillViewport, { VIEWPORT_BASE_WIDTH } from '../workspace/useFillViewport.js'
+import useFillViewport, {
+  VIEWPORT_BASE_HEIGHT,
+  VIEWPORT_BASE_WIDTH,
+} from '../workspace/useFillViewport.js'
 
 const clamp01 = (value) => Math.min(1, Math.max(0, value))
 
@@ -36,8 +39,8 @@ export default function CanvasStage({
   const [draft, setDraft] = useState(null)
   const [drawing, setDrawing] = useState(false)
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 })
-  // 与沙盒预览共用 1024px 设计宽度：缩放后画布与 iframe 的页面尺寸完全一致。
-  const { scale, logicalHeight } = useFillViewport(stageRef)
+  // 与沙盒预览共用 1280×720 设计视口：两边缩放参数与页面尺寸完全一致。
+  const { scale, offsetX, offsetY } = useFillViewport(stageRef)
 
   // 监听画布尺寸，浮层按像素计算左右/上下空间，避免超出可视区域。
   useEffect(() => {
@@ -156,13 +159,13 @@ export default function CanvasStage({
         onPointerUp={finishDrawing}
         onPointerCancel={finishDrawing}
       >
-        {/* 页面层与 iframe 使用同一缩放算法：1024px 逻辑宽度，左上角原点。 */}
+        {/* 页面层与 iframe 使用同一缩放算法：1280×720 设计视口，cover 居中。 */}
         <div
           className="canvas-viewport"
           style={{
             width: `${VIEWPORT_BASE_WIDTH}px`,
-            height: logicalHeight > 0 ? `${logicalHeight}px` : '100%',
-            transform: `scale(${scale})`,
+            height: `${VIEWPORT_BASE_HEIGHT}px`,
+            transform: `translate(${offsetX}px, ${offsetY}px) scale(${scale})`,
             transformOrigin: 'top left',
           }}
         >
