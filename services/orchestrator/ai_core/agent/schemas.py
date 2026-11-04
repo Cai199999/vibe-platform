@@ -68,6 +68,20 @@ class AnnotationIntent(CamelModel):
     full_stack: dict[str, Any] | None = None
 
 
+class AnnotationChatMessage(CamelModel):
+    """同一个标注（thread）内的一轮对话。
+
+    前端负责展示会话，后端负责把同一 threadId 的历史与上一次修改记录
+    一起送入 Planner / Coder，实现“不，我要蓝色”这类增量修改。
+    """
+
+    id: str | None = Field(default=None, max_length=128)
+    role: Literal["user", "assistant", "system"]
+    content: str = Field(min_length=1, max_length=8000)
+    run_id: str | None = Field(default=None, max_length=64)
+    created_at: datetime | None = None
+
+
 class AnnotationEnvelope(CamelModel):
     """画布标注信封。M1 接受 UI_ONLY / UI_AND_BUSINESS，拒绝 FULLSTACK。"""
 
@@ -80,6 +94,11 @@ class AnnotationEnvelope(CamelModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     screenshot: dict[str, Any] | None = None
     created_at: datetime | None = None
+    # 每个标注独立的多轮会话：同一个圈后续发送指令时复用 thread_id。
+    thread_id: str | None = Field(default=None, max_length=64)
+    chat_history: list[AnnotationChatMessage] = Field(
+        default_factory=list, max_length=40
+    )
 
 
 # ------------------------------------------------------------
@@ -116,6 +135,8 @@ class ExecuteRunRequest(CamelModel):
     annotations: list[AnnotationEnvelope] = Field(default_factory=list, max_length=3)
     # 兼容旧协议：单个标注；与 annotations 同时出现时以 annotations 为准。
     annotation: AnnotationEnvelope | None = None
+    # 增量修改：复用该项目当前的沙盒，避免每一轮对话都创建新容器。
+    sandbox_id: str | None = Field(default=None, max_length=64)
     # 沙盒初始文件；为空时使用 sandbox_template 自带页面。
     files: dict[str, str] = Field(default_factory=dict)
     options: RunOptions = Field(default_factory=RunOptions)
@@ -153,10 +174,13 @@ class ExecuteRunResponse(CamelModel):
     status: Literal["AWAITING_APPROVAL", "FAILED"]
     sandbox_id: str
     preview_url: str
+    reused_sandbox: bool = False
     plan: str = ""
     generated_patch: str = ""
     generated_files: dict[str, str] = Field(default_factory=dict)
     verify_result: VerifyResultModel | None = None
     retry_count: int = 0
     messages: list[dict[str, Any]] = Field(default_factory=list)
+    # 前端直接展示在迷你 Chatbox 中的助手回复，与服务端 thread 记录同文案。
+    assistant_message: str = ""
     error: str | None = None

@@ -155,6 +155,41 @@ class LocalDockerSandbox(SandboxProvider):
             created_at=datetime.now(timezone.utc),
         )
 
+    def get(self, sandbox_id: str) -> SandboxHandle:
+        """恢复已存在沙盒的句柄，供同一标注的多轮增量修改复用。"""
+        container = self._get_container(sandbox_id)
+        try:
+            container.reload()
+            attrs = container.attrs
+        except DockerException as exc:
+            raise SandboxError(f"读取沙盒状态失败 {sandbox_id}: {exc}") from exc
+
+        ports = (attrs.get("NetworkSettings") or {}).get("Ports") or {}
+        bindings = ports.get(f"{self.settings.sandbox_dev_port}/tcp") or []
+        if not bindings:
+            raise SandboxNotFoundError(f"沙盒没有可用的预览端口: {sandbox_id}")
+        host_port = int(bindings[0]["HostPort"])
+
+        labels = attrs.get("Config", {}).get("Labels") or {}
+        created_raw = str(attrs.get("Created") or "")
+        try:
+            created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+        except ValueError:
+            created_at = datetime.now(timezone.utc)
+
+        return SandboxHandle(
+            sandbox_id=sandbox_id,
+            container_id=container.id,
+            container_name=container.name,
+            project_id=str(labels.get(LABEL_PROJECT_ID) or ""),
+            state=str(container.status),
+            preview_url=f"http://{self.settings.sandbox_preview_host}:{host_port}",
+            host_port=host_port,
+            internal_port=self.settings.sandbox_dev_port,
+            template="react-vite",
+            created_at=created_at,
+        )
+
     def apply_patch(
         self,
         sandbox_id: str,

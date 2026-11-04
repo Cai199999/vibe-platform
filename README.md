@@ -2,13 +2,15 @@
 
 以前端可视化为抓手、多轮交互生成完整全栈应用的 Vibe Coding 平台。
 
-当前阶段：**M1 完成 · Phase 5 批量标注与真实模型接入**。画布最多 3 个标注 →
-`AnnotationEnvelope[]` → Java BFF → Python AI Core → LangGraph 单 Agent
-一次性规划 / 编码 / 写入 / 构建验证 → Docker 沙盒 → 项目内预览与 Diff，
-全链路已打通；工作台支持对比/展示两种布局、无缝缩放预览、多项目 Tab、
-5 Tab 上限、关闭即销毁沙盒与拖拽排序。模型可选 `auto` / `deepseek` /
-`mock`：配置 `DEEPSEEK_API_KEY` 后即可对颜色、文案、字号、布局等任意 UI
-属性生成修改，不再局限于 Mock 的固定示例。
+当前阶段：**M1 完成 · Phase 6 画布世界坐标与标注多轮对话**。画布最多 3 个
+标注 → `AnnotationEnvelope[]` → Java BFF → Python AI Core → LangGraph 单
+Agent 一次性规划 / 编码 / 写入 / 构建验证 → Docker 沙盒 → 项目内预览与
+Diff，全链路已打通；工作台支持对比/展示两种布局、无缝缩放预览、多项目
+Tab、5 Tab 上限、关闭即销毁沙盒与拖拽排序。每个标注拥有独立 `threadId` /
+`chatHistory` 与迷你 Chatbox，可在同一个圈上连续多轮增量修改，后端复用
+同一沙盒并携带历史修改记录。模型可选 `auto` / `deepseek` / `mock`：配置
+`DEEPSEEK_API_KEY` 后即可对颜色、文案、字号、布局等任意 UI 属性生成修改，
+不再局限于 Mock 的固定示例。
 
 ## 目录
 
@@ -26,6 +28,7 @@ scripts/agent_e2e_test.py             Agent 闭环 E2E（Mock LLM）
 scripts/platform_e2e_test.py          全链路 E2E（Vite 代理 → BFF → AI Core → 沙盒）
 scripts/ui_e2e_test.py                浏览器 E2E（Playwright：双视图 / 缩放预览 / 项目导出 / 沙盒销毁 / Tab 上限）
 scripts/multi_annotation_e2e_test.py  浏览器 E2E（3 个标注 / 独立输入框 / 上限提示 / 批量提交 / 导出）
+scripts/multi_turn_chat_e2e_test.py   浏览器 E2E（平移缩放不漂移 / 单圈两轮对话 / 沙盒复用）
 docs/screenshots/                     M1 联调截图
 docker-compose.yml                    只编排平台自身服务
 ```
@@ -88,11 +91,26 @@ planner -> coder -> applier -> verifier -> evaluator
 6. 当前 Tab 顶部的状态点与顶栏提示显示执行进度；成功后画布右下角出现
    **查看效果**，点击切到「实时预览」，全屏展示 `previewUrl` iframe，并可
    展开 `generatedPatch` Diff 与执行轨迹。
+7. **世界坐标绑定**：圈选时将屏幕坐标反算为 1280×720 设计视口的归一化
+   世界坐标；`.annotation-layer` 与 Mock 页面位于同一个
+   `translate(x, y) scale(s)` 容器内。平移 / 滚轮缩放后，圈、迷你 Chatbox
+   与页面 DOM 保持像素级绑定，不会留在屏幕原位。
+8. **标注层级**：点击某个标注标签或浮层会将其 `z-index` 提升到最高；点击
+   画布空白或失焦后恢复默认层级。中键 / 空格 + 左键平移即使从浮层上按下
+   也继续生效，不会出现浮层覆盖区域无法拖动的死角。
+9. **单圈多轮对话**：每个标注的浮层是独立迷你 Chatbox，拥有 `threadId` 与
+   `chatHistory`。发送后立即只执行该圈，后端复用当前沙盒、读取上一轮修改
+   后的源码，并把同圈历史与 `previousRuns` 通过 `threadContext` 注入
+   Planner / Coder。用户先发「改成红色」再发「不，我要蓝色」时，最终源码
+   以蓝色为准；对话气泡展示历史，超出高度在浮层内部滚动。浮层锚点跟随
+   世界坐标，但通过 `scale(1 / viewportScale)` 反向缩放保持屏幕字号恒定，
+   放大画布后输入区不会被裁掉。
 
 Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier 捕获日志后
 自动修复 1 次，最终返回 `AWAITING_APPROVAL`，方便稳定复现完整闭环。Mock
 能确定性解析常见颜色 / 文案 / 放大缩小指令并合并应用 3 个标注，但它不是
 通用模型；布局、间距、结构等任意修改请选择 `deepseek`（或 `auto`）。
+单圈 Chatbox 发送固定使用 `mockScenario=none`，确保多轮交互即时返回。
 
 ![登录页](docs/screenshots/phase2-login.png)
 
@@ -107,6 +125,10 @@ Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier �
 ![3 个标注与独立输入框](docs/screenshots/m1-three-annotations.png)
 
 ![3 处修改同时生效](docs/screenshots/m1-multi-annotation-result.png)
+
+![平移缩放后标注不漂移](docs/screenshots/m1-multiturn-zoom-no-drift.png)
+
+![单圈两轮对话与最终结果](docs/screenshots/m1-multiturn-chat-result.png)
 
 ![5 个项目上限](docs/screenshots/phase4-tab-limit.png)
 
@@ -282,7 +304,20 @@ cover 缩放后完全覆盖预览屏幕（居中、无留白）→ 对比画布 
 `annotations` 数组（且不再发送单 `annotation`）、预览与导出包 /
 `VIBE_CONTEXT.md` / Diff 同时包含颜色、文案、尺寸 3 处修改。
 
-### 4. 分层验证
+### 4. 单圈多轮对话 / 世界坐标 E2E
+
+```bash
+/tmp/vibe-browser/bin/python scripts/multi_turn_chat_e2e_test.py
+```
+
+验证：圈选后中键平移 + 滚轮放大，圈与按钮相对几何位移为 0；激活浮层
+`z-index` 从 30 提升到 120，失焦恢复；同一个 Chatbox 连续发送「改成红色」
+与「不，我要蓝色」，两次请求 `threadId` 一致，第二轮 `chatHistory` 为
+`[user, assistant, user]` 且携带第一轮 `sandboxId`；后端返回
+`reusedSandbox=true`，最终 iframe 按钮为 `rgb(0, 0, 255)`；刷新后两轮对话
+仍从会话快照恢复。
+
+### 5. 分层验证
 
 ```bash
 python3 scripts/sandbox_e2e_test.py   # 沙盒生命周期 / 补丁 / 构建
@@ -290,7 +325,7 @@ python3 scripts/agent_e2e_test.py     # 批量标注 / 自动修复 / 3 次上�
 ./scripts/smoke-test.sh               # Java -> Python 健康检查
 ```
 
-### 5. 手动调用
+### 6. 手动调用
 
 ```bash
 curl -s http://127.0.0.1:5173/api/v1/health | python3 -m json.tool
@@ -315,6 +350,13 @@ BFF 只校验 `projectId` 以及 `annotations`（数组）或旧版 `annotation`
 契约单一真源在 Python `agent/schemas.py`（数组最多 3 项，超出返回 422）。
 AI Core 的 HTTP 状态与 JSON 原样返回：业务失败（重试耗尽）是
 `200 + status=FAILED`，参数 / 沙盒错误是 4xx/5xx。
+
+单圈多轮修改额外使用：
+
+- 请求：`sandboxId` 复用上一轮沙盒；每个 annotation 携带
+  `threadId` 与 `chatHistory: [{id, role, content, runId?, createdAt?}]`。
+- 响应：`reusedSandbox` 表示是否复用；`assistantMessage` 与后端 thread
+  记录同文案，前端直接追加到该圈聊天记录。
 
 > AI Core 客户端强制 HTTP/1.1。JDK HttpClient 默认尝试 h2c Upgrade，Uvicorn
 > 不支持升级，POST 请求体会丢失（表现为 FastAPI 422 missing body）。
@@ -349,6 +391,10 @@ AI Core 的 HTTP 状态与 JSON 原样返回：业务失败（重试耗尽）是
 （1~3 个；旧版单 `annotation` 自动归一为单元素数组），创建沙盒并同步执行
 LangGraph：
 
+- 每个 annotation 可携带 `threadId` / `chatHistory` / `sandboxId`。服务端
+  `ThreadMemoryStore` 合并前端历史与进程内记录，生成
+  `threadContext = {threadId, chatHistory, previousRuns}` 注入 Planner /
+  Coder；同一圈的后续请求优先复用 `sandboxId`，并读取修改后的当前源码。
 - `planner` 一次性读取全部标注和所有目标文件，输出综合计划；多个标注命中
   同一文件时只规划一次。
 - `coder` 一次生成包含全部修改的 patch 或完整 files；多文件 / 多标注时

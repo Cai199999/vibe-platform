@@ -71,6 +71,14 @@ class SandboxProvider(ABC):
     ) -> SandboxHandle:
         """创建并启动沙盒，返回可访问的预览地址。"""
 
+    def get(self, sandbox_id: str) -> SandboxHandle:
+        """按 sandbox_id 恢复句柄，供多轮对话复用同一沙盒。
+
+        默认实现抛出 SandboxError；具体 Provider 应覆盖并在容器不存在时
+        返回 SandboxNotFoundError，让上层可以回退为创建新沙盒。
+        """
+        raise SandboxError(f"当前 Provider 不支持恢复沙盒句柄: {sandbox_id}")
+
     @abstractmethod
     def apply_patch(
         self,

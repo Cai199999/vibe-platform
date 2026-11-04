@@ -26,6 +26,7 @@ function ProjectWorkspaceInner({
   onAnnotationAdd,
   onAnnotationIntentChange,
   onAnnotationRemove,
+  onAnnotationSend,
   onClearAnnotations,
   onSubmit,
   onRetry,
@@ -113,17 +114,17 @@ function ProjectWorkspaceInner({
                 ? `一次性提交 ${annotations.length} 个标注，Agent 将合并处理`
                 : annotations.length === 0
                   ? '请先在画布上圈选组件'
-                  : '请为每个标注填写修改意图'
+                  : '请为每个标注填写修改意图；也可直接在单个浮层内发送'
             }
             onClick={onSubmit}
           >
-            {submitting ? (
+            {submitting && !run.pendingAnnotationId ? (
               <>
                 <span className="mini-spinner" aria-label="执行中" />
                 执行中…
               </>
             ) : (
-              `提交标注 (${annotations.length}/3)`
+              `批量提交 (${annotations.length}/3)`
             )}
           </button>
 
@@ -207,6 +208,8 @@ function ProjectWorkspaceInner({
             onAnnotationAdd={onAnnotationAdd}
             onAnnotationIntentChange={onAnnotationIntentChange}
             onAnnotationRemove={onAnnotationRemove}
+            onAnnotationSend={onAnnotationSend}
+            pendingAnnotationId={run.pendingAnnotationId}
             submitting={submitting}
             disabled={submitting}
           />

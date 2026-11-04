@@ -122,6 +122,12 @@ def render_vibe_context(
         else:
             lines.append("- （未提供，保持现有布局与文案不变）")
 
+        if annotation.chat_history:
+            lines.extend(["", "**同圈多轮对话**", ""])
+            for message in annotation.chat_history[-10:]:
+                role = "用户" if message.role == "user" else "助手"
+                lines.append(f"- {role}：{message.content}")
+
         lines.extend(["", "**画布选区（归一化坐标 0~1）**", ""])
         if world:
             for key in ("x", "y", "width", "height", "coordinateSpace"):

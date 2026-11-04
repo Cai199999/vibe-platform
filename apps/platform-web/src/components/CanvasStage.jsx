@@ -7,8 +7,8 @@ import usePanZoom from '../workspace/usePanZoom.js'
 
 const clamp01 = (value) => Math.min(1, Math.max(0, value))
 
-const POPOVER_WIDTH = 272
-const POPOVER_HEIGHT = 164
+const POPOVER_WIDTH = 320
+const POPOVER_MAX_HEIGHT = 360
 const POPOVER_GAP = 14
 const MAX_ANNOTATIONS = 3
 
@@ -52,81 +52,136 @@ function readTarget(element) {
   }
 }
 
-function popoverStyleFor(rect, stageSize, index) {
-  if (!rect || stageSize.width === 0) return null
-  const { width, height } = stageSize
+/**
+ * 浮层与圈使用同一套“世界坐标”（1280×720 设计视口）。
+ * 整个 annotation-layer 与页面共享 translate + scale，因此圈的锚点永远
+ * 和页面元素绑定；浮层内部再反向缩放抵消字号 / 尺寸变化。
+ */
+function popoverStyleFor(rect, index, active, scale) {
+  if (!rect) return null
+  const width = VIEWPORT_BASE_WIDTH
+  const height = VIEWPORT_BASE_HEIGHT
+  const safeScale = Math.max(scale, 0.001)
+  // 浮层通过 1/scale 抵消父级缩放，保持屏幕字号与宽度恒定，但锚点仍随
+  // 世界坐标移动。因此所有间距 / 尺寸在计算定位时要换算回世界单位。
+  const worldPopoverWidth = POPOVER_WIDTH / safeScale
+  const worldPopoverHeight = POPOVER_MAX_HEIGHT / safeScale
+  const worldGap = POPOVER_GAP / safeScale
   const leftPx = rect.x * width
   const rightPx = (rect.x + rect.width) * width
   const centerY = (rect.y + rect.height / 2) * height
   // 同时存在多个浮层时按顺序轻微错开，避免完全重叠。
-  const stagger = index * 12
+  const stagger = (index * 12) / safeScale
   const clampTop = (value) =>
     Math.min(
-      Math.max(12, value + stagger),
-      Math.max(12, height - POPOVER_HEIGHT - 12),
+      Math.max(10 / safeScale, value + stagger),
+      Math.max(10 / safeScale, height - worldPopoverHeight - 10 / safeScale),
     )
+  const zIndex = active ? 120 : 30 + index
+  const inverseScale = `scale(${1 / safeScale})`
 
-  if (width - rightPx >= POPOVER_WIDTH + POPOVER_GAP) {
+  if (width - rightPx >= worldPopoverWidth + worldGap) {
     return {
-      left: rightPx + POPOVER_GAP,
-      top: clampTop(centerY - POPOVER_HEIGHT / 2),
-      zIndex: 30 + index,
+      left: rightPx + worldGap,
+      top: clampTop(centerY - worldPopoverHeight / 2),
+      zIndex,
+      transform: inverseScale,
+      transformOrigin: 'top left',
     }
   }
-  if (leftPx >= POPOVER_WIDTH + POPOVER_GAP) {
+  if (leftPx >= worldPopoverWidth + worldGap) {
     return {
-      right: width - leftPx + POPOVER_GAP,
-      top: clampTop(centerY - POPOVER_HEIGHT / 2),
-      zIndex: 30 + index,
+      right: width - leftPx + worldGap,
+      top: clampTop(centerY - worldPopoverHeight / 2),
+      zIndex,
+      transform: inverseScale,
+      transformOrigin: 'top left',
     }
   }
 
   // 窄屏兜底：横跨选区下方 / 上方，宽度由 left/right 自适应。
-  const below = (rect.y + rect.height) * height + 12
-  const above = rect.y * height - POPOVER_HEIGHT - 12
-  const top = below + POPOVER_HEIGHT <= height - 12 ? below : Math.max(12, above)
+  const below = (rect.y + rect.height) * height + worldGap
+  const above = rect.y * height - worldPopoverHeight - worldGap
+  const top =
+    below + worldPopoverHeight <= height - 10 / safeScale
+      ? below
+      : Math.max(10 / safeScale, above)
   return {
-    left: 12,
-    right: 12,
-    width: 'auto',
+    left: Math.max(10 / safeScale, (width - worldPopoverWidth) / 2),
+    width: worldPopoverWidth,
     top: clampTop(top),
-    zIndex: 30 + index,
+    zIndex,
+    transform: inverseScale,
+    transformOrigin: 'top left',
   }
 }
 
 /**
- * 单个标注旁的浮动输入框。
+ * 单个标注旁的迷你 Chatbox。
  *
- * 每个标注拥有独立输入内容；用户可在画布上连续圈出最多 3 个区域，最后在
- * 顶部工具栏点击「提交标注」一次性提交 AnnotationEnvelope[]。
+ * 每个标注拥有独立 threadId / chatHistory；用户发送后立即触发该标注的
+ * 增量 Run，后端复用沙盒，并把同一圈的历史与上一次修改记录送入模型。
  */
 function AnnotationPopover({
   annotation,
   index,
   total,
-  stageSize,
   submitting,
+  pending,
+  active,
+  panReady,
+  scale,
   inputRef,
   onChange,
   onRemove,
+  onSend,
+  onActivate,
+  onDeactivate,
 }) {
+  const historyRef = useRef(null)
   const style = useMemo(
-    () => popoverStyleFor(annotation.rect, stageSize, index),
-    [annotation.rect, stageSize, index],
+    () => popoverStyleFor(annotation.rect, index, active, scale),
+    [annotation.rect, index, active, scale],
   )
+  const history = annotation.chatHistory ?? []
+
+  useEffect(() => {
+    const node = historyRef.current
+    if (node) node.scrollTop = node.scrollHeight
+  }, [history.length, pending])
+
   if (!style) return null
 
   const targetLabel = annotation.target?.label || '组件'
+  const sending = Boolean(submitting && pending)
   return (
     <form
-      className={`canvas-popover tone-${index % 3}`}
+      className={`canvas-popover tone-${index % 3} ${active ? 'is-active' : ''}`}
       style={style}
       role="dialog"
-      aria-label={`标注 ${index + 1} 修改意图`}
+      aria-label={`标注 ${index + 1} 多轮对话`}
       data-annotation-id={annotation.id}
-      onPointerDown={(event) => event.stopPropagation()}
-      onPointerUp={(event) => event.stopPropagation()}
-      onSubmit={(event) => event.preventDefault()}
+      onPointerDown={(event) => {
+        // 中键 / 空格+左键是全局平移手势：即使从浮层上按下也必须继续
+        // 冒泡给画布，否则浮层覆盖画布中心时会出现“中间区域无法拖动”的死角。
+        if (event.button === 1 || (event.button === 0 && panReady)) return
+        event.stopPropagation()
+        onActivate?.(annotation.id)
+      }}
+      onPointerUp={(event) => {
+        if (event.button === 1 || (event.button === 0 && panReady)) return
+        event.stopPropagation()
+      }}
+      onFocusCapture={() => onActivate?.(annotation.id)}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) {
+          onDeactivate?.(annotation.id)
+        }
+      }}
+      onSubmit={(event) => {
+        event.preventDefault()
+        onSend?.(annotation.id)
+      }}
     >
       <div className="popover-head">
         <span className="popover-dot" />
@@ -145,21 +200,54 @@ function AnnotationPopover({
           ×
         </button>
       </div>
+
+      {history.length > 0 && (
+        <div
+          className="popover-chat"
+          ref={historyRef}
+          aria-label={`标注 ${index + 1} 对话历史`}
+        >
+          {history.map((message, messageIndex) => (
+            <div
+              key={message.id || `${message.role}-${messageIndex}`}
+              className={`chat-bubble is-${message.role}`}
+            >
+              <span className="chat-role">
+                {message.role === 'user' ? '你' : 'Agent'}
+              </span>
+              <p>{message.content}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="popover-row">
         <input
           ref={inputRef}
           type="text"
           value={annotation.intent}
           maxLength={120}
-          placeholder="例如：改成蓝色 / 文字改为提交 / 放大一倍"
+          placeholder={
+            history.length ? '继续对话，例如：不，我要蓝色' : '例如：改成蓝色 / 放大一倍'
+          }
           disabled={submitting}
           onChange={(event) => onChange?.(annotation.id, event.target.value)}
         />
+        <button
+          className="popover-send"
+          type="submit"
+          disabled={submitting || !annotation.intent.trim()}
+          title="只对当前圈执行一次增量修改"
+        >
+          {sending ? <span className="mini-spinner" aria-label="执行中" /> : '发送'}
+        </button>
       </div>
       <p className="popover-hint">
-        {annotation.intent.trim()
-          ? '已填写 · 在顶部点击「提交标注」'
-          : '每个标注写一条指令，最多 3 个标注'}
+        {sending
+          ? 'Agent 正在这个圈上增量修改…'
+          : history.length
+            ? '同一圈可继续发送，最新指令会覆盖冲突属性'
+            : '发送后立即执行；后续可继续对话调整'}
       </p>
     </form>
   )
@@ -168,15 +256,17 @@ function AnnotationPopover({
 /**
  * 画布 Stage：
  *  - 展示一个与沙盒初始源码一致的 Mock 页面；
- *  - 鼠标 / 触控拖拽圈选组件，坐标归一化到 0~1；
- *  - 最多保留 3 个标注，每个标注都有自己的浮动意图输入框；
- *  - 圈选完成后由顶部「提交标注」统一发送 AnnotationEnvelope[]。
+ *  - 鼠标 / 触控拖拽圈选组件，坐标转换为 1280×720 世界坐标；
+ *  - 页面与标注层使用同一 transform，平移 / 缩放后圈不会漂移；
+ *  - 每个圈拥有独立多轮 Chatbox，可单独发送增量修改。
  */
 export default function CanvasStage({
   annotations = [],
   onAnnotationAdd,
   onAnnotationIntentChange,
   onAnnotationRemove,
+  onAnnotationSend,
+  pendingAnnotationId,
   submitting,
   disabled,
 }) {
@@ -187,8 +277,9 @@ export default function CanvasStage({
   const limitTimerRef = useRef(null)
   const [draft, setDraft] = useState(null)
   const [drawing, setDrawing] = useState(false)
-  const [stageSize, setStageSize] = useState({ width: 0, height: 0 })
   const [limitNotice, setLimitNotice] = useState(false)
+  // 当前激活的标注：浮层 / 圈提升到最高 z-index，点击画布空白处恢复。
+  const [activeAnnotationId, setActiveAnnotationId] = useState(null)
   // 用户圈选多个区域时，可临时隐藏浮层，避免输入框挡住下一笔圈选。
   const [popoversHidden, setPopoversHidden] = useState(false)
 
@@ -207,23 +298,13 @@ export default function CanvasStage({
     baseOffsetY,
   })
 
-  // 监听画布尺寸，浮层按像素计算左右/上下空间，避免超出可视区域。
-  useEffect(() => {
-    const node = stageRef.current
-    if (!node) return undefined
-    const update = () => setStageSize({ width: node.clientWidth, height: node.clientHeight })
-    update()
-    const observer = new ResizeObserver(update)
-    observer.observe(node)
-    return () => observer.disconnect()
-  }, [])
-
   // 新增标注后自动展开浮层并聚焦它的输入框；编辑已有标注不会抢焦点。
   useEffect(() => {
     const last = annotations[annotations.length - 1]
     if (!last || last.id === focusedAnnotationRef.current) return undefined
     focusedAnnotationRef.current = last.id
     setPopoversHidden(false)
+    setActiveAnnotationId(last.id)
     const frame = window.requestAnimationFrame(() =>
       inputRefs.current.get(last.id)?.focus(),
     )
@@ -245,17 +326,52 @@ export default function CanvasStage({
     limitTimerRef.current = window.setTimeout(() => setLimitNotice(false), 2600)
   }
 
+  const activateAnnotation = (annotationId) => {
+    setActiveAnnotationId(annotationId)
+  }
+
+  const deactivateAnnotation = (annotationId) => {
+    setActiveAnnotationId((current) =>
+      current === annotationId ? null : current,
+    )
+  }
+
+  /**
+   * Screen -> World：先减去画布在屏幕上的左上角与当前 translate，再除以
+   * 当前 scale，最后归一化到 1280×720 设计视口。这样无论怎么平移 / 缩放，
+   * 圈记录的都是页面内容坐标，而不是屏幕坐标。
+   */
   const toPoint = (event) => {
-    const box = stageRef.current.getBoundingClientRect()
+    const node = stageRef.current
+    if (!node || viewport.scale <= 0) return { x: 0, y: 0 }
+    const box = node.getBoundingClientRect()
+    const worldX =
+      (event.clientX - box.left - viewport.translateX) / viewport.scale
+    const worldY =
+      (event.clientY - box.top - viewport.translateY) / viewport.scale
     return {
-      x: clamp01((event.clientX - box.left) / box.width),
-      y: clamp01((event.clientY - box.top) / box.height),
+      x: clamp01(worldX / VIEWPORT_BASE_WIDTH),
+      y: clamp01(worldY / VIEWPORT_BASE_HEIGHT),
     }
   }
 
+  /** 忽略标注浮层，找到页面内容上的 data-vibe-target。 */
   const targetAtPoint = (clientX, clientY) => {
     if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null
-    return readTarget(document.elementFromPoint(clientX, clientY))
+    const elements = document.elementsFromPoint(clientX, clientY)
+    for (const element of elements) {
+      if (
+        element.closest?.('.annotation-layer') ||
+        element.closest?.('.viewport-controls') ||
+        element.closest?.('.annotation-limit') ||
+        element.closest?.('.canvas-hint')
+      ) {
+        continue
+      }
+      const target = readTarget(element)
+      if (target) return target
+    }
+    return null
   }
 
   const handlePointerDown = (event) => {
@@ -266,6 +382,13 @@ export default function CanvasStage({
     if (disabled || event.button !== 0) {
       return
     }
+    // 点击标注标签 = 选中该圈；不开始新的圈选。
+    const annotationNode = event.target.closest?.('[data-annotation-id]')
+    if (annotationNode) {
+      activateAnnotation(annotationNode.getAttribute('data-annotation-id'))
+      return
+    }
+    setActiveAnnotationId(null)
     if (atLimit) {
       flashLimitNotice()
       return
@@ -302,10 +425,14 @@ export default function CanvasStage({
     setDraft(null)
 
     if (rect.width > 0.02 && rect.height > 0.02) {
-      // 以选区中心命中的元素为准；起点落在卡片留白时也能识别到按钮 / 标题。
+      // 以选区中心的页面元素为准；起点落在卡片留白时也能识别到按钮 / 标题。
       const box = stageRef.current.getBoundingClientRect()
-      const centerX = box.left + (rect.x + rect.width / 2) * box.width
-      const centerY = box.top + (rect.y + rect.height / 2) * box.height
+      const centerWorldX = (rect.x + rect.width / 2) * VIEWPORT_BASE_WIDTH
+      const centerWorldY = (rect.y + rect.height / 2) * VIEWPORT_BASE_HEIGHT
+      const centerX =
+        box.left + viewport.translateX + centerWorldX * viewport.scale
+      const centerY =
+        box.top + viewport.translateY + centerWorldY * viewport.scale
       const target = targetAtPoint(centerX, centerY) ?? startTargetRef.current
       onAnnotationAdd?.({ rect, target })
     }
@@ -339,7 +466,7 @@ export default function CanvasStage({
         onPointerCancel={finishDrawing}
         onAuxClick={(event) => event.preventDefault()}
       >
-        {/* 页面层与 iframe 使用同一套基准变换，再叠加用户平移 / 缩放。 */}
+        {/* 页面层与标注层共享同一个 transform：两者“长在一起”。 */}
         <div
           className="canvas-viewport"
           style={{
@@ -368,55 +495,68 @@ export default function CanvasStage({
               <span className="cta-hint">圈选任意组件，写下你的修改意图</span>
             </section>
           </div>
+
+          <div className="annotation-layer">
+            {annotations.map((annotation, index) => {
+              const active = annotation.id === activeAnnotationId
+              return (
+                <div
+                  key={annotation.id}
+                  className={`annotation-ellipse tone-${index % 3} ${active ? 'is-active' : ''}`}
+                  data-annotation-id={annotation.id}
+                  data-annotation-index={index}
+                  style={{
+                    left: `${annotation.rect.x * 100}%`,
+                    top: `${annotation.rect.y * 100}%`,
+                    width: `${annotation.rect.width * 100}%`,
+                    height: `${annotation.rect.height * 100}%`,
+                    zIndex: active ? 100 : 20 + index,
+                  }}
+                >
+                  <span className="annotation-tag">标注 {index + 1}</span>
+                </div>
+              )
+            })}
+
+            {draftRect && (
+              <div
+                className="annotation-ellipse is-draft"
+                style={{
+                  left: `${draftRect.x * 100}%`,
+                  top: `${draftRect.y * 100}%`,
+                  width: `${draftRect.width * 100}%`,
+                  height: `${draftRect.height * 100}%`,
+                }}
+              >
+                <span className="annotation-tag">新标注</span>
+              </div>
+            )}
+
+            {!skipPopovers &&
+              annotations.map((annotation, index) => (
+                <AnnotationPopover
+                  key={annotation.id}
+                  annotation={annotation}
+                  index={index}
+                  total={annotations.length}
+                  submitting={submitting}
+                  pending={pendingAnnotationId === annotation.id}
+                  active={annotation.id === activeAnnotationId}
+                  panReady={viewport.spaceHeld}
+                  scale={viewport.scale}
+                  inputRef={(node) => {
+                    if (node) inputRefs.current.set(annotation.id, node)
+                    else inputRefs.current.delete(annotation.id)
+                  }}
+                  onChange={onAnnotationIntentChange}
+                  onRemove={onAnnotationRemove}
+                  onSend={onAnnotationSend}
+                  onActivate={activateAnnotation}
+                  onDeactivate={deactivateAnnotation}
+                />
+              ))}
+          </div>
         </div>
-
-        {annotations.map((annotation, index) => (
-          <div
-            key={annotation.id}
-            className={`annotation-ellipse tone-${index % 3}`}
-            data-annotation-index={index}
-            style={{
-              left: `${annotation.rect.x * 100}%`,
-              top: `${annotation.rect.y * 100}%`,
-              width: `${annotation.rect.width * 100}%`,
-              height: `${annotation.rect.height * 100}%`,
-            }}
-          >
-            <span className="annotation-tag">标注 {index + 1}</span>
-          </div>
-        ))}
-
-        {draftRect && (
-          <div
-            className="annotation-ellipse is-draft"
-            style={{
-              left: `${draftRect.x * 100}%`,
-              top: `${draftRect.y * 100}%`,
-              width: `${draftRect.width * 100}%`,
-              height: `${draftRect.height * 100}%`,
-            }}
-          >
-            <span className="annotation-tag">新标注</span>
-          </div>
-        )}
-
-        {!skipPopovers &&
-          annotations.map((annotation, index) => (
-            <AnnotationPopover
-              key={annotation.id}
-              annotation={annotation}
-              index={index}
-              total={annotations.length}
-              stageSize={stageSize}
-              submitting={submitting}
-              inputRef={(node) => {
-                if (node) inputRefs.current.set(annotation.id, node)
-                else inputRefs.current.delete(annotation.id)
-              }}
-              onChange={onAnnotationIntentChange}
-              onRemove={onAnnotationRemove}
-            />
-          ))}
 
         {(atLimit || limitNotice) && (
           <div

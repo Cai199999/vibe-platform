@@ -18,6 +18,8 @@ const MODEL_PROVIDERS = new Set(['auto', 'deepseek', 'mock'])
 const EMPTY_RUN = {
   annotations: [],
   submitting: false,
+  // 单标注迷你 Chatbox 发送时记录是哪一个，用于只在该浮层显示 spinner。
+  pendingAnnotationId: null,
   elapsed: 0,
   startedAt: null,
   result: null,
@@ -46,7 +48,7 @@ function loadRunStates(projects) {
         sandboxIds.push(saved.result.sandboxId)
       }
       // 兼容旧版本只保存单个 annotation 的会话快照。
-      const annotations = Array.isArray(saved.annotations)
+      const rawAnnotations = Array.isArray(saved.annotations)
         ? saved.annotations
         : saved.annotation
           ? [
@@ -58,6 +60,14 @@ function loadRunStates(projects) {
               },
             ]
           : []
+      // 老快照没有 threadId / chatHistory：补齐，保证每个圈都能继续对话。
+      const annotations = rawAnnotations.map((annotation) => ({
+        ...annotation,
+        threadId: annotation.threadId || newId('thread'),
+        chatHistory: Array.isArray(annotation.chatHistory)
+          ? annotation.chatHistory
+          : [],
+      }))
       restored[projectId] = {
         ...EMPTY_RUN,
         annotations,
@@ -101,6 +111,14 @@ const newId = (prefix) => {
       : Math.random().toString(36).slice(2, 14)
   return `${prefix}_${random}`
 }
+
+const newMessage = (role, content, extra = {}) => ({
+  id: newId('msg'),
+  role,
+  content,
+  createdAt: new Date().toISOString(),
+  ...extra,
+})
 
 /**
  * 根据 data-vibe-target 标记定位源码行号。
@@ -177,7 +195,44 @@ function buildAnnotation(entry, source) {
       strokes: [],
     },
     createdAt: entry.createdAt ?? new Date().toISOString(),
+    threadId: entry.threadId,
+    // 每个圈独立记忆：后端据此把上一轮指令、助手回复与修改记录传给模型。
+    chatHistory: (entry.chatHistory ?? []).slice(-40).map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      runId: message.runId,
+      createdAt: message.createdAt,
+    })),
   }
+}
+
+/**
+ * 助手回复只追加一次；批量提交时每条标注都会得到同一条 run 级回复。
+ */
+function appendAssistantMessage(annotation, result, fallback = '') {
+  const content =
+    result?.assistantMessage ||
+    fallback ||
+    (result?.status === 'FAILED'
+      ? `执行失败：${result?.error || '构建未通过'}`
+      : '已更新预览，可以继续在这个圈里提出修改。')
+  const runId = result?.runId
+  const history = annotation.chatHistory ?? []
+  const last = history[history.length - 1]
+  if (
+    last?.role === 'assistant' &&
+    last.content === content &&
+    (!runId || last.runId === runId)
+  ) {
+    return history
+  }
+  return [
+    ...history,
+    newMessage('assistant', content, {
+      runId,
+    }),
+  ]
 }
 
 async function extractError(response) {
@@ -326,6 +381,9 @@ export default function WorkspacePage() {
             target,
             intent: '',
             createdAt: new Date().toISOString(),
+            // 每个标注 = 一个独立 Agent thread，后续对话复用同一个 id。
+            threadId: newId('thread'),
+            chatHistory: [],
           },
         ],
       }
@@ -354,6 +412,139 @@ export default function WorkspacePage() {
     patchRun(projectId, (previous) => ({ ...previous, annotations: [] }))
   }
 
+  const projectSource = (project) =>
+    project.template === 'vibe-react'
+      ? INITIAL_APP
+      : (project.files?.[TARGET_FILE] ?? INITIAL_APP)
+
+  const postRun = async (payload) => {
+    const response = await fetch('/api/v1/runs', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session?.token ?? ''}`,
+      },
+      body: JSON.stringify(payload),
+    })
+    if (!response.ok) {
+      throw new Error(await extractError(response))
+    }
+    return response.json()
+  }
+
+  /**
+   * 单个圈的多轮发送：只提交当前标注，携带 threadId + chatHistory + 当前
+   * 沙盒 ID。后端据此复用沙盒，基于上一轮修改后的源码做增量修改。
+   */
+  const handleAnnotationSend = async (projectId, annotationId) => {
+    const project = projects.find((item) => item.id === projectId)
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const annotation = run.annotations.find((item) => item.id === annotationId)
+    const instruction = annotation?.intent.trim()
+    if (
+      !project ||
+      !annotation ||
+      !instruction ||
+      run.submitting ||
+      inflightRef.current.has(projectId)
+    ) {
+      return
+    }
+
+    const userMessage = newMessage('user', instruction)
+    const sendEntry = {
+      ...annotation,
+      intent: instruction,
+      chatHistory: [...(annotation.chatHistory ?? []), userMessage],
+    }
+    const source = projectSource(project)
+    const startedAt = Date.now()
+    inflightRef.current.add(projectId)
+    patchRun(projectId, (previous) => ({
+      ...previous,
+      submitting: true,
+      pendingAnnotationId: annotationId,
+      elapsed: 0,
+      startedAt,
+      error: null,
+      lastInstruction: instruction,
+      // 输入框清空，对话气泡保留本轮用户指令。
+      annotations: previous.annotations.map((item) =>
+        item.id === annotationId
+          ? {
+              ...item,
+              intent: '',
+              chatHistory: [...(item.chatHistory ?? []), userMessage],
+            }
+          : item,
+      ),
+    }))
+
+    const payload = {
+      runId: newId('run'),
+      tenantId: user?.tenantId || 'tenant_local',
+      projectId: project.id,
+      // 复用项目当前沙盒：同一圈后续对话必须基于上一轮修改后的源码。
+      sandboxId: run.result?.sandboxId || annotation.lastSandboxId || undefined,
+      annotations: [buildAnnotation(sendEntry, source)],
+      files: { [TARGET_FILE]: source },
+      options: {
+        llmProvider: modelProvider,
+        // 对话交互要求即时反馈；不注入 Mock 的首次失败演示。
+        mockScenario: 'none',
+        maxRetries: 3,
+        keepSandbox: true,
+      },
+    }
+
+    try {
+      const result = await postRun(payload)
+      if (closedProjectsRef.current.has(projectId)) {
+        await destroySandbox(result.sandboxId, session?.token)
+        return
+      }
+      patchRun(projectId, (previous) => ({
+        ...previous,
+        result,
+        error:
+          result.status === 'FAILED'
+            ? result.error || '构建验证未通过'
+            : null,
+        annotations: previous.annotations.map((item) =>
+          item.id === annotationId
+            ? {
+                ...item,
+                lastRunId: result.runId,
+                lastSandboxId: result.sandboxId,
+                chatHistory: appendAssistantMessage(item, result),
+              }
+            : item,
+        ),
+        sandboxIds:
+          result.sandboxId && !previous.sandboxIds.includes(result.sandboxId)
+            ? [...previous.sandboxIds, result.sandboxId]
+            : previous.sandboxIds,
+      }))
+    } catch (cause) {
+      const message = `网络请求失败：${cause?.message || cause}`
+      patchRun(projectId, (previous) => ({
+        ...previous,
+        error: message,
+        annotations: previous.annotations.map((item) =>
+          item.id === annotationId
+            ? {
+                ...item,
+                chatHistory: appendAssistantMessage(item, null, message),
+              }
+            : item,
+        ),
+      }))
+    } finally {
+      inflightRef.current.delete(projectId)
+      patchRun(projectId, { submitting: false, pendingAnnotationId: null })
+    }
+  }
+
   const handleSubmit = async (projectId) => {
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
@@ -369,30 +560,38 @@ export default function WorkspacePage() {
       return
     }
 
+    // 批量提交也把每条指令写入对应圈的聊天历史，并各带自己的 threadId。
+    const sendEntries = annotations.map((annotation, index) => ({
+      ...annotation,
+      chatHistory: [
+        ...(annotation.chatHistory ?? []),
+        newMessage('user', instructions[index]),
+      ],
+    }))
+    const source = projectSource(project)
     inflightRef.current.add(projectId)
     const startedAt = Date.now()
     const lastInstruction = instructions.join(' / ')
     patchRun(projectId, {
       submitting: true,
+      pendingAnnotationId: null,
       elapsed: 0,
       startedAt,
       result: null,
       error: null,
       lastInstruction,
+      annotations: sendEntries,
     })
 
-    // 内置模板始终以当前 INITIAL_APP 为准：即使 localStorage 里残留了旧版
-    // 文件，也不会把旧卡片样式带进沙盒，保证画布与预览框尺寸一致。
-    const source =
-      project.template === 'vibe-react'
-        ? INITIAL_APP
-        : (project.files?.[TARGET_FILE] ?? INITIAL_APP)
     const payload = {
       runId: newId('run'),
       tenantId: user?.tenantId || 'tenant_local',
       projectId: project.id,
+      sandboxId: run.result?.sandboxId || undefined,
       // 关键：一次请求携带全部标注，后端 Planner / Coder 一次性综合处理。
-      annotations: annotations.map((annotation) => buildAnnotation(annotation, source)),
+      annotations: sendEntries.map((annotation) =>
+        buildAnnotation(annotation, source),
+      ),
       files: { [TARGET_FILE]: source },
       options: {
         // auto：有 DEEPSEEK_API_KEY 用 DeepSeek，否则回退 Mock。
@@ -404,20 +603,7 @@ export default function WorkspacePage() {
     }
 
     try {
-      const response = await fetch('/api/v1/runs', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${session?.token ?? ''}`,
-        },
-        body: JSON.stringify(payload),
-      })
-      if (!response.ok) {
-        const message = await extractError(response)
-        patchRun(projectId, { error: message })
-        return
-      }
-      const result = await response.json()
+      const result = await postRun(payload)
       if (closedProjectsRef.current.has(projectId)) {
         // 提交后用户立即关闭了项目：后端仍会完成本次 Run，
         // 前端拿到结果后立刻销毁新生成的沙盒，避免资源泄漏。
@@ -427,16 +613,34 @@ export default function WorkspacePage() {
       patchRun(projectId, (previous) => ({
         ...previous,
         result,
+        error:
+          result.status === 'FAILED'
+            ? result.error || '构建验证未通过'
+            : null,
+        annotations: previous.annotations.map((annotation) => ({
+          ...annotation,
+          lastRunId: result.runId,
+          lastSandboxId: result.sandboxId,
+          chatHistory: appendAssistantMessage(annotation, result),
+        })),
         sandboxIds:
           result.sandboxId && !previous.sandboxIds.includes(result.sandboxId)
             ? [...previous.sandboxIds, result.sandboxId]
             : previous.sandboxIds,
       }))
     } catch (cause) {
-      patchRun(projectId, { error: `网络请求失败：${cause?.message || cause}` })
+      const message = `网络请求失败：${cause?.message || cause}`
+      patchRun(projectId, (previous) => ({
+        ...previous,
+        error: message,
+        annotations: previous.annotations.map((annotation) => ({
+          ...annotation,
+          chatHistory: appendAssistantMessage(annotation, null, message),
+        })),
+      }))
     } finally {
       inflightRef.current.delete(projectId)
-      patchRun(projectId, { submitting: false })
+      patchRun(projectId, { submitting: false, pendingAnnotationId: null })
     }
   }
 
@@ -618,6 +822,9 @@ export default function WorkspacePage() {
                 }
                 onAnnotationRemove={(annotationId) =>
                   handleAnnotationRemove(project.id, annotationId)
+                }
+                onAnnotationSend={(annotationId) =>
+                  handleAnnotationSend(project.id, annotationId)
                 }
                 onClearAnnotations={() => handleClearAnnotations(project.id)}
                 onSubmit={() => handleSubmit(project.id)}

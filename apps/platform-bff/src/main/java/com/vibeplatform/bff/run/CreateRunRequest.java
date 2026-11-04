@@ -21,6 +21,7 @@ import java.util.Map;
  * @param projectId   项目 ID
  * @param annotations 批量画布标注（最多 3 个）
  * @param annotation  旧协议：单个画布标注
+ * @param sandboxId   可选：同一标注多轮修改时复用当前沙盒
  * @param files       沙盒初始文件
  * @param options     LLM / 重试 / 沙盒保留选项
  */
@@ -30,6 +31,7 @@ public record CreateRunRequest(
         @NotBlank String projectId,
         JsonNode annotations,
         JsonNode annotation,
+        String sandboxId,
         Map<String, String> files,
         JsonNode options
 ) {

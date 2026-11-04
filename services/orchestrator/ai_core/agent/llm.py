@@ -139,6 +139,10 @@ class MockAgentLLM(AgentLLM):
                 f"   - 标注 {index}（{_annotation_selector(annotation)}）："
                 f"{_annotation_text(annotation)}"
             )
+        history_count = sum(
+            len(((annotation.get("threadContext") or {}).get("chatHistory") or []))
+            for annotation in annotations
+        )
         lines.extend(
             [
                 "2. 将全部标注合并为一次代码修改，禁止只处理第一个标注",
@@ -146,8 +150,16 @@ class MockAgentLLM(AgentLLM):
                 f"4. 目标文件：{', '.join(sorted(current_files))}",
             ]
         )
+        if history_count:
+            lines.append(
+                f"5. 参考同圈多轮对话历史 {history_count} 条，"
+                "以最新用户指令为准做增量修改"
+            )
         if previous_errors:
-            lines.append("5. 上一轮构建失败：先修复错误日志，再保证全部标注生效")
+            lines.append(
+                f"{6 if history_count else 5}. 上一轮构建失败："
+                "先修复错误日志，再保证全部标注生效"
+            )
         return PlanResult(plan="\n".join(lines))
 
     def generate(
@@ -299,6 +311,12 @@ class DeepSeekAgentLLM(AgentLLM):
             "要求：\n"
             "- 逐条列出每个标注的目标组件、要修改的属性（颜色 / 文案 / 字号 /"
             " 间距 / 布局 / 结构等）与验收标准；\n"
+            "- 每个标注可能带 threadContext.chatHistory（同一圈的多轮对话）和"
+            " previousRuns（上一轮修改记录）。必须理解上下文，例如用户先说"
+            "“改成红色”，再说“不，我要蓝色”，最终结果只能是蓝色；不要同时保留"
+            "两个冲突方案；\n"
+            "- 历史修改已经体现在当前源码中。本轮只需生成相对当前源码的增量修改，"
+            "不得回退用户没有要求撤销的其它属性；\n"
             "- 明确指出多个标注之间是否可能冲突，以及最终以什么结果为准；\n"
             "- 只描述要改什么、保持什么不变、如何验证；不要输出代码。"
         )
@@ -338,6 +356,10 @@ class DeepSeekAgentLLM(AgentLLM):
             "- 不要修改无关文件、路由、未提及的文案与样式；\n"
             "- 如果多个标注作用在同一元素，按标注顺序叠加修改，后写的属性覆盖"
             "先写的同名属性；\n"
+            "- 同一标注可能带 threadContext：当前文件已经包含上一轮修改。必须"
+            "基于历史对话与当前源码做增量修改，以最新用户指令为准；用户否定"
+            "上一轮方案时（如“不，我要蓝色”），最终代码只能体现新方案，同时"
+            "保留其它未被否定的属性；\n"
             "- 如果上一轮构建失败，必须针对错误日志修复，同时保证全部标注仍然"
             "生效，而不是重复原方案。"
         )
