@@ -26,6 +26,9 @@ function ProjectWorkspaceInner({
   onClearAnnotation,
   onSubmit,
   onRetry,
+  onExport,
+  canExport = false,
+  exporting = false,
 }) {
   const { linked, setLinked } = useViewportState()
   // 当前布局：compare = 单屏切换，dual = 双屏同显。
@@ -132,6 +135,21 @@ function ProjectWorkspaceInner({
               </button>
             </div>
           )}
+
+          <button
+            type="button"
+            className={`export-button ${exporting ? 'is-busy' : ''}`}
+            disabled={!canExport || exporting}
+            title={
+              canExport
+                ? '下载当前项目的 tar.gz（排除 node_modules / .git / dist）'
+                : '请先执行一次 Agent，生成可导出的沙盒项目'
+            }
+            onClick={onExport}
+          >
+            <span aria-hidden="true">📥</span>
+            {exporting ? '导出中…' : '导出代码'}
+          </button>
         </div>
       </div>
 

@@ -247,6 +247,41 @@ class LocalDockerSandbox(SandboxProvider):
             )
         return self._decode(output)
 
+    def export_archive(self, sandbox_id: str) -> bytes:
+        """在容器内把当前项目打成 tar.gz，并把字节流返回给上层。
+
+        - 用 `-czf -` 直接写到 stdout，不在沙盒工作目录留下临时压缩包；
+        - 排除 node_modules / .git / dist：依赖与构建产物可通过
+          `npm install && npm run dev` 重建，导出包保持可移植的最小体积；
+        - 保留 package-lock.json，保证解压后依赖版本与沙盒一致。
+        """
+        container = self._get_container(sandbox_id)
+        command = (
+            "tar -czf - " "--exclude=node_modules " "--exclude=.git " "--exclude=dist ."
+        )
+        try:
+            exit_code, output = self._exec(
+                container,
+                ["sh", "-lc", command],
+                workdir=self.settings.sandbox_workdir,
+            )
+        except DockerException as exc:
+            raise SandboxError(f"导出项目失败: {exc}") from exc
+
+        if exit_code != 0:
+            raise SandboxError(f"导出项目失败: {self._decode(output)}")
+
+        data = output if isinstance(output, bytes) else self._decode(output).encode()
+        if not data:
+            raise SandboxError("导出项目失败: 压缩包为空")
+
+        limit = self.settings.sandbox_max_export_bytes
+        if len(data) > limit:
+            raise SandboxValidationError(
+                f"导出包超过大小限制（{len(data)} > {limit} 字节）"
+            )
+        return data
+
     def destroy(self, sandbox_id: str) -> None:
         container = self._get_container(sandbox_id)
         try:

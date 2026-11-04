@@ -30,13 +30,16 @@ public class RunService {
 
     private final RestClient aiCoreRunRestClient;
     private final ObjectMapper objectMapper;
+    private final RunSandboxRegistry runSandboxRegistry;
 
     public RunService(
             @Qualifier("aiCoreRunRestClient") RestClient aiCoreRunRestClient,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            RunSandboxRegistry runSandboxRegistry
     ) {
         this.aiCoreRunRestClient = aiCoreRunRestClient;
         this.objectMapper = objectMapper;
+        this.runSandboxRegistry = runSandboxRegistry;
     }
 
     /**
@@ -78,6 +81,14 @@ public class RunService {
                         }
                         return ResponseEntity.status(status).body(body);
                     });
+
+            // 记录 runId -> sandboxId，供后续导出接口只凭 runId 定位沙盒。
+            JsonNode body = response.getBody();
+            if (body != null) {
+                String runId = body.path("runId").asText(null);
+                String sandboxId = body.path("sandboxId").asText(null);
+                runSandboxRegistry.record(runId, sandboxId);
+            }
 
             log.info(
                     "run proxy completed requestBytes={} status={} elapsedMs={}",

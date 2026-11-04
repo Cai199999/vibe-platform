@@ -9,8 +9,11 @@ export default function ProjectSwitcher({
   activeProject,
   openTabs,
   limitReached,
+  canExport = false,
+  exporting = false,
   onOpenProject,
   onNewProject,
+  onExport,
 }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef(null)
@@ -106,6 +109,25 @@ export default function ProjectSwitcher({
               <span aria-hidden="true">↥</span>
               导入项目
               <span className="project-menu-badge">Phase 3</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="project-menu-export"
+              disabled={!activeProject || !canExport || exporting}
+              title={
+                canExport
+                  ? '下载当前项目的 tar.gz 源码包'
+                  : '当前项目还没有可导出的沙盒，请先执行一次 Agent'
+              }
+              onClick={() => {
+                if (!activeProject) return
+                onExport?.(activeProject.id)
+                setOpen(false)
+              }}
+            >
+              <span aria-hidden="true">📥</span>
+              {exporting ? '正在导出…' : '导出当前项目'}
             </button>
           </div>
 

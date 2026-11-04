@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     sandbox_max_file_bytes: int = 1_048_576
     sandbox_max_total_bytes: int = 5_242_880
 
+    # 项目导出包上限（已排除 node_modules / .git / dist，正常源码项目远小于该值）。
+    sandbox_max_export_bytes: int = 33_554_432
+
     # ------------------------------------------------------------
     # Agent
     # ------------------------------------------------------------

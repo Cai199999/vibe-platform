@@ -8,6 +8,7 @@
     - 两种模式往返时组件零卸载，画布标注与 iframe / HMR 状态不丢失
     - 预览 iframe 等比缩放居中、外层无滚动条、iframe body 隐藏滚动条
     - Agent 完成后「查看效果」快捷切换
+    - 工具栏与项目下拉菜单导出 tar.gz，并校验这是可独立运行的 Vite 项目
     - 沙盒被外部销毁时预览显示连接失败，并可一键重新执行
     - 关闭 Tab = 删除项目 + 销毁 Docker 沙盒（通过 BFF 调用 Python internal API）
     - 最多 5 个 Tab；新建项目按存活数量递增命名且不重名
@@ -24,6 +25,7 @@
     docs/screenshots/phase4-canvas-mode.png
     docs/screenshots/phase4-loading.png
     docs/screenshots/phase4-preview-mode.png
+    docs/screenshots/phase4-export.png
     docs/screenshots/phase4-dual-mode.png
     docs/screenshots/phase4-preview-offline.png
     docs/screenshots/phase4-tab-limit.png
@@ -35,6 +37,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import tarfile
 import time
 import urllib.request
 from pathlib import Path
@@ -233,6 +236,49 @@ def assert_pane_stack(active, visible: str, hidden: str, label: str) -> None:
     print(
         f"   显隐层级: {label} visible={visible_style['visibility']} / hidden={hidden_style['visibility']}"
     )
+
+
+def assert_export_archive(download, label: str) -> None:
+    """校验浏览器下载到的 tar.gz 是完整、可独立运行的 Vite 项目。"""
+    if download.suggested_filename != "project-export.tar.gz":
+        fail(f"{label} 文件名不正确: {download.suggested_filename}")
+    path = download.path()
+    if not path:
+        fail(f"{label} 未拿到下载文件")
+
+    with tarfile.open(path, "r:gz") as tar:
+        names = set()
+        for member in tar.getmembers():
+            name = member.name[2:] if member.name.startswith("./") else member.name
+            names.add(name)
+
+        required = {
+            "package.json",
+            "package-lock.json",
+            "vite.config.js",
+            "index.html",
+            "src/App.jsx",
+            "src/main.jsx",
+        }
+        missing = required - names
+        if missing:
+            fail(f"{label} 缺少文件: {sorted(missing)}")
+
+        excluded = {"node_modules", ".git", "dist"}
+        leaked = [name for name in names if name.split("/")[0] in excluded]
+        if leaked:
+            fail(f"{label} 包含应排除的目录: {leaked[:5]}")
+
+        member = tar.extractfile("./src/App.jsx") or tar.extractfile("src/App.jsx")
+        if member is None:
+            fail(f"{label} 无法读取 src/App.jsx")
+        source = member.read().decode("utf-8", errors="replace")
+        # Agent 已把 CTA 改成红色，导出包必须是修改后的真实沙盒内容。
+        if "backgroundColor: 'red'" not in source:
+            fail(f"{label} 的 src/App.jsx 不是 Agent 修改后的版本")
+
+    size_kb = Path(path).stat().st_size / 1024
+    print(f"   {label}: project-export.tar.gz / {size_kb:.1f} KB / {len(names)} 个文件")
 
 
 def assert_canvas_preview_parity(page, active, label: str) -> None:
@@ -460,7 +506,24 @@ def main() -> None:
             path=str(SCREENSHOT_DIR / "phase4-preview-mode.png"), full_page=True
         )
 
-        print("\n== 7. 对比/展示模式往返：组件不卸载、尺寸严格对齐 ==")
+        print("\n== 7. 导出项目：工具栏与项目下拉菜单均下载 tar.gz ==")
+        export_button = active.locator(".export-button")
+        expect(export_button).to_be_enabled()
+        with page.expect_download(timeout=30_000) as download_info:
+            export_button.click()
+        assert_export_archive(download_info.value, "工具栏导出")
+        expect(page.locator("[data-export-notice='success']")).to_be_visible()
+
+        page.locator(".project-switcher-button").click()
+        menu_export = page.get_by_role("menuitem", name=re.compile("导出当前项目"))
+        expect(menu_export).to_be_enabled()
+        page.screenshot(path=str(SCREENSHOT_DIR / "phase4-export.png"), full_page=True)
+        with page.expect_download(timeout=30_000) as menu_download_info:
+            menu_export.click()
+        assert_export_archive(menu_download_info.value, "下拉菜单导出")
+        expect(page.locator(".project-menu")).to_have_count(0)
+
+        print("\n== 8. 对比/展示模式往返：组件不卸载、尺寸严格对齐 ==")
         # 在 DOM 节点上打标记，任何一次切换若导致 React 重建节点都会被发现。
         page.evaluate("""() => {
                 const windowNode = document.querySelector('.tab-window.is-active');
@@ -547,7 +610,7 @@ def main() -> None:
         )
         print("   两种模式/画布预览往返均无重挂载，圈选与 iframe 状态保留")
 
-        print("\n== 8. 视口交互：滚轮缩放、中键平移、状态保持与视口联动 ==")
+        print("\n== 9. 视口交互：滚轮缩放、中键平移、状态保持与视口联动 ==")
         preview_pane = active.locator(".preview-pane")
         canvas_pane = active.locator(".canvas-pane")
 
@@ -787,7 +850,7 @@ def main() -> None:
         assert_canvas_preview_parity(page, active, "重置视口后展示模式")
         print("   重置视图后回到 100%，画布/预览卡片再次严格对齐")
 
-        print("\n== 9. 刷新页面：恢复预览结果，默认回到画布模式 ==")
+        print("\n== 10. 刷新页面：恢复预览结果，默认回到画布模式 ==")
         page.reload(wait_until="networkidle")
         active = page.locator(".tab-window.is-active")
         expect(active.locator(".tab-window-title h2")).to_have_text("演示项目")
@@ -804,7 +867,7 @@ def main() -> None:
         )
         print("   刷新后预览与沙盒信息均恢复，关闭项目仍可追踪沙盒")
 
-        print("\n== 10. 沙盒被外部销毁：预览显示连接失败并可重新执行 ==")
+        print("\n== 11. 沙盒被外部销毁：预览显示连接失败并可重新执行 ==")
         console_state["suppress"] = True
         removed = subprocess.run(
             ["docker", "rm", "-f", f"vibe-sandbox-{sandbox_id}"],
@@ -840,7 +903,7 @@ def main() -> None:
         )
         print(f"   失联提示正确，重新执行后新沙盒: {sandbox_id}")
 
-        print("\n== 11. 关闭项目：删除状态并销毁沙盒容器 ==")
+        print("\n== 12. 关闭项目：删除状态并销毁沙盒容器 ==")
         page.locator(".workspace-tab.is-active .tab-close").click()
         expect(page.locator(".workspace-tab")).to_have_count(1)
         page.locator(".project-switcher-button").click()
@@ -852,7 +915,7 @@ def main() -> None:
         print(f"   项目已删除，容器 vibe-sandbox-{sandbox_id} 已销毁")
         console_state["suppress"] = False
 
-        print("\n== 12. 同时打开 5 个项目，触发上限 ==")
+        print("\n== 13. 同时打开 5 个项目，触发上限 ==")
         for _ in range(4):
             open_new_project(page)
         expect(page.locator(".workspace-tab")).to_have_count(5)
@@ -876,7 +939,7 @@ def main() -> None:
         page.keyboard.press("Escape")
         print("   5 个 Tab 时新建入口已禁用并展示上限提示")
 
-        print("\n== 13. 关闭项目 2 后新建，按存活数量递增且不重名 ==")
+        print("\n== 14. 关闭项目 2 后新建，按存活数量递增且不重名 ==")
         page.locator(".workspace-tab", has_text="未命名项目 2").locator(
             ".tab-close"
         ).click()
@@ -892,7 +955,7 @@ def main() -> None:
             fail(f"项目名称出现重复: {names}")
         print("   关闭项目 2 后，新项目按存活数递增为「未命名项目 7」")
 
-        print("\n== 14. 账户设置、退出与账号密码登录 ==")
+        print("\n== 15. 账户设置、退出与账号密码登录 ==")
         page.locator(".avatar-button").click()
         page.get_by_role("menuitem", name="账户设置").click()
         expect(page.locator(".account-dialog")).to_be_visible()

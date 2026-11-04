@@ -184,6 +184,9 @@ export default function WorkspacePage() {
 
   const [runStates, setRunStates] = useState(() => loadRunStates(projects))
   const [accountOpen, setAccountOpen] = useState(false)
+  // 导出状态只保留一个：同时下载多个项目没有意义，且提示条全局唯一。
+  const [exportingProjectId, setExportingProjectId] = useState(null)
+  const [exportNotice, setExportNotice] = useState(null)
   const inflightRef = useRef(new Set())
   // 记录已关闭项目，防止关闭瞬间仍在执行的 Run 回写状态或泄漏沙盒。
   const closedProjectsRef = useRef(new Set())
@@ -212,6 +215,16 @@ export default function WorkspacePage() {
     () => Object.values(runStates).some((run) => run.submitting),
     [runStates],
   )
+
+  // 导出提示自动消失，成功 3 秒、失败 6 秒（失败需要更久阅读）。
+  useEffect(() => {
+    if (!exportNotice) return undefined
+    const timer = window.setTimeout(
+      () => setExportNotice(null),
+      exportNotice.kind === 'error' ? 6000 : 3000,
+    )
+    return () => window.clearTimeout(timer)
+  }, [exportNotice])
 
   // 所有 Tab 共用同一个计时器；按 startedAt 计算各自耗时，避免多项目并发时互相覆盖。
   useEffect(() => {
@@ -344,6 +357,64 @@ export default function WorkspacePage() {
   }
 
   /**
+   * 导出当前项目的 tar.gz：
+   *  - 优先走 GET /api/v1/runs/{runId}/export?sandboxId=...（BFF 记录映射）；
+   *  - 旧会话没有 runId 时直接走 GET /api/v1/sandboxes/{sandboxId}/export；
+   *  - 用 Blob + <a download> 触发浏览器原生下载，不依赖弹窗或新标签页。
+   */
+  const handleExport = async (projectId) => {
+    const run = runStates[projectId]
+    const sandboxId = run?.result?.sandboxId
+    if (!sandboxId) {
+      setExportNotice({
+        kind: 'error',
+        text: '当前项目还没有可导出的沙盒，请先执行一次 Agent。',
+      })
+      return
+    }
+    if (exportingProjectId) return
+
+    setExportingProjectId(projectId)
+    setExportNotice(null)
+    const runId = run?.result?.runId
+    // sandboxId 显式带上：BFF 重启后进程内 runId 映射会丢失，前端仍能导出。
+    const url = runId
+      ? `/api/v1/runs/${encodeURIComponent(runId)}/export?sandboxId=${encodeURIComponent(sandboxId)}`
+      : `/api/v1/sandboxes/${encodeURIComponent(sandboxId)}/export`
+
+    try {
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${session?.token ?? ''}` },
+      })
+      if (!response.ok) {
+        throw new Error(await extractError(response))
+      }
+      const blob = await response.blob()
+      if (blob.size === 0) {
+        throw new Error('导出包为空')
+      }
+
+      const objectUrl = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = objectUrl
+      anchor.download = 'project-export.tar.gz'
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      // 延迟回收，给浏览器留出读取 Blob 的时间。
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
+      setExportNotice({
+        kind: 'success',
+        text: `已导出 ${(blob.size / 1024).toFixed(1)} KB 项目源码包`,
+      })
+    } catch (cause) {
+      setExportNotice({ kind: 'error', text: `导出失败：${cause?.message || cause}` })
+    } finally {
+      setExportingProjectId(null)
+    }
+  }
+
+  /**
    * 预览沙盒失联后，用最近一次指令重新执行。
    * 仍复用原画布标注；没有历史指令（旧会话）时由 UI 引导用户手动重发。
    */
@@ -410,8 +481,15 @@ export default function WorkspacePage() {
             activeProject={activeProject}
             openTabs={openTabs}
             limitReached={limitReached}
+            canExport={Boolean(
+              activeProject && runStates[activeProject.id]?.result?.sandboxId,
+            )}
+            exporting={Boolean(
+              activeProject && exportingProjectId === activeProject.id,
+            )}
             onOpenProject={openProject}
             onNewProject={createProject}
+            onExport={handleExport}
           />
 
           <div className="workspace-stats">
@@ -453,6 +531,9 @@ export default function WorkspacePage() {
                 onClearAnnotation={() => handleClearAnnotation(project.id)}
                 onSubmit={(instruction) => handleSubmit(project.id, instruction)}
                 onRetry={() => handleRetry(project.id)}
+                canExport={Boolean(run.result?.sandboxId)}
+                exporting={exportingProjectId === project.id}
+                onExport={() => handleExport(project.id)}
               />
             )
           })}
@@ -460,6 +541,17 @@ export default function WorkspacePage() {
           {openProjects.length === 0 && <EmptyWorkspace onNewProject={createProject} />}
         </div>
       </main>
+
+      {exportNotice && (
+        <div
+          className={`workspace-toast is-${exportNotice.kind}`}
+          role="status"
+          data-export-notice={exportNotice.kind}
+        >
+          <span aria-hidden="true">{exportNotice.kind === 'success' ? '✓' : '⚠'}</span>
+          {exportNotice.text}
+        </div>
+      )}
 
       <AccountDialog open={accountOpen} onClose={() => setAccountOpen(false)} />
     </div>

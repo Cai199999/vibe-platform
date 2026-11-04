@@ -1,11 +1,16 @@
 package com.vibeplatform.bff.run;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.vibeplatform.bff.sandbox.SandboxExportService;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -16,9 +21,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class RunController {
 
     private final RunService runService;
+    private final SandboxExportService sandboxExportService;
 
-    public RunController(RunService runService) {
+    public RunController(RunService runService, SandboxExportService sandboxExportService) {
         this.runService = runService;
+        this.sandboxExportService = sandboxExportService;
     }
 
     /**
@@ -30,5 +37,20 @@ public class RunController {
     @PostMapping
     public ResponseEntity<JsonNode> createRun(@Valid @RequestBody CreateRunRequest request) {
         return runService.execute(request);
+    }
+
+    /**
+     * 下载该 Run 生成的完整项目（tar.gz）。
+     *
+     * <p>sandboxId 可选：BFF 会记录最近执行的 runId -> sandboxId；前端同时
+     * 传 sandboxId 可以覆盖 BFF 重启后映射丢失的情况。</p>
+     */
+    @GetMapping("/{runId}/export")
+    public void exportRun(
+            @PathVariable String runId,
+            @RequestParam(name = "sandboxId", required = false) String sandboxId,
+            HttpServletResponse response
+    ) {
+        sandboxExportService.exportByRun(runId, sandboxId, response);
     }
 }

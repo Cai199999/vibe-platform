@@ -21,7 +21,7 @@ scripts/smoke-test.sh                 验证 Java -> Python 跨语言调用
 scripts/sandbox_e2e_test.py           沙盒创建/补丁/构建校验/销毁 E2E
 scripts/agent_e2e_test.py             Agent 闭环 E2E（Mock LLM）
 scripts/platform_e2e_test.py          全链路 E2E（Vite 代理 → BFF → AI Core → 沙盒）
-scripts/ui_e2e_test.py                浏览器 E2E（Playwright：双视图 / 缩放预览 / 沙盒销毁 / Tab 上限）
+scripts/ui_e2e_test.py                浏览器 E2E（Playwright：双视图 / 缩放预览 / 项目导出 / 沙盒销毁 / Tab 上限）
 docs/screenshots/                     M1 联调截图
 docker-compose.yml                    只编排平台自身服务
 ```
@@ -89,6 +89,8 @@ Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier �
 ![展示模式：画布 + 等比缩放预览](docs/screenshots/phase4-dual-mode.png)
 
 ![对比模式：全屏预览](docs/screenshots/phase4-preview-mode.png)
+
+![项目导出入口](docs/screenshots/phase4-export.png)
 
 ![5 个项目上限](docs/screenshots/phase4-tab-limit.png)
 
@@ -176,6 +178,26 @@ platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
 回写也始终带 `projectId`，关闭 Tab 后由 `closedProjectsRef` 阻止迟到结果污染
 状态并立即销毁新沙盒。
 
+## 项目导出
+
+沙盒是项目的唯一真源：导出直接读取运行中的沙盒文件，不依赖前端缓存。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/v1/runs/{runId}/export?sandboxId=...` | 前端主入口；`sandboxId` 可选，用于 BFF 重启后兜底 |
+| GET | `/api/v1/sandboxes/{sandboxId}/export` | 直接按沙盒导出 |
+| GET | `/api/v1/internal/sandbox/{sandboxId}/export` | Python 内部接口，返回 gzip 字节流 |
+
+- 容器内执行 `tar -czf - --exclude=node_modules --exclude=.git --exclude=dist .`，
+  保留 `package.json` / `package-lock.json` / `vite.config.js` / `src/`。
+- BFF 不落盘、不解析压缩包，直接把 AI Core 的 `InputStream` 复制到 Servlet
+  输出流；响应头为 `Content-Type: application/gzip` 与
+  `Content-Disposition: attachment; filename="project-export.tar.gz"`。
+- 前端有两个入口：工作区工具栏最右侧的 **📥 导出代码**，以及项目下拉菜单中
+  的 **导出当前项目**；二者都触发浏览器原生下载，失败时右下角提示原因。
+- 解压后在干净环境执行 `npm ci && npm run dev` 即可独立运行；已在
+  `node:20-alpine` 容器中实测 `npm ci && npm run build` 通过。
+
 ### 5 个项目时的 Docker 资源（实测）
 
 同一时刻并发创建 5 个 React + Vite 沙盒，稳定后 `docker stats`：
@@ -222,7 +244,8 @@ cover 缩放后完全覆盖预览屏幕（居中、无留白）→ 对比画布 
 用 DOM 节点标记验证组件零重挂载 → **预览滚轮放大（校验指针锚点不漂移）、
 中键平移、画布独立缩放，并在画布/预览往返后校验 transform 零重置** →
 展示模式开启视口联动，校验两侧 zoom/transform 完全一致 → 重置视图恢复对齐 →
-详情抽屉中的 Diff 与沙盒信息 →
+**工具栏与项目下拉菜单分别触发下载，解压校验完整 Vite 文件结构与 Agent
+修改后的源码** → 详情抽屉中的 Diff 与沙盒信息 →
 **刷新恢复预览结果** → 外部删除沙盒容器，验证 PREVIEW_OFFLINE 提示与
 **重新执行 Agent** 创建新沙盒 → 关闭 Tab 并通过 Docker CLI 确认容器已销毁 →
 5 Tab 上限 → 关闭项目后按存活数递增命名且不重名 → 账户设置 / 退出 /
@@ -252,6 +275,8 @@ curl -s http://127.0.0.1:8100/api/v1/health | python3 -m json.tool
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/v1/runs` | 接收画布标注，同步代理 AI Core 执行 |
+| GET | `/api/v1/runs/{runId}/export` | 下载该 Run 的项目 tar.gz；`sandboxId` 可选 |
+| GET | `/api/v1/sandboxes/{sandboxId}/export` | 按沙盒下载项目 tar.gz |
 | DELETE | `/api/v1/sandboxes/{sandboxId}` | 代理 AI Core 销毁沙盒；404 幂等透传 |
 
 BFF 只校验 `projectId` / `annotation` 存在，`annotation` 与 `options` 以

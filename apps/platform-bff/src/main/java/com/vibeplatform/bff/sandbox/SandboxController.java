@@ -3,10 +3,12 @@ package com.vibeplatform.bff.sandbox;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.servlet.http.HttpServletResponse;
 import java.util.regex.Pattern;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -22,11 +24,26 @@ public class SandboxController {
     private static final Pattern SANDBOX_ID_PATTERN = Pattern.compile("[A-Za-z0-9_-]{1,80}");
 
     private final SandboxService sandboxService;
+    private final SandboxExportService sandboxExportService;
     private final ObjectMapper objectMapper;
 
-    public SandboxController(SandboxService sandboxService, ObjectMapper objectMapper) {
+    public SandboxController(
+            SandboxService sandboxService,
+            SandboxExportService sandboxExportService,
+            ObjectMapper objectMapper
+    ) {
         this.sandboxService = sandboxService;
+        this.sandboxExportService = sandboxExportService;
         this.objectMapper = objectMapper;
+    }
+
+    /**
+     * 下载沙盒当前项目的 tar.gz 快照。
+     * runId 不可知或 BFF 重启后，前端可直接用 sandboxId 调用该入口。
+     */
+    @GetMapping("/{sandboxId}/export")
+    public void export(@PathVariable String sandboxId, HttpServletResponse response) {
+        sandboxExportService.exportSandbox(sandboxId, response);
     }
 
     /**

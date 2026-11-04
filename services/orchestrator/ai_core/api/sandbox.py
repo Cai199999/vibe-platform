@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from docker.errors import DockerException
 
 from ai_core.api.errors import sandbox_error_to_http
@@ -102,6 +102,35 @@ def verify(
         logs=result.logs,
         logs_truncated=result.logs_truncated,
         finished_at=datetime.now(timezone.utc),
+    )
+
+
+@router.get("/{sandbox_id}/export")
+def export_project(sandbox_id: str) -> Response:
+    """把沙盒当前项目打包为 tar.gz 并直接返回字节流。
+
+    排除 node_modules / .git / dist；解压后执行 `npm install && npm run dev`
+    即可得到与沙盒一致的可运行 Vite 项目。
+    """
+    provider = get_sandbox_provider()
+    try:
+        archive = provider.export_archive(sandbox_id)
+    except SandboxError as exc:
+        raise sandbox_error_to_http(exc) from exc
+    except DockerException as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "SANDBOX_DOCKER_UNAVAILABLE", "message": str(exc)},
+        ) from exc
+
+    filename = "project-export.tar.gz"
+    return Response(
+        content=archive,
+        media_type="application/gzip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 

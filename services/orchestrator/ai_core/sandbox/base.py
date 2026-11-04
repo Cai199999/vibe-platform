@@ -94,5 +94,12 @@ class SandboxProvider(ABC):
         """读取沙盒内文件，供 Agent 维护 current_code。"""
 
     @abstractmethod
+    def export_archive(self, sandbox_id: str) -> bytes:
+        """把沙盒项目打包为 tar.gz（排除 node_modules / .git / dist）。
+
+        返回的是完整 gzip 字节流，调用方负责直接下发或存储。
+        """
+
+    @abstractmethod
     def destroy(self, sandbox_id: str) -> None:
         """销毁容器并释放资源。"""
