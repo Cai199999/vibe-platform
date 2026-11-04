@@ -52,14 +52,17 @@ class RunExecutionService:
         self._settings = settings or get_settings()
 
     def execute(self, request: ExecuteRunRequest) -> ExecuteRunResponse:
-        annotation = request.annotation
-        intent_kind = annotation.intent.kind if annotation.intent else "UI_ONLY"
-        if intent_kind == "FULLSTACK":
+        annotations = request.effective_annotations
+        intent_kinds = {
+            annotation.intent.kind if annotation.intent else "UI_ONLY"
+            for annotation in annotations
+        }
+        if "FULLSTACK" in intent_kinds:
             raise FullStackNotSupportedError(
                 "M1 只支持 UI_ONLY / UI_AND_BUSINESS，FULLSTACK 需等待 M2"
             )
 
-        target_file = self._resolve_target_file(request)
+        target_files = self._resolve_target_files(request)
         run_id = request.run_id or f"run_{uuid.uuid4().hex[:20]}"
 
         # 先构造 LLM，避免密钥缺失时已经创建了沙盒。
@@ -71,15 +74,20 @@ class RunExecutionService:
             template="react-vite",
         )
 
+        # 批量标注可能指向不同文件；一次性读取，交给同一个 Agent 综合处理。
+        current_files: dict[str, str] = {}
         try:
-            current_code = self._sandbox.read_file(handle.sandbox_id, target_file)
+            for target_file in target_files:
+                current_files[target_file] = self._sandbox.read_file(
+                    handle.sandbox_id, target_file
+                )
         except SandboxError as exc:
             self._sandbox.destroy(handle.sandbox_id)
             raise TargetFileNotFoundError(
-                f"读取目标文件失败 {target_file}: {exc}"
+                f"读取目标文件失败 {list(target_files)}: {exc}"
             ) from exc
 
-        # 把画布标注渲染成 VIBE_CONTEXT.md 写进沙盒，导出源码包时自动带上：
+        # 把全部画布标注渲染成 VIBE_CONTEXT.md 写进沙盒，导出源码包时自动带上：
         # 本地 Cursor / Claude Code 打开项目即可看到本次修改意图。
         # 写入失败只记录日志，不影响 Run 本身的执行与校验。
         try:
@@ -90,7 +98,7 @@ class RunExecutionService:
                         request,
                         run_id,
                         handle.sandbox_id,
-                        target_file,
+                        target_files,
                     )
                 },
             )
@@ -102,17 +110,20 @@ class RunExecutionService:
                 exc_info=True,
             )
 
-        annotation_context = self._build_annotation_context(request, target_file)
+        annotation_context = self._build_annotation_context(request, target_files)
+        primary_file = target_files[0]
         initial_state: dict[str, Any] = {
             "run_id": run_id,
             "tenant_id": request.tenant_id or "",
             "project_id": request.project_id,
             "sandbox_id": handle.sandbox_id,
             "preview_url": handle.preview_url,
-            "target_file": target_file,
+            "target_file": primary_file,
+            "target_files": target_files,
             "annotation_context": annotation_context,
             "messages": [],
-            "current_code": current_code,
+            "current_code": current_files[primary_file],
+            "current_files": current_files,
             "plan": "",
             "generated_patch": "",
             "generated_files": {},
@@ -169,33 +180,65 @@ class RunExecutionService:
     # 内部工具
     # --------------------------------------------------------
     @staticmethod
-    def _resolve_target_file(request: ExecuteRunRequest) -> str:
-        target = request.annotation.target
-        if target and target.source and target.source.file:
-            return target.source.file
-        return DEFAULT_TARGET_FILE
+    def _resolve_target_files(request: ExecuteRunRequest) -> list[str]:
+        """按标注顺序去重目标文件；没有源码定位时回退到默认入口。"""
+        files: list[str] = []
+        for annotation in request.effective_annotations:
+            file = None
+            target = annotation.target
+            if target and target.source and target.source.file:
+                file = target.source.file
+            file = file or DEFAULT_TARGET_FILE
+            if file not in files:
+                files.append(file)
+        return files or [DEFAULT_TARGET_FILE]
 
     @staticmethod
     def _build_annotation_context(
         request: ExecuteRunRequest,
-        target_file: str,
+        target_files: list[str],
     ) -> dict[str, Any]:
-        annotation = request.annotation
-        intent = annotation.intent
-        ui = intent.ui if intent else None
+        """构造 Planner / Coder 需要的逐标注上下文。
+
+        每个标注保留自己的目标文件、来源组件、选择器、验收标准与自然语言
+        指令；Graph 会把整个列表一次性交给模型，而不是循环调用模型。
+        """
+        contexts: list[dict[str, Any]] = []
+        fallback_file = target_files[0] if target_files else DEFAULT_TARGET_FILE
+        for index, annotation in enumerate(request.effective_annotations, start=1):
+            intent = annotation.intent
+            ui = intent.ui if intent else None
+            target = annotation.target
+            source = target.source if target else None
+            contexts.append(
+                {
+                    "index": index,
+                    "annotation_id": annotation.annotation_id,
+                    "annotation": annotation.model_dump(
+                        by_alias=True, exclude_none=True
+                    ),
+                    "intent_kind": intent.kind if intent else "UI_ONLY",
+                    "instruction": str(annotation.payload.get("text") or "").strip(),
+                    "ui_summary": (ui.summary if ui else None)
+                    or annotation.payload.get("text", ""),
+                    "acceptance": ui.acceptance if ui else [],
+                    "business": (intent.business if intent else None),
+                    "target_file": (
+                        source.file if source and source.file else fallback_file
+                    ),
+                    "selector": target.selector if target else None,
+                    "component": source.component if source else None,
+                    "target_snippet": (
+                        target.snippet.model_dump(by_alias=True, exclude_none=True)
+                        if target and target.snippet
+                        else None
+                    ),
+                }
+            )
         return {
-            "annotation": annotation.model_dump(by_alias=True, exclude_none=True),
-            "intent_kind": intent.kind if intent else "UI_ONLY",
-            "ui_summary": (ui.summary if ui else None)
-            or annotation.payload.get("text", ""),
-            "acceptance": ui.acceptance if ui else [],
-            "business": (intent.business if intent else None),
-            "target_file": target_file,
-            "target_snippet": (
-                annotation.target.snippet.model_dump(by_alias=True, exclude_none=True)
-                if annotation.target and annotation.target.snippet
-                else None
-            ),
+            "count": len(contexts),
+            "annotations": contexts,
+            "target_files": target_files,
         }
 
     @staticmethod

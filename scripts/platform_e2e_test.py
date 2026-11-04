@@ -67,52 +67,90 @@ def load_initial_app() -> str:
     return match.group(1)
 
 
-def build_payload(initial_app: str, run_id: str) -> dict:
-    """与 apps/platform-web/src/App.jsx buildAnnotation 保持一致。"""
+def build_annotation(
+    initial_app: str,
+    run_id: str,
+    index: int,
+    selector: str,
+    instruction: str,
+) -> dict:
+    """与 platform-web 的 buildAnnotation 保持同一份契约。"""
     now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    return {
+        "version": 1,
+        "annotationId": f"ann_{run_id}_{index}",
+        "type": "drag",
+        "worldTarget": {
+            "x": 0.32,
+            "y": 0.61,
+            "width": 0.18,
+            "height": 0.08,
+            "coordinateSpace": "normalized",
+        },
+        "target": {
+            "mode": "source",
+            "source": {
+                "file": "src/App.jsx",
+                "line": 11,
+                "column": 7,
+                "component": "App",
+                "sourceKind": "jsx",
+            },
+            "selector": selector,
+            "snippet": {
+                "startLine": 1,
+                "endLine": len(initial_app.split("\n")),
+                "content": initial_app,
+                "hash": "sha256:canvas-demo",
+            },
+        },
+        "intent": {
+            "kind": "UI_ONLY",
+            "ui": {
+                "summary": instruction,
+                "acceptance": [f"完成指令：{instruction}"],
+                "elementRole": "element",
+            },
+        },
+        "payload": {
+            "text": instruction,
+            "from": None,
+            "to": None,
+            "strokes": [],
+        },
+        "createdAt": now,
+    }
+
+
+def build_payload(initial_app: str, run_id: str) -> dict:
+    """一次提交 3 个标注：颜色 + 文案 + 尺寸。"""
     return {
         "runId": run_id,
         "tenantId": "tenant_local",
         "projectId": "proj_canvas_demo",
-        "annotation": {
-            "version": 1,
-            "annotationId": f"ann_{run_id}",
-            "type": "drag",
-            "worldTarget": {
-                "x": 0.32,
-                "y": 0.61,
-                "width": 0.18,
-                "height": 0.08,
-                "coordinateSpace": "normalized",
-            },
-            "target": {
-                "mode": "source",
-                "source": {
-                    "file": "src/App.jsx",
-                    "line": 11,
-                    "column": 7,
-                    "component": "App",
-                    "sourceKind": "jsx",
-                },
-                "selector": "[data-vibe-target='cta-button']",
-                "snippet": {
-                    "startLine": 1,
-                    "endLine": len(initial_app.split("\n")),
-                    "content": initial_app,
-                    "hash": "sha256:canvas-demo",
-                },
-            },
-            "intent": {
-                "kind": "UI_ONLY",
-                "ui": {
-                    "summary": "将按钮改为红色（用户标注：改颜色）",
-                    "acceptance": ["按钮背景色变为红色", "其余布局与文案保持不变"],
-                    "elementRole": "button",
-                },
-            },
-            "payload": {"text": "改颜色", "from": None, "to": None, "strokes": []},
-            "createdAt": now,
-        },
+        "annotations": [
+            build_annotation(
+                initial_app,
+                run_id,
+                1,
+                "[data-vibe-target='cta-button']",
+                "改成蓝色",
+            ),
+            build_annotation(
+                initial_app,
+                run_id,
+                2,
+                "[data-vibe-target='title']",
+                "文字改为Batch Platform Title",
+            ),
+            build_annotation(
+                initial_app,
+                run_id,
+                3,
+                "[data-vibe-target='copy']",
+                "放大一倍",
+            ),
+        ],
         "files": {"src/App.jsx": initial_app},
         "options": {
             "llmProvider": "mock",
@@ -175,7 +213,12 @@ def main() -> None:
     verify = body.get("verifyResult") or {}
     require(verify.get("success") is True, f"最终构建未通过: {verify}")
     patch = body.get("generatedPatch") or ""
-    require("backgroundColor" in patch and "red" in patch, "Diff 未包含红色样式修改")
+    for token in (
+        "background-color:blue",
+        "Batch Platform Title",
+        "transform:scale(2)",
+    ):
+        require(token in patch, f"Diff 缺少批量修改内容: {token}")
     require(
         patch.startswith("---") or patch.startswith("diff "), "Diff 不是 unified diff"
     )
@@ -195,11 +238,13 @@ def main() -> None:
     )
     module_status, module_source = http_text(f"{preview_url}/src/App.jsx")
     require(module_status == 200, "无法读取沙盒 /src/App.jsx")
-    require(
-        "backgroundColor" in module_source and "red" in module_source,
-        "沙盒源码未包含红色样式",
-    )
-    print("   预览页 200；/src/App.jsx 已包含 backgroundColor + red")
+    for token in (
+        "background-color:blue",
+        "Batch Platform Title",
+        "transform:scale(2)",
+    ):
+        require(token in module_source, f"沙盒源码缺少批量修改: {token}")
+    print("   预览页 200；/src/App.jsx 已同时包含颜色 / 文案 / 尺寸修改")
 
     print("\n== 4. 清理沙盒 ==")
     try:

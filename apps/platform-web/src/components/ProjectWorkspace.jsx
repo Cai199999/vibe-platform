@@ -21,9 +21,12 @@ function ProjectWorkspaceInner({
   project,
   run,
   active,
-  onAnnotationChange,
-  onIntentChange,
-  onClearAnnotation,
+  modelProvider,
+  onModelProviderChange,
+  onAnnotationAdd,
+  onAnnotationIntentChange,
+  onAnnotationRemove,
+  onClearAnnotations,
   onSubmit,
   onRetry,
   onExport,
@@ -35,11 +38,15 @@ function ProjectWorkspaceInner({
   const [viewMode, setViewMode] = useState('compare')
   // 仅对比模式生效：当前显示画布还是预览。
   const [mode, setMode] = useState('canvas')
-  const annotation = run.annotation
+  const annotations = run.annotations
   const submitting = run.submitting
   const previewReady = Boolean(run.result?.previewUrl)
   const canvasVisible = viewMode === 'dual' || mode === 'canvas'
   const previewVisible = viewMode === 'dual' || mode === 'preview'
+  // 只有每个标注都写了指令才允许提交，避免静默丢标注。
+  const submitReady =
+    annotations.length > 0 &&
+    annotations.every((annotation) => annotation.intent.trim().length > 0)
   const status = submitting
     ? 'running'
     : run.error
@@ -47,6 +54,10 @@ function ProjectWorkspaceInner({
       : run.result
         ? 'success'
         : 'idle'
+  const targetLabels = annotations
+    .map((annotation) => annotation.target?.label)
+    .filter(Boolean)
+    .join('、')
 
   return (
     <section
@@ -64,22 +75,56 @@ function ProjectWorkspaceInner({
       <div className="project-toolbar">
         <div className="project-toolbar-left">
           <code className="source-path">src/App.jsx</code>
-          <span className={`selection-state ${annotation ? 'is-ready' : ''}`}>
-            {annotation
-              ? `已圈选 ${(annotation.width * 100).toFixed(0)}% × ${(annotation.height * 100).toFixed(0)}%`
+          <span className={`selection-state ${annotations.length ? 'is-ready' : ''}`}>
+            {annotations.length
+              ? `已圈选 ${annotations.length}/3 个标注${targetLabels ? ` · ${targetLabels}` : ''}`
               : '尚未圈选组件'}
           </span>
-          <span className="chip chip-muted">Mock LLM · fail_first</span>
+          <label className="model-picker" title="auto：配置了 DeepSeek Key 时自动使用真实模型，否则使用 Mock">
+            <span>模型</span>
+            <select
+              value={modelProvider}
+              disabled={submitting}
+              onChange={(event) => onModelProviderChange?.(event.target.value)}
+            >
+              <option value="auto">自动（有 Key 用 DeepSeek）</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="mock">Mock（离线演示）</option>
+            </select>
+          </label>
         </div>
 
         <div className="project-toolbar-right">
           <button
             className="ghost-button"
             type="button"
-            disabled={!annotation || submitting}
-            onClick={onClearAnnotation}
+            disabled={annotations.length === 0 || submitting}
+            onClick={onClearAnnotations}
           >
             清除标注
+          </button>
+
+          <button
+            className="submit-annotations"
+            type="button"
+            disabled={!submitReady || submitting}
+            title={
+              submitReady
+                ? `一次性提交 ${annotations.length} 个标注，Agent 将合并处理`
+                : annotations.length === 0
+                  ? '请先在画布上圈选组件'
+                  : '请为每个标注填写修改意图'
+            }
+            onClick={onSubmit}
+          >
+            {submitting ? (
+              <>
+                <span className="mini-spinner" aria-label="执行中" />
+                执行中…
+              </>
+            ) : (
+              `提交标注 (${annotations.length}/3)`
+            )}
           </button>
 
           <div className="segmented view-mode-switch" role="group" aria-label="视图模式">
@@ -158,11 +203,10 @@ function ProjectWorkspaceInner({
           className={`viewport-pane canvas-pane ${canvasVisible ? 'is-visible' : 'is-hidden'}`}
         >
           <CanvasStage
-            annotation={annotation}
-            intent={run.intent}
-            onIntentChange={onIntentChange}
-            onAnnotationChange={onAnnotationChange}
-            onSubmit={onSubmit}
+            annotations={annotations}
+            onAnnotationAdd={onAnnotationAdd}
+            onAnnotationIntentChange={onAnnotationIntentChange}
+            onAnnotationRemove={onAnnotationRemove}
             submitting={submitting}
             disabled={submitting}
           />
@@ -187,14 +231,15 @@ function ProjectWorkspaceInner({
             projectName={project.name}
             expanded
             visible={active && previewVisible}
-            onRetry={run.lastInstruction ? onRetry : undefined}
+            onRetry={submitReady ? onRetry : undefined}
           />
         </div>
       </div>
 
       <p className="footnote">
         同步链路：platform-web → <code>/api/v1/runs</code> → Java BFF → python-ai → Docker 沙盒。
-        首次执行会创建 Vite 沙盒，通常需要 20–60 秒；关闭 Tab 会销毁对应沙盒。
+        一次最多提交 3 个标注，Planner / Coder 会合并成一次代码修改；首次执行创建
+        Vite 沙盒通常需要 20–60 秒，关闭 Tab 会销毁对应沙盒。
       </p>
     </section>
   )

@@ -28,14 +28,20 @@ class AgentState(TypedDict, total=False):
     project_id: str
     sandbox_id: str
     preview_url: str
+    # 主目标文件（第一个标注），用于消息展示 / 兼容旧状态读取。
     target_file: str
+    # 本次 Run 全部标注涉及的文件（去重，最多 3 个）。
+    target_files: list[str]
 
     # ---- 输入上下文 ----
-    # 包含 AnnotationEnvelope、意图摘要、目标文件 / 片段等。
+    # 包含 AnnotationEnvelope[]、逐标注意图、目标文件 / 片段等。
     annotation_context: dict[str, Any]
     # 对话 / 节点执行轨迹：[{role, node, content}]
     messages: Annotated[list[dict[str, Any]], operator.add]
+    # 主文件内容，兼容旧逻辑；真正读取请使用 current_files。
     current_code: str
+    # 所有目标文件的最新完整内容：{path: source}
+    current_files: dict[str, str]
 
     # ---- 生成结果 ----
     plan: str

@@ -2,10 +2,13 @@
 
 以前端可视化为抓手、多轮交互生成完整全栈应用的 Vibe Coding 平台。
 
-当前阶段：**M1 完成 · Phase 4 双视图与等比预览**。画布标注 → Java BFF →
-Python AI Core → LangGraph 单 Agent → Docker 沙盒 → 构建验证 / 自动修复 →
-项目内预览与 Diff，全链路已打通；工作台支持对比/展示两种布局、无缝缩放
-预览、多项目 Tab、5 Tab 上限、关闭即销毁沙盒与拖拽排序。
+当前阶段：**M1 完成 · Phase 5 批量标注与真实模型接入**。画布最多 3 个标注 →
+`AnnotationEnvelope[]` → Java BFF → Python AI Core → LangGraph 单 Agent
+一次性规划 / 编码 / 写入 / 构建验证 → Docker 沙盒 → 项目内预览与 Diff，
+全链路已打通；工作台支持对比/展示两种布局、无缝缩放预览、多项目 Tab、
+5 Tab 上限、关闭即销毁沙盒与拖拽排序。模型可选 `auto` / `deepseek` /
+`mock`：配置 `DEEPSEEK_API_KEY` 后即可对颜色、文案、字号、布局等任意 UI
+属性生成修改，不再局限于 Mock 的固定示例。
 
 ## 目录
 
@@ -22,6 +25,7 @@ scripts/sandbox_e2e_test.py           沙盒创建/补丁/构建校验/销毁 E2
 scripts/agent_e2e_test.py             Agent 闭环 E2E（Mock LLM）
 scripts/platform_e2e_test.py          全链路 E2E（Vite 代理 → BFF → AI Core → 沙盒）
 scripts/ui_e2e_test.py                浏览器 E2E（Playwright：双视图 / 缩放预览 / 项目导出 / 沙盒销毁 / Tab 上限）
+scripts/multi_annotation_e2e_test.py  浏览器 E2E（3 个标注 / 独立输入框 / 上限提示 / 批量提交 / 导出）
 docs/screenshots/                     M1 联调截图
 docker-compose.yml                    只编排平台自身服务
 ```
@@ -61,11 +65,17 @@ Browser ──/api──▶ platform-web(Vite proxy) ──▶ java-bff ──�
 
 ## 画布全链路（M1）
 
-1. 在画布上按住鼠标拖拽，圈选「开始体验」按钮。
-2. 选区旁自动弹出浮动输入框，输入「改颜色」，按 Enter 或点击 **发送**。
-3. 前端组装 `AnnotationEnvelope`，POST `/api/v1/runs`。
+1. 在画布上按住鼠标拖拽，圈选目标区域；选区旁自动弹出该标注的独立输入框。
+2. 一次最多圈选 **3 个区域**，每个区域填写自己的意图（如「改成蓝色」
+   「文字改为提交」「放大一倍」）。浮层遮挡下一次圈选时，可点击视口工具栏
+   的 **隐藏标注输入**；**清除标注** 会同时清空全部圈与输入框。
+3. 达到 3 个后继续圈选会被拦截并提示上限。点击 **提交标注**，前端把全部
+   `AnnotationEnvelope` 打包为 `annotations: AnnotationEnvelope[]`，一次
+   POST `/api/v1/runs`；旧版单 `annotation` 字段仍向后兼容。
 4. Java BFF 同步代理到 `POST /api/v1/internal/runs/execute`（长读超时 300s）。
-5. Python 创建 React + Vite 沙盒，执行 LangGraph：
+5. Python 创建 React + Vite 沙盒，Planner 综合全部标注，Coder 一次生成
+   包含所有修改的 patch / files，Applier 一次写入，Verifier 一次构建，执行
+   LangGraph：
 
 ```text
 planner -> coder -> applier -> verifier -> evaluator
@@ -80,7 +90,9 @@ planner -> coder -> applier -> verifier -> evaluator
    展开 `generatedPatch` Diff 与执行轨迹。
 
 Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier 捕获日志后
-自动修复 1 次，最终返回 `AWAITING_APPROVAL`，方便稳定复现完整闭环。
+自动修复 1 次，最终返回 `AWAITING_APPROVAL`，方便稳定复现完整闭环。Mock
+能确定性解析常见颜色 / 文案 / 放大缩小指令并合并应用 3 个标注，但它不是
+通用模型；布局、间距、结构等任意修改请选择 `deepseek`（或 `auto`）。
 
 ![登录页](docs/screenshots/phase2-login.png)
 
@@ -91,6 +103,10 @@ Mock LLM 默认 `fail_first`：首次生成故意包含语法错误，Verifier �
 ![对比模式：全屏预览](docs/screenshots/phase4-preview-mode.png)
 
 ![项目导出入口](docs/screenshots/phase4-export.png)
+
+![3 个标注与独立输入框](docs/screenshots/m1-three-annotations.png)
+
+![3 处修改同时生效](docs/screenshots/m1-multi-annotation-result.png)
 
 ![5 个项目上限](docs/screenshots/phase4-tab-limit.png)
 
@@ -227,9 +243,9 @@ CPU 会短时冲高，但每个容器受 1 CPU 限额约束。沙盒镜像
 python3 scripts/platform_e2e_test.py
 ```
 
-覆盖：三个服务健康检查 → Vite `/api` 代理 → 画布同款请求体 → Java BFF →
-Python Agent → 沙盒创建 → 首次构建失败 → 自动修复 → 预览页与 `/src/App.jsx`
-包含红色样式 → 清理沙盒。
+覆盖：三个服务健康检查 → Vite `/api` 代理 → 画布同款请求体（3 个标注：
+颜色 / 文案 / 尺寸）→ Java BFF → Python Agent → 沙盒创建 → 首次构建失败 →
+自动修复 → 预览页与 `/src/App.jsx` 同时包含 3 处修改 → 清理沙盒。
 
 ### 2. 浏览器 UI E2E（Playwright）
 
@@ -255,15 +271,26 @@ cover 缩放后完全覆盖预览屏幕（居中、无留白）→ 对比画布 
 5 Tab 上限 → 关闭项目后按存活数递增命名且不重名 → 账户设置 / 退出 /
 账号密码登录。截图输出到 `docs/screenshots/`（`phase4-*.png`）。
 
-### 3. 分层验证
+### 3. 批量标注 UI E2E
+
+```bash
+/tmp/vibe-browser/bin/python scripts/multi_annotation_e2e_test.py
+```
+
+真实浏览器验证：连续圈选 3 个区域、每个区域独立输入、第 4 次圈选被上限
+拦截、「清除标注」清空全部圈与输入框、提交请求体为长度 3 的
+`annotations` 数组（且不再发送单 `annotation`）、预览与导出包 /
+`VIBE_CONTEXT.md` / Diff 同时包含颜色、文案、尺寸 3 处修改。
+
+### 4. 分层验证
 
 ```bash
 python3 scripts/sandbox_e2e_test.py   # 沙盒生命周期 / 补丁 / 构建
-python3 scripts/agent_e2e_test.py     # Agent 闭环 / 3 次上限 / FULLSTACK 拒绝
+python3 scripts/agent_e2e_test.py     # 批量标注 / 自动修复 / 3 次上限 / 4 个标注 422
 ./scripts/smoke-test.sh               # Java -> Python 健康检查
 ```
 
-### 4. 手动调用
+### 5. 手动调用
 
 ```bash
 curl -s http://127.0.0.1:5173/api/v1/health | python3 -m json.tool
@@ -283,10 +310,11 @@ curl -s http://127.0.0.1:8100/api/v1/health | python3 -m json.tool
 | GET | `/api/v1/sandboxes/{sandboxId}/export` | 按沙盒下载项目 tar.gz |
 | DELETE | `/api/v1/sandboxes/{sandboxId}` | 代理 AI Core 销毁沙盒；404 幂等透传 |
 
-BFF 只校验 `projectId` / `annotation` 存在，`annotation` 与 `options` 以
-`JsonNode` 透传，契约单一真源在 Python `agent/schemas.py`。AI Core 的 HTTP
-状态与 JSON 原样返回：业务失败（重试耗尽）是 `200 + status=FAILED`，参数 /
-沙盒错误是 4xx/5xx。
+BFF 只校验 `projectId` 以及 `annotations`（数组）或旧版 `annotation` 至少
+存在一个；`annotations` / `annotation` / `options` 均以 `JsonNode` 透传，
+契约单一真源在 Python `agent/schemas.py`（数组最多 3 项，超出返回 422）。
+AI Core 的 HTTP 状态与 JSON 原样返回：业务失败（重试耗尽）是
+`200 + status=FAILED`，参数 / 沙盒错误是 4xx/5xx。
 
 > AI Core 客户端强制 HTTP/1.1。JDK HttpClient 默认尝试 h2c Upgrade，Uvicorn
 > 不支持升级，POST 请求体会丢失（表现为 FastAPI 422 missing body）。
@@ -317,47 +345,113 @@ BFF 只校验 `projectId` / `annotation` 存在，`annotation` 与 `options` 以
 
 ## Agent 闭环（M1）
 
-`POST /api/v1/internal/runs/execute` 接收画布 `AnnotationEnvelope`，创建沙盒并
-同步执行 LangGraph：
+`POST /api/v1/internal/runs/execute` 接收 `annotations: AnnotationEnvelope[]`
+（1~3 个；旧版单 `annotation` 自动归一为单元素数组），创建沙盒并同步执行
+LangGraph：
 
-- `applier` 直接复用 `SandboxProvider`（与沙盒 `apply-patch` API 同一实现），
-  避免内部 HTTP 自调用。
-- `verifier` 执行 `npm run build`，失败日志写入状态并由 `coder` 重试；
-  `retry_count` 硬上限为 3，预算耗尽返回 `FAILED`。
-- 模型选择：`llmProvider=auto` 时，有 `DEEPSEEK_API_KEY` 用 DeepSeek，
-  否则用 Mock；也可显式指定 `mock` / `deepseek`。
+- `planner` 一次性读取全部标注和所有目标文件，输出综合计划；多个标注命中
+  同一文件时只规划一次。
+- `coder` 一次生成包含全部修改的 patch 或完整 files；多文件 / 多标注时
+  提示词强制优先 `mode=files`，并校验所有目标文件都被覆盖。
+- `applier` 直接复用 `SandboxProvider`，一次性写入全部文件，避免多次 HMR
+  和中间态；随后重读所有目标文件，作为后续 Diff 与重试的基线。
+- `verifier` 只执行一次 `npm run build`；失败日志写入状态并由 `coder` 整体
+  重试，`retry_count` 硬上限为 3，预算耗尽返回 `FAILED`。
 - Mock 场景：`fail_first`（首次写错，验证自动修复）、`always_fail`
-  （验证 3 次上限）、`none`（直接成功）。
+  （验证 3 次上限）、`none`（直接成功）。`agent_e2e_test.py` 还验证第 4 个
+  标注会被 Pydantic 以 422 拒绝。
 
-最小请求：
+### 接入真实 DeepSeek
+
+1. 在 `.env` 填入真实 Key（不要提交 Git）：
+
+```dotenv
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
+```
+
+2. 重新创建 `python-ai`，让环境变量生效：
+
+```bash
+docker compose up -d --force-recreate python-ai
+# 改了提示词 / Python 代码时：
+docker compose up --build -d python-ai
+```
+
+3. `GET /api/v1/health` 的 `dependencies.llm` 应为 `deepseek`（不泄露 Key）。
+   前端模型选择器可选 **自动（有 Key 用 DeepSeek）** 或 **DeepSeek**；
+   `auto` 在当前 Key 为空时会回退 Mock。
+
+调用链：Planner 与 Coder 的 System Prompt 明确要求处理全部 1~3 个标注、
+支持颜色 / 文案 / 字号 / 间距 / 布局 / 组件结构等任意 UI 属性，禁止只处理
+第一个标注；输出仅接受结构化 JSON（`diff` 或 `files`），路径必须位于沙盒
+目标文件内，`..` / 绝对路径会被拒绝。
+
+最小请求（3 个不同属性）：
 
 ```json
 {
   "runId": "run_01",
   "projectId": "proj_01",
-  "annotation": {
-    "version": 1,
-    "annotationId": "ann_01",
-    "type": "note",
-    "target": {
-      "mode": "source",
-      "source": { "file": "src/App.jsx" }
+  "annotations": [
+    {
+      "version": 1,
+      "annotationId": "ann_01",
+      "type": "drag",
+      "target": {
+        "mode": "source",
+        "source": { "file": "src/App.jsx" },
+        "selector": "[data-vibe-target='cta-button']"
+      },
+      "intent": {
+        "kind": "UI_ONLY",
+        "ui": { "summary": "改成蓝色" }
+      },
+      "payload": { "text": "改成蓝色" }
     },
-    "intent": {
-      "kind": "UI_ONLY",
-      "ui": { "summary": "将按钮改为红色" }
+    {
+      "version": 1,
+      "annotationId": "ann_02",
+      "type": "drag",
+      "target": {
+        "mode": "source",
+        "source": { "file": "src/App.jsx" },
+        "selector": "[data-vibe-target='title']"
+      },
+      "intent": {
+        "kind": "UI_ONLY",
+        "ui": { "summary": "文字改为提交" }
+      },
+      "payload": { "text": "文字改为提交" }
     },
-    "payload": { "text": "将按钮改为红色" }
-  },
+    {
+      "version": 1,
+      "annotationId": "ann_03",
+      "type": "drag",
+      "target": {
+        "mode": "source",
+        "source": { "file": "src/App.jsx" },
+        "selector": "[data-vibe-target='copy']"
+      },
+      "intent": {
+        "kind": "UI_ONLY",
+        "ui": { "summary": "放大一倍" }
+      },
+      "payload": { "text": "放大一倍" }
+    }
+  ],
   "files": { "src/App.jsx": "export default function App() { ... }" },
   "options": {
-    "llmProvider": "mock",
-    "mockScenario": "fail_first",
+    "llmProvider": "auto",
     "maxRetries": 3,
     "keepSandbox": true
   }
 }
 ```
+
+> 沙盒源码中的 `data-vibe-target` 标记与画布 Mock 元素同名，前端圈选时把
+  命中的 selector 写进标注，模型据此定位组件。新增画布元素时请同时补标记。
 
 > M1 的 execute 是同步接口，便于后台联调；M2 将改为 202 + checkpoint + 事件流。
 

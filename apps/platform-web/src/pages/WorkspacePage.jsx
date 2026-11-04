@@ -9,16 +9,20 @@ import { useWorkspace } from '../workspace/useWorkspace.js'
 import { INITIAL_APP } from '../mockProject.js'
 
 const TARGET_FILE = 'src/App.jsx'
+const MAX_ANNOTATIONS = 3
+const MODEL_STORAGE_KEY = 'vibe.llmProvider'
+const MODEL_PROVIDERS = new Set(['auto', 'deepseek', 'mock'])
 
+// 一个画布标注：选区 + 目标元素 + 用户自己的意图草稿。
+// 一次 Run 最多 3 个，提交时按顺序打包成 AnnotationEnvelope[]。
 const EMPTY_RUN = {
-  annotation: null,
-  intent: '',
+  annotations: [],
   submitting: false,
   elapsed: 0,
   startedAt: null,
   result: null,
   error: null,
-  // 最近一次指令用于预览失联后一键重新执行。
+  // 最近一次全部指令的拼接，用于预览失联后一键重新执行。
   lastInstruction: '',
   // 同一项目可能执行多次，每次都会生成新沙盒；关闭项目时需全部销毁。
   sandboxIds: [],
@@ -41,9 +45,22 @@ function loadRunStates(projects) {
       if (saved.result?.sandboxId && !sandboxIds.includes(saved.result.sandboxId)) {
         sandboxIds.push(saved.result.sandboxId)
       }
+      // 兼容旧版本只保存单个 annotation 的会话快照。
+      const annotations = Array.isArray(saved.annotations)
+        ? saved.annotations
+        : saved.annotation
+          ? [
+              {
+                id: `ann_restored_${projectId}`,
+                rect: saved.annotation,
+                intent: saved.intent ?? '',
+                target: null,
+              },
+            ]
+          : []
       restored[projectId] = {
         ...EMPTY_RUN,
-        annotation: saved.annotation ?? null,
+        annotations,
         result: saved.result ?? null,
         error: saved.error ?? null,
         lastInstruction: saved.lastInstruction ?? '',
@@ -86,14 +103,37 @@ const newId = (prefix) => {
 }
 
 /**
- * 将画布上的归一化选区组装为 AnnotationEnvelope。
- * worldTarget 保留归一化坐标，后端可换算到任意分辨率。
+ * 根据 data-vibe-target 标记定位源码行号。
+ * 找不到时回退到 1，仍保留文件 + 选择器 + 完整源码片段，模型可以自行定位。
  */
-function buildAnnotation(rect, instruction, source) {
-  const now = new Date().toISOString()
+function findTargetLine(source, marker) {
+  if (!marker) return 1
+  const index = source.indexOf(`data-vibe-target="${marker}"`)
+  const fallback = source.indexOf(`data-vibe-target='${marker}'`)
+  const offset = index >= 0 ? index : fallback
+  return offset >= 0 ? source.slice(0, offset).split('\n').length : 1
+}
+
+/**
+ * 将画布上的一个归一化选区组装为 AnnotationEnvelope。
+ * worldTarget 保留归一化坐标；target 记录圈选命中的元素，帮助模型把
+ * “改成蓝色 / 文字改为提交 / 放大一倍”绑定到正确的组件。
+ */
+function buildAnnotation(entry, source) {
+  const rect = entry.rect
+  const instruction = entry.intent.trim()
+  const target = entry.target ?? {
+    marker: 'cta-button',
+    selector: "[data-vibe-target='cta-button']",
+    label: '按钮',
+    role: 'button',
+    component: 'App',
+    tag: 'button',
+  }
+  const line = findTargetLine(source, target.marker)
   return {
     version: 1,
-    annotationId: newId('ann'),
+    annotationId: entry.id,
     type: 'drag',
     worldTarget: {
       x: Number(rect.x.toFixed(6)),
@@ -106,12 +146,12 @@ function buildAnnotation(rect, instruction, source) {
       mode: 'source',
       source: {
         file: TARGET_FILE,
-        line: 11,
+        line,
         column: 7,
-        component: 'App',
+        component: target.component || 'App',
         sourceKind: 'jsx',
       },
-      selector: "[data-vibe-target='cta-button']",
+      selector: target.selector,
       snippet: {
         startLine: 1,
         endLine: source.split('\n').length,
@@ -122,9 +162,12 @@ function buildAnnotation(rect, instruction, source) {
     intent: {
       kind: 'UI_ONLY',
       ui: {
-        summary: `将按钮改为红色（用户标注：${instruction}）`,
-        acceptance: ['按钮背景色变为红色', '其余布局与文案保持不变'],
-        elementRole: 'button',
+        summary: instruction,
+        acceptance: [
+          `按指令修改${target.label || '目标组件'}：${instruction}`,
+          '其余布局、文案与交互保持不变',
+        ],
+        elementRole: target.role || 'button',
       },
     },
     payload: {
@@ -133,7 +176,7 @@ function buildAnnotation(rect, instruction, source) {
       to: null,
       strokes: [],
     },
-    createdAt: now,
+    createdAt: entry.createdAt ?? new Date().toISOString(),
   }
 }
 
@@ -183,6 +226,12 @@ export default function WorkspacePage() {
   } = useWorkspace()
 
   const [runStates, setRunStates] = useState(() => loadRunStates(projects))
+  // 默认 auto：配置了 DEEPSEEK_API_KEY 时自动走真实模型；没有 Key 时回退 Mock。
+  // 用户也可以显式选择 DeepSeek / Mock，便于真实 Key 联调与离线 E2E。
+  const [modelProvider, setModelProvider] = useState(() => {
+    const saved = window.localStorage.getItem(MODEL_STORAGE_KEY)
+    return MODEL_PROVIDERS.has(saved) ? saved : 'auto'
+  })
   const [accountOpen, setAccountOpen] = useState(false)
   // 导出状态只保留一个：同时下载多个项目没有意义，且提示条全局唯一。
   const [exportingProjectId, setExportingProjectId] = useState(null)
@@ -197,7 +246,7 @@ export default function WorkspacePage() {
     Object.entries(runStates).forEach(([projectId, run]) => {
       if (!run.result && !run.error && run.sandboxIds.length === 0) return
       snapshot[projectId] = {
-        annotation: run.annotation,
+        annotations: run.annotations,
         result: run.result,
         error: run.error,
         lastInstruction: run.lastInstruction,
@@ -215,6 +264,10 @@ export default function WorkspacePage() {
     () => Object.values(runStates).some((run) => run.submitting),
     [runStates],
   )
+
+  useEffect(() => {
+    window.localStorage.setItem(MODEL_STORAGE_KEY, modelProvider)
+  }, [modelProvider])
 
   // 导出提示自动消失，成功 3 秒、失败 6 秒（失败需要更久阅读）。
   useEffect(() => {
@@ -260,27 +313,56 @@ export default function WorkspacePage() {
     })
   }
 
-  const handleAnnotationChange = (projectId, rect) => {
-    // 无论新建还是清除选区，都重置该项目的意图草稿，避免旧意图误发到新目标。
-    patchRun(projectId, (previous) => ({ ...previous, annotation: rect, intent: '' }))
+  const handleAnnotationAdd = (projectId, { rect, target }) => {
+    patchRun(projectId, (previous) => {
+      if (previous.annotations.length >= MAX_ANNOTATIONS) return previous
+      return {
+        ...previous,
+        annotations: [
+          ...previous.annotations,
+          {
+            id: newId('ann'),
+            rect,
+            target,
+            intent: '',
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      }
+    })
   }
 
-  const handleIntentChange = (projectId, intent) => {
-    patchRun(projectId, (previous) => ({ ...previous, intent }))
+  const handleAnnotationIntentChange = (projectId, annotationId, intent) => {
+    patchRun(projectId, (previous) => ({
+      ...previous,
+      annotations: previous.annotations.map((annotation) =>
+        annotation.id === annotationId ? { ...annotation, intent } : annotation,
+      ),
+    }))
   }
 
-  const handleClearAnnotation = (projectId) => {
-    patchRun(projectId, (previous) => ({ ...previous, annotation: null, intent: '' }))
+  const handleAnnotationRemove = (projectId, annotationId) => {
+    patchRun(projectId, (previous) => ({
+      ...previous,
+      annotations: previous.annotations.filter(
+        (annotation) => annotation.id !== annotationId,
+      ),
+    }))
   }
 
-  const handleSubmit = async (projectId, instruction) => {
+  const handleClearAnnotations = (projectId) => {
+    patchRun(projectId, (previous) => ({ ...previous, annotations: [] }))
+  }
+
+  const handleSubmit = async (projectId) => {
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
-    const text = instruction.trim()
+    const annotations = run.annotations
+    const instructions = annotations.map((annotation) => annotation.intent.trim())
     if (
       !project ||
-      !run.annotation ||
-      !text ||
+      annotations.length === 0 ||
+      instructions.some((text) => !text) ||
       run.submitting ||
       inflightRef.current.has(projectId)
     ) {
@@ -289,14 +371,14 @@ export default function WorkspacePage() {
 
     inflightRef.current.add(projectId)
     const startedAt = Date.now()
+    const lastInstruction = instructions.join(' / ')
     patchRun(projectId, {
       submitting: true,
       elapsed: 0,
       startedAt,
       result: null,
       error: null,
-      intent: '',
-      lastInstruction: text,
+      lastInstruction,
     })
 
     // 内置模板始终以当前 INITIAL_APP 为准：即使 localStorage 里残留了旧版
@@ -309,10 +391,12 @@ export default function WorkspacePage() {
       runId: newId('run'),
       tenantId: user?.tenantId || 'tenant_local',
       projectId: project.id,
-      annotation: buildAnnotation(run.annotation, text, source),
+      // 关键：一次请求携带全部标注，后端 Planner / Coder 一次性综合处理。
+      annotations: annotations.map((annotation) => buildAnnotation(annotation, source)),
       files: { [TARGET_FILE]: source },
       options: {
-        llmProvider: 'mock',
+        // auto：有 DEEPSEEK_API_KEY 用 DeepSeek，否则回退 Mock。
+        llmProvider: modelProvider,
         mockScenario: 'fail_first',
         maxRetries: 3,
         keepSandbox: true,
@@ -420,8 +504,8 @@ export default function WorkspacePage() {
    */
   const handleRetry = (projectId) => {
     const run = runStates[projectId]
-    if (!run?.lastInstruction || !run.annotation) return
-    void handleSubmit(projectId, run.lastInstruction)
+    if (!run?.lastInstruction || run.annotations.length === 0) return
+    void handleSubmit(projectId)
   }
 
   /**
@@ -526,10 +610,17 @@ export default function WorkspacePage() {
                 project={project}
                 run={run}
                 active={project.id === activeTabId}
-                onAnnotationChange={(rect) => handleAnnotationChange(project.id, rect)}
-                onIntentChange={(intent) => handleIntentChange(project.id, intent)}
-                onClearAnnotation={() => handleClearAnnotation(project.id)}
-                onSubmit={(instruction) => handleSubmit(project.id, instruction)}
+                modelProvider={modelProvider}
+                onModelProviderChange={setModelProvider}
+                onAnnotationAdd={(payload) => handleAnnotationAdd(project.id, payload)}
+                onAnnotationIntentChange={(annotationId, intent) =>
+                  handleAnnotationIntentChange(project.id, annotationId, intent)
+                }
+                onAnnotationRemove={(annotationId) =>
+                  handleAnnotationRemove(project.id, annotationId)
+                }
+                onClearAnnotations={() => handleClearAnnotations(project.id)}
+                onSubmit={() => handleSubmit(project.id)}
                 onRetry={() => handleRetry(project.id)}
                 canExport={Boolean(run.result?.sandboxId)}
                 exporting={exportingProjectId === project.id}

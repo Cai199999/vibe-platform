@@ -108,8 +108,8 @@ class AgentGraphRunner:
         context = state["annotation_context"]
         previous_errors = (state.get("verify_result") or {}).get("error_logs")
         plan = self._llm.plan(
-            annotation=context["annotation"],
-            current_code=state["current_code"],
+            annotations=[item["annotation"] for item in context["annotations"]],
+            current_files=state["current_files"],
             previous_errors=previous_errors,
         )
         return {
@@ -119,17 +119,18 @@ class AgentGraphRunner:
         }
 
     def _coder(self, state: AgentState) -> dict[str, Any]:
-        target_file = state["target_file"]
-        current_code = state["current_code"]
+        context = state["annotation_context"]
+        annotations = [item["annotation"] for item in context["annotations"]]
+        current_files = state["current_files"]
         verify_result = state.get("verify_result") or {}
         retry_count = int(state.get("retry_count", 0))
 
         try:
             result = self._llm.generate(
-                annotation=state["annotation_context"]["annotation"],
+                annotations=annotations,
                 plan=state.get("plan", ""),
-                current_code=current_code,
-                target_file=target_file,
+                current_files=current_files,
+                target_files=state["target_files"],
                 verify_result=verify_result,
                 retry_count=retry_count,
             )
@@ -144,14 +145,12 @@ class AgentGraphRunner:
                 "messages": [_message("coder", f"代码生成失败: {exc}", error=True)],
             }
 
+        # files 模式：用修改前后的完整内容合成展示用 diff（一次性展示全部改动）。
         patch = result.patch or ""
-        if not patch and target_file in result.files:
-            patch = _unified_diff(
-                current_code,
-                result.files[target_file],
-                target_file,
-            )
+        if not patch and result.files:
+            patch = _combined_diff(current_files, result.files)
 
+        changed_files = sorted(result.files) or _diff_paths(patch)
         return {
             "generated_patch": patch,
             "generated_files": result.files,
@@ -162,7 +161,7 @@ class AgentGraphRunner:
                     "coder",
                     f"{result.summary}\n"
                     f"mode={'diff' if result.patch else 'files'} "
-                    f"changed={sorted(result.files) or [target_file]}",
+                    f"annotations={len(annotations)} changed={changed_files}",
                 )
             ],
         }
@@ -176,14 +175,26 @@ class AgentGraphRunner:
             # 全量文件与 unified diff 只能二选一：
             # generated_patch 在 files 模式下只是用于展示/审计的 diff，
             # 若同时应用，会对已更新的文件再次打补丁而失败。
+            # 批量标注必须一次写入，避免多次 HMR / 构建。
             if files:
                 changed = self._sandbox.apply_patch(sandbox_id=sandbox_id, files=files)
             elif patch:
                 changed = self._sandbox.apply_patch(sandbox_id=sandbox_id, patch=patch)
             else:
                 changed = []
-            # 以沙盒真实文件为准更新 current_code，兼容 unified diff。
-            current_code = self._sandbox.read_file(sandbox_id, state["target_file"])
+
+            # 以沙盒真实文件为准更新全部目标文件；diff 模式可能修改额外文件。
+            paths = set(state["target_files"])
+            paths.update(files.keys())
+            paths.update(_diff_paths(patch or ""))
+            current_files = dict(state.get("current_files") or {})
+            for path in sorted(paths):
+                try:
+                    current_files[path] = self._sandbox.read_file(sandbox_id, path)
+                except SandboxError:
+                    # 删除的文件或模型误报路径：不阻塞本次执行，构建阶段会暴露问题。
+                    logger.warning("failed to reread %s after apply", path)
+            current_code = current_files.get(state["target_file"], "")
         except SandboxError as exc:
             logger.warning("applier failed: %s", exc)
             return {
@@ -195,9 +206,10 @@ class AgentGraphRunner:
 
         return {
             "current_code": current_code,
+            "current_files": current_files,
             "apply_failed": False,
             "status": "APPLYING",
-            "messages": [_message("applier", f"已写入沙盒，变更文件: {changed}")],
+            "messages": [_message("applier", f"已一次写入沙盒，变更文件: {changed}")],
         }
 
     def _verifier(self, state: AgentState) -> dict[str, Any]:
@@ -353,6 +365,37 @@ def _unified_diff(old: str, new: str, target_file: str) -> str:
             tofile=f"b/{target_file}",
         )
     )
+
+
+def _combined_diff(
+    before: dict[str, str],
+    after: dict[str, str],
+) -> str:
+    """把 files 模式下所有变更文件合成为一个 unified diff，用于前端展示。"""
+    parts: list[str] = []
+    for path in sorted(after):
+        old = before.get(path)
+        # 新增文件没有旧内容，不在这里生成 diff；构建仍以 files 全量写入为准。
+        if old is None:
+            continue
+        diff = _unified_diff(old, after[path], path)
+        if diff:
+            parts.append(diff)
+    return "".join(parts)
+
+
+def _diff_paths(patch: str) -> list[str]:
+    """从 unified diff 中提取目标文件路径（优先 +++ b/path）。"""
+    paths: list[str] = []
+    for line in patch.splitlines():
+        if not line.startswith("+++ "):
+            continue
+        path = line[4:].strip()
+        if path.startswith("b/"):
+            path = path[2:]
+        if path and path != "/dev/null" and path not in paths:
+            paths.append(path)
+    return paths
 
 
 def _tail(text: str, limit: int) -> str:

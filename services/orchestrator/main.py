@@ -60,6 +60,8 @@ def health() -> HealthResponse:
             "langgraph": _package_version("langgraph") or "NOT_INSTALLED",
             "docker": provider.docker_version(),
             "sandbox_image": provider.image_state(),
+            # 只暴露“是否已配置”和实际生效的 provider，绝不返回密钥内容。
+            "llm": "deepseek" if settings.deepseek_api_key else "mock",
         },
     )
 

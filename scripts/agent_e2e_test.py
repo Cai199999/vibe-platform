@@ -2,10 +2,11 @@
 """LangGraph 单 Agent 闭环 E2E。
 
 场景：
-  1. fail_first：首次生成语法错误 -> verifier 捕获 -> evaluator 触发修复 ->
-     第二次生成正确 diff -> AWAITING_APPROVAL；
+  1. fail_first + 3 个批量标注：首次生成语法错误 -> 自动修复 -> 3 处修改
+     同时生效 -> AWAITING_APPROVAL；
   2. always_fail：持续失败 -> 3 次重试耗尽 -> FAILED；
-  3. FULLSTACK 意图：M1 必须显式返回 FULLSTACK_NOT_SUPPORTED。
+  3. FULLSTACK 意图：M1 必须显式返回 FULLSTACK_NOT_SUPPORTED；
+  4. 超过 3 个标注：请求必须被 422 拒绝。
 """
 
 from __future__ import annotations
@@ -22,8 +23,12 @@ AI_BASE_URL = os.environ.get("AI_BASE_URL", "http://127.0.0.1:8100").rstrip("/")
 INITIAL_APP = """export default function App() {
   return (
     <main>
-      <h1>Vibe App</h1>
-      <button>Click me</button>
+      <style>{"[data-vibe-target='cta-button']{background:#2563eb;color:#fff}"}</style>
+      <section data-vibe-target="card">
+        <h1 data-vibe-target="title">Old title</h1>
+        <p data-vibe-target="copy">Old copy</p>
+        <button data-vibe-target="cta-button">Go</button>
+      </section>
     </main>
   )
 }
@@ -64,12 +69,24 @@ def log_step(title: str) -> None:
     print(f"\n=== {title} ===")
 
 
-def build_annotation(intent_kind: str = "UI_ONLY") -> dict:
+def build_annotation(
+    selector: str,
+    instruction: str,
+    *,
+    annotation_id: str,
+    intent_kind: str = "UI_ONLY",
+) -> dict:
     return {
         "version": 1,
-        "annotationId": f"ann_e2e_{int(time.time() * 1000)}",
-        "type": "note",
-        "worldTarget": {"x": 120, "y": 80, "width": 200, "height": 48, "zoom": 1.0},
+        "annotationId": annotation_id,
+        "type": "drag",
+        "worldTarget": {
+            "x": 0.2,
+            "y": 0.2,
+            "width": 0.2,
+            "height": 0.1,
+            "coordinateSpace": "normalized",
+        },
         "target": {
             "mode": "source",
             "source": {
@@ -79,10 +96,10 @@ def build_annotation(intent_kind: str = "UI_ONLY") -> dict:
                 "component": "App",
                 "sourceKind": "jsx",
             },
-            "selector": "button",
+            "selector": selector,
             "snippet": {
                 "startLine": 1,
-                "endLine": 9,
+                "endLine": len(INITIAL_APP.splitlines()),
                 "content": INITIAL_APP,
                 "hash": "sha256:e2e",
             },
@@ -90,14 +107,39 @@ def build_annotation(intent_kind: str = "UI_ONLY") -> dict:
         "intent": {
             "kind": intent_kind,
             "ui": {
-                "summary": "将按钮改为红色",
-                "acceptance": ["按钮背景色为红色"],
-                "elementRole": "button",
+                "summary": instruction,
+                "acceptance": [f"完成指令：{instruction}"],
+                "elementRole": "element",
             },
         },
-        "payload": {"text": "将按钮改为红色"},
+        "payload": {"text": instruction},
         "createdAt": "2026-11-04T10:00:00Z",
     }
+
+
+def build_annotations(intent_kind: str = "UI_ONLY") -> list[dict]:
+    """一次请求携带 3 个不同属性 / 不同目标的标注。"""
+    suffix = int(time.time() * 1000)
+    return [
+        build_annotation(
+            "[data-vibe-target='cta-button']",
+            "改成蓝色",
+            annotation_id=f"ann_e2e_color_{suffix}",
+            intent_kind=intent_kind,
+        ),
+        build_annotation(
+            "[data-vibe-target='title']",
+            "文字改为Batch Title",
+            annotation_id=f"ann_e2e_text_{suffix}",
+            intent_kind=intent_kind,
+        ),
+        build_annotation(
+            "[data-vibe-target='copy']",
+            "放大一倍",
+            annotation_id=f"ann_e2e_scale_{suffix}",
+            intent_kind=intent_kind,
+        ),
+    ]
 
 
 def execute(
@@ -109,7 +151,8 @@ def execute(
     body = {
         "runId": f"run_e2e_{run_suffix}_{int(time.time())}",
         "projectId": f"project_e2e_{run_suffix}",
-        "annotation": build_annotation(intent_kind),
+        # 新协议：一次性提交 AnnotationEnvelope[]。
+        "annotations": build_annotations(intent_kind),
         "files": {"src/App.jsx": INITIAL_APP},
         "options": {
             "llmProvider": "mock",
@@ -168,9 +211,14 @@ def main() -> int:
         assert (
             "+++ b/src/App.jsx" in result["generatedPatch"]
         ), "最终补丁应为 unified diff"
-        assert (
-            "backgroundColor: 'red'" in result["generatedPatch"]
-        ), "补丁应包含红色样式"
+        # 三个标注必须一次性全部生效，不能只处理第一个。
+        for token in (
+            "background-color:blue",
+            "Batch Title",
+            "transform:scale(2)",
+        ):
+            assert token in result["generatedPatch"], f"最终补丁缺少 {token}"
+        assert "3 个标注" in trace, "Planner 消息应明确说明批量标注数量"
 
         log_step("2. 验证沙盒与 Vite 实时模块")
         preview_status, preview_html = fetch(result["previewUrl"])
@@ -179,10 +227,13 @@ def main() -> int:
         module_status, module_source = fetch(f"{result['previewUrl']}/src/App.jsx")
         assert module_status == 200, f"模块请求失败: {module_status}"
         # Vite/esbuild 会把 JSX 转成 JS，并可能把单引号规范化为双引号。
-        assert (
-            "backgroundColor" in module_source and "red" in module_source
-        ), "Vite 未返回红色按钮代码"
-        print(f"OK: {result['previewUrl']} 已加载修复后的代码")
+        for token in (
+            "background-color:blue",
+            "Batch Title",
+            "transform:scale(2)",
+        ):
+            assert token in module_source, f"Vite 未返回批量修改内容: {token}"
+        print(f"OK: {result['previewUrl']} 已同时加载 3 个标注的修改")
 
         destroy(result["sandboxId"])
         sandbox_ids.remove(result["sandboxId"])
@@ -219,6 +270,30 @@ def main() -> int:
         print(f"HTTP {status}: {rejected}")
         assert status == 422, f"FULLSTACK 期望 422，实际 {status}: {rejected}"
         assert rejected["detail"]["code"] == "FULLSTACK_NOT_SUPPORTED"
+
+        log_step("5. 超过 3 个标注：Pydantic 必须返回 422")
+        annotations = build_annotations()
+        annotations.append(
+            build_annotation(
+                "[data-vibe-target='kicker']",
+                "改成绿色",
+                annotation_id="ann_e2e_extra",
+            )
+        )
+        status, too_many = call(
+            "POST",
+            "/api/v1/internal/runs/execute",
+            {
+                "runId": f"run_e2e_too_many_{int(time.time())}",
+                "projectId": "project_e2e_too_many",
+                "annotations": annotations,
+                "files": {"src/App.jsx": INITIAL_APP},
+                "options": {"llmProvider": "mock", "mockScenario": "none"},
+            },
+        )
+        print(f"HTTP {status}: {too_many}")
+        assert status == 422, f"4 个标注期望 422，实际 {status}: {too_many}"
+        assert "at most 3" in json.dumps(too_many), "错误信息应说明最多 3 个标注"
 
         print("\nAGENT E2E: PASS")
         return 0

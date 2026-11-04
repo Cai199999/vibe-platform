@@ -7,8 +7,8 @@ import ScaledPreview from './ScaledPreview.jsx'
  * M2 接入事件流后，这里改为消费真实 Agent 状态。
  */
 const STAGES = [
-  { at: 0, title: '正在解析画布标注', detail: '归一化坐标 → 组件选区 → AnnotationEnvelope' },
-  { at: 3, title: 'Planner 正在规划修改方案', detail: '理解“改颜色”的目标组件与验收条件' },
+  { at: 0, title: '正在解析画布标注', detail: '归一化坐标 → 组件选区 → AnnotationEnvelope[]' },
+  { at: 3, title: 'Planner 正在综合分析全部标注', detail: '把最多 3 条指令合并成一个统一修改方案' },
   { at: 6, title: 'Coder 正在生成代码', detail: '输出 Unified Diff / 全量文件' },
   { at: 9, title: 'Applier 正在写入沙盒', detail: 'git apply + Vite HMR 热更新' },
   { at: 12, title: 'Verifier 正在运行构建', detail: 'npm run build 收集错误日志' },
@@ -87,8 +87,8 @@ function IdleState({ hasAnnotation, projectName }) {
         <strong>沙盒预览将在这里出现</strong>
         <p>
           {hasAnnotation
-            ? '标注已就绪，在画布浮层中写下修改意图并发送。'
-            : `在「${projectName}」的画布上圈选组件，浮层会自动出现。`}
+            ? '标注已就绪，为每个标注填写意图后在顶部点击「提交标注」。'
+            : `在「${projectName}」的画布上圈选 1~3 个组件，每个选区都有独立输入框。`}
         </p>
       </div>
 
@@ -246,7 +246,7 @@ export default function RuntimePanel({
   onRetry,
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false)
-  const { submitting, elapsed, result, error, annotation } = run
+  const { submitting, elapsed, result, error, annotations = [] } = run
   const previewUrl = result?.previewUrl
   const success = result?.status === 'AWAITING_APPROVAL'
   const diffLines = result?.generatedPatch ? result.generatedPatch.split('\n').length : 0
@@ -315,7 +315,7 @@ export default function RuntimePanel({
 
         {!submitting && !error && !result && (
           <div className="runtime-overlay">
-            <IdleState hasAnnotation={Boolean(annotation)} projectName={projectName} />
+            <IdleState hasAnnotation={annotations.length > 0} projectName={projectName} />
           </div>
         )}
 

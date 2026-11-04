@@ -275,7 +275,7 @@ def assert_export_archive(download, label: str) -> None:
             fail(f"{label} 无法读取 src/App.jsx")
         source = member.read().decode("utf-8", errors="replace")
         # Agent 已把 CTA 改成红色，导出包必须是修改后的真实沙盒内容。
-        if "backgroundColor: 'red'" not in source:
+        if "background-color:red" not in source:
             fail(f"{label} 的 src/App.jsx 不是 Agent 修改后的版本")
 
         context_file = tar.extractfile("./VIBE_CONTEXT.md") or tar.extractfile(
@@ -285,7 +285,7 @@ def assert_export_archive(download, label: str) -> None:
             fail(f"{label} 缺少 VIBE_CONTEXT.md")
         context = context_file.read().decode("utf-8", errors="replace")
         # 本地 Cursor 需要从 Markdown 中读到画布意图与机器可读的信封。
-        for token in ("VIBE_CONTEXT", "改颜色", "UI_ONLY", "AnnotationEnvelope"):
+        for token in ("VIBE_CONTEXT", "改成红色", "UI_ONLY", "AnnotationEnvelope"):
             if token not in context:
                 fail(f"{label} 的 VIBE_CONTEXT.md 缺少内容: {token}")
 
@@ -470,8 +470,10 @@ def main() -> None:
             path=str(SCREENSHOT_DIR / "phase4-canvas-mode.png"), full_page=True
         )
 
-        popover.locator("input").fill("改颜色")
-        popover.locator("input").press("Enter")
+        popover.locator("input").fill("改成红色")
+        # M1 升级后不再由单个浮层直接发送：顶部「提交标注」统一打包
+        # AnnotationEnvelope[]，支持一次最多 3 个标注。
+        active.locator(".submit-annotations").click()
 
         print("\n== 5. Agent 执行完成后仍停留在画布模式 ==")
         # 执行中进度面板位于隐藏的预览视口，画布模式下通过状态点与顶栏提示反馈。
@@ -586,7 +588,7 @@ def main() -> None:
         active.get_by_role("button", name="详情 / 代码 Diff").click()
         expect(active.locator(".runtime-drawer")).to_be_visible()
         expect(active.locator(".runtime-meta code").nth(3)).to_have_text(sandbox_id)
-        expect(active.locator(".diff-view")).to_contain_text("backgroundColor")
+        expect(active.locator(".diff-view")).to_contain_text("background-color")
         active.locator(".runtime-drawer").get_by_role("button", name="关闭").click()
         expect(active.locator(".runtime-drawer")).to_have_count(0)
 
@@ -652,7 +654,7 @@ def main() -> None:
         if abs(dx0) < 40 or abs(dy0) < 40:
             fail(f"预览 100% 中键平移未同时作用于 X/Y: ({dx0:.1f}, {dy0:.1f})")
         print(f"   预览 100% 中键二维平移: ({dx0:.0f}, {dy0:.0f})")
-        active.locator(".preview-pane .viewport-reset").click()
+        active.locator(".preview-pane .viewport-reset[title^='恢复']").click()
         page.wait_for_timeout(200)
 
         anchor_before = pointer_world_point(
@@ -725,7 +727,7 @@ def main() -> None:
         if abs(dx0) < 40 or abs(dy0) < 40:
             fail(f"画布 100% 中键平移未同时作用于 X/Y: ({dx0:.1f}, {dy0:.1f})")
         print(f"   画布 100% 中键二维平移: ({dx0:.0f}, {dy0:.0f})")
-        active.locator(".canvas-pane .viewport-reset").click()
+        active.locator(".canvas-pane .viewport-reset[title^='恢复']").click()
         page.wait_for_timeout(200)
 
         cx = canvas_stage["x"] + canvas_stage["width"] * 0.15
@@ -774,7 +776,7 @@ def main() -> None:
 
         stage_box = active.locator(".canvas-pane .canvas-stage").bounding_box()
         # 先重置到 100%，再以画面中心为锚点放大，截图能同时看到两侧同一内容。
-        active.locator(".canvas-pane .viewport-reset").click()
+        active.locator(".canvas-pane .viewport-reset[title^='恢复']").click()
         page.wait_for_timeout(200)
         lx = stage_box["x"] + stage_box["width"] / 2
         ly = stage_box["y"] + stage_box["height"] / 2
@@ -793,7 +795,7 @@ def main() -> None:
         print(f"   视口联动: 两侧同步为 {linked_canvas['zoom']}%，transform 完全一致")
 
         # 8.4 展示模式 100%：中键 / 空格 + 左键都必须二维自由平移。
-        active.locator(".canvas-pane .viewport-reset").click()
+        active.locator(".canvas-pane .viewport-reset[title^='恢复']").click()
         page.wait_for_timeout(250)
         dual_initial = viewport_snapshot(canvas_pane, "展示模式 100%")
         if dual_initial["zoom"] != 100:
@@ -818,7 +820,7 @@ def main() -> None:
         if linked_panned["transform"] != dual_panned["transform"]:
             fail("展示模式平移后画布/预览 transform 不一致")
         print(f"   展示模式 100% 中键二维平移: ({delta_x:.0f}, {delta_y:.0f})")
-        active.locator(".canvas-pane .viewport-reset").click()
+        active.locator(".canvas-pane .viewport-reset[title^='恢复']").click()
         page.wait_for_timeout(200)
 
         # 空格 + 左键：按住时 grab，拖拽中 grabbing，并且同样二维平移。
@@ -852,8 +854,8 @@ def main() -> None:
         )
 
         # 8.5 重置恢复 100%，画布与预览重新严格对齐。
-        active.locator(".canvas-pane .viewport-reset").click()
-        active.locator(".preview-pane .viewport-reset").click()
+        active.locator(".canvas-pane .viewport-reset[title^='恢复']").click()
+        active.locator(".preview-pane .viewport-reset[title^='恢复']").click()
         page.wait_for_timeout(250)
         reset_canvas = viewport_snapshot(canvas_pane, "重置画布")
         reset_preview = viewport_snapshot(preview_pane, "重置预览")

@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _to_camel(name: str) -> str:
@@ -101,13 +101,44 @@ class RunOptions(CamelModel):
 
 
 class ExecuteRunRequest(CamelModel):
+    """一次 Run 的输入。
+
+    M1 升级后支持画布一次提交最多 3 个标注：
+      - 新客户端发送 ``annotations: AnnotationEnvelope[]``；
+      - 旧客户端仍可发送单个 ``annotation``，服务端自动归一化为数组，
+        避免既有脚本 / 调用方失效。
+    """
+
     run_id: str | None = Field(default=None, max_length=64)
     tenant_id: str | None = None
     project_id: str = Field(min_length=1, max_length=64)
-    annotation: AnnotationEnvelope
+    # 新协议：批量标注，顺序即画布上的标注顺序。
+    annotations: list[AnnotationEnvelope] = Field(default_factory=list, max_length=3)
+    # 兼容旧协议：单个标注；与 annotations 同时出现时以 annotations 为准。
+    annotation: AnnotationEnvelope | None = None
     # 沙盒初始文件；为空时使用 sandbox_template 自带页面。
     files: dict[str, str] = Field(default_factory=dict)
     options: RunOptions = Field(default_factory=RunOptions)
+
+    @model_validator(mode="after")
+    def _normalize_annotations(self) -> "ExecuteRunRequest":
+        """把单标注旧请求归一化为数组，并执行 1~3 的数量约束。"""
+        if self.annotations:
+            items = list(self.annotations)
+        elif self.annotation is not None:
+            items = [self.annotation]
+        else:
+            raise ValueError("annotations 至少包含 1 个标注")
+
+        if len(items) > 3:
+            raise ValueError("一次最多提交 3 个标注")
+        self.annotations = items
+        return self
+
+    @property
+    def effective_annotations(self) -> list[AnnotationEnvelope]:
+        """统一读取入口；调用方不要直接判断 annotation / annotations。"""
+        return self.annotations
 
 
 class VerifyResultModel(CamelModel):
