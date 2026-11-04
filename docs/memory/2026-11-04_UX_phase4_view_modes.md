@@ -47,8 +47,9 @@
 - 预览 URL 通过 `fetch(..., { mode: 'no-cors' })` 探活；容器被外部销毁后显示
   `PREVIEW_OFFLINE` 覆盖层，并提供「重新执行 Agent」。`lastInstruction` 随
   Run 快照写入 sessionStorage，重试时复用原标注，不需要重新圈选。
-- Agent 成功后画布 Mock 按钮同步变红（`.mock-cta.is-applied`），避免对比模式
-  下画布与预览的内容状态明显不一致。
+- 内置模板增加 `templateVersion`；旧 localStorage 项目加载时自动替换为新版
+  `INITIAL_APP`。此前旧文件缺少 `box-sizing: border-box` 和 `p { margin: 0 }`，
+  会导致画布与预览卡片宽高、垂直位置不一致，这是对比模式“框不一样”的根因。
 - RuntimePanel 改为「42px chrome + 全出血 stage」：
   - chrome 与 CanvasStage 的浏览器栏等高，双屏左右严格对齐；
   - 状态 pill、修复次数、详情按钮以底部浮层覆盖；
@@ -85,8 +86,11 @@
 1. 对比模式默认画布，圈选并完成 Agent；「查看效果」切到全屏预览。
 2. 切到展示模式：两个面板同时可见，`.canvas-frame` 与 `.runtime-panel`
    宽高一致；外层容器 overflow hidden 且无滚动距离。
-3. iframe 应用 `top left` 原点的 transform scale，缩放后宽高与预览屏幕一致，
-   画布 Mock 卡片与 iframe 内卡片的宽高、垂直中心偏差不超过 2px。
+3. iframe 应用 `top left` 原点的 transform scale，缩放后宽高与预览屏幕一致；
+   画布 stage 与预览 screen 同宽同高，两侧卡片相对屏幕的左上角偏移、宽高与
+   垂直中心偏差均不超过 2px。实测对比模式 1113.8×400.9、offset
+   `(235.1,103.0)` vs `(235.1,102.8)`；展示模式 542.8×195.4、offset
+   `(114.6,192.8)` vs `(114.6,192.9)`。
 4. 在 DOM 上标记 canvas / iframe 节点，往返对比/展示与画布/预览后仍是
    同一节点，证明零重挂载。
 5. iframe 内按钮仍为 `rgb(255, 0, 0)`，body `overflow:hidden`。

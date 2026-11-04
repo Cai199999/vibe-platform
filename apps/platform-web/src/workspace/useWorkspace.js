@@ -3,6 +3,10 @@ import { INITIAL_APP } from '../mockProject.js'
 
 const STORAGE_KEY = 'vibe.workspace.v1'
 const STORAGE_VERSION = 1
+// 内置模板版本：旧 localStorage 里的项目文件可能还带着旧版卡片样式
+// （content-box / 默认 p 外边距），会导致画布与沙盒预览的卡片尺寸不一致。
+// 升级此版本号即可在下次加载时把 vibe-react 项目迁回最新模板。
+const TEMPLATE_VERSION = 2
 const TARGET_FILE = 'src/App.jsx'
 
 /**
@@ -29,6 +33,7 @@ const createProject = (name) => ({
   id: newId('proj'),
   name,
   template: 'vibe-react',
+  templateVersion: TEMPLATE_VERSION,
   files: templateFiles(),
   createdAt: new Date().toISOString(),
 })
@@ -62,9 +67,25 @@ function normalizeState(raw) {
   if (!raw || !Array.isArray(raw.projects) || raw.projects.length === 0) {
     return createInitialState()
   }
-  const projects = raw.projects.filter(
-    (project) => project?.id && project?.name && project?.files?.[TARGET_FILE],
-  )
+  const projects = raw.projects
+    .filter(
+      (project) => project?.id && project?.name && project?.files?.[TARGET_FILE],
+    )
+    .map((project) => {
+      // 内置模板升级：旧项目文件统一替换为当前 INITIAL_APP，避免旧样式造成
+      // 画布 Mock 与沙盒真实页面尺寸不一致。导入的外部项目后续走独立迁移。
+      if (
+        project.template === 'vibe-react' &&
+        project.templateVersion !== TEMPLATE_VERSION
+      ) {
+        return {
+          ...project,
+          files: templateFiles(),
+          templateVersion: TEMPLATE_VERSION,
+        }
+      }
+      return project
+    })
   if (projects.length === 0) {
     return createInitialState()
   }

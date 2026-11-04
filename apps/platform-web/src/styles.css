@@ -526,15 +526,6 @@ code {
   transition: background 0.2s ease;
 }
 
-/* Agent 成功后的演示改色同步回画布，避免画布与预览出现明显色差。 */
-.mock-cta.is-applied {
-  background: #ff0000;
-}
-
-.mock-cta.is-applied:hover {
-  background: #e60000;
-}
-
 .cta-hint {
   margin-left: 14px;
   color: var(--faint);

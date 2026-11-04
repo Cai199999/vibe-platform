@@ -286,7 +286,12 @@ export default function WorkspacePage() {
       lastInstruction: text,
     })
 
-    const source = project.files?.[TARGET_FILE] ?? INITIAL_APP
+    // 内置模板始终以当前 INITIAL_APP 为准：即使 localStorage 里残留了旧版
+    // 文件，也不会把旧卡片样式带进沙盒，保证画布与预览框尺寸一致。
+    const source =
+      project.template === 'vibe-react'
+        ? INITIAL_APP
+        : (project.files?.[TARGET_FILE] ?? INITIAL_APP)
     const payload = {
       runId: newId('run'),
       tenantId: user?.tenantId || 'tenant_local',

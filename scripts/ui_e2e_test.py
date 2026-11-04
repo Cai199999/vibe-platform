@@ -232,15 +232,40 @@ def assert_canvas_preview_parity(page, active, label: str) -> None:
 
     canvas_stage = active.locator(".canvas-stage").bounding_box()
     preview_screen = active.locator(".runtime-preview-screen").bounding_box()
-    canvas_center = canvas_card["y"] + canvas_card["height"] / 2 - canvas_stage["y"]
-    preview_center = vibe_card["y"] + vibe_card["height"] / 2 - preview_screen["y"]
-    if abs(canvas_center - preview_center) > 2:
-        fail(
-            f"{label} 画布与预览卡片垂直位置不一致: "
-            f"{canvas_center:.1f} vs {preview_center:.1f}"
-        )
+    if not canvas_stage or not preview_screen:
+        fail(f"{label} 未读取到画布/预览屏幕尺寸")
+
+    # 舞台必须同宽同高，否则卡片即使等尺寸也会整体偏移。
+    for key in ("width", "height"):
+        if abs(canvas_stage[key] - preview_screen[key]) > 2:
+            fail(
+                f"{label} 画布与预览屏幕 {key} 不一致: "
+                f"{canvas_stage[key]:.1f} vs {preview_screen[key]:.1f}"
+            )
+
+    # 卡片相对各自屏幕的左上角偏移和垂直中心都必须一致，而不只是宽高一致。
+    canvas_left = canvas_card["x"] - canvas_stage["x"]
+    preview_left = vibe_card["x"] - preview_screen["x"]
+    canvas_top = canvas_card["y"] - canvas_stage["y"]
+    preview_top = vibe_card["y"] - preview_screen["y"]
+    canvas_center = canvas_top + canvas_card["height"] / 2
+    preview_center = preview_top + vibe_card["height"] / 2
+
+    for name, left_a, left_b in (
+        ("水平偏移", canvas_left, preview_left),
+        ("垂直偏移", canvas_top, preview_top),
+        ("垂直中心", canvas_center, preview_center),
+    ):
+        if abs(left_a - left_b) > 2:
+            fail(
+                f"{label} 画布与预览卡片{name}不一致: "
+                f"{left_a:.1f} vs {left_b:.1f}"
+            )
+
     print(
         f"   卡片对齐: {canvas_card['width']:.1f}×{canvas_card['height']:.1f} / "
+        f"offset ({canvas_left:.1f},{canvas_top:.1f}) vs "
+        f"({preview_left:.1f},{preview_top:.1f}) / "
         f"centerY {canvas_center:.1f} vs {preview_center:.1f}"
     )
 

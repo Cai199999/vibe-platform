@@ -129,7 +129,6 @@ export default function ProjectWorkspace({
             onSubmit={onSubmit}
             submitting={submitting}
             disabled={submitting}
-            applied={run.result?.status === 'AWAITING_APPROVAL'}
           />
 
           {previewReady && viewMode === 'compare' && mode === 'canvas' && (
