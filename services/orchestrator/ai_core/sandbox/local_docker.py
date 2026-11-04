@@ -46,7 +46,27 @@ LABEL_PROJECT_ID = "vibe.project.id"
 LABEL_MANAGED = "vibe.managed"
 
 # 沙盒 Git 仓库忽略项：依赖与构建产物重建即可，不需要进入 checkpoint。
-GITIGNORE_CONTENT = "node_modules/\ndist/\n.vite/\n*.log\n"
+# Vite 会在项目根目录瞬时生成 vite.config.js.timestamp-*.mjs 后立即删除；
+# 若 git add 恰好扫描到删除瞬间会报 "unable to stat"，因此必须忽略临时文件。
+GITIGNORE_CONTENT = (
+    "node_modules/\n"
+    "dist/\n"
+    ".vite/\n"
+    "*.log\n"
+    "vite.config.*.timestamp-*\n"
+    "*.timestamp-*.mjs\n"
+)
+# 写入 .git/info/exclude：兼容本次升级前已创建、且 .gitignore 不含上述
+# 临时文件规则的旧沙盒，避免它们在下一次 checkpoint 时偶发失败。
+GIT_EXCLUDE_CONTENT = (
+    "# vibe sandbox excludes\n"
+    "node_modules/\n"
+    "dist/\n"
+    ".vite/\n"
+    "*.log\n"
+    "vite.config.*.timestamp-*\n"
+    "*.timestamp-*.mjs\n"
+)
 FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -211,13 +231,7 @@ class LocalDockerSandbox(SandboxProvider):
         container = self._get_container(sandbox_id)
         with self._git_lock:
             self._ensure_git_repo(container)
-            code, output = self._exec(
-                container,
-                ["git", "add", "-A"],
-                workdir=self.settings.sandbox_workdir,
-            )
-            if code != 0:
-                raise SandboxGitError(f"git add 失败: {self._decode(output)}")
+            self._git_add_all(container, "git add 失败")
 
             code, output = self._exec(
                 container,
@@ -286,6 +300,33 @@ class LocalDockerSandbox(SandboxProvider):
                 )
             return value
 
+    def _git_add_all(self, container: Any, context: str) -> None:
+        """``git add -A``，并对 Vite 临时文件竞态做有限重试。
+
+        Vite 在启动 / 配置变更时会瞬时创建 ``vite.config.js.timestamp-*.mjs``
+        再删除；如果 git 扫描恰好落在删除瞬间，会返回
+        ``unable to stat ... No such file or directory``。这类错误是瞬时的，
+        忽略规则无法 100% 消除竞态，因此保留 3 次短重试，仍失败才上抛。
+        """
+        workdir = self.settings.sandbox_workdir
+        last_output = ""
+        for attempt in range(3):
+            code, output = self._exec(
+                container,
+                ["git", "add", "-A"],
+                workdir=workdir,
+            )
+            if code == 0:
+                return
+            last_output = self._decode(output)
+            transient = "unable to stat" in last_output or (
+                "No such file or directory" in last_output
+            )
+            if not transient or attempt == 2:
+                break
+            time.sleep(0.2 * (attempt + 1))
+        raise SandboxGitError(f"{context}: {last_output}")
+
     def _ensure_git_repo(self, container: Any) -> None:
         """确保工作区是带初始提交的 Git 仓库（幂等）。
 
@@ -312,6 +353,16 @@ class LocalDockerSandbox(SandboxProvider):
         if code != 0:
             self._put_files(container, {".gitignore": GITIGNORE_CONTENT})
 
+        # 旧沙盒的 .gitignore 可能还没有 Vite 临时文件规则。.git/info/exclude
+        # 只影响当前仓库、不会进入源码导出，用它补齐忽略项最安全。
+        code, _ = self._exec(
+            container,
+            ["grep", "-qF", "vibe sandbox excludes", ".git/info/exclude"],
+            workdir=workdir,
+        )
+        if code != 0:
+            self._put_files(container, {".git/info/exclude": GIT_EXCLUDE_CONTENT})
+
         self._exec(
             container,
             ["git", "config", "user.name", "Vibe Agent"],
@@ -329,13 +380,7 @@ class LocalDockerSandbox(SandboxProvider):
             workdir=workdir,
         )
         if code != 0:
-            code, output = self._exec(
-                container,
-                ["git", "add", "-A"],
-                workdir=workdir,
-            )
-            if code != 0:
-                raise SandboxGitError(f"初始化 git add 失败: {self._decode(output)}")
+            self._git_add_all(container, "初始化 git add 失败")
             code, output = self._exec(
                 container,
                 ["git", "commit", "--allow-empty", "-m", "baseline: sandbox init"],

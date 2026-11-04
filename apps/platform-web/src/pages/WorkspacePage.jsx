@@ -298,9 +298,11 @@ export default function WorkspacePage() {
 
   const [runStates, setRunStates] = useState(() => loadRunStates(projects))
   // 默认 auto：配置了 DEEPSEEK_API_KEY 时自动走真实模型；没有 Key 时回退 Mock。
-  // 用户也可以显式选择 DeepSeek / Mock，便于真实 Key 联调与离线 E2E。
+  // 旧版本可能持久化过显式 deepseek，这里统一归一到 auto，UI 不再暴露内部
+  // provider 名称（测试仍可通过 mock 进入离线模式）。
   const [modelProvider, setModelProvider] = useState(() => {
     const saved = window.localStorage.getItem(MODEL_STORAGE_KEY)
+    if (saved === 'deepseek') return 'auto'
     return MODEL_PROVIDERS.has(saved) ? saved : 'auto'
   })
   const [accountOpen, setAccountOpen] = useState(false)

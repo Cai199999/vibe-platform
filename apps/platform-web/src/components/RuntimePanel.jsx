@@ -3,17 +3,13 @@ import DiffView from './DiffView.jsx'
 import ScaledPreview from './ScaledPreview.jsx'
 
 /**
- * 同步链路没有真实节点事件，M1 用时间轴模拟进度，避免界面看起来卡死。
- * M2 接入事件流后，这里改为消费真实 Agent 状态。
+ * 没有真实节点事件时用时间轴模拟进度，避免界面看起来卡死。
+ * 只展示用户能理解的三步，不暴露 Planner / Coder / Verifier 等内部实现。
  */
 const STAGES = [
-  { at: 0, title: '正在解析画布标注', detail: '归一化坐标 → 组件选区 → AnnotationEnvelope[]' },
-  { at: 3, title: 'Planner 正在综合分析全部标注', detail: '把最多 3 条指令合并成一个统一修改方案' },
-  { at: 6, title: 'Coder 正在生成代码', detail: '输出 Unified Diff / 全量文件' },
-  { at: 9, title: 'Applier 正在写入沙盒', detail: 'git apply + Vite HMR 热更新' },
-  { at: 12, title: 'Verifier 正在运行构建', detail: 'npm run build 收集错误日志' },
-  { at: 16, title: '遇到报错，正在尝试自我修复（第 1 次）', detail: '错误日志回灌 Coder，重新生成补丁' },
-  { at: 22, title: '再次验证中', detail: '等待沙盒返回最终结果' },
+  { at: 0, title: '理解修改意图' },
+  { at: 5, title: '生成代码' },
+  { at: 12, title: '验证构建' },
 ]
 
 const stageIndexFor = (elapsed) => {
@@ -29,7 +25,7 @@ function StatusPill({ status }) {
   return (
     <span className={`status-pill ${isSuccess ? 'is-success' : 'is-failed'}`}>
       <i />
-      {isSuccess ? '等待审批 · 构建通过' : '执行失败'}
+      {isSuccess ? '已完成' : '执行失败'}
     </span>
   )
 }
@@ -46,17 +42,14 @@ function LoadingState({ elapsed }) {
         <span />
       </div>
       <div className="loading-copy">
-        <h3 className="loading-title">Agent 正在执行</h3>
-        <p className="muted">
-          同步链路已打通，正在等待沙盒返回结果 · {elapsed < 1 ? '<1' : elapsed}s
-        </p>
+        <h3 className="loading-title">正在修改</h3>
+        <p className="muted">{elapsed < 1 ? '<1' : elapsed}s</p>
         <p className="loading-step">
           <span>
             {stageIndex + 1} / {STAGES.length}
           </span>
           {stage.title}
         </p>
-        <p className="loading-detail">{stage.detail}</p>
       </div>
 
       <div className="stage-dots" aria-hidden="true">
@@ -75,7 +68,7 @@ function LoadingState({ elapsed }) {
   )
 }
 
-function IdleState({ hasAnnotation, projectName }) {
+function IdleState({ hasAnnotation }) {
   return (
     <div className="runtime-idle">
       <div className="runtime-placeholder">
@@ -84,20 +77,9 @@ function IdleState({ hasAnnotation, projectName }) {
           <span />
           <span />
         </div>
-        <strong>沙盒预览将在这里出现</strong>
-        <p>
-          {hasAnnotation
-            ? '标注已就绪，为每个标注填写意图后在顶部点击「提交标注」。'
-            : `在「${projectName}」的画布上圈选 1~3 个组件，每个选区都有独立输入框。`}
-        </p>
+        <strong>还没有预览</strong>
+        <p>{hasAnnotation ? '填写修改意图后提交。' : '圈选一个组件开始。'}</p>
       </div>
-
-      <ol className="flow-list">
-        <li>Planner 解析标注，生成修改计划</li>
-        <li>Coder 输出 Diff / 全量文件</li>
-        <li>Applier 写入沙盒，Verifier 执行构建</li>
-        <li>失败自动回灌日志，最多修复 3 次</li>
-      </ol>
     </div>
   )
 }
@@ -277,9 +259,6 @@ export default function RuntimePanel({
           <i className="dot-amber" />
           <i className="dot-green" />
         </span>
-        <span className="runtime-url" title={previewUrl ?? 'vibe://sandbox/preview'}>
-          {previewUrl ?? 'vibe://sandbox/preview'}
-        </span>
         <span className={`runtime-state ${stateClass}`}>
           <i />
           {stateLabel}
@@ -306,16 +285,16 @@ export default function RuntimePanel({
           <div className="runtime-overlay">
             <div className="error-state runtime-error">
               <span className="error-code">RUN_FAILED</span>
-              <h3>链路执行失败</h3>
+              <h3>执行失败</h3>
               <p>{error}</p>
-              <p className="muted">检查 Java BFF / Python AI Core 容器状态后重试。</p>
+              <p className="muted">请稍后重试。</p>
             </div>
           </div>
         )}
 
         {!submitting && !error && !result && (
           <div className="runtime-overlay">
-            <IdleState hasAnnotation={annotations.length > 0} projectName={projectName} />
+            <IdleState hasAnnotation={annotations.length > 0} />
           </div>
         )}
 
@@ -329,9 +308,8 @@ export default function RuntimePanel({
           <div className="runtime-overlay">
             <div className="error-state runtime-error">
               <span className="error-code">PREVIEW_OFFLINE</span>
-              <h3>预览连接失败</h3>
-              <p>沙盒容器可能已被销毁、重启或端口已释放，当前地址无法连接。</p>
-              <p className="muted runtime-offline-url">{previewUrl}</p>
+              <h3>预览已失效</h3>
+              <p>重新执行一次即可恢复。</p>
               {onRetry ? (
                 <button className="ghost-button" type="button" onClick={onRetry}>
                   重新执行 Agent
@@ -347,9 +325,6 @@ export default function RuntimePanel({
           <div className="runtime-result-overlay">
             <div className="runtime-result-status">
               <StatusPill status={result.status} />
-              <span className="elapsed">
-                {result.retryCount > 0 ? `自动修复 ${result.retryCount} 次` : '一次通过'}
-              </span>
             </div>
 
             <div className="runtime-result-actions">

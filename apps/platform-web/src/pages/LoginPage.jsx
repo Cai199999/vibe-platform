@@ -71,18 +71,16 @@ export default function LoginPage() {
           </li>
           <li>
             <strong>03</strong>
-            <span>多项目工作区，即将支持拖拽 Tab</span>
+            <span>多项目工作区，随时切换与回滚</span>
           </li>
         </ul>
-
-        <p className="auth-footnote">Mock 鉴权 · 本地会话 · 不连接真实身份服务</p>
       </section>
 
       <section className="auth-main">
         <form className="auth-card" onSubmit={handleSubmit}>
           <span className="eyebrow">Sign in</span>
           <h2>进入工作台</h2>
-          <p className="auth-sub">使用任意账号密码即可体验，会话保存在 localStorage。</p>
+          <p className="auth-sub">使用任意账号密码即可体验。</p>
 
           <label className="auth-field" htmlFor="login-account">
             <span>账号</span>

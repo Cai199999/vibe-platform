@@ -51,7 +51,6 @@ export default function ProjectSwitcher({
           ▦
         </span>
         <span className="project-switcher-text">
-          <small>当前项目</small>
           <strong>{activeProject?.name ?? '选择项目'}</strong>
         </span>
         <span className="account-caret" aria-hidden="true">
@@ -61,11 +60,6 @@ export default function ProjectSwitcher({
 
       {open && (
         <div className="project-menu" role="menu">
-          <div className="project-menu-head">
-            <span>工作区项目</span>
-            <small>{projects.length} 个</small>
-          </div>
-
           <div className="project-menu-list">
             {projects.map((project) => {
               const isActive = activeProject?.id === project.id
@@ -104,11 +98,6 @@ export default function ProjectSwitcher({
               <span aria-hidden="true">＋</span>
               新建项目
               {limitReached && <span className="project-menu-badge">5 / 5</span>}
-            </button>
-            <button type="button" role="menuitem" disabled title="Phase 3 支持导入 HTML / URL">
-              <span aria-hidden="true">↥</span>
-              导入项目
-              <span className="project-menu-badge">Phase 3</span>
             </button>
             <button
               type="button"

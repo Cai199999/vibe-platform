@@ -132,9 +132,7 @@ export default function WorkspaceTabs({
         ＋
       </button>
 
-      <span className="tabs-hint">
-        {limitReached ? '已达 5 个项目上限' : '拖拽 Tab 可排序'}
-      </span>
+      {limitReached && <span className="tabs-hint">已达 5 个项目上限</span>}
     </div>
   )
 }

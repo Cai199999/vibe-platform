@@ -56,42 +56,31 @@ function ProjectWorkspaceInner({
       : run.result
         ? 'success'
         : 'idle'
-  const targetLabels = annotations
-    .map((annotation) => annotation.target?.label)
-    .filter(Boolean)
-    .join('、')
 
   return (
     <section
       className={`tab-window ${active ? 'is-active' : 'is-hidden'}`}
       aria-hidden={!active}
     >
-      <div className="tab-window-head">
-        <div className="tab-window-title">
-          <span className="eyebrow">Workspace · {project.template}</span>
-          <h2>{project.name}</h2>
-          <p>沿画布圈选组件，浮层内下达修改意图，Agent 在隔离沙盒中执行。</p>
-        </div>
-      </div>
-
       <div className="project-toolbar">
         <div className="project-toolbar-left">
-          <code className="source-path">src/App.jsx</code>
-          <span className={`selection-state ${annotations.length ? 'is-ready' : ''}`}>
-            {annotations.length
-              ? `已圈选 ${annotations.length}/3 个标注${targetLabels ? ` · ${targetLabels}` : ''}`
-              : '尚未圈选组件'}
-          </span>
-          <label className="model-picker" title="auto：配置了 DeepSeek Key 时自动使用真实模型，否则使用 Mock">
-            <span>模型</span>
+          {annotations.length > 0 && (
+            <span className="selection-state is-ready">
+              {annotations.length} 个标注
+            </span>
+          )}
+          <label className="model-picker" title="模型设置">
+            <span className="model-gear" aria-hidden="true">
+              ⚙
+            </span>
             <select
+              aria-label="模型"
               value={modelProvider}
               disabled={submitting}
               onChange={(event) => onModelProviderChange?.(event.target.value)}
             >
-              <option value="auto">自动（有 Key 用 DeepSeek）</option>
-              <option value="deepseek">DeepSeek</option>
-              <option value="mock">Mock（离线演示）</option>
+              <option value="auto">DeepSeek V3</option>
+              <option value="mock">本地预览</option>
             </select>
           </label>
         </div>
@@ -112,10 +101,10 @@ function ProjectWorkspaceInner({
             disabled={!submitReady || submitting}
             title={
               submitReady
-                ? `一次性提交 ${annotations.length} 个标注，Agent 将合并处理`
+                ? `提交全部 ${annotations.length} 个标注`
                 : annotations.length === 0
                   ? '请先在画布上圈选组件'
-                  : '请为每个标注填写修改意图；也可直接在单个浮层内发送'
+                  : '请为每个标注填写修改意图'
             }
             onClick={onSubmit}
           >
@@ -125,7 +114,7 @@ function ProjectWorkspaceInner({
                 {run.pendingAction === 'rollback' ? '回滚中…' : '执行中…'}
               </>
             ) : (
-              `批量提交 (${annotations.length}/3)`
+              '提交'
             )}
           </button>
 
@@ -241,12 +230,6 @@ function ProjectWorkspaceInner({
           />
         </div>
       </div>
-
-      <p className="footnote">
-        同步链路：platform-web → <code>/api/v1/runs</code> → Java BFF → python-ai → Docker 沙盒。
-        一次最多提交 3 个标注，Planner / Coder 会合并成一次代码修改；首次执行创建
-        Vite 沙盒通常需要 20–60 秒，关闭 Tab 会销毁对应沙盒。
-      </p>
     </section>
   )
 }

@@ -114,7 +114,6 @@ function popoverStyleFor(rect, index, active) {
 function AnnotationPopover({
   annotation,
   index,
-  total,
   submitting,
   pending,
   pendingAction,
@@ -142,7 +141,6 @@ function AnnotationPopover({
 
   if (!style) return null
 
-  const targetLabel = annotation.target?.label || '组件'
   const sending = Boolean(submitting && pending)
   const rollingBack = sending && pendingAction === 'rollback'
   return (
@@ -175,11 +173,7 @@ function AnnotationPopover({
       }}
     >
       <div className="popover-head">
-        <span className="popover-dot" />
-        <span>
-          标注 {index + 1} / {total}
-        </span>
-        <span className="popover-target">{targetLabel}</span>
+        <span className="popover-dot" aria-label={`标注 ${index + 1}`} />
         <button
           className="popover-remove"
           type="button"
@@ -238,9 +232,7 @@ function AnnotationPopover({
           type="text"
           value={annotation.intent}
           maxLength={120}
-          placeholder={
-            history.length ? '继续对话，例如：不，我要蓝色' : '例如：改成蓝色 / 放大一倍'
-          }
+          placeholder="描述修改意图..."
           disabled={submitting}
           onChange={(event) => onChange?.(annotation.id, event.target.value)}
         />
@@ -253,15 +245,11 @@ function AnnotationPopover({
           {sending ? <span className="mini-spinner" aria-label="执行中" /> : '发送'}
         </button>
       </div>
-      <p className="popover-hint">
-        {rollingBack
-          ? '正在恢复该轮代码与对话上下文…'
-          : sending
-            ? 'Agent 正在这个圈上增量修改…'
-            : history.length
-              ? '同一圈可继续发送；也可以回到任意成功轮次'
-              : '发送后立即执行；后续可继续对话调整'}
-      </p>
+      {sending && (
+        <p className="popover-hint">
+          {rollingBack ? '正在恢复…' : '正在修改…'}
+        </p>
+      )}
     </form>
   )
 }
@@ -468,8 +456,6 @@ export default function CanvasStage({
           <i className="dot-amber" />
           <i className="dot-green" />
         </span>
-        <span className="chrome-url">vibe://canvas/preview</span>
-        <span className="chrome-badge">src/App.jsx</span>
       </div>
 
       <div
@@ -553,7 +539,6 @@ export default function CanvasStage({
                   key={annotation.id}
                   annotation={annotation}
                   index={index}
-                  total={annotations.length}
                   submitting={submitting}
                   pending={pendingAnnotationId === annotation.id}
                   pendingAction={pendingAnnotationId === annotation.id ? pendingAction : null}
@@ -615,7 +600,7 @@ export default function CanvasStage({
         <div className="canvas-hint">
           {drawing
             ? '松开鼠标完成圈选'
-            : `左键圈选（最多 ${MAX_ANNOTATIONS} 个） · 空格/中键平移 · 滚轮缩放`}
+            : '圈选组件 · 空格/中键平移 · 滚轮缩放'}
         </div>
       </div>
     </div>

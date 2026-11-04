@@ -58,7 +58,6 @@ export default function AccountDialog({ open, onClose }) {
             <strong>{user.name}</strong>
             <p>{user.email}</p>
           </div>
-          <span className="chip chip-muted">Mock Session</span>
         </div>
 
         <dl className="account-fields">

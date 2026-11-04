@@ -438,7 +438,7 @@ def main() -> None:
         print("\n== 3. 新建项目、拖拽排序、刷新持久化 ==")
         open_new_project(page)
         expect(page.locator(".workspace-tab")).to_have_count(2)
-        expect(page.locator(".tab-window.is-active .tab-window-title h2")).to_have_text(
+        expect(page.locator(".workspace-tab.is-active .tab-name")).to_have_text(
             "未命名项目 2"
         )
         page.screenshot(
@@ -488,15 +488,15 @@ def main() -> None:
 
         # 预览面板在对比模式画布下是 visibility:hidden，inner_text 会返回空；
         # 这里只需要校验 DOM 内容，使用 text_content 不受可见性影响。
-        retry_text = (
-            active.locator(".runtime-result-overlay .elapsed").text_content() or ""
+        status_text = (
+            active.locator(".runtime-result-overlay .status-pill").text_content() or ""
         )
-        if "自动修复 1 次" not in retry_text:
-            fail(f"重试信息异常: {retry_text}")
+        if "已完成" not in status_text:
+            fail(f"运行状态异常: {status_text}")
         sandbox_id = active.locator(".runtime-panel").get_attribute("data-sandbox-id")
         if not sandbox_id:
             fail("未读取到 sandboxId")
-        print(f"   沙盒: {sandbox_id} / {retry_text}")
+        print(f"   沙盒: {sandbox_id} / 状态: {status_text.strip()}")
 
         print("\n== 6. 点击「查看效果」切换到全屏预览 ==")
         active.locator(".view-result-cta").click()
@@ -867,7 +867,9 @@ def main() -> None:
         print("\n== 10. 刷新页面：恢复预览结果，默认回到画布模式 ==")
         page.reload(wait_until="networkidle")
         active = page.locator(".tab-window.is-active")
-        expect(active.locator(".tab-window-title h2")).to_have_text("演示项目")
+        expect(page.locator(".workspace-tab.is-active .tab-name")).to_have_text(
+            "演示项目"
+        )
         expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
         expect(active.locator(".pane-switch")).to_be_visible()
         expect(active.locator(".view-result-cta")).to_be_visible()
@@ -896,7 +898,7 @@ def main() -> None:
         active.get_by_role("button", name="预览", exact=True).click()
         offline = active.locator(".runtime-error")
         expect(offline).to_be_visible(timeout=15_000)
-        expect(offline).to_contain_text("预览连接失败")
+        expect(offline).to_contain_text("预览已失效")
         retry = offline.get_by_role("button", name="重新执行 Agent")
         expect(retry).to_be_visible()
         page.screenshot(
@@ -933,7 +935,7 @@ def main() -> None:
         for _ in range(4):
             open_new_project(page)
         expect(page.locator(".workspace-tab")).to_have_count(5)
-        expect(page.locator(".tab-window.is-active .tab-window-title h2")).to_have_text(
+        expect(page.locator(".workspace-tab.is-active .tab-name")).to_have_text(
             "未命名项目 6"
         )
         expect(page.locator(".tab-new")).to_be_disabled()
@@ -961,7 +963,7 @@ def main() -> None:
         open_new_project(page)
         expect(page.locator(".workspace-tab")).to_have_count(5)
         # 存活 4 个 Tab → 从 5 起编号；5、6 已被占用，顺延到 7，绝不重名。
-        expect(page.locator(".tab-window.is-active .tab-window-title h2")).to_have_text(
+        expect(page.locator(".workspace-tab.is-active .tab-name")).to_have_text(
             "未命名项目 7"
         )
         names = page.locator(".workspace-tab .tab-name").all_inner_texts()

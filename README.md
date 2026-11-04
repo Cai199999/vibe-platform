@@ -485,8 +485,8 @@ docker compose up --build -d python-ai
 ```
 
 3. `GET /api/v1/health` 的 `dependencies.llm` 应为 `deepseek`（不泄露 Key）。
-   前端模型选择器可选 **自动（有 Key 用 DeepSeek）** 或 **DeepSeek**；
-   `auto` 在当前 Key 为空时会回退 Mock。
+   前端模型选择器默认显示 **DeepSeek V3**（`auto`：有 Key 走真实模型，
+   无 Key 回退本地 Mock）；离线演示时可选 **本地预览**。
 
 调用链：Planner 与 Coder 的 System Prompt 明确要求处理全部 1~3 个标注、
 支持颜色 / 文案 / 字号 / 间距 / 布局 / 组件结构等任意 UI 属性，禁止只处理

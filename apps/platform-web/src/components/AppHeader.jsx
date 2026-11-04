@@ -43,16 +43,17 @@ export default function AppHeader({ busy, onOpenAccount }) {
         <span className="brand-mark">V</span>
         <div>
           <h1>Vibe Studio</h1>
-          <p>画布标注 · 单 Agent 闭环</p>
         </div>
       </Link>
 
       <div className="topbar-meta">
-        <span className="chip">M1</span>
-        <span className="chip chip-muted">React / Vite Sandbox</span>
-        <span className={`live-dot ${busy ? 'is-busy' : ''}`}>
+        <span
+          className={`live-dot ${busy ? 'is-busy' : ''}`}
+          role="status"
+          aria-label={busy ? '正在执行' : '就绪'}
+          title={busy ? '正在执行' : '就绪'}
+        >
           <i />
-          {busy ? 'Agent Running' : 'Ready'}
         </span>
 
         <div className="account-menu" ref={menuRef}>
