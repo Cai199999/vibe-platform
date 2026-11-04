@@ -20,12 +20,27 @@ FastAPI + Pydantic Settings + LangGraph 依赖，M1 提供：
 ```text
 ai_core/
   config.py                 环境变量配置
-  schemas.py                请求 / 响应模型
-  api/sandbox.py            内部 HTTP API
+  schemas.py                沙盒请求 / 响应模型
+  api/sandbox.py            沙盒 HTTP API
+  api/runs.py               Run 执行 API
   sandbox/base.py           SandboxProvider 抽象
   sandbox/local_docker.py   LocalDockerSandbox（Docker SDK）
+  agent/state.py            LangGraph AgentState
+  agent/graph.py            Planner/Coder/Applier/Verifier/Evaluator
+  agent/llm.py              Mock / DeepSeek 适配
+  agent/schemas.py          AnnotationEnvelope 与执行契约
+  agent/service.py          沙盒 + Graph 编排
 sandbox_template/           React + Vite 基础镜像
 ```
+
+## Run 执行 API
+
+`POST /api/v1/internal/runs/execute` 接收 `AnnotationEnvelope`，启动沙盒并
+同步运行单 Agent 图，返回 `AWAITING_APPROVAL` / `FAILED`、最终补丁、
+构建结果与节点消息轨迹。
+
+Mock 场景通过 `options.mockScenario` 控制：`fail_first` / `always_fail` /
+`none`；`options.llmProvider=auto` 时无 `DEEPSEEK_API_KEY` 自动使用 Mock。
 
 沙盒镜像不存在时，`LocalDockerSandbox` 会以 `sandbox_template/` 为上下文
 自动构建 `vibe-platform/sandbox-react:dev`。Dockerfile 已配置

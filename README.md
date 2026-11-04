@@ -120,6 +120,69 @@ verify 成功 → Vite 返回最新模块 → 销毁 → 资源 404。
 > 若容器内无权限访问 Socket，执行
 > `stat -c '%g' /var/run/docker.sock` 获取 GID，并写入 `.env` 的 `DOCKER_GID`。
 
+## Agent 闭环（M1）
+
+`POST /api/v1/internal/runs/execute` 接收画布 `AnnotationEnvelope`，创建沙盒并
+同步执行 LangGraph：
+
+```text
+planner -> coder -> applier -> verifier -> evaluator
+                        ^                       |
+                        +---- retry (<= 3) <-----+
+                                                +-- success -> awaiting_approval
+                                                +-- exhausted -> failed
+```
+
+- `applier` 直接复用 SandboxProvider（与沙盒 `apply-patch` API 同一实现），
+  避免内部 HTTP 自调用。
+- `verifier` 执行 `npm run build`，失败日志写入状态并由 `coder` 重试；
+  `retry_count` 硬上限为 3，超过后返回 `FAILED`。
+- 模型选择：`llmProvider=auto` 时，有 `DEEPSEEK_API_KEY` 用 DeepSeek，
+  否则用 Mock；也可显式指定 `mock` / `deepseek`。
+- Mock 场景：`fail_first`（首次写错，验证自动修复）、`always_fail`
+  （验证 3 次上限）、`none`（直接成功）。
+
+最小请求：
+
+```json
+{
+  "runId": "run_01",
+  "projectId": "proj_01",
+  "annotation": {
+    "version": 1,
+    "annotationId": "ann_01",
+    "type": "note",
+    "target": {
+      "mode": "source",
+      "source": { "file": "src/App.jsx" }
+    },
+    "intent": {
+      "kind": "UI_ONLY",
+      "ui": { "summary": "将按钮改为红色" }
+    },
+    "payload": { "text": "将按钮改为红色" }
+  },
+  "files": { "src/App.jsx": "export default function App() { ... }" },
+  "options": {
+    "llmProvider": "mock",
+    "mockScenario": "fail_first",
+    "maxRetries": 3,
+    "keepSandbox": true
+  }
+}
+```
+
+E2E：
+
+```bash
+python3 scripts/agent_e2e_test.py
+```
+
+覆盖：首次语法错误 → 自动修复 → `AWAITING_APPROVAL`；持续失败 → 3 次上限
+→ `FAILED`；`FULLSTACK` 意图 → `422 FULLSTACK_NOT_SUPPORTED`。
+
+> M1 的 execute 是同步接口，便于后台联调；M2 将改为 202 + checkpoint + 事件流。
+
 ## 数据库
 
 ```bash

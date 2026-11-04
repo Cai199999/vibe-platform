@@ -228,6 +228,25 @@ class LocalDockerSandbox(SandboxProvider):
             logs_truncated=truncated,
         )
 
+    def read_file(self, sandbox_id: str, path: str) -> str:
+        """读取沙盒内文本文件。
+
+        Agent 在每次 apply 之后重新读取目标文件，确保 current_code 与沙盒
+        真实状态一致（尤其适用于 unified diff 场景）。
+        """
+        container = self._get_container(sandbox_id)
+        rel_path = self._normalize_path(path)
+        code, output = self._exec(
+            container,
+            ["sh", "-lc", f"cat {shlex.quote(rel_path)}"],
+            workdir=self.settings.sandbox_workdir,
+        )
+        if code != 0:
+            raise SandboxValidationError(
+                f"读取沙盒文件失败 {rel_path}: {self._decode(output)}"
+            )
+        return self._decode(output)
+
     def destroy(self, sandbox_id: str) -> None:
         container = self._get_container(sandbox_id)
         try:

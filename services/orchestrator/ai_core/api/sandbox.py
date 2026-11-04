@@ -11,14 +11,9 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query
 from docker.errors import DockerException
 
+from ai_core.api.errors import sandbox_error_to_http
 from ai_core.sandbox import get_sandbox_provider
-from ai_core.sandbox.base import (
-    SandboxError,
-    SandboxNotFoundError,
-    SandboxPatchError,
-    SandboxStartupError,
-    SandboxValidationError,
-)
+from ai_core.sandbox.base import SandboxError
 from ai_core.schemas import (
     ApplyPatchRequest,
     ApplyPatchResponse,
@@ -29,34 +24,6 @@ from ai_core.schemas import (
 )
 
 router = APIRouter(prefix="/api/v1/internal/sandbox", tags=["sandbox"])
-
-
-def _map_error(exc: SandboxError) -> HTTPException:
-    """把领域异常映射为稳定的 HTTP 错误码。"""
-    if isinstance(exc, SandboxNotFoundError):
-        return HTTPException(
-            status_code=404,
-            detail={"code": "SANDBOX_NOT_FOUND", "message": str(exc)},
-        )
-    if isinstance(exc, SandboxValidationError):
-        return HTTPException(
-            status_code=422,
-            detail={"code": "SANDBOX_INVALID_REQUEST", "message": str(exc)},
-        )
-    if isinstance(exc, SandboxPatchError):
-        return HTTPException(
-            status_code=422,
-            detail={"code": "SANDBOX_PATCH_FAILED", "message": str(exc)},
-        )
-    if isinstance(exc, SandboxStartupError):
-        return HTTPException(
-            status_code=503,
-            detail={"code": "SANDBOX_UNAVAILABLE", "message": str(exc)},
-        )
-    return HTTPException(
-        status_code=500,
-        detail={"code": "SANDBOX_ERROR", "message": str(exc)},
-    )
 
 
 @router.post("/create", response_model=SandboxInfo, status_code=201)
@@ -70,7 +37,7 @@ def create_sandbox(request: CreateSandboxRequest) -> SandboxInfo:
             template=request.template,
         )
     except SandboxError as exc:
-        raise _map_error(exc) from exc
+        raise sandbox_error_to_http(exc) from exc
     except DockerException as exc:
         raise HTTPException(
             status_code=503,
@@ -103,7 +70,7 @@ def apply_patch(request: ApplyPatchRequest) -> ApplyPatchResponse:
             deleted_paths=request.deleted_paths,
         )
     except SandboxError as exc:
-        raise _map_error(exc) from exc
+        raise sandbox_error_to_http(exc) from exc
 
     return ApplyPatchResponse(
         sandbox_id=request.sandbox_id,
@@ -123,7 +90,7 @@ def verify(
     try:
         result = provider.verify(sandbox_id=sandbox_id, check=check)
     except SandboxError as exc:
-        raise _map_error(exc) from exc
+        raise sandbox_error_to_http(exc) from exc
 
     return VerifyResponse(
         sandbox_id=sandbox_id,
@@ -145,7 +112,7 @@ def destroy(sandbox_id: str) -> DestroySandboxResponse:
     try:
         provider.destroy(sandbox_id)
     except SandboxError as exc:
-        raise _map_error(exc) from exc
+        raise sandbox_error_to_http(exc) from exc
 
     return DestroySandboxResponse(
         sandbox_id=sandbox_id,

@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     sandbox_max_file_bytes: int = 1_048_576
     sandbox_max_total_bytes: int = 5_242_880
 
+    # ------------------------------------------------------------
+    # Agent
+    # ------------------------------------------------------------
+    # LangGraph 单次执行的最大步数；3 次修复 + 7 个节点远低于该值。
+    agent_graph_recursion_limit: int = 60
+
 
 @lru_cache
 def get_settings() -> Settings:

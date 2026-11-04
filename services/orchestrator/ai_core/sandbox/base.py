@@ -90,5 +90,9 @@ class SandboxProvider(ABC):
         """在沙盒内执行 npm run build / npm run test。"""
 
     @abstractmethod
+    def read_file(self, sandbox_id: str, path: str) -> str:
+        """读取沙盒内文件，供 Agent 维护 current_code。"""
+
+    @abstractmethod
     def destroy(self, sandbox_id: str) -> None:
         """销毁容器并释放资源。"""
