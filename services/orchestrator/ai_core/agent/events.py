@@ -30,6 +30,13 @@ TERMINAL_EVENT_TYPES = {
     # 审批暂停与澄清暂停一样会结束当前 SSE 连接；用户决策后通过
     # afterSeq 重放继续同一条事件流。
     "approval.required",
+    # Architect（M2.5）使用独立事件命名空间，但复用同一 SSE 缓冲与 seq
+    # 语义。澄清 / 契约确认是暂停态；其余为终态。
+    "architect.clarification.required",
+    "architect.contract.ready",
+    "architect.contract.confirmed",
+    "architect.cancelled",
+    "architect.failed",
 }
 SSE_EVENT_NAME = "run.event"
 HEARTBEAT_SECONDS = 15

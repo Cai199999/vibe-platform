@@ -8,6 +8,7 @@ import WorkspaceTabs from '../components/WorkspaceTabs.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { useSettings } from '../settings/SettingsContext.jsx'
 import { useWorkspace } from '../workspace/useWorkspace.js'
+import { EMPTY_ARCHITECT, useArchitect } from '../workspace/useArchitect.js'
 import { streamRun } from '../workspace/runStream.js'
 import { INITIAL_APP } from '../mockProject.js'
 
@@ -613,6 +614,10 @@ export default function WorkspacePage() {
     reorderTabs,
   } = useWorkspace()
 
+  // M2.5 全局架构澄清：与画布 Run 完全独立的 SSE / 状态存储。
+  const architect = useArchitect({ token: session?.token })
+  const architectStates = architect.states
+
   const [runStates, setRunStates] = useState(() => loadRunStates(projects))
   // 默认 auto：配置了 DEEPSEEK_API_KEY 时自动走真实模型；没有 Key 时回退 Mock。
   // 旧版本可能持久化过显式 deepseek，这里统一归一到 auto，UI 不再暴露内部
@@ -934,6 +939,70 @@ export default function WorkspacePage() {
     project.template === 'vibe-react'
       ? INITIAL_APP
       : (project.files?.[TARGET_FILE] ?? INITIAL_APP)
+
+  /**
+   * 构造 Architect 请求。
+   *
+   * 有沙盒时只传 sandboxId，由 AI Core 导出真实源码；没有沙盒时才回退到
+   * 当前模板文件。全局澄清不复用 Run 的 runId / 事件坐标。
+   */
+  const buildArchitectPayload = (projectId) => {
+    const project = projects.find((item) => item.id === projectId)
+    const run = runStates[projectId] ?? EMPTY_RUN
+    if (!project) return null
+    const sandboxId = run.result?.sandboxId
+    const source = {
+      sandboxId: sandboxId || undefined,
+      baseRunId: run.result?.runId || undefined,
+      baseCommitHash: run.result?.commitHash || undefined,
+    }
+    if (!sandboxId) {
+      source.files = { [TARGET_FILE]: projectSource(project) }
+    }
+    const uiHistory = run.annotations
+      .flatMap((annotation) =>
+        (annotation.chatHistory ?? []).map((message) => ({
+          role: message.role,
+          content: message.content,
+        })),
+      )
+      .filter((message) => message.content)
+      .slice(-20)
+
+    return {
+      runId: newId('architect'),
+      tenantId: user?.tenantId || 'tenant_local',
+      projectId: project.id,
+      projectName: project.name,
+      source,
+      uiHistory,
+      options: {
+        llmProvider: modelProvider,
+        confidenceThreshold: 0.85,
+        maxClarificationRounds: 5,
+        ragProvider: 'markdown',
+        ragTopK: 5,
+      },
+    }
+  }
+
+  const handleStartArchitect = (projectId) => {
+    const payload = buildArchitectPayload(projectId)
+    if (!payload) return
+    architect.start(projectId, payload)
+  }
+
+  /**
+   * 工具栏主 CTA：没有 Run 时直接发起并打开面板；已有 Run（含已确认契约）
+   * 时恢复同一面板，避免误销毁上一次澄清结果。
+   */
+  const handleOpenArchitect = (projectId) => {
+    if (architectStates[projectId]?.runId) {
+      architect.openPanel(projectId)
+      return
+    }
+    handleStartArchitect(projectId)
+  }
 
   /**
    * 启动 / 恢复 SSE 并持续把事件写入项目状态。
@@ -1537,6 +1606,7 @@ export default function WorkspacePage() {
     inflightRef.current.delete(projectId)
     streamControllersRef.current.get(projectId)?.abort()
     streamControllersRef.current.delete(projectId)
+    void architect.dispose(projectId)
     closeTab(projectId)
     setRunStates((previous) => {
       if (!(projectId in previous)) return previous
@@ -1671,6 +1741,19 @@ export default function WorkspacePage() {
                 canExport={Boolean(run.result?.sandboxId)}
                 exporting={exportingProjectId === project.id}
                 onExport={() => handleExport(project.id)}
+                architectState={
+                  architectStates[project.id] ?? EMPTY_ARCHITECT
+                }
+                onArchitectOpen={() => handleOpenArchitect(project.id)}
+                onArchitectStart={() => handleStartArchitect(project.id)}
+                onArchitectClose={() => architect.closePanel(project.id)}
+                onArchitectAnswer={(answers, comment) =>
+                  architect.answer(project.id, answers, comment)
+                }
+                onArchitectDecide={(decision, comment) =>
+                  architect.decide(project.id, decision, comment)
+                }
+                onArchitectCancel={() => architect.cancel(project.id)}
               />
             )
           })}

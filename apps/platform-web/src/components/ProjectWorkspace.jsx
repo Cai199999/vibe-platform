@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import ArchitectPanel from './ArchitectPanel.jsx'
 import CanvasStage from './CanvasStage.jsx'
 import RuntimePanel from './RuntimePanel.jsx'
 import {
@@ -38,6 +39,13 @@ function ProjectWorkspaceInner({
   onExport,
   canExport = false,
   exporting = false,
+  architectState,
+  onArchitectOpen,
+  onArchitectStart,
+  onArchitectClose,
+  onArchitectAnswer,
+  onArchitectDecide,
+  onArchitectCancel,
 }) {
   const { linked, setLinked } = useViewportState()
   // 当前布局：compare = 单屏切换，dual = 双屏同显。
@@ -101,6 +109,23 @@ function ProjectWorkspaceInner({
         </div>
 
         <div className="project-toolbar-right">
+          <button
+            className={`architect-launch ${
+              architectState?.contract ? 'has-contract' : ''
+            } ${architectState?.status === 'AWAITING_CLARIFICATION' ? 'needs-answer' : ''}`}
+            type="button"
+            title="基于当前沙盒源码，澄清应用形态并生成可实施的全栈契约"
+            onClick={onArchitectOpen}
+          >
+            <span className="architect-launch-mark" aria-hidden="true">
+              ◈
+            </span>
+            下一步：构建全栈方案
+            {architectState?.status === 'AWAITING_CLARIFICATION' && (
+              <span className="architect-launch-dot" aria-label="有待回答问题" />
+            )}
+          </button>
+
           <button
             className="ghost-button"
             type="button"
@@ -275,6 +300,19 @@ function ProjectWorkspaceInner({
           />
         </div>
       </div>
+
+      {architectState?.open && (
+        <ArchitectPanel
+          projectName={project.name}
+          state={architectState}
+          onClose={onArchitectClose}
+          onStart={onArchitectStart}
+          onRestart={onArchitectStart}
+          onAnswer={onArchitectAnswer}
+          onDecide={onArchitectDecide}
+          onCancel={onArchitectCancel}
+        />
+      )}
     </section>
   )
 }

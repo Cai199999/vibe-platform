@@ -84,6 +84,20 @@ class Settings(BaseSettings):
     # 每个 Run 的内存事件缓冲上限；生产切换 Redis Stream 后由 stream TTL 管理。
     agent_event_buffer_size: int = 2000
 
+    # ------------------------------------------------------------
+    # Architect（M2.5 全栈架构澄清与 Path 生成）
+    # ------------------------------------------------------------
+    architect_confidence_threshold: float = 0.85
+    architect_max_clarification_rounds: int = 5
+    architect_contract_repair_limit: int = 1
+    architect_graph_recursion_limit: int = 80
+    architect_rag_provider: str = "markdown"
+    architect_rag_top_k: int = 5
+    architect_knowledge_dir: str = "knowledge/fullstack"
+    # 源码上下文预算：防止超大项目把 Prompt 撑爆。
+    architect_source_max_bytes: int = 200_000
+    architect_source_max_files: int = 80
+
 
 @lru_cache
 def get_settings() -> Settings:

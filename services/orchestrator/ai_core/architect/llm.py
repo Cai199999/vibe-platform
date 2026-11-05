@@ -1,0 +1,960 @@
+"""Architect LLM 适配层。
+
+与局部 UI Run 的 ``AgentLLM`` 完全分离：
+  - ``MockArchitectLLM`` 确定性推进应用形态 -> 动态槽位 -> 分级契约；
+  - ``DeepSeekArchitectLLM`` 使用 OpenAI 兼容接口输出结构化 JSON。
+
+LLM 只负责“分析 + 起草”，应用形态约束、槽位校验、置信度封顶、契约
+分级校验全部由确定性代码完成，避免模型过度设计或虚报置信度。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+
+from ai_core.architect.confidence import is_known_shape, missing_slots_for
+from ai_core.architect.schemas import (
+    APP_SHAPE_LABELS,
+    ArchitectAnalysis,
+    ArchitectApiRoute,
+    ArchitectComponentInteraction,
+    ArchitectImplementationPhase,
+    ArchitectQuestion,
+)
+from ai_core.architect.source import format_source
+from ai_core.config import Settings, get_settings
+
+
+class ArchitectLLMError(Exception):
+    """Architect LLM 输出不可用。"""
+
+
+class ArchitectLLMConfigurationError(ArchitectLLMError):
+    """缺少模型密钥或配置。"""
+
+
+@dataclass(frozen=True)
+class ArchitectContext:
+    """分析与起草共享的只读上下文。"""
+
+    project_id: str
+    project_name: str
+    source_files: dict[str, str]
+    ui_history: list[dict[str, Any]]
+    slots: dict[str, Any]
+    app_shape: str | None
+    round: int
+    threshold: float
+    retrieved_chunks: list[dict[str, Any]] = field(default_factory=list)
+    source_hash: str = ""
+
+
+@dataclass(frozen=True)
+class ContractDraft:
+    """LLM 起草的分级契约，尚未写入 runId / contractId。"""
+
+    contract_markdown: str
+    tech_stack: dict[str, Any] = field(default_factory=dict)
+    api_routes: list[ArchitectApiRoute] = field(default_factory=list)
+    database_ddl: str = ""
+    component_interactions: list[ArchitectComponentInteraction] = field(
+        default_factory=list
+    )
+    ui_logic: list[dict[str, Any]] = field(default_factory=list)
+    frontend_data_model: list[dict[str, Any]] = field(default_factory=list)
+    script_spec: dict[str, Any] = field(default_factory=dict)
+    implementation_path: list[ArchitectImplementationPhase] = field(
+        default_factory=list
+    )
+    assumptions: list[str] = field(default_factory=list)
+
+
+class ArchitectLLM:
+    """Architect 模型接口。"""
+
+    def analyze(self, context: ArchitectContext) -> ArchitectAnalysis:
+        raise NotImplementedError
+
+    def draft_contract(self, context: ArchitectContext) -> ContractDraft:
+        raise NotImplementedError
+
+    def revise_contract(
+        self,
+        context: ArchitectContext,
+        previous: ContractDraft,
+        feedback: str,
+    ) -> ContractDraft:
+        """根据校验反馈修复契约；默认重新起草。"""
+        return self.draft_contract(context)
+
+
+# ------------------------------------------------------------
+# Mock
+# ------------------------------------------------------------
+class MockArchitectLLM(ArchitectLLM):
+    """无密钥、确定性的架构澄清流程。
+
+    第一轮永不猜测应用形态；只有用户明确选择后才填充对应槽位。
+    这保证 E2E 能验证“先问形态，再问动态槽位”的核心交互。
+    """
+
+    def analyze(self, context: ArchitectContext) -> ArchitectAnalysis:
+        slots = dict(context.slots)
+        shape = slots.get("app.shape")
+        if not is_known_shape(shape):
+            return ArchitectAnalysis(
+                app_shape=None,
+                confidence_score=0.30,
+                missing_slots=["app.shape"],
+                slots=slots,
+                reasoning=(
+                    "源码与历史对话不足以判断应该生成轻量网页、自动化脚本"
+                    "还是全栈系统，必须先询问应用形态。"
+                ),
+            )
+
+        missing = missing_slots_for(shape, slots)
+        if missing:
+            return ArchitectAnalysis(
+                app_shape=shape,
+                confidence_score=0.90,
+                missing_slots=missing,
+                slots=slots,
+                reasoning=(
+                    f"已确认应用形态为 {APP_SHAPE_LABELS.get(shape, shape)}，"
+                    f"还需要补齐动态槽位：{', '.join(missing)}。"
+                ),
+            )
+
+        return ArchitectAnalysis(
+            app_shape=shape,
+            confidence_score=0.94,
+            missing_slots=[],
+            slots=slots,
+            tech_stack=self._tech_stack(shape, slots),
+            business_flows=self._business_flows(shape, slots),
+            entities=self._entities(shape, slots),
+            assumptions=[],
+            reasoning="应用形态与关键槽位均已明确，可以生成分级实施契约。",
+        )
+
+    def draft_contract(self, context: ArchitectContext) -> ContractDraft:
+        shape = context.app_shape or context.slots.get("app.shape")
+        if shape == "lightweight_web":
+            return self._lightweight_contract(context)
+        if shape == "script_automation":
+            return self._script_contract(context)
+        if shape == "full_stack_system":
+            return self._full_stack_contract(context)
+        raise ArchitectLLMError(f"无法为未知应用形态生成契约: {shape}")
+
+    def revise_contract(
+        self,
+        context: ArchitectContext,
+        previous: ContractDraft,
+        feedback: str,
+    ) -> ContractDraft:
+        # Mock 的契约是确定性生成的；反馈只影响修订说明，不改变结构。
+        draft = self.draft_contract(context)
+        note = f"\n\n## 修订记录\n\n- 根据反馈调整：{feedback.strip()}\n"
+        return ContractDraft(
+            contract_markdown=draft.contract_markdown + note,
+            tech_stack=draft.tech_stack,
+            api_routes=draft.api_routes,
+            database_ddl=draft.database_ddl,
+            component_interactions=draft.component_interactions,
+            ui_logic=draft.ui_logic,
+            frontend_data_model=draft.frontend_data_model,
+            script_spec=draft.script_spec,
+            implementation_path=draft.implementation_path,
+            assumptions=draft.assumptions,
+        )
+
+    # --------------------------------------------------------
+    # Mock 分级契约
+    # --------------------------------------------------------
+    def _lightweight_contract(self, context: ArchitectContext) -> ContractDraft:
+        flow = str(context.slots.get("ui.primary_flow") or "展示内容并响应交互").strip()
+        storage = str(context.slots.get("ui.persistence") or "localStorage")
+        interactions = [
+            ArchitectComponentInteraction(
+                component="App",
+                event="mount",
+                api_route="",
+                logic="从浏览器存储读取数据并初始化页面状态",
+            ),
+            ArchitectComponentInteraction(
+                component="PrimaryAction",
+                event="click",
+                api_route="",
+                logic=f"执行核心流程：{flow}；成功后立即更新本地状态",
+            ),
+        ]
+        data_model = [
+            {
+                "name": "appState",
+                "storage": storage,
+                "version": 1,
+                "fields": ["items", "updatedAt"],
+            }
+        ]
+        markdown = f"""# 轻量网页工具实施契约
+
+## 1. 项目目标
+
+**{context.project_name}** 是一个纯前端轻量工具，不引入独立后端与数据库。
+
+## 2. 核心操作流程
+
+{flow}
+
+## 3. UI 交互
+
+| 组件 | 事件 | 行为 | 成功反馈 | 失败反馈 |
+|---|---|---|---|---|
+| App | mount | 读取 {storage} 并恢复状态 | 展示已有数据 | 回退为空状态并提示 |
+| PrimaryAction | click | 执行核心流程 | 更新界面并持久化 | 保留旧状态并显示错误 |
+
+必须实现空状态、加载状态与错误状态。
+
+## 4. 状态管理
+
+- 使用 React `useState` / `useReducer` 管理页面状态；
+- 所有写操作先更新内存状态，再持久化到 `{storage}`；
+- 持久化失败时回滚内存状态，避免界面与存储不一致。
+
+## 5. 前端数据模型
+
+```json
+{{
+  "version": 1,
+  "items": [],
+  "updatedAt": "ISO-8601"
+}}
+```
+
+## 6. 实施路径
+
+1. 梳理现有页面与组件；
+2. 实现核心交互与本地状态；
+3. 接入 `{storage}` 持久化与版本迁移；
+4. 补齐空 / 错 / 加载状态；
+5. 执行构建与交互验收。
+"""
+        return ContractDraft(
+            contract_markdown=markdown,
+            tech_stack={
+                "appShape": "lightweight_web",
+                "frontend": "React 18 + Vite",
+                "persistence": storage,
+                "backend": None,
+                "database": None,
+            },
+            api_routes=[],
+            database_ddl="",
+            component_interactions=interactions,
+            ui_logic=[
+                {
+                    "flow": flow,
+                    "states": ["empty", "ready", "error"],
+                    "persistence": storage,
+                }
+            ],
+            frontend_data_model=data_model,
+            script_spec={},
+            implementation_path=[
+                ArchitectImplementationPhase(
+                    phase="frontend",
+                    title="轻量前端实现",
+                    tasks=["核心交互", "本地状态", "浏览器持久化", "构建验收"],
+                )
+            ],
+            assumptions=[],
+        )
+
+    def _script_contract(self, context: ArchitectContext) -> ContractDraft:
+        runtime = str(context.slots.get("script.runtime") or "python")
+        script_input = str(context.slots.get("script.input") or "命令行参数")
+        output = str(context.slots.get("script.output") or "标准输出")
+        logic = str(context.slots.get("script.logic") or "执行核心数据处理")
+        dependencies = (
+            ["requests>=2.32", "python-dotenv>=1.0"]
+            if runtime == "python"
+            else ["axios>=1.7", "dotenv>=16.4"]
+        )
+        entry = "main.py" if runtime == "python" else "src/index.js"
+        spec = {
+            "runtime": runtime,
+            "entry": entry,
+            "dependencies": dependencies,
+            "input": script_input,
+            "output": output,
+            "exitCodes": {"0": "成功", "1": "输入或处理失败", "2": "外部依赖失败"},
+            "timeoutSeconds": 30,
+            "retries": 2,
+        }
+        markdown = f"""# 自动化脚本实施契约
+
+## 1. 项目目标
+
+**{context.project_name}** 是一个无 UI 的后台自动化脚本。
+
+## 2. 运行环境
+
+- 运行时：`{runtime}`
+- 入口：`{entry}`
+- 依赖：{", ".join(f"`{item}`" for item in dependencies)}
+
+## 3. 输入与输出
+
+- **输入**：{script_input}
+- **输出**：{output}
+- 所有文件路径必须通过参数或环境变量传入，禁止写死本机路径。
+
+## 4. 核心处理逻辑
+
+{logic}
+
+## 5. 异常与可观测性
+
+- 外部调用设置 30 秒超时，最多重试 2 次；
+- 失败时输出可诊断错误并返回非零退出码；
+- 禁止在日志中打印密钥、Token 或完整个人数据。
+
+## 6. 验收标准
+
+1. 使用示例输入可生成约定格式的输出；
+2. 输入缺失时返回退出码 1，并给出明确提示；
+3. 外部接口超时不会无限阻塞；
+4. 重复执行不会产生未声明的副作用。
+
+## 7. 实施路径
+
+1. 建立 `{entry}` 与依赖清单；
+2. 实现输入解析与校验；
+3. 实现核心处理与输出序列化；
+4. 补充超时、重试与错误码；
+5. 用样例数据执行端到端验收。
+"""
+        return ContractDraft(
+            contract_markdown=markdown,
+            tech_stack={
+                "appShape": "script_automation",
+                "runtime": runtime,
+                "dependencies": dependencies,
+            },
+            api_routes=[],
+            database_ddl="",
+            component_interactions=[],
+            ui_logic=[],
+            frontend_data_model=[],
+            script_spec=spec,
+            implementation_path=[
+                ArchitectImplementationPhase(
+                    phase="script",
+                    title="脚本实现",
+                    tasks=[
+                        "入口与依赖",
+                        "输入校验",
+                        "核心逻辑",
+                        "异常处理",
+                        "样例验收",
+                    ],
+                )
+            ],
+            assumptions=[],
+        )
+
+    def _full_stack_contract(self, context: ArchitectContext) -> ContractDraft:
+        backend = str(context.slots.get("backend.framework") or "java_spring_boot")
+        database = str(context.slots.get("database.engine") or "mysql")
+        flows = str(context.slots.get("business.key_flows") or "创建并查询业务记录")
+        entities = str(context.slots.get("data.entities") or "业务记录")
+        table = _table_name(entities)
+        api_routes = [
+            ArchitectApiRoute(
+                method="GET",
+                path=f"/api/v1/{table}",
+                request="查询参数：page, size",
+                response="分页记录列表",
+                description="查询业务记录",
+            ),
+            ArchitectApiRoute(
+                method="POST",
+                path=f"/api/v1/{table}",
+                request="业务字段 + Idempotency-Key",
+                response="创建后的记录",
+                description="创建业务记录",
+            ),
+        ]
+        ddl = _mock_ddl(table)
+        interactions = [
+            ArchitectComponentInteraction(
+                component="RecordList",
+                event="mount",
+                api_route=f"GET /api/v1/{table}",
+                logic="加载分页数据并渲染空 / 错 / 加载状态",
+            ),
+            ArchitectComponentInteraction(
+                component="SubmitButton",
+                event="click",
+                api_route=f"POST /api/v1/{table}",
+                logic="校验表单、防重复提交、成功后刷新列表",
+            ),
+        ]
+        ui_logic = [
+            {
+                "component": "SubmitButton",
+                "event": "click",
+                "logic": "前端校验 -> POST 创建 -> 成功后刷新列表",
+            }
+        ]
+        data_model = [
+            {"name": "RecordsPage", "fields": ["items", "page", "total", "loading"]}
+        ]
+        markdown = f"""# 全栈系统实施契约
+
+## 1. 项目目标
+
+**{context.project_name}** 需要前端、后端与持久化数据库协同工作。
+
+## 2. 技术栈
+
+- 前端：React 18 + Vite
+- 后端：`{backend}`
+- 数据库：`{database}`
+- 通信：RESTful JSON API
+
+## 3. 关键业务流程
+
+{flows}
+
+## 4. API 契约
+
+### GET `/api/v1/{table}`
+
+- 请求：`page`、`size`
+- 响应：`{{ items: Record[], total: number }}`
+- 语义：只返回当前租户数据
+
+### POST `/api/v1/{table}`
+
+- 请求头：`Idempotency-Key`
+- 请求体：业务字段
+- 成功：201 + 创建后的记录
+- 失败：400 参数错误 / 409 重复提交 / 500 服务异常
+
+## 5. 数据库 DDL
+
+```sql
+{ddl}
+```
+
+约束：
+
+- 禁止物理外键，关联字段由业务代码保证一致性；
+- 金额使用 `DECIMAL(18,2)`；
+- 列表查询必须带租户条件与分页。
+
+## 6. 组件交互
+
+| 组件 | 事件 | API | 逻辑 |
+|---|---|---|---|
+| RecordList | mount | GET `/api/v1/{table}` | 加载并渲染列表 |
+| SubmitButton | click | POST `/api/v1/{table}` | 防重复提交，成功后刷新 |
+
+## 7. 实施路径
+
+1. 建立数据库表与迁移；
+2. 实现后端领域模型、校验与 REST API；
+3. 实现前端 API client 与页面状态；
+4. 联调错误码、幂等与分页；
+5. 执行端到端验收。
+"""
+        return ContractDraft(
+            contract_markdown=markdown,
+            tech_stack={
+                "appShape": "full_stack_system",
+                "frontend": "React 18 + Vite",
+                "backend": backend,
+                "database": database,
+                "apiStyle": "RESTful JSON",
+            },
+            api_routes=api_routes,
+            database_ddl=ddl,
+            component_interactions=interactions,
+            ui_logic=ui_logic,
+            frontend_data_model=data_model,
+            script_spec={},
+            implementation_path=[
+                ArchitectImplementationPhase(
+                    phase="database",
+                    title="数据库",
+                    tasks=["建表", "索引", "迁移脚本"],
+                ),
+                ArchitectImplementationPhase(
+                    phase="backend",
+                    title="后端 API",
+                    tasks=["领域模型", "校验", "REST 接口", "幂等"],
+                ),
+                ArchitectImplementationPhase(
+                    phase="frontend",
+                    title="前端联调",
+                    tasks=["API client", "页面状态", "错误提示", "验收"],
+                ),
+            ],
+            assumptions=[],
+        )
+
+    @staticmethod
+    def _tech_stack(shape: str, slots: dict[str, Any]) -> dict[str, Any]:
+        if shape == "lightweight_web":
+            return {
+                "appShape": shape,
+                "frontend": "React 18 + Vite",
+                "persistence": slots.get("ui.persistence") or "localStorage",
+                "backend": None,
+                "database": None,
+            }
+        if shape == "script_automation":
+            return {
+                "appShape": shape,
+                "runtime": slots.get("script.runtime") or "python",
+                "ui": None,
+            }
+        return {
+            "appShape": shape,
+            "frontend": "React 18 + Vite",
+            "backend": slots.get("backend.framework"),
+            "database": slots.get("database.engine"),
+            "apiStyle": "RESTful JSON",
+        }
+
+    @staticmethod
+    def _business_flows(shape: str, slots: dict[str, Any]) -> list[dict[str, Any]]:
+        if shape == "lightweight_web":
+            return [{"name": "前端核心流程", "detail": slots.get("ui.primary_flow")}]
+        if shape == "script_automation":
+            return [
+                {
+                    "name": "脚本输入输出",
+                    "detail": (
+                        f"{slots.get('script.input')} -> "
+                        f"{slots.get('script.logic')} -> {slots.get('script.output')}"
+                    ),
+                }
+            ]
+        return [{"name": "核心业务", "detail": slots.get("business.key_flows")}]
+
+    @staticmethod
+    def _entities(shape: str, slots: dict[str, Any]) -> list[dict[str, Any]]:
+        if shape == "full_stack_system":
+            return [{"name": slots.get("data.entities") or "业务记录"}]
+        if shape == "lightweight_web":
+            return [{"name": "appState", "storage": slots.get("ui.persistence")}]
+        return []
+
+
+# ------------------------------------------------------------
+# DeepSeek
+# ------------------------------------------------------------
+class DeepSeekArchitectLLM(ArchitectLLM):
+    """DeepSeek Chat 实现。"""
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+        if not self.settings.deepseek_api_key:
+            raise ArchitectLLMConfigurationError(
+                "DEEPSEEK_API_KEY 未配置；请设置密钥或使用 llm_provider=mock"
+            )
+        self._model = ChatOpenAI(
+            model=self.settings.deepseek_model,
+            api_key=self.settings.deepseek_api_key,
+            base_url=self.settings.deepseek_base_url,
+            temperature=0,
+            timeout=120,
+            max_retries=2,
+        )
+
+    def analyze(self, context: ArchitectContext) -> ArchitectAnalysis:
+        system = (
+            "你是平台级软件架构师。你的第一任务是判断应用形态，第二任务才是"
+            "补齐该形态真正需要的槽位。禁止默认所有需求都是全栈 ERP。\n"
+            "应用形态只有三种：\n"
+            "- lightweight_web：纯前端网页工具，使用 LocalStorage / IndexedDB "
+            "或 Serverless；不需要独立后端与数据库；\n"
+            "- script_automation：无 UI 的 Python / Node 自动化脚本，输入 -> "
+            "处理 -> 输出；不需要前端框架；\n"
+            "- full_stack_system：前端 + 后端 + 数据库，需要持久化/多端协作。\n\n"
+            "动态槽位规则（必须严格遵守）：\n"
+            "- lightweight_web：只要求 ui.primary_flow；绝对不要追问 backend."
+            "framework 或 database.engine；\n"
+            "- script_automation：只要求 script.runtime、script.input、script."
+            "output、script.logic；绝对不要追问前端框架；\n"
+            "- full_stack_system：要求 backend.framework、database.engine、"
+            "business.key_flows、data.entities；\n"
+            "- 如果源码与对话仍不足以判断形态，app_shape 必须为 null，"
+            "confidence_score 不得高于 0.42，并首先询问："
+            f"“{_shape_question()}”\n\n"
+            "只输出一个 JSON 对象，不要 Markdown 围栏。格式：\n"
+            '{"app_shape":null或"lightweight_web|script_automation|'
+            'full_stack_system","confidence_score":0.0到1.0,'
+            '"missing_slots":["槽位名"],"slots":{"槽位名":"值"},'
+            '"questions":[{"question_id":"q1","slot":"槽位名",'
+            '"type":"single_choice|multi_choice|free_text|entity_fields|'
+            'schema_fields","prompt":"...","required":true,'
+            '"options":[{"value":"...","label":"..."}],'
+            '"default_value":null}],"tech_stack":{},'
+            '"business_flows":[],"entities":[],"assumptions":[],'
+            '"reasoning":"..."}\n\n'
+            "问题最多 3 个；不得重复已问过且已回答的槽位；已确认的槽位必须"
+            "写入 slots。不要把“怕不确定”当作全栈的理由。"
+        )
+        human = _analysis_human(context)
+        raw = self._invoke(system, human)
+        payload = _extract_json(raw)
+        payload = _normalize_analysis_payload(payload)
+        try:
+            return ArchitectAnalysis.model_validate(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise ArchitectLLMError(f"Architect 分析 JSON 不合法: {exc}") from exc
+
+    def draft_contract(self, context: ArchitectContext) -> ContractDraft:
+        system = (
+            "你是软件交付架构师。根据已确认的应用形态生成“分级实施契约”，"
+            "只输出该形态真正需要的章节，禁止过度设计。\n"
+            "只输出一个 JSON 对象，不要 Markdown 围栏。格式：\n"
+            '{"contract_markdown":"完整 Markdown 契约","tech_stack":{},'
+            '"api_routes":[{"method":"GET","path":"/api/v1/...",'
+            '"request":"","response":"","description":"","auth_required":true}],'
+            '"database_ddl":"SQL 字符串","component_interactions":'
+            '[{"component":"","event":"","api_route":"","logic":""}],'
+            '"ui_logic":[{}],"frontend_data_model":[{}],"script_spec":{},'
+            '"implementation_path":[{"phase":"","title":"","tasks":[]}],'
+            '"assumptions":[]}\n\n'
+            "分级规则：\n"
+            "- lightweight_web：api_routes 必须为空、database_ddl 必须为空；"
+            "契约只包含 UI 交互、状态管理、前端数据模型、验收标准；\n"
+            "- script_automation：api_routes / database_ddl / component_"
+            "interactions / ui_logic 必须为空；契约只包含脚本逻辑、依赖、"
+            "运行环境、输入输出、错误码；\n"
+            "- full_stack_system：必须给出 REST API、数据库 DDL（禁止物理"
+            "外键）、组件交互、前后端联调；\n"
+            "- 所有形态都必须给 implementation_path 与可验证验收标准；\n"
+            "- 不要编造用户未提供的业务实体；不确定处写入 assumptions。"
+        )
+        human = _contract_human(context)
+        raw = self._invoke(system, human)
+        payload = _extract_json(raw)
+        return _parse_contract_draft(payload)
+
+    def revise_contract(
+        self,
+        context: ArchitectContext,
+        previous: ContractDraft,
+        feedback: str,
+    ) -> ContractDraft:
+        system = (
+            "你是软件交付架构师。上一版实施契约未通过确定性校验。"
+            "请严格根据校验反馈修复，不要扩写无关内容；仍然只输出契约 JSON。\n"
+            "必须遵守应用形态分级规则：lightweight_web 不含 API/DDL；"
+            "script_automation 不含 UI/API/DDL；full_stack_system 必须包含 "
+            "API/DDL/交互。"
+        )
+        human = (
+            f"{_contract_human(context)}\n\n"
+            f"上一版契约:\n{json.dumps(_draft_to_payload(previous), ensure_ascii=False)}\n\n"
+            f"校验反馈:\n{feedback[:3000]}"
+        )
+        raw = self._invoke(system, human)
+        return _parse_contract_draft(_extract_json(raw))
+
+    def _invoke(self, system: str, human: str) -> str:
+        try:
+            response = self._model.invoke(
+                [SystemMessage(content=system), HumanMessage(content=human)]
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ArchitectLLMError(f"DeepSeek Architect 调用失败: {exc}") from exc
+        content = response.content
+        if isinstance(content, list):
+            content = "".join(str(part) for part in content)
+        return str(content)
+
+
+def build_architect_llm(
+    provider: str = "auto",
+    settings: Settings | None = None,
+) -> ArchitectLLM:
+    resolved = settings or get_settings()
+    name = (provider or "auto").strip().lower()
+    if name == "mock":
+        return MockArchitectLLM()
+    if name == "deepseek":
+        return DeepSeekArchitectLLM(resolved)
+    if name == "auto":
+        if resolved.deepseek_api_key:
+            return DeepSeekArchitectLLM(resolved)
+        return MockArchitectLLM()
+    raise ArchitectLLMConfigurationError(f"未知 llm_provider: {provider}")
+
+
+# ------------------------------------------------------------
+# Prompt / JSON 工具
+# ------------------------------------------------------------
+def _shape_question() -> str:
+    from ai_core.architect.confidence import APP_SHAPE_PROMPT
+
+    return APP_SHAPE_PROMPT
+
+
+def _analysis_human(context: ArchitectContext) -> str:
+    return (
+        f"项目：{context.project_name}（{context.project_id}）\n"
+        f"当前澄清轮次：{context.round}\n"
+        f"已确认槽位：{json.dumps(context.slots, ensure_ascii=False)}\n"
+        f"用户历史对话：{json.dumps(context.ui_history[-12:], ensure_ascii=False)}\n\n"
+        f"RAG 规范片段：\n{_format_chunks(context.retrieved_chunks)}\n\n"
+        f"当前源码：\n{format_source(context.source_files, 42000)}"
+    )
+
+
+def _contract_human(context: ArchitectContext) -> str:
+    return (
+        f"项目：{context.project_name}（{context.project_id}）\n"
+        f"应用形态：{context.app_shape}\n"
+        f"置信度阈值：{context.threshold}\n"
+        f"已确认槽位：{json.dumps(context.slots, ensure_ascii=False)}\n"
+        f"历史对话：{json.dumps(context.ui_history[-12:], ensure_ascii=False)}\n\n"
+        f"RAG 规范片段：\n{_format_chunks(context.retrieved_chunks)}\n\n"
+        f"当前源码：\n{format_source(context.source_files, 36000)}"
+    )
+
+
+def _format_chunks(chunks: list[dict[str, Any]]) -> str:
+    if not chunks:
+        return "（无）"
+    parts = []
+    for chunk in chunks[:5]:
+        parts.append(
+            f"[{chunk.get('docId')}] {chunk.get('title')} / "
+            f"{chunk.get('section')}\n{chunk.get('content', '')}"
+        )
+    return "\n\n".join(parts)
+
+
+def _extract_json(raw: str) -> dict[str, Any]:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            raise ArchitectLLMError("模型未返回 JSON 对象")
+        try:
+            payload = json.loads(text[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise ArchitectLLMError(f"模型 JSON 解析失败: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ArchitectLLMError("模型 JSON 顶层必须是对象")
+    return payload
+
+
+def _normalize_analysis_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """把模型常见的 camelCase / 非严格字段统一成 Pydantic 输入。"""
+    normalized = dict(payload)
+    shape = normalized.pop("appShape", None) or normalized.get("app_shape")
+    if shape not in {
+        "lightweight_web",
+        "script_automation",
+        "full_stack_system",
+    }:
+        shape = None
+    normalized["app_shape"] = shape
+
+    missing = normalized.pop("missingSlots", normalized.get("missing_slots"))
+    normalized["missing_slots"] = [
+        str(item) for item in missing or [] if str(item).strip()
+    ][:12]
+
+    slots = normalized.get("slots")
+    normalized["slots"] = slots if isinstance(slots, dict) else {}
+
+    questions = normalized.get("questions")
+    if not isinstance(questions, list):
+        normalized["questions"] = []
+    else:
+        normalized["questions"] = [
+            item
+            for item in questions[:3]
+            if isinstance(item, dict) and item.get("prompt")
+        ]
+
+    raw_confidence = normalized.pop(
+        "confidenceScore", normalized.get("confidence_score", 0.0)
+    )
+    try:
+        normalized["confidence_score"] = max(0.0, min(1.0, float(raw_confidence)))
+    except (TypeError, ValueError):
+        normalized["confidence_score"] = 0.0
+
+    for key in ("tech_stack", "business_flows", "entities", "assumptions"):
+        camel = _to_camel(key)
+        value = normalized.pop(camel, normalized.get(key))
+        if key == "tech_stack":
+            normalized[key] = value if isinstance(value, dict) else {}
+        elif key == "assumptions":
+            normalized[key] = [str(item) for item in value or [] if str(item).strip()][
+                :12
+            ]
+        else:
+            normalized[key] = value if isinstance(value, list) else []
+
+    normalized.setdefault("reasoning", "")
+    return normalized
+
+
+def _parse_contract_draft(payload: dict[str, Any]) -> ContractDraft:
+    markdown = str(
+        payload.get("contract_markdown") or payload.get("contractMarkdown") or ""
+    ).strip()
+    if not markdown:
+        raise ArchitectLLMError("契约缺少 contract_markdown")
+
+    raw_routes = payload.get("api_routes") or payload.get("apiRoutes") or []
+    routes: list[ArchitectApiRoute] = []
+    for item in raw_routes if isinstance(raw_routes, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            routes.append(ArchitectApiRoute.model_validate(item))
+        except Exception:  # noqa: BLE001 - 单条非法路由直接跳过
+            continue
+
+    raw_interactions = (
+        payload.get("component_interactions")
+        or payload.get("componentInteractions")
+        or []
+    )
+    interactions: list[ArchitectComponentInteraction] = []
+    for item in raw_interactions if isinstance(raw_interactions, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            interactions.append(ArchitectComponentInteraction.model_validate(item))
+        except Exception:  # noqa: BLE001
+            continue
+
+    raw_path = (
+        payload.get("implementation_path") or payload.get("implementationPath") or []
+    )
+    phases: list[ArchitectImplementationPhase] = []
+    for item in raw_path if isinstance(raw_path, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            phases.append(ArchitectImplementationPhase.model_validate(item))
+        except Exception:  # noqa: BLE001
+            continue
+
+    return ContractDraft(
+        contract_markdown=markdown,
+        tech_stack=_as_dict(payload.get("tech_stack") or payload.get("techStack")),
+        api_routes=routes,
+        database_ddl=str(
+            payload.get("database_ddl") or payload.get("databaseDdl") or ""
+        ).strip(),
+        component_interactions=interactions,
+        ui_logic=_as_list(payload.get("ui_logic") or payload.get("uiLogic")),
+        frontend_data_model=_as_list(
+            payload.get("frontend_data_model") or payload.get("frontendDataModel")
+        ),
+        script_spec=_as_dict(payload.get("script_spec") or payload.get("scriptSpec")),
+        implementation_path=phases,
+        assumptions=[
+            str(item)
+            for item in (
+                payload.get("assumptions")
+                if isinstance(payload.get("assumptions"), list)
+                else []
+            )
+            if str(item).strip()
+        ][:12],
+    )
+
+
+def _draft_to_payload(draft: ContractDraft) -> dict[str, Any]:
+    return {
+        "contractMarkdown": draft.contract_markdown,
+        "techStack": draft.tech_stack,
+        "apiRoutes": [item.model_dump(by_alias=True) for item in draft.api_routes],
+        "databaseDdl": draft.database_ddl,
+        "componentInteractions": [
+            item.model_dump(by_alias=True) for item in draft.component_interactions
+        ],
+        "uiLogic": draft.ui_logic,
+        "frontendDataModel": draft.frontend_data_model,
+        "scriptSpec": draft.script_spec,
+        "implementationPath": [
+            item.model_dump(by_alias=True) for item in draft.implementation_path
+        ],
+        "assumptions": draft.assumptions,
+    }
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _to_camel(name: str) -> str:
+    head, *tail = name.split("_")
+    return head + "".join(part.capitalize() for part in tail)
+
+
+def _table_name(raw: str) -> str:
+    """从实体描述中提取稳定的表名，避免把中文整段拼进 SQL。"""
+    candidates = re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,31}", raw or "")
+    stop = {"the", "and", "with", "table", "entity", "field", "fields"}
+    for candidate in candidates:
+        lowered = candidate.lower()
+        if lowered not in stop:
+            return _snake(lowered)
+    return "app_records"
+
+
+def _snake(value: str) -> str:
+    value = re.sub(r"(?<!^)(?=[A-Z])", "_", value).lower()
+    value = re.sub(r"[^a-z0-9_]", "_", value)
+    value = re.sub(r"_+", "_", value).strip("_")
+    return value or "app_records"
+
+
+def _mock_ddl(table: str) -> str:
+    return f"""CREATE TABLE {table} (
+  id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  tenant_id VARCHAR(64) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+  payload JSON NULL,
+  created_at DATETIME(3) NOT NULL,
+  updated_at DATETIME(3) NOT NULL,
+  deleted_at DATETIME(3) NULL,
+  KEY idx_{table}_tenant_updated (tenant_id, updated_at),
+  KEY idx_{table}_tenant_status (tenant_id, status)
+);"""

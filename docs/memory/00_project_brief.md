@@ -16,12 +16,16 @@
   默认关闭并持久化到 localStorage；请求携带 `options.requireManualApproval`，
   关闭时验证通过直接成功，开启时才进入 Diff 审批。
   细节见 `docs/memory/2026-11-05_manual_approval_setting.md`。
+- **M2.5 已落地（2026-11-05）**：独立 Architect Graph，先判别 `lightweight_web` /
+  `script_automation` / `full_stack_system` 应用形态，再按形态动态追问与分级生成
+  《全栈实施契约》；RAG 使用 Markdown + BM25；支持 `CONFIRM / REVISE / CANCEL`。
+  细节见 `docs/memory/2026-11-05_M2_5_app_shape_contract.md`。
 
 ## 2. 核心技术栈
 
 | 层 | 选型 |
 |---|---|
-| 前端 | React 19 + TypeScript + Vite + Tailwind CSS；画布壳 platform-web |
+| 前端 | React 18 + JavaScript/JSX + Vite + 原生 CSS；画布壳 platform-web |
 | BFF/业务 | Java 21 + Spring Boot 3.3 + MyBatis-Plus + Flyway；用户、项目、配额、审批、长连接 |
 | AI 编排 | Python 3.12 + FastAPI + LangGraph + Redis checkpoint；Supervisor/多 Agent |
 | 沙盒 | Python Sandbox Service + Docker（M1）/ gVisor（M2）；多服务 + edge 单入口 |
@@ -49,8 +53,9 @@
 4. 自动修复最多 3 次；同一错误指纹重复/无进展/预算耗尽即停止。
 5. 全栈沙盒数据库为临时实例：随机口令、无宿主端口、不连接生产库；迁移 up/down 成对验证。
 6. 多 Agent 只有 Supervisor 写共享 State；契约先行（ApiContract + DataModel），子 Agent 返回结构化 `AgentResult`。
-7. 澄清最多 3 轮；第 3 轮后只能让用户确认“默认方案 + assumptions”，不得臆造业务模型。
-8. 基础设施复用 `~/Workspace/infra` 的 MySQL/Redis/MinIO；平台 Compose 不重复部署中间件。
+7. 局部 Run 澄清最多 3 轮；M2.5 Architect 最多 5 轮，耗尽后返回 `CONFIDENCE_EXHAUSTED`；不得臆造业务模型。
+8. M2.5 以应用形态为第一判别项：轻量工具不追问后端 / 数据库，脚本不追问 UI，全栈才要求 API、DDL 与数据实体。
+9. 基础设施复用 `~/Workspace/infra` 的 MySQL/Redis/MinIO；平台 Compose 不重复部署中间件。
 
 ## 5. 当前文档状态
 

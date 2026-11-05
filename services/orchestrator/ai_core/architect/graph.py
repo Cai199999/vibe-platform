@@ -1,0 +1,914 @@
+"""Architect Graph：应用形态判别 -> 动态澄清 -> 分级契约 -> 最终确认。
+
+拓扑：
+
+    START -> ingest_context -> retrieve_knowledge -> architect_analyze
+                                                             │
+                                                             ▼
+                                                     confidence_gate
+                                          │(不足)                    │(足够)
+                                          ▼                          ▼
+                                    clarify_gate              draft_contract
+                                          │ interrupt()              │
+                                          │                          ▼
+                                          └──────► architect_analyze validate_contract
+                                                                     │      │(修复)
+                                                                     │      ▼
+                                                                     │ revise_contract
+                                                                     │      │
+                                                                     ▼      ▼
+                                                              contract_ready ◄┘
+                                                                     │
+                                                                     ▼
+                                                               contract_gate
+                                                          interrupt(CONFIRM/REVISE/CANCEL)
+                                                           │        │          │
+                                                           ▼        ▼          ▼
+                                                       confirmed  revise   cancelled
+
+关键约束：
+  - 应用形态未知时第一轮必须询问形态，不允许直接套用全栈模板；
+  - 动态槽位校验与置信度封顶由确定性代码完成，不信任 LLM 自报分数；
+  - 契约分级校验失败时最多修复一次，仍失败则明确终止；
+  - Architect 使用独立 thread 前缀，与局部 UI Run 的 checkpoint 完全隔离。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Callable
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
+
+from ai_core.agent.checkpoint import (
+    CheckpointerProvider,
+    get_checkpointer_provider,
+)
+from ai_core.agent.events import EventSink, NullEventSink
+from ai_core.architect.confidence import apply_confidence_guard
+from ai_core.architect.contract import (
+    assemble_contract,
+    draft_from_dict,
+    draft_to_dict,
+    validate_draft,
+)
+from ai_core.architect.llm import (
+    ArchitectContext,
+    ArchitectLLM,
+    ContractDraft,
+)
+from ai_core.architect.schemas import (
+    APP_SHAPE_LABELS,
+    ArchitectCitation,
+    ArchitectClarification,
+    ArchitectContract,
+    ArchitectQuestion,
+)
+from ai_core.architect.state import ArchitectState
+from ai_core.rag import RAGProviderError, get_rag_provider
+
+logger = logging.getLogger(__name__)
+
+ARCHITECT_THREAD_PREFIX = "architect:"
+CONTRACT_REVISION_SOFT_LIMIT = 8
+
+NODE_LABELS = {
+    "ingest_context": "读取当前源码",
+    "retrieve_knowledge": "检索架构规范",
+    "architect_analyze": "判别应用形态",
+    "confidence_gate": "校验置信度",
+    "clarify_gate": "等待用户澄清",
+    "draft_contract": "起草实施契约",
+    "validate_contract": "校验契约分级",
+    "revise_contract": "修订实施契约",
+    "contract_ready": "生成实施契约",
+    "contract_gate": "等待契约决策",
+    "confirmed": "契约已确认",
+    "cancelled": "已取消",
+    "confidence_exhausted": "澄清轮次耗尽",
+    "failed": "架构澄清失败",
+}
+
+
+class ArchitectRunCancelledError(Exception):
+    """用户取消 Architect Run。"""
+
+
+@dataclass
+class ArchitectGraphOutcome:
+    state: ArchitectState
+    interrupted: bool
+    interrupt: dict[str, Any] | None
+    thread_id: str
+
+
+class ArchitectGraphRunner:
+    """构建并执行 Architect 状态机。"""
+
+    def __init__(
+        self,
+        llm: ArchitectLLM,
+        *,
+        event_sink: EventSink | None = None,
+        checkpointer_provider: CheckpointerProvider | None = None,
+        recursion_limit: int = 80,
+        cancel_check: Callable[[], bool] | None = None,
+        pause_hook: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> None:
+        self._llm = llm
+        self._event_sink = event_sink or NullEventSink()
+        self._checkpointer_provider = (
+            checkpointer_provider or get_checkpointer_provider()
+        )
+        self._recursion_limit = max(20, recursion_limit)
+        self._cancel_check = cancel_check
+        # 暂停事件先于 graph.invoke 返回，服务层必须在该事件可见前拿到
+        # 待回答的澄清 / 待确认的契约，否则快速点击会命中“尚不存在”的竞态。
+        self._pause_hook = pause_hook
+        self._graph = self._build()
+
+    def run(
+        self,
+        initial_state: ArchitectState,
+        *,
+        run_id: str | None = None,
+        resume: Any | None = None,
+    ) -> ArchitectGraphOutcome:
+        resolved_run_id = run_id or str(initial_state.get("run_id") or "")
+        thread_id = f"{ARCHITECT_THREAD_PREFIX}{resolved_run_id}"
+        config = {
+            "recursion_limit": self._recursion_limit,
+            "configurable": {"thread_id": thread_id},
+        }
+        if resume is None:
+            self._graph.invoke(dict(initial_state), config=config)
+        else:
+            self._graph.invoke(Command(resume=resume), config=config)
+
+        snapshot = self._graph.get_state(config)
+        state = dict(snapshot.values or {})
+        return ArchitectGraphOutcome(
+            state=state,  # type: ignore[arg-type]
+            interrupted=bool(snapshot.next),
+            interrupt=_find_interrupt(snapshot),
+            thread_id=thread_id,
+        )
+
+    # --------------------------------------------------------
+    # 图构建
+    # --------------------------------------------------------
+    def _build(self):
+        builder = StateGraph(ArchitectState)
+        builder.add_node("ingest_context", self._ingest_context)
+        builder.add_node("retrieve_knowledge", self._retrieve_knowledge)
+        builder.add_node("architect_analyze", self._architect_analyze)
+        builder.add_node("confidence_gate", self._confidence_gate)
+        builder.add_node("clarify_gate", self._clarify_gate)
+        builder.add_node("draft_contract", self._draft_contract)
+        builder.add_node("validate_contract", self._validate_contract)
+        builder.add_node("revise_contract", self._revise_contract)
+        builder.add_node("contract_ready", self._contract_ready)
+        builder.add_node("contract_gate", self._contract_gate)
+        builder.add_node("confirmed", self._confirmed)
+        builder.add_node("cancelled", self._cancelled)
+        builder.add_node("confidence_exhausted", self._confidence_exhausted)
+        builder.add_node("failed", self._failed)
+
+        builder.add_edge(START, "ingest_context")
+        builder.add_edge("ingest_context", "retrieve_knowledge")
+        builder.add_edge("retrieve_knowledge", "architect_analyze")
+        builder.add_edge("architect_analyze", "confidence_gate")
+        builder.add_conditional_edges(
+            "confidence_gate",
+            self._route_confidence,
+            {
+                "clarify_gate": "clarify_gate",
+                "draft_contract": "draft_contract",
+                "confidence_exhausted": "confidence_exhausted",
+            },
+        )
+        builder.add_edge("clarify_gate", "architect_analyze")
+        builder.add_edge("draft_contract", "validate_contract")
+        builder.add_conditional_edges(
+            "validate_contract",
+            self._route_validation,
+            {
+                "contract_ready": "contract_ready",
+                "revise_contract": "revise_contract",
+                "failed": "failed",
+            },
+        )
+        builder.add_edge("revise_contract", "validate_contract")
+        builder.add_edge("contract_ready", "contract_gate")
+        builder.add_conditional_edges(
+            "contract_gate",
+            self._route_contract_decision,
+            {
+                "confirmed": "confirmed",
+                "revise_contract": "revise_contract",
+                "cancelled": "cancelled",
+                "failed": "failed",
+            },
+        )
+        builder.add_edge("confirmed", END)
+        builder.add_edge("cancelled", END)
+        builder.add_edge("confidence_exhausted", END)
+        builder.add_edge("failed", END)
+        return builder.compile(checkpointer=self._checkpointer_provider.get())
+
+    # --------------------------------------------------------
+    # 节点：上下文与 RAG
+    # --------------------------------------------------------
+    def _ingest_context(self, state: ArchitectState) -> dict[str, Any]:
+        self._check_cancelled()
+        self._emit(
+            "architect.context.ingested",
+            {
+                "runId": state["run_id"],
+                "sourceHash": state.get("source_hash", ""),
+                "origin": state.get("source_origin", "request"),
+                "fileCount": len(state.get("source_files") or {}),
+                "warnings": state.get("source_warnings") or [],
+            },
+            dedupe_key=f"architect.context.ingested:{state['run_id']}",
+        )
+        return {"status": "ANALYZING"}
+
+    def _retrieve_knowledge(self, state: ArchitectState) -> dict[str, Any]:
+        self._check_cancelled()
+        query = _rag_query(state)
+        try:
+            provider = get_rag_provider(state.get("rag_provider") or None)
+            chunks = provider.retrieve(
+                query,
+                top_k=max(1, int(state.get("rag_top_k") or 5)),
+            )
+        except RAGProviderError as exc:
+            # RAG 是增强能力，不是主流程单点；失败时继续生成并显式记录。
+            logger.warning("architect rag retrieve failed: %s", exc)
+            self._emit(
+                "architect.rag.failed",
+                {"message": str(exc)},
+                dedupe_key=f"architect.rag.failed:{state['run_id']}",
+            )
+            return {"retrieved_chunks": []}
+
+        payload = [
+            {
+                **chunk.to_citation(),
+                "content": chunk.content,
+                "metadata": chunk.metadata,
+            }
+            for chunk in chunks
+        ]
+        self._emit(
+            "architect.rag.retrieved",
+            {
+                "query": query[:500],
+                "provider": provider.name,
+                "citations": [chunk.to_citation() for chunk in chunks],
+            },
+            dedupe_key=f"architect.rag.retrieved:{state['run_id']}",
+        )
+        return {"retrieved_chunks": payload}
+
+    # --------------------------------------------------------
+    # 节点：应用形态与置信度
+    # --------------------------------------------------------
+    def _architect_analyze(self, state: ArchitectState) -> dict[str, Any]:
+        self._check_cancelled()
+        context = _context_from_state(state)
+        analysis = self._llm.analyze(context)
+        self._check_cancelled()
+        analysis, guard = apply_confidence_guard(
+            analysis,
+            dict(state.get("slots") or {}),
+            float(state.get("threshold") or 0.85),
+        )
+        shape = analysis.app_shape
+        questions = [item.model_dump(by_alias=True) for item in analysis.questions]
+        update: dict[str, Any] = {
+            "app_shape": shape or "",
+            "slots": analysis.slots,
+            "missing_slots": analysis.missing_slots,
+            "questions": questions,
+            "confidence_score": analysis.confidence_score,
+            "analysis": analysis.model_dump(mode="json", by_alias=True),
+            "status": "ANALYZING",
+        }
+        if shape:
+            self._emit(
+                "architect.app_shape.detected",
+                {
+                    "appShape": shape,
+                    "label": APP_SHAPE_LABELS.get(shape, shape),
+                    "confidenceScore": analysis.confidence_score,
+                    "reasons": guard.reasons,
+                },
+                dedupe_key=f"architect.app_shape:{state['run_id']}:{shape}",
+            )
+        self._emit(
+            "architect.analysis.completed",
+            {
+                "round": int(state.get("round") or 0),
+                "appShape": shape,
+                "confidenceScore": analysis.confidence_score,
+                "threshold": float(state.get("threshold") or 0.85),
+                "missingSlots": analysis.missing_slots,
+                "reasons": guard.reasons,
+            },
+            dedupe_key=(
+                f"architect.analysis:{state['run_id']}:{state.get('round', 0)}"
+            ),
+        )
+        return update
+
+    def _confidence_gate(self, state: ArchitectState) -> dict[str, Any]:
+        # 纯路由节点：保留命名，方便观测与状态机文档对齐。
+        return {}
+
+    def _route_confidence(self, state: ArchitectState) -> str:
+        shape = state.get("app_shape") or ""
+        missing = state.get("missing_slots") or []
+        confidence = float(state.get("confidence_score") or 0.0)
+        threshold = float(state.get("threshold") or 0.85)
+        if shape and not missing and confidence >= threshold:
+            return "draft_contract"
+        if int(state.get("round") or 0) >= int(state.get("max_rounds") or 5):
+            return "confidence_exhausted"
+        return "clarify_gate"
+
+    def _clarify_gate(self, state: ArchitectState) -> dict[str, Any]:
+        clarification = _build_clarification(state)
+        payload = clarification.model_dump(mode="json", by_alias=True)
+        # 必须先发暂停事件再 interrupt：前端依赖该事件结束当前 SSE 并渲染
+        # 澄清表单；否则连接会一直挂着心跳，用户看不到问题。
+        self._emit(
+            "architect.clarification.required",
+            payload,
+            dedupe_key=(
+                "architect.clarification.required:" f"{clarification.clarification_id}"
+            ),
+        )
+        # interrupt 会暂停当前节点；恢复后返回用户在 API 提交的答案。
+        response = interrupt(payload)
+        answers = _normalize_resume_answers(response)
+        slots = dict(state.get("slots") or {})
+        questions = {
+            str(item.get("questionId") or item.get("question_id")): item
+            for item in state.get("questions") or []
+        }
+        asked = list(state.get("asked_slots") or [])
+        messages = list(state.get("messages") or [])
+        history = list(state.get("ui_history") or [])
+
+        for answer in answers["answers"]:
+            question_id = str(
+                answer.get("questionId") or answer.get("question_id") or ""
+            )
+            question = questions.get(question_id)
+            value = answer.get("value")
+            text = answer.get("text")
+            slot = str((question or {}).get("slot") or answer.get("slot") or "").strip()
+            if slot == "app.shape":
+                shape = _normalize_shape(value) or _normalize_shape(text)
+                if shape:
+                    slots["app.shape"] = shape
+            elif slot:
+                resolved = _answer_value(value, text)
+                if resolved not in (None, ""):
+                    slots[slot] = resolved
+            if slot and slot not in asked:
+                asked.append(slot)
+            content = _answer_content(question, value, text)
+            if content:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": content,
+                        "round": int(state.get("round") or 0),
+                        "questionId": question_id,
+                    }
+                )
+                history.append({"role": "user", "content": content})
+
+        comment = str(answers.get("comment") or "").strip()
+        if comment:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": comment,
+                    "round": int(state.get("round") or 0),
+                    "questionId": None,
+                }
+            )
+            history.append({"role": "user", "content": comment})
+
+        return {
+            "slots": slots,
+            "asked_slots": asked,
+            "messages": messages,
+            "ui_history": history[-30:],
+            "round": int(state.get("round") or 0) + 1,
+            "questions": [],
+            "status": "ANALYZING",
+        }
+
+    # --------------------------------------------------------
+    # 节点：契约起草 / 校验 / 修订
+    # --------------------------------------------------------
+    def _draft_contract(self, state: ArchitectState) -> dict[str, Any]:
+        self._check_cancelled()
+        context = _context_from_state(state)
+        draft = self._llm.draft_contract(context)
+        self._check_cancelled()
+        contract_id = state.get("contract_id") or f"ctr_{uuid.uuid4().hex[:20]}"
+        self._emit(
+            "architect.contract.drafting",
+            {
+                "contractId": contract_id,
+                "appShape": state.get("app_shape"),
+                "confidenceScore": float(state.get("confidence_score") or 0.0),
+            },
+            dedupe_key=f"architect.contract.drafting:{state['run_id']}",
+        )
+        return {
+            "contract_id": contract_id,
+            "contract_draft": draft_to_dict(draft),
+            "contract_issues": [],
+            "repair_count": 0,
+            "status": "DRAFTING_CONTRACT",
+        }
+
+    def _validate_contract(self, state: ArchitectState) -> dict[str, Any]:
+        self._check_cancelled()
+        raw = state.get("contract_draft") or {}
+        if not raw:
+            return {
+                "status": "FAILED",
+                "error": "契约草稿为空",
+                "error_code": "CONTRACT_DRAFT_MISSING",
+                "contract_issues": ["契约草稿为空"],
+            }
+        draft = draft_from_dict(raw)
+        validation = validate_draft(str(state.get("app_shape") or ""), draft)
+        if validation.valid and validation.draft is not None:
+            return {
+                "contract_draft": draft_to_dict(validation.draft),
+                "contract_issues": [],
+                "status": "DRAFTING_CONTRACT",
+            }
+
+        repair_limit = int(state.get("repair_limit") or 1)
+        repair_count = int(state.get("repair_count") or 0)
+        if repair_count < repair_limit:
+            self._emit(
+                "architect.contract.repair.requested",
+                {
+                    "contractId": state.get("contract_id"),
+                    "issues": validation.issues,
+                    "attempt": repair_count + 1,
+                },
+                dedupe_key=(
+                    f"architect.contract.repair:"
+                    f"{state.get('contract_id')}:{repair_count + 1}"
+                ),
+            )
+            return {
+                "contract_draft": raw,
+                "contract_issues": validation.issues,
+                "contract_feedback": "；".join(validation.issues),
+                "repair_count": repair_count + 1,
+                "status": "REPAIRING_CONTRACT",
+            }
+        return {
+            "contract_draft": raw,
+            "contract_issues": validation.issues,
+            "status": "FAILED",
+            "error": "实施契约未通过分级校验：" + "；".join(validation.issues),
+            "error_code": "CONTRACT_VALIDATION_FAILED",
+        }
+
+    def _revise_contract(self, state: ArchitectState) -> dict[str, Any]:
+        self._check_cancelled()
+        raw = state.get("contract_draft") or {}
+        if not raw:
+            return {
+                "status": "FAILED",
+                "error": "待修订的契约不存在",
+                "error_code": "CONTRACT_DRAFT_MISSING",
+            }
+        previous = draft_from_dict(raw)
+        feedback = str(
+            state.get("contract_feedback")
+            or "；".join(state.get("contract_issues") or [])
+            or "按规范修正契约"
+        )
+        context = _context_from_state(state)
+        draft = self._llm.revise_contract(context, previous, feedback)
+        self._check_cancelled()
+        return {
+            "contract_draft": draft_to_dict(draft),
+            "contract_feedback": "",
+            "status": "DRAFTING_CONTRACT",
+        }
+
+    def _contract_ready(self, state: ArchitectState) -> dict[str, Any]:
+        self._check_cancelled()
+        raw = state.get("contract_draft") or {}
+        draft = draft_from_dict(raw)
+        contract = assemble_contract(
+            contract_id=str(state.get("contract_id") or ""),
+            run_id=str(state.get("run_id") or ""),
+            shape=str(state.get("app_shape") or ""),
+            confidence_score=float(state.get("confidence_score") or 0.0),
+            threshold=float(state.get("threshold") or 0.85),
+            source_hash=str(state.get("source_hash") or ""),
+            draft=draft,
+            citations=_citations(state),
+        )
+        contract_payload = contract.model_dump(mode="json", by_alias=True)
+        self._emit(
+            "architect.contract.ready",
+            {
+                "contract": contract_payload,
+                "citations": [
+                    item.model_dump(by_alias=True) for item in contract.citations
+                ],
+            },
+            dedupe_key=(
+                f"architect.contract.ready:{contract.contract_id}:"
+                f"{int(state.get('contract_revision_count') or 0)}"
+            ),
+        )
+        return {
+            "contract": contract_payload,
+            "status": "AWAITING_CONTRACT_CONFIRMATION",
+        }
+
+    def _contract_gate(self, state: ArchitectState) -> dict[str, Any]:
+        self._check_cancelled()
+        contract = state.get("contract") or {}
+        payload = {
+            "kind": "contract_confirmation",
+            "contractId": contract.get("contractId") or state.get("contract_id"),
+            "runId": state.get("run_id"),
+            "appShape": state.get("app_shape"),
+            "confidenceScore": float(state.get("confidence_score") or 0.0),
+            "threshold": float(state.get("threshold") or 0.85),
+            "contract": contract,
+            "decisions": ["CONFIRM", "REVISE", "CANCEL"],
+        }
+        response = interrupt(payload)
+        decision = _normalize_decision(response)
+        comment = ""
+        if isinstance(response, dict):
+            comment = str(response.get("comment") or "").strip()
+
+        if decision == "REVISE":
+            revision_count = int(state.get("contract_revision_count") or 0)
+            if revision_count >= CONTRACT_REVISION_SOFT_LIMIT:
+                return {
+                    "status": "FAILED",
+                    "error": "契约修订次数超过上限，请重新发起架构澄清",
+                    "error_code": "CONTRACT_REVISION_EXHAUSTED",
+                }
+            self._emit(
+                "architect.contract.revision_requested",
+                {
+                    "contractId": state.get("contract_id"),
+                    "comment": comment,
+                    "revision": revision_count + 1,
+                },
+                dedupe_key=(
+                    f"architect.contract.revision:"
+                    f"{state.get('contract_id')}:{revision_count + 1}"
+                ),
+            )
+            return {
+                "contract_decision": "REVISE",
+                "contract_feedback": comment,
+                "contract_revision_count": revision_count + 1,
+                "repair_count": 0,
+                "status": "REVISING_CONTRACT",
+            }
+        return {
+            "contract_decision": decision,
+            "contract_feedback": comment,
+            "status": (
+                "CONFIRMING_CONTRACT" if decision == "CONFIRM" else "CANCELLING"
+            ),
+        }
+
+    def _route_validation(self, state: ArchitectState) -> str:
+        if state.get("status") == "FAILED":
+            return "failed"
+        if state.get("contract_issues"):
+            repair_limit = int(state.get("repair_limit") or 1)
+            if int(state.get("repair_count") or 0) <= repair_limit:
+                return "revise_contract"
+            return "failed"
+        return "contract_ready"
+
+    def _route_contract_decision(self, state: ArchitectState) -> str:
+        if state.get("status") == "FAILED":
+            return "failed"
+        decision = state.get("contract_decision")
+        if decision == "CONFIRM":
+            return "confirmed"
+        if decision == "REVISE":
+            return "revise_contract"
+        if decision == "CANCEL":
+            return "cancelled"
+        return "failed"
+
+    # --------------------------------------------------------
+    # 终态
+    # --------------------------------------------------------
+    def _confirmed(self, state: ArchitectState) -> dict[str, Any]:
+        contract = _contract_from_state(state)
+        if contract is not None:
+            contract.status = "CONFIRMED"
+            contract.decided_at = datetime.now(timezone.utc)
+            payload = contract.model_dump(mode="json", by_alias=True)
+        else:
+            payload = {}
+        self._emit(
+            "architect.contract.confirmed",
+            {
+                "contractId": state.get("contract_id"),
+                "contract": payload,
+                "comment": state.get("contract_feedback") or "",
+            },
+            dedupe_key=f"architect.contract.confirmed:{state.get('contract_id')}",
+        )
+        return {"contract": payload, "status": "CONFIRMED"}
+
+    def _cancelled(self, state: ArchitectState) -> dict[str, Any]:
+        contract = _contract_from_state(state)
+        if contract is not None:
+            contract.status = "CANCELLED"
+            contract.decided_at = datetime.now(timezone.utc)
+            payload = contract.model_dump(mode="json", by_alias=True)
+        else:
+            payload = {}
+        self._emit(
+            "architect.cancelled",
+            {
+                "contractId": state.get("contract_id"),
+                "reason": state.get("contract_feedback") or "",
+            },
+            dedupe_key=f"architect.cancelled:{state.get('run_id')}",
+        )
+        return {"contract": payload, "status": "CANCELLED"}
+
+    def _confidence_exhausted(self, state: ArchitectState) -> dict[str, Any]:
+        error = (
+            f"经过 {state.get('max_rounds')} 轮澄清仍未达到置信度阈值 "
+            f"{state.get('threshold')}，请补充需求后重新发起"
+        )
+        self._emit(
+            "architect.failed",
+            {
+                "error": error,
+                "errorCode": "CONFIDENCE_EXHAUSTED",
+                "round": state.get("round"),
+                "confidenceScore": state.get("confidence_score"),
+                "missingSlots": state.get("missing_slots") or [],
+            },
+            dedupe_key=f"architect.failed:{state.get('run_id')}",
+        )
+        return {
+            "status": "FAILED",
+            "error": error,
+            "error_code": "CONFIDENCE_EXHAUSTED",
+        }
+
+    def _failed(self, state: ArchitectState) -> dict[str, Any]:
+        error = state.get("error") or "架构澄清失败"
+        code = state.get("error_code") or "ARCHITECT_FAILED"
+        self._emit(
+            "architect.failed",
+            {
+                "error": error,
+                "errorCode": code,
+                "round": state.get("round"),
+                "confidenceScore": state.get("confidence_score"),
+            },
+            dedupe_key=f"architect.failed:{state.get('run_id')}:{code}",
+        )
+        return {"status": "FAILED", "error": error, "error_code": code}
+
+    # --------------------------------------------------------
+    # 工具
+    # --------------------------------------------------------
+    def _check_cancelled(self) -> None:
+        if self._cancel_check is not None and self._cancel_check():
+            raise ArchitectRunCancelledError("Architect Run 已被用户取消")
+
+    def _emit(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        dedupe_key: str | None = None,
+    ) -> None:
+        if self._pause_hook is not None and event_type in {
+            "architect.clarification.required",
+            "architect.contract.ready",
+        }:
+            try:
+                self._pause_hook(event_type, payload)
+            except Exception:  # noqa: BLE001 - 状态预热失败不能阻断 SSE
+                logger.warning(
+                    "failed to prepare pause state for %s",
+                    event_type,
+                    exc_info=True,
+                )
+        try:
+            self._event_sink.emit(event_type, payload, dedupe_key=dedupe_key)
+        except Exception:  # noqa: BLE001 - 事件失败不能打断主流程
+            logger.warning("failed to emit %s", event_type, exc_info=True)
+
+
+# ------------------------------------------------------------
+# 状态 / 槽位 / RAG 工具
+# ------------------------------------------------------------
+def _context_from_state(state: ArchitectState) -> ArchitectContext:
+    return ArchitectContext(
+        project_id=str(state.get("project_id") or ""),
+        project_name=str(state.get("project_name") or "未命名项目"),
+        source_files=dict(state.get("source_files") or {}),
+        ui_history=list(state.get("ui_history") or []),
+        slots=dict(state.get("slots") or {}),
+        app_shape=state.get("app_shape") or None,
+        round=int(state.get("round") or 0),
+        threshold=float(state.get("threshold") or 0.85),
+        retrieved_chunks=list(state.get("retrieved_chunks") or []),
+        source_hash=str(state.get("source_hash") or ""),
+    )
+
+
+def _rag_query(state: ArchitectState) -> str:
+    shape = state.get("app_shape") or "未知形态"
+    slots = json.dumps(state.get("slots") or {}, ensure_ascii=False)
+    history = " ".join(
+        str(item.get("content") or "")
+        for item in (state.get("ui_history") or [])[-6:]
+        if isinstance(item, dict)
+    )
+    return (f"{state.get('project_name') or ''} {shape} {slots} {history}").strip()[
+        :2000
+    ]
+
+
+def _build_clarification(state: ArchitectState) -> ArchitectClarification:
+    round_no = int(state.get("round") or 0) + 1
+    missing = list(state.get("missing_slots") or [])
+    questions = [
+        ArchitectQuestion.model_validate(item)
+        for item in state.get("questions") or []
+        if isinstance(item, dict)
+    ]
+    return ArchitectClarification(
+        clarification_id=f"clr_{state.get('run_id')}_{round_no}",
+        run_id=str(state.get("run_id") or ""),
+        round=round_no,
+        max_rounds=int(state.get("max_rounds") or 5),
+        status="PENDING",
+        app_shape=state.get("app_shape") or None,  # type: ignore[arg-type]
+        confidence_score=float(state.get("confidence_score") or 0.0),
+        threshold=float(state.get("threshold") or 0.85),
+        missing_slots=missing,
+        reason=(
+            "app_shape_required"
+            if not state.get("app_shape")
+            else "missing_required_slots"
+        ),
+        questions=questions,
+    )
+
+
+def _normalize_resume_answers(response: Any) -> dict[str, Any]:
+    if isinstance(response, dict):
+        raw_answers = response.get("answers") or []
+        comment = response.get("comment")
+    elif isinstance(response, list):
+        raw_answers = response
+        comment = None
+    else:
+        raw_answers = []
+        comment = None
+    answers = []
+    for item in raw_answers:
+        if isinstance(item, dict):
+            answers.append(item)
+    return {"answers": answers, "comment": comment}
+
+
+def _answer_value(value: Any, text: Any) -> Any:
+    if value not in (None, ""):
+        return value
+    if text not in (None, ""):
+        return text
+    return None
+
+
+def _answer_content(
+    question: dict[str, Any] | None,
+    value: Any,
+    text: Any,
+) -> str:
+    resolved = _answer_value(value, text)
+    if resolved in (None, ""):
+        return ""
+    prompt = str((question or {}).get("prompt") or (question or {}).get("slot") or "")
+    return f"{prompt} {resolved}".strip()[:2000]
+
+
+def _normalize_shape(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip().lower()
+    if raw in {
+        "lightweight_web",
+        "lightweight",
+        "轻量网页工具",
+        "轻量应用",
+    }:
+        return "lightweight_web"
+    if raw in {
+        "script_automation",
+        "script",
+        "自动化脚本",
+        "脚本自动化",
+    }:
+        return "script_automation"
+    if raw in {
+        "full_stack_system",
+        "fullstack",
+        "full-stack",
+        "全栈系统",
+        "全栈",
+    }:
+        return "full_stack_system"
+    return None
+
+
+def _normalize_decision(response: Any) -> str:
+    if isinstance(response, dict):
+        raw = response.get("decision") or response.get("action") or ""
+    else:
+        raw = response or ""
+    value = str(raw).strip().upper()
+    if value in {"CONFIRM", "APPROVE", "APPROVED"}:
+        return "CONFIRM"
+    if value in {"REVISE", "REVISION", "CHANGES"}:
+        return "REVISE"
+    if value in {"CANCEL", "CANCELLED"}:
+        return "CANCEL"
+    return ""
+
+
+def _citations(state: ArchitectState) -> list[ArchitectCitation]:
+    citations: list[ArchitectCitation] = []
+    for item in state.get("retrieved_chunks") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            citations.append(
+                ArchitectCitation(
+                    doc_id=str(item.get("docId") or ""),
+                    title=str(item.get("title") or ""),
+                    section=str(item.get("section") or ""),
+                    path=str(item.get("path") or ""),
+                    score=float(item.get("score") or 0.0),
+                )
+            )
+        except Exception:  # noqa: BLE001
+            continue
+    return citations
+
+
+def _contract_from_state(state: ArchitectState) -> ArchitectContract | None:
+    payload = state.get("contract") or {}
+    if not payload:
+        return None
+    try:
+        return ArchitectContract.model_validate(payload)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _find_interrupt(snapshot: Any) -> dict[str, Any] | None:
+    for task in getattr(snapshot, "tasks", ()) or ():
+        for item in getattr(task, "interrupts", ()) or []:
+            value = getattr(item, "value", None)
+            if isinstance(value, dict):
+                return value
+    return None

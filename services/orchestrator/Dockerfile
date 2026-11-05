@@ -18,6 +18,8 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY main.py .
 COPY ai_core ./ai_core
+# Architect RAG 知识库：Markdown + BM25，运行时可换 Chroma 而不改 Graph。
+COPY knowledge ./knowledge
 # 沙盒构建上下文：镜像不存在时由 LocalDockerSandbox 自动构建。
 COPY sandbox_template ./sandbox_template
 

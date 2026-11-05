@@ -1,7 +1,7 @@
 # vibe-platform 技术栈全记录
 
 > **快照日期**：2026-11-05  
-> **覆盖范围**：M1 前端闭环 → M2 SSE / HITL → M3-A Diff 审批与取消 → M3-B `CodeEditor` 抽象  
+> **覆盖范围**：M1 前端闭环 → M2 SSE / HITL → M3-A Diff 审批与取消 → M3-B `CodeEditor` 抽象 → M2.5 应用形态与全栈契约
 > **统计口径**：以仓库当前源码、`pom.xml`、`package.json`、`requirements.txt`、Dockerfile 和实际运行容器为准。  
 > **重要说明**：设计文档中的目标技术栈与当前已落地技术栈并不完全一致，本文严格区分「当前已使用」「已接入但未启用」「设计预留 / 未落地」。
 
@@ -21,7 +21,15 @@ vibe-platform 是一个以画布标注为输入、以多轮对话为意图、以
 6. 沙盒内执行 `npm run build` 验证，生成 Git checkpoint 与 unified diff；
 7. 用户审批后应用更改，预览 iframe 刷新；也可取消 Run 或回滚到指定 commit。
 
-当前仍是**单前端应用（React/Vite）沙盒**。全栈生成、多服务沙盒、Redis checkpoint、真实鉴权与持久化尚未落地。
+M2.5 另有一条**独立的 Architect 链路**，与局部 UI Run 解耦：
+
+1. 工作台点击 `下一步：构建全栈方案`；
+2. Architect Graph 从沙盒导出真实源码，先判别 `lightweight_web / script_automation / full_stack_system`；
+3. 按应用形态动态追问，不强迫轻量工具提供后端 / 数据库；
+4. 检索 `knowledge/fullstack`（Markdown + BM25）生成带引用的《全栈实施契约》；
+5. 用户 `CONFIRM / REVISE / CANCEL`，确认结果保留在 Architect 状态中。
+
+当前仍是**单前端应用（React/Vite）沙盒**。契约尚未驱动全栈代码生成；多服务沙盒、Redis checkpoint、真实鉴权与持久化尚未落地。
 
 ---
 
@@ -96,7 +104,7 @@ Docker Compose 使用自定义 bridge 网络 `vibe-platform-net`，三个平台�
 | 前端语言 | JavaScript + JSX | ES2022 | 全部业务代码 | 已使用 |
 | 前端样式 | 原生 CSS | — | `styles.css`、CSS 变量、响应式布局 | 已使用 |
 | 前端 HTTP | Fetch API | 浏览器原生 | REST 调用 | 已使用 |
-| 前端流式 | Fetch + `ReadableStream` + `TextDecoder` | 浏览器原生 | 解析 SSE，支持断线重放 | 已使用 |
+| 前端流式 | Fetch + `ReadableStream` + `TextDecoder` | 浏览器原生 | 解析 Run / Architect SSE，支持断线重放 | 已使用 |
 | 前端预览 | HTML `<iframe>` | 浏览器原生 | 沙盒预览与缩放 | 已使用 |
 | 前端状态 | React Context + Hooks | React 18 | 鉴权、工作区、视口状态 | 已使用 |
 | 前端持久化 | `localStorage` / `sessionStorage` | 浏览器原生 | Mock 会话、项目草稿、Run 快照 | 已使用 |
@@ -122,6 +130,7 @@ Docker Compose 使用自定义 bridge 网络 `vibe-platform-net`，三个平台�
 | 模型 | DeepSeek `deepseek-chat` | 远端 API | 真实生成与规划 | 可选 |
 | 模型 | Mock LLM | 内置 | 无 Key、确定性 E2E | 已使用 |
 | HTTP 客户端 | httpx | 0.28.1 | 健康检查 / 测试调用依赖 | 已使用 |
+| 架构 RAG | Markdown + BM25（自研，无外部依赖） | — | 检索 `knowledge/fullstack` 规范与引用 | 已使用 |
 | 容器 SDK | Docker SDK for Python | 7.1.0 | 创建、执行、导出、销毁沙盒 | 已使用 |
 | 沙盒运行时 | Docker Engine | 宿主安装 | 隔离执行用户项目 | 已使用 |
 | 沙盒基础镜像 | `node:20-alpine` | Node 20 | React/Vite 构建与 dev server | 已使用 |
@@ -319,10 +328,40 @@ START
 
 - 未安装 `redis` Python 客户端，未连接 Redis。
 - 未使用 SQLAlchemy / Alembic；AI Core 当前不直接访问 MySQL。
-- 未使用 pytest；编辑器测试使用标准库 `unittest`。
+- 未使用 pytest；编辑器 / Architect 测试使用标准库 `unittest`。
 - 未使用 tree-sitter 依赖。
 - 未实现 `RedisSaver`、Redis Stream 事件总线、跨进程 checkpoint 恢复。
 - 多 Agent Supervisor、BackendCoder、DBA、Reviewer 仅存在于设计文档，当前是单图多节点，不是多 Agent 进程 / 多服务编排。
+
+### 6.6 M2.5 Architect 模块
+
+| 组件 | 文件 | 职责 |
+|---|---|---|
+| Graph | `ai_core/architect/graph.py` | 独立 `StateGraph`：采集 → RAG → 形态判别 → 动态澄清 → 分级契约 → 决策 |
+| Confidence Guard | `ai_core/architect/confidence.py` | 按 `app_shape` 计算必填槽位、确定性置信度上限与 fallback 问题 |
+| Contract | `ai_core/architect/contract.py` | 分级校验、字段裁剪、确定性修复反馈、契约装配 |
+| LLM | `ai_core/architect/llm.py` | DeepSeek / Mock Architect LLM；Mock 可离线生成三种形态契约 |
+| Source | `ai_core/architect/source.py` | 从沙盒 tar.gz 读真实源码；预算、路径与二进制过滤 |
+| RAG | `ai_core/rag/base.py`、`markdown.py`、`chroma.py` | `RAGProvider` 协议；Markdown + BM25 已实现，Chroma 占位 |
+| Service | `ai_core/architect/service.py` | 后台线程、SSE 缓冲、暂停态预热、epoch 防旧结果回写、决策幂等 |
+| API | `ai_core/api/architect.py` | 内部 REST/SSE；BFF 暴露公开 `/api/v1/architect/**` |
+
+应用形态与动态槽位：
+
+| 形态 | 必填槽位 | 明确禁止 |
+|---|---|---|
+| `lightweight_web` | `ui.primary_flow` | 后端、数据库、API、DDL、脚本规格 |
+| `script_automation` | `script.runtime/input/output/logic` | UI、API、DDL |
+| `full_stack_system` | `backend.framework/database.engine/business.key_flows/data.entities` | 物理外键 |
+
+分支契约校验：
+
+- 轻量：`apiRoutes=[]`、`databaseDdl=""`、`scriptSpec={}`；
+- 脚本：必须含 `runtime/entry/dependencies/input/output/exitCodes`；
+- 全栈：至少一条 `/api/` 路由、`CREATE TABLE`、组件交互、`backend/database` 技术栈。
+
+前端 `useArchitect.js` 按项目持久化 Architect 状态到 `sessionStorage`，`architectStream.js`
+复用 `afterSeq` 重放；`ContractViewer.jsx` 用 React 节点渲染 Markdown，不使用 HTML 注入。
 
 ---
 
@@ -427,12 +466,19 @@ MinIO : http://127.0.0.1:9000  (admin/admin123，仅本地开发)
 | `POST` | `/api/v1/runs/rollback` | 回滚到指定 commit |
 | `GET` | `/api/v1/runs/{runId}/export` | 导出项目 tar.gz |
 | `DELETE` | `/api/v1/sandboxes/{sandboxId}` | 销毁沙盒 |
+| `POST` | `/api/v1/architect/runs/stream` | 启动 Architect Run 并返回 SSE |
+| `GET` | `/api/v1/architect/runs/{runId}/events/stream` | Architect 断线重放 |
+| `POST` | `/api/v1/architect/runs/{runId}/clarifications/{clarificationId}/answers` | 提交架构澄清 |
+| `POST` | `/api/v1/architect/runs/{runId}/contracts/{contractId}/decision` | 契约 `CONFIRM / REVISE / CANCEL` |
+| `POST` | `/api/v1/architect/runs/{runId}/cancel` | 取消 Architect Run |
+| `GET` | `/api/v1/architect/runs/{runId}` | Architect 快照 |
 
 ### 9.3 SSE 事件模型
 
 - 每个事件带单调递增 `seq`，作为 SSE `id`。
 - 事件类型包括 `run.started`、节点进度、`run.succeeded`、`run.failed`、`run.cancelled`、`run.rejected`、`clarification.required`、`approval.required`。
-- 终态事件：`run.succeeded`、`run.failed`、`run.cancelled`、`run.rejected`、`clarification.required`、`approval.required`。
+- Architect 事件使用 `architect.*` 命名空间，包括 `architect.started`、`architect.rag.retrieved`、`architect.app_shape.detected`、`architect.clarification.required`、`architect.contract.ready`、`architect.contract.confirmed`、`architect.cancelled`、`architect.failed`。
+- 终态事件：`run.succeeded`、`run.failed`、`run.cancelled`、`run.rejected`、`clarification.required`、`approval.required`；Architect 的暂停 / 终态事件同样结束当前 SSE，并可按 `afterSeq` 续流。
 - 心跳帧用于保持连接。
 - 客户端记录 `lastSeq`，重连时通过 `afterSeq` 补洞。
 - 事件缓冲区上限 2000 条，生产环境计划切换 Redis Stream。
@@ -451,7 +497,7 @@ MinIO : http://127.0.0.1:9000  (admin/admin123，仅本地开发)
 
 | 类别 | 工具 / 命令 | 说明 |
 |---|---|---|
-| Python 单元测试 | `python3 -m unittest discover -s services/orchestrator/tests` | 编辑器抽象等 15 个用例 |
+| Python 单元测试 | `python3 -m unittest discover -s services/orchestrator/tests` | 编辑器、Run 选项、RAG、Architect 等 46 个用例 |
 | Python 语法检查 | `python3 -m compileall services/orchestrator/ai_core` | 编译检查 |
 | Python 格式化 | `black .` | 当前环境 black 26.10.1 |
 | 浏览器 E2E | Playwright 1.64.1，Chromium | Python API，`/tmp/vibe-browser/bin/python` |
@@ -473,6 +519,8 @@ scripts/multi_turn_chat_e2e_test.py
 scripts/ui_e2e_test.py
 scripts/ui_copy_clean_e2e_test.py
 scripts/popover_equal_scale_e2e_test.py
+scripts/architect_m2_5_e2e_test.py
+scripts/architect_ui_e2e_test.py
 ```
 
 已知遗留：`rollback_e2e_test.py`、`annotation_delete_rollback_e2e_test.py` 仍按旧同步 `/runs` 响应编写，尚未适配 SSE 与审批暂停。
@@ -493,7 +541,7 @@ scripts/popover_equal_scale_e2e_test.py
 | WebSocket 双向通道 | SSE 单向 + REST | 未实现 |
 | gVisor / Firecracker / K8s | 普通 Docker 容器 | 隔离强度较低 |
 | 多服务沙盒（web/api/db/edge） | 单 React/Vite 沙盒 | 全栈未实现 |
-| Qdrant / RAG | 无向量库、无检索服务 | `services/rag` 仅 README |
+| Qdrant / 向量 RAG | 已实现 Markdown + BM25 检索；无向量库 | `chroma.py` 仅占位 |
 | OpenAPI / JSON Schema 代码生成 | Pydantic / Jackson DTO 手写 | `packages/protocol` 仅 README |
 | Supervisor + 多 Agent 进程 | 单 LangGraph 图内多节点 | 无多 Agent 隔离与消息总线 |
 | Tree-sitter 结构化编辑 | 占位类 | 未安装依赖、未实现 |
@@ -564,6 +612,7 @@ docker compose up -d
 | `docs/memory/2026-11-04_M2_SSE_HITL.md` | M2 阶段总结 |
 | `docs/memory/2026-11-05_M3A_diff_approval_cancel.md` | Diff 审批与取消 |
 | `docs/memory/2026-11-05_M3B_code_editor_abstraction.md` | CodeEditor 抽象 |
+| `docs/memory/2026-11-05_M2_5_app_shape_contract.md` | M2.5 应用形态与全栈契约 |
 
 ---
 
