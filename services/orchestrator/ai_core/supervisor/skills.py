@@ -31,6 +31,9 @@ class SkillDescriptor:
     agent_id: str
     description: str = ""
     prompt_ref: str | None = None
+    # 实际注入模型的系统提示词。只在服务端内存中使用，绝不出现在
+    # /supervisor/agents 等公开响应里。
+    system_prompt: str | None = None
     rag_refs: tuple[str, ...] = ()
     tools: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)

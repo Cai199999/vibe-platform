@@ -35,6 +35,12 @@ spring:
     serialization:
       write-dates-as-timestamps: false
 
+  # 项目导入：zip / 截图最大 32MB（Python 侧还有更细的解压体积限制）。
+  servlet:
+    multipart:
+      max-file-size: 32MB
+      max-request-size: 34MB
+
 # Python AI Core 内部调用地址。
 # 容器内使用 Docker 自定义网络的服务名 python-ai；本地 IDE 调试可改为 http://localhost:8100。
 ai-core:

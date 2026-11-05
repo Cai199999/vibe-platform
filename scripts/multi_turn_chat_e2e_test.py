@@ -131,7 +131,7 @@ def main() -> int:
 
             def on_request(request) -> None:
                 if request.method == "POST" and request.url.endswith(
-                    "/api/v1/runs/stream"
+                    "/api/v1/supervisor/route"
                 ):
                     requests.append(json.loads(request.post_data or "{}"))
 
@@ -262,16 +262,15 @@ def main() -> int:
                 fail("两轮 threadId 不一致")
             first_history = first_ann.get("chatHistory") or []
             second_history = second_ann.get("chatHistory") or []
-            if [m.get("role") for m in first_history] != ["user"]:
-                fail(f"第一轮历史异常: {first_history}")
-            if len(second_history) != 3:
-                fail(f"第二轮历史应包含 user/assistant/user 3 条: {second_history}")
+            # 当前指令放在 payload.text；chatHistory 只包含此前已完成的轮次。
+            if first_history:
+                fail(f"第一轮历史应为空: {first_history}")
+            if [m.get("role") for m in second_history] != ["user", "assistant"]:
+                fail(f"第二轮历史应包含 user/assistant 2 条: {second_history}")
             if second_history[0].get("content") != "改成红色":
                 fail(f"第二轮未携带第一轮用户指令: {second_history}")
             if second_history[1].get("role") != "assistant":
                 fail(f"第二轮未携带第一轮助手回复: {second_history}")
-            if second_history[2].get("content") != "不，我要蓝色":
-                fail(f"第二轮最新指令异常: {second_history}")
             if requests[1].get("sandboxId") != sandbox_id:
                 fail("第二轮请求体未携带第一轮 sandboxId")
             if first_ann.get("payload", {}).get("text") != "改成红色":

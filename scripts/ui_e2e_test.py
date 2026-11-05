@@ -475,25 +475,21 @@ def main() -> None:
         # AnnotationEnvelope[]，支持一次最多 3 个标注。
         active.locator(".submit-annotations").click()
 
-        print("\n== 5. Agent 执行完成后仍停留在画布模式 ==")
+        print("\n== 5. Agent 执行完成后自动聚焦预览 ==")
         # 执行中进度面板位于隐藏的预览视口，画布模式下通过状态点与顶栏提示反馈。
         expect(active.locator(".seg-status-running")).to_be_visible(timeout=10_000)
         expect(page.locator(".chip-live")).to_be_visible()
         page.wait_for_timeout(900)
         page.screenshot(path=str(SCREENSHOT_DIR / "phase4-loading.png"), full_page=True)
 
-        # 设置默认关闭人工审批：构建验证通过后直接完成，仍停留在画布。
+        # 设置默认关闭人工审批：构建验证通过后直接完成；Supervisor
+        # 派发 UI Run 后会自动切到预览，露出右侧执行时间轴。
         expect(active.locator(".runtime-result-overlay .status-pill")).to_contain_text(
             "已完成", timeout=180_000
         )
-        expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
+        expect(active.locator(".preview-pane.is-visible")).to_be_visible()
+        expect(active.locator(".runtime-preview-frame")).to_be_visible()
 
-        expect(active.locator(".view-result-cta")).to_be_visible(timeout=120_000)
-        expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
-        expect(active.locator(".runtime-preview-frame")).to_be_hidden()
-
-        # 预览面板在对比模式画布下是 visibility:hidden，inner_text 会返回空；
-        # 这里只需要校验 DOM 内容，使用 text_content 不受可见性影响。
         status_text = (
             active.locator(".runtime-result-overlay .status-pill").text_content() or ""
         )
@@ -504,8 +500,7 @@ def main() -> None:
             fail("未读取到 sandboxId")
         print(f"   沙盒: {sandbox_id} / 状态: {status_text.strip()}")
 
-        print("\n== 6. 点击「查看效果」切换到全屏预览 ==")
-        active.locator(".view-result-cta").click()
+        print("\n== 6. 全屏预览已自动展示 ==")
         expect(active.locator(".preview-pane.is-visible")).to_be_visible()
         expect(active.locator(".runtime-preview-frame")).to_be_visible()
         expect(active.locator(".status-pill.is-success")).to_be_visible()
@@ -905,14 +900,24 @@ def main() -> None:
         offline = active.locator(".runtime-error")
         expect(offline).to_be_visible(timeout=15_000)
         expect(offline).to_contain_text("预览已失效")
-        retry = offline.get_by_role("button", name="重新执行 Agent")
-        expect(retry).to_be_visible()
+        # 已提交的标注会被清空，此时没有可重放的意图，因此不显示
+        # “重新执行 Agent”，而是引导用户回到画布重新圈选。
+        expect(offline.get_by_role("button", name="重新执行 Agent")).to_have_count(0)
+        expect(offline).to_contain_text("请切回画布")
         page.screenshot(
             path=str(SCREENSHOT_DIR / "phase4-preview-offline.png"), full_page=True
         )
 
-        retry.click()
-        # 免审批路径：retry 从预览侧发起，验证通过后直接 SUCCEEDED。
+        # 回到画布重新发送一次修改指令，验证沙盒失联后可恢复。
+        active.get_by_role("button", name="画布", exact=True).click()
+        draw_around(page, active.locator(".mock-cta"))
+        # 上一轮的圈仍保留在画布上（只是清空了意图），提交要求每个圈
+        # 都有意图，因此统一补齐；这是真实用户继续叠加标注的路径。
+        popovers = active.locator(".canvas-popover")
+        for index in range(popovers.count()):
+            popovers.nth(index).locator("input").fill("改成红色")
+        active.locator(".submit-annotations").click()
+        # 免审批路径：验证通过后直接 SUCCEEDED。
         expect(active.locator(".runtime-result-overlay .status-pill")).to_contain_text(
             "已完成", timeout=180_000
         )
@@ -927,7 +932,7 @@ def main() -> None:
         expect(frame.locator("button")).to_have_css(
             "background-color", "rgb(255, 0, 0)"
         )
-        print(f"   失联提示正确，重新执行后新沙盒: {sandbox_id}")
+        print(f"   失联提示正确，重新发送后新沙盒: {sandbox_id}")
 
         print("\n== 12. 关闭项目：删除状态并销毁沙盒容器 ==")
         page.locator(".workspace-tab.is-active .tab-close").click()

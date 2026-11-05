@@ -47,17 +47,55 @@ def draw_around(page, locator) -> None:
 
 
 def send(page, popover, text: str, label: str) -> dict:
+    """发送单个标注并返回最终 Run 结果。
+
+    Supervisor 改造后，POST /runs 不再同步返回结果；真实执行由
+    /supervisor/dispatch 启动，前端通过 SSE 把终态写入会话快照。
+    因此这里先捕获 dispatch.runId，再等待界面完成并从
+    sessionStorage 读取该 Run 的 result。
+    """
     popover.locator("input").fill(text, force=True)
     with page.expect_response(
         lambda response: response.request.method == "POST"
-        and response.url.endswith("/api/v1/runs"),
+        and response.url.endswith("/api/v1/supervisor/dispatch"),
         timeout=180_000,
     ) as info:
         popover.locator(".popover-send").click(force=True)
     response = info.value
     if not response.ok:
         fail(f"{label} 请求失败: HTTP {response.status} {response.text()}")
-    payload = response.json()
+    dispatch = response.json()
+    ui_dispatch = next(
+        (
+            item
+            for item in dispatch.get("dispatches") or []
+            if item.get("agentId") == "ui_graph"
+        ),
+        None,
+    )
+    if not ui_dispatch:
+        fail(f"{label} 未派发 UI Run: {dispatch}")
+    run_id = ui_dispatch.get("runId")
+
+    active = page.locator(".tab-window.is-active")
+    expect(active.locator(".runtime-result-overlay .status-pill")).to_contain_text(
+        "已完成", timeout=180_000
+    )
+    payload = page.evaluate(
+        """(runId) => {
+            const saved = JSON.parse(
+                window.sessionStorage.getItem('vibe.runs.v1') || '{}'
+            );
+            for (const value of Object.values(saved)) {
+                const result = value && value.result;
+                if (result && result.runId === runId) return result;
+            }
+            return null;
+        }""",
+        run_id,
+    )
+    if not payload:
+        fail(f"{label} 会话快照中没有 Run 结果: {run_id}")
     commit = (payload.get("commits") or [{}])[0]
     print(
         f"   {label}: turn={commit.get('turnCount')} "
@@ -122,6 +160,9 @@ def main() -> int:
             container = f"vibe-sandbox-{sandbox_id}"
 
             print("\n== 3. 在 A 之后新增圈 B，改绿色 ==")
+            # Supervisor 派发后会自动切到预览，先回画布再画第二个圈。
+            active.get_by_role("button", name="画布", exact=True).click()
+            expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
             draw_around(page, active.locator(".mock-cta"))
             popovers = active.locator(".canvas-popover")
             expect(popovers).to_have_count(2)
@@ -139,6 +180,8 @@ def main() -> int:
                 fail(f"B 提交顺序异常: {log}")
 
             print("\n== 4. 删除圈 B：应 reset 到 B 创建前的 A1 基线 ==")
+            active.get_by_role("button", name="画布", exact=True).click()
+            expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
             with page.expect_response(
                 lambda response: response.request.method == "POST"
                 and response.url.endswith("/api/v1/runs/rollback"),

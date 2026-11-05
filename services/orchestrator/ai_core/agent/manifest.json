@@ -17,7 +17,8 @@
     "create_file",
     "run_build",
     "git_commit",
-    "rollback_checkpoint"
+    "rollback_checkpoint",
+    "shell_tool"
   ],
   "input_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -77,6 +78,20 @@
       "rag_refs": ["knowledge/ui/components"],
       "tools": ["read_file", "apply_code_edit", "create_file", "run_build"],
       "metadata": {"stage": "M3-preview"}
+    },
+    {
+      "skill_id": "tailwind_magic",
+      "name": "Tailwind 视觉强化",
+      "description": "从 config/skills/tailwind_magic.skill.json 挂载的领域 Prompt，约束 Tailwind 样式质量。",
+      "prompt_ref": "tailwind_magic.skill.json",
+      "rag_refs": ["knowledge/ui/style"],
+      "tools": ["read_file", "apply_code_edit", "run_build"],
+      "metadata": {
+        "stage": "M3-preview",
+        "external": true,
+        "skillFile": "config/skills/tailwind_magic.skill.json",
+        "priority": 40
+      }
     }
   ],
   "keywords": [

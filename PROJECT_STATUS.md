@@ -35,6 +35,9 @@ UI 修改在 Docker 沙盒中自动编码、构建、验证并生成 Git checkpo
 | M2.5 专属 Agent 演示 | ✅ 已完成 | Excel 报表 Manifest 自动注册、关键词路由、前端目录 |
 | M2.5 前端 Supervisor 接入 | ✅ 已完成 | “发送 / 提交 / 下一步”统一走 route + dispatch，按 handoff 切换 UI |
 | M2.5 both 强门控 | ✅ 已完成 | 项目锁、契约校验、幂等 release、乱序 409、自动中止 |
+| M3 多格式导入 | ✅ 已完成 | React zip / HTML zip / 图片 → 沙盒 → 新 Tab + 预览 |
+| M3 空白区域 ADD | ✅ 已完成 | 圈选几何判定新增意图，父容器归一化坐标，Agent 插入 JSX |
+| M3 Tools / Skills / MCP | ✅ 已完成 | shell_tool 注册、tailwind_magic Skill、MCP 配置预留 |
 | 全栈代码生成 | ⏳ 未开始 | 契约尚未驱动 Spring Boot / MySQL / 脚本生成 |
 | 多服务沙盒 | ⏳ 未开始 | 当前只有单 React/Vite 沙盒 |
 | 真实认证 / 多租户 | ⏳ 未开始 | 前端 Mock 登录，BFF 无 Spring Security |
@@ -188,7 +191,17 @@ flowchart LR
   - `EditorRegistry`：按编辑类型选择实现。
 - Mock 与 Coder 的 files 模式已接入；旧 patch 模式保留兼容。
 
-### 4.7 项目与导出
+### 4.7 项目导入与扩展点
+
+- 导入 React zip：解压、`npm install`、构建校验，失败返回结构化错误。
+- 导入 HTML zip：直接启动内置静态服务器，支持 SPA fallback。
+- 导入图片：多模态模型生成 React 代码；无视觉 Key 时输出确定性占位页。
+- 圈选空白区域自动判定 `ADD`：最近 `data-source` 父容器 + 父容器归一化坐标。
+- `shell_tool` 已接入 LangGraph `ToolNode`，默认关闭且仅允许只读白名单命令。
+- `config/skills/` 外部 Skill 挂载到 `ui_graph`（`tailwind_magic`）。
+- `MCP_SERVERS` 配置与官方 `mcp` SDK 挂载示例已预留。
+
+### 4.8 项目与导出
 
 - 多项目本地持久化、项目切换、新建项目。
 - 项目导出为可运行 React/Vite 工程。

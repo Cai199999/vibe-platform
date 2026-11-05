@@ -25,6 +25,7 @@ from langchain_openai import ChatOpenAI
 
 from ai_core.agent.schemas import ExecuteRunRequest, RunOptions
 from ai_core.config import Settings, get_settings
+from ai_core.skill_loader import skill_prompts_to_system
 from ai_core.editor import (
     CodeEdit,
     EditKind,
@@ -368,6 +369,12 @@ class DeepSeekAgentLLM(AgentLLM):
             timeout=120,
             max_retries=2,
         )
+        # config/skills/*.skill.json 中挂载到 ui_graph 的 Prompt。
+        # 只读取服务端静态文件，不接受请求参数注入。
+        self._skill_system = skill_prompts_to_system(
+            "ui_graph",
+            self.settings.skills_dir,
+        )
 
     def plan(
         self,
@@ -392,8 +399,9 @@ class DeepSeekAgentLLM(AgentLLM):
             "- 逐条列出每个标注的目标组件、要修改的属性（颜色 / 文案 / 字号 /"
             " 间距 / 布局 / 结构等）与验收标准；\n"
             "- 每个标注带 action：MODIFY 表示修改已有元素；ADD 表示在圈选"
-            "区域新增组件。ADD 时必须在计划中给出插入位置（父级容器或兄弟"
-            "节点）与新增内容，禁止把新增内容伪造成“修改某个已有元素”；\n"
+            "区域新增组件。ADD 时会提供 relativeTarget（相对最近 data-source"
+            " 父容器的归一化坐标）与 target.selector（该父容器），必须在计划"
+            "中给出插入位置与新增内容，禁止把新增内容伪造成“修改某个已有元素”；\n"
             "- 每个标注可能带 threadContext.chatHistory（同一圈的多轮对话）和"
             " previousRuns（上一轮修改记录）。必须理解上下文，例如用户先说"
             "“改成红色”，再说“不，我要蓝色”，最终结果只能是蓝色；不要同时保留"
@@ -420,6 +428,7 @@ class DeepSeekAgentLLM(AgentLLM):
             "- 当前能力只有前端时，不得擅自承诺或生成后端 / 数据库代码；"
             "用户明确要求全栈时在 plan 中标注 fullstack_requested=true，"
             "由上层能力开关决定是否继续。"
+            f"{self._skill_system}"
         )
         files_block = _format_files(current_files, 16000)
         answers_block = (
@@ -469,17 +478,19 @@ class DeepSeekAgentLLM(AgentLLM):
             "保留其它未被否定的属性；\n"
             "- 标注的 action 字段决定操作类型：MODIFY 修改已有元素；ADD 新增"
             "组件。ADD 时必须保留原有 DOM 结构，不得删除或覆盖已有节点；"
-            "请结合 target.selector、target.source.component 与 worldTarget"
-            " 选区中心，找到最合适的父级或兄弟级节点，插入完整的、可编译的"
-            " JSX。优先插入到目标容器内部末尾；如果目标只是文字 / 按钮等叶子"
-            "元素，则插到该元素之后作为兄弟节点。target 为空（用户圈了空白"
-            "区域）时，按选区几何位置选择页面中覆盖该区域的容器，绝不能把"
-            "新增内容写到已有元素内部破坏结构；\n"
+            "ADD 的 target.selector 指向前端计算出的“最近 data-source 父容"
+            "器”，relativeTarget 给出圈选区域相对该容器的 x/y/width/height"
+            "（0~1）。必须在该容器内部插入完整、可编译的 JSX：先按 relative"
+            "Target 的 y 比例判断应插入到哪个兄弟节点之前/之后，再结合 x 与"
+            "宽度决定左右分栏；若无法精确对应，插到容器内部末尾。绝不能把"
+            "新增内容塞进 button / p / h1 等叶子元素内部。target 为空时，从"
+            "源码中页面主容器（main / 根 section）末尾插入；\n"
             "- ADD 生成的新元素必须有可辨识的文本与样式（如 className / style"
             " / 已有 CSS 类），新增按钮需保证点击区域可见；同一 thread 多轮"
             " ADD 时不要重复插入完全相同的组件，除非用户明确要求再来一个；\n"
             "- 如果上一轮构建失败，必须针对错误日志修复，同时保证全部标注仍然"
             "生效，而不是重复原方案。"
+            f"{self._skill_system}"
         )
         human = (
             f"目标文件列表: {json.dumps(target_files, ensure_ascii=False)}\n\n"
@@ -818,6 +829,19 @@ def _annotation_selector(annotation: dict[str, Any]) -> str:
     return ""
 
 
+def _selector_marker(selector: str) -> tuple[str, str]:
+    """从属性选择器中提取标记属性与值。
+
+    前端新契约使用 ``data-source``，M1 旧源码仍可能是
+    ``data-vibe-target``；Mock 的两条路径都必须兼容。
+    """
+    match = re.search(r"data-(source|vibe-target)\s*=\s*['\"]([^'\"]+)['\"]", selector)
+    if not match:
+        return "", ""
+    attribute = "data-source" if match.group(1) == "source" else "data-vibe-target"
+    return attribute, match.group(2)
+
+
 def _annotation_target_file(
     annotation: dict[str, Any],
     current_files: dict[str, str],
@@ -864,6 +888,9 @@ def _detect_button_label(text: str) -> str:
         if not match:
             continue
         label = match.group(1).strip()
+        # “加个按钮”这类口语中，量词可能被正则的惰性匹配吞进文案，
+        # 先剔除以避免生成只有“个”的按钮。
+        label = re.sub(r"^(?:一个|一条|一段|个)", "", label).strip()
         for word, _color in _COLOR_WORDS:
             if word.isascii():
                 label = re.sub(rf"\b{re.escape(word)}\b", "", label, flags=re.I)
@@ -944,8 +971,7 @@ def _insert_button(
     )
 
     selector = _annotation_selector(annotation)
-    marker_match = re.search(r"data-vibe-target\s*=\s*['\"]([^'\"]+)['\"]", selector)
-    marker = marker_match.group(1) if marker_match else ""
+    attribute, marker = _selector_marker(selector)
 
     # 1) 内容容器：优先插入到容器内部末尾。
     if marker in {"card", ""}:
@@ -1062,16 +1088,29 @@ def _append_css_rule(code: str, rule: str, path: str = "src/App.jsx") -> str:
       2. 普通 ``</style>``：兼容非模板写法；
       3. 没有 style 块：在页面主容器末尾新建一个 ``<style>`` 块。
     """
-    for marker in ('"}</style>', "</style>"):
-        if marker in code:
-            return _edit_source(
-                code,
-                path,
-                EditKind.INSERT_BEFORE,
-                marker,
-                rule,
-                label="追加 CSS 规则",
-            )
+    # 模板字符串 <style>{"..."}</style>：规则会进入 JS 字符串字面量，
+    # 属性选择器里的双引号必须转义，否则 `[data-source="x"]` 会直接
+    # 截断字符串导致 JSX 编译失败。
+    js_marker = '"}</style>'
+    if js_marker in code:
+        escaped = rule.replace("\\", "\\\\").replace('"', '\\"')
+        return _edit_source(
+            code,
+            path,
+            EditKind.INSERT_BEFORE,
+            js_marker,
+            escaped,
+            label="追加 CSS 规则",
+        )
+    if "</style>" in code:
+        return _edit_source(
+            code,
+            path,
+            EditKind.INSERT_BEFORE,
+            "</style>",
+            rule,
+            label="追加 CSS 规则",
+        )
     style_block = f"<style>{{`{rule}`}}</style>"
     for closing_tag in ("</section>", "</main>"):
         if closing_tag in code:
@@ -1094,12 +1133,12 @@ def _replace_element_text(code: str, selector: str, new_text: str) -> str:
     真实 Coder 输出的是锚点 / 结构化编辑；跨文件、跨标签的文本替换应由
     ``TreeSitterEditor`` 基于 AST 完成。保留此函数只服务于零依赖 E2E。
     """
-    marker_match = re.search(r"data-vibe-target\s*=\s*['\"]([^'\"]+)['\"]", selector)
-    if marker_match:
-        marker = re.escape(marker_match.group(1))
+    attribute, raw_marker = _selector_marker(selector)
+    if attribute and raw_marker:
+        marker = re.escape(raw_marker)
         pattern = re.compile(
             rf"(<([a-zA-Z][\w-]*)\b"
-            rf"(?=[^>]*data-vibe-target=['\"]{marker}['\"])[^>]*>)"
+            rf"(?=[^>]*{attribute}=['\"]{marker}['\"])[^>]*>)"
             rf"([\s\S]*?)(</\2>)",
             re.MULTILINE,
         )

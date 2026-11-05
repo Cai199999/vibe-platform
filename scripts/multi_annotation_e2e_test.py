@@ -103,7 +103,7 @@ def main() -> int:
 
             def on_request(request) -> None:
                 if request.method == "POST" and request.url.endswith(
-                    "/api/v1/runs/stream"
+                    "/api/v1/supervisor/route"
                 ):
                     try:
                         captured["body"] = json.loads(request.post_data or "{}")

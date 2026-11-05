@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 
 /**
- * 项目下拉栏：切换项目、新建项目。
- * 导入项目留到 Phase 3，先以禁用项展示，避免入口缺失。
+ * 项目下拉栏：切换项目、新建项目、导入项目。
+ *
+ * 导入支持 zip（React / HTML 项目包）与 png / jpg 截图；真正的解压、
+ * npm install 与沙盒启动全部由后端完成，前端只负责选择文件与展示结果。
  */
 export default function ProjectSwitcher({
   projects,
@@ -11,12 +13,15 @@ export default function ProjectSwitcher({
   limitReached,
   canExport = false,
   exporting = false,
+  importing = false,
   onOpenProject,
   onNewProject,
+  onImportFile,
   onExport,
 }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef(null)
+  const fileInputRef = useRef(null)
 
   useEffect(() => {
     if (!open) return undefined
@@ -99,6 +104,37 @@ export default function ProjectSwitcher({
               新建项目
               {limitReached && <span className="project-menu-badge">5 / 5</span>}
             </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="project-menu-import"
+              disabled={limitReached || importing}
+              title={
+                limitReached
+                  ? '最多只能同时打开 5 个项目，请关闭其他项目'
+                  : '上传 zip（React / HTML）或 png / jpg 截图导入项目'
+              }
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <span aria-hidden="true">{importing ? '⏳' : '📦'}</span>
+              {importing ? '正在导入…' : '导入项目'}
+              {limitReached && <span className="project-menu-badge">5 / 5</span>}
+            </button>
+            <input
+              ref={fileInputRef}
+              className="project-import-input"
+              type="file"
+              accept=".zip,.png,.jpg,.jpeg,application/zip,image/png,image/jpeg"
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                // 允许连续选择同一个文件：先清空 value。
+                event.target.value = ''
+                if (!file) return
+                setOpen(false)
+                onImportFile?.(file)
+              }}
+            />
             <button
               type="button"
               role="menuitem"

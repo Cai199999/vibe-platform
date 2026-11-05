@@ -7,9 +7,13 @@
 #   - package.json 单独成层，改源码不会重新下载依赖。
 FROM node:20-alpine
 
-# git 用于应用 Agent 输出的 unified diff。
-RUN apk add --no-cache git \
+# git 用于应用 Agent 输出的 unified diff；unzip 供导入 zip 时容器内排查使用。
+# 真正的上传解压通过 Docker put_archive 完成，不依赖容器内 unzip。
+RUN apk add --no-cache git unzip \
     && npm config set registry https://registry.npmmirror.com
+
+# 纯 HTML 导入项目的静态服务器（无 npm 依赖）。
+COPY static_server.mjs /opt/vibe-static-server.mjs
 
 WORKDIR /app
 

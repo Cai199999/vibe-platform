@@ -75,6 +75,22 @@ class SandboxProvider(ABC):
     ) -> SandboxHandle:
         """创建并启动沙盒，返回可访问的预览地址。"""
 
+    def create_imported(
+        self,
+        project_id: str,
+        files: dict[str, bytes],
+        kind: str,
+        start_command: str,
+        template: str = "react-vite",
+    ) -> SandboxHandle:
+        """用用户上传的源码创建沙盒。
+
+        与 ``create`` 的区别：
+          - 文件可能是二进制（图片 / 字体），因此使用 bytes；
+          - 容器启动命令由导入服务决定（React 先 npm install，HTML 起静态服务）。
+        """
+        raise SandboxError("当前 Provider 不支持导入项目")
+
     def get(self, sandbox_id: str) -> SandboxHandle:
         """按 sandbox_id 恢复句柄，供多轮对话复用同一沙盒。
 

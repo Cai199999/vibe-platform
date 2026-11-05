@@ -26,6 +26,8 @@ services/orchestrator/                Python 3.12 + FastAPI + LangGraph AI Core
 services/orchestrator/ai_core/        Sandbox / Agent / API
 services/orchestrator/ai_core/*/manifest.json 声明式 Agent 能力清单
 services/orchestrator/config/custom_agents/   企业专属 Agent Manifest（演示：Excel 报表专家）
+services/orchestrator/config/skills/          外部 Skill 提示词（tailwind_magic.skill.json）
+services/orchestrator/ai_core/tools/          LangGraph 工具箱（shell_tool 示例 + 安全白名单）
 services/orchestrator/sandbox_template/ React + Vite 沙盒基础镜像
 infra/migrations/schema.sql           M1 初始 MySQL schema（无物理外键）
 scripts/init-db.sh                    应用 schema 到已有 Docker MySQL
@@ -39,6 +41,8 @@ scripts/multi_turn_chat_e2e_test.py   浏览器 E2E（平移缩放不漂移 / �
 scripts/rollback_e2e_test.py          浏览器 E2E（Git 提交顺序 / 逐轮回滚 / 回滚后续写）
 scripts/annotation_delete_rollback_e2e_test.py 浏览器 E2E（删除标注回到创建前基线 / 清除全部）
 scripts/add_component_e2e_test.py     浏览器 E2E（圈选卡片内部 → ADD 红色提交按钮 → 构建/预览）
+scripts/blank_area_add_e2e_test.py    浏览器 E2E（画圈框住空白区域 → 自动判定 ADD → 父容器内插入按钮 → 构建）
+scripts/import_project_e2e_test.py    浏览器 E2E（导入 React zip / HTML zip / 图片，自动建 Tab 与预览）
 scripts/supervisor_e2e_test.py        Supervisor 路由 / 注册中心 / 门控 API E2E
 scripts/supervisor_both_e2e_test.py   both 模式 API E2E（契约确认 → release → UI Run）
 scripts/supervisor_mixed_ui_e2e_test.py 浏览器级 both 混合 E2E（决策可视化 + 时间轴）
@@ -358,6 +362,49 @@ platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
 5 个项目全部打开时，平台 + 沙盒常驻内存约 **800 MiB**；构建/热更新瞬间
 CPU 会短时冲高，但每个容器受 1 CPU 限额约束。沙盒镜像
 `vibe-platform/sandbox-react:dev` 约 492 MB（镜像层共享，不随容器数线性增长）。
+
+## 项目导入与画布新增意图（M3）
+
+### 导入项目
+
+工作区左上角“新建项目”下方新增 **导入项目**，支持：
+
+| 输入 | 后端处理 | 结果 |
+|---|---|---|
+| React 项目 `.zip` | 沙盒内解压 → 校验入口 → `npm install` → `npm run build` | 新 Tab + 预览 |
+| 静态 HTML `.zip` | 解压 → 内置静态服务器（SPA fallback） | 新 Tab + 预览 |
+| 图片 `.png/.jpg` | 视觉模型识别结构并生成 React 代码；无 Key 时生成确定性占位页 | 新 Tab + 预览 |
+
+- 入口：`POST /api/v1/internal/sandbox/import`（multipart，BFF 透传），返回
+  `sandboxId` / `previewUrl` / `kind`。
+- zip 安全：拒绝 Zip Slip、符号链接、加密包、解压炸弹、超量条目，过滤
+  `.env` / 密钥文件；默认限制 32 MiB 压缩包、128 MiB 解压、4000 条目。
+- 图片走 OpenAI 兼容多模态端点（`VISION_API_KEY` / `VISION_BASE_URL` /
+  `VISION_MODEL`）；未配置 Key 时仍返回可编译的占位 React 页，便于离线联调。
+
+### 空白区域自动判定 ADD
+
+圈选时前端会计算圈与所有 `data-source` 节点的交集面积、覆盖率与选区占比：
+
+- 命中节点且覆盖率足够 → `action: "MODIFY"`，目标为被圈节点。
+- 未命中任何节点，或圈面积远大于节点（阈值 `MODIFY_MIN_COVERAGE=0.35`、
+  `ADD_AREA_RATIO=4`、`MODIFY_MIN_SELECTION_SHARE=0.12`）→ `action: "ADD"`。
+- ADD 时向上寻找最近的带 `data-source` 父容器作为 `target`，并附带
+  `relativeTarget`（`coordinateSpace: "parent-normalized"`，x/y/width/height
+  相对父容器归一化），Agent 依据坐标在父容器内插入新 JSX。
+- `ui_graph` 的 System Prompt 已明确 ADD 语义；Mock LLM 与真实模型共用同一
+  契约，新增节点会写入 `data-source` 供后续继续圈选。
+
+### Tools / Skills / MCP 扩展点
+
+- **Tools**：`ai_core/tools/` 提供 `ToolRegistry` 与 `shell_tool`，已注册进
+  LangGraph `ToolNode`。默认 `TOOL_SHELL_ENABLED=false`；开启后仍只允许只读
+  白名单命令、固定工作目录、超时与输出截断，拒绝 shell 元字符与路径逃逸。
+- **Skills**：`config/skills/*.skill.json` 由 `SkillRegistry` 扫描；
+  `tailwind_magic` 在 `ui_graph` manifest 中挂载，向 System Prompt 注入
+  Tailwind 设计规范。
+- **MCP**：`config.py` 提供 `MCP_SERVERS: list[dict]`，`graph.py` 预留官方
+  `mcp` SDK 挂载外部 Server（文件系统 / 浏览器）的注释与配置入口。
 
 ## 验证
 

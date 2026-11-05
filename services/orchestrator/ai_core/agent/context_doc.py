@@ -139,6 +139,23 @@ def render_vibe_context(
         else:
             lines.append("- （未提供）")
 
+        relative = annotation.relative_target or {}
+        if annotation.action == "ADD":
+            lines.extend(["", "**新节点相对父容器的位置（ADD）**", ""])
+            if relative:
+                for key in (
+                    "x",
+                    "y",
+                    "width",
+                    "height",
+                    "coordinateSpace",
+                    "parentSelector",
+                ):
+                    if key in relative:
+                        lines.append(f"- {key}: `{relative[key]}`")
+            else:
+                lines.append("- （未提供，插入到父容器末尾）")
+
         lines.extend(["", "**目标源码定位**", ""])
         lines.append(
             f"- 文件：`{source.file if source and source.file else _target_file(annotation, fallback_file)}`"

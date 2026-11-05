@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ai_core.config import Settings, get_settings
+from ai_core.skill_loader import load_skill_directory
 from ai_core.supervisor.custom import (
     CustomAgentError,
     read_manifest,
@@ -157,6 +158,7 @@ class AgentRegistry:
         self,
         custom_agents_dir: Path | str | None = None,
         manifest_dir: Path | str | None = None,
+        skills_dir: Path | str | None = None,
     ) -> None:
         self._lock = threading.RLock()
         self._agents: dict[str, AgentDescriptor] = {}
@@ -168,6 +170,7 @@ class AgentRegistry:
             Path(manifest_dir) if manifest_dir else DEFAULT_AGENT_MANIFEST_ROOT
         )
         self._custom_agents_dir = Path(custom_agents_dir) if custom_agents_dir else None
+        self._skills_dir = Path(skills_dir) if skills_dir else None
         self.reload_builtin_agents()
 
     @property
@@ -438,7 +441,12 @@ class AgentRegistry:
     # SkillRegistry
     # --------------------------------------------------------
     def _rebuild_skills(self) -> None:
-        """从当前全部 Agent 描述符重建 Skill 视图。"""
+        """从 Manifest + config/skills 重建 Skill 视图。
+
+        Manifest 负责“挂载声明”，外部 ``*.skill.json`` 负责提供真实
+        System Prompt。同 id 的外部 Skill 会替换 Manifest 中的占位描述，
+        这样 Agent 清单与 Skill 内容可以独立迭代。
+        """
         with self._lock:
             registry = SkillRegistry()
             for descriptor in self._agents.values():
@@ -450,6 +458,17 @@ class AgentRegistry:
                             "skip duplicate skill %s from %s: %s",
                             skill.skill_id,
                             descriptor.agent_id,
+                            exc,
+                        )
+            if self._skills_dir is not None:
+                for skill in load_skill_directory(self._skills_dir):
+                    try:
+                        registry.register(skill, replace=True)
+                    except Exception as exc:  # noqa: BLE001 - 坏 Skill 不阻断 Agent
+                        logger.warning(
+                            "skip external skill %s from %s: %s",
+                            skill.skill_id,
+                            self._skills_dir,
                             exc,
                         )
             self._skills = registry
@@ -485,6 +504,7 @@ def build_default_registry(settings: Settings | None = None) -> AgentRegistry:
     registry = AgentRegistry(
         custom_agents_dir=resolved.supervisor_custom_agents_dir,
         manifest_dir=manifest_dir,
+        skills_dir=resolved.skills_dir,
     )
     registry.reload_custom_agents()
     return registry

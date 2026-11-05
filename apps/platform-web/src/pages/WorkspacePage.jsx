@@ -10,6 +10,7 @@ import { useSettings } from '../settings/SettingsContext.jsx'
 import { useWorkspace } from '../workspace/useWorkspace.js'
 import { EMPTY_ARCHITECT, useArchitect } from '../workspace/useArchitect.js'
 import { streamRun } from '../workspace/runStream.js'
+import { importProjectFile } from '../workspace/importClient.js'
 import {
   dispatchSupervisor,
   fetchSupervisorAgents,
@@ -20,6 +21,21 @@ import { INITIAL_APP } from '../mockProject.js'
 
 const TARGET_FILE = 'src/App.jsx'
 const MAX_ANNOTATIONS = 3
+
+/**
+ * 导入项目可能使用不同的入口文件（React 常见 src/App.tsx，
+ * 纯 HTML 项目为 index.html）。画布标注必须指向真实存在、可被 Agent
+ * 修改的文件，否则会退回内置模板源码，导致“改了预览却没变”。
+ */
+function projectEntryFile(project) {
+  return project?.entryFile || TARGET_FILE
+}
+
+function projectSourceFile(project) {
+  const entry = projectEntryFile(project)
+  if (project?.files?.[entry]) return project.files[entry]
+  return project?.files?.[TARGET_FILE] ?? INITIAL_APP
+}
 const MODEL_STORAGE_KEY = 'vibe.llmProvider'
 const MODEL_PROVIDERS = new Set(['auto', 'deepseek', 'mock'])
 
@@ -188,9 +204,18 @@ const newMessage = (role, content, extra = {}) => ({
  */
 function findTargetLine(source, marker) {
   if (!marker) return 1
-  const index = source.indexOf(`data-vibe-target="${marker}"`)
-  const fallback = source.indexOf(`data-vibe-target='${marker}'`)
-  const offset = index >= 0 ? index : fallback
+  // 新源码写 data-source，旧模板仍可能只有 data-vibe-target。
+  const patterns = [
+    `data-source="${marker}"`,
+    `data-source='${marker}'`,
+    `data-vibe-target="${marker}"`,
+    `data-vibe-target='${marker}'`,
+  ]
+  let offset = -1
+  for (const pattern of patterns) {
+    offset = source.indexOf(pattern)
+    if (offset >= 0) break
+  }
   return offset >= 0 ? source.slice(0, offset).split('\n').length : 1
 }
 
@@ -200,13 +225,17 @@ const ADD_INTENT_PATTERN = /添加|新增|新建|插入|加一个|加个|(?:^|\s
 
 /**
  * 自动推断操作类型：
- *  - 圈中没有命中任何 data-vibe-target（空白区域）→ ADD；
+ *  - 圈中没有命中任何 data-source（空白区域）→ ADD；
+ *  - 圈的展示面积远大于命中的节点 → ADD（由 CanvasStage 的几何判定给出）；
  *  - 指令包含新增语义 → ADD；
  *  - 其余命中已有元素 → MODIFY。
  * 用户手动点选浮层内的“修改 / 新增”后 actionSource=manual，不再自动覆盖。
  */
-function inferAnnotationAction(target, intent) {
+function inferAnnotationAction(target, intent, geometryAction) {
   if (ADD_INTENT_PATTERN.test(intent ?? '')) return 'ADD'
+  if (geometryAction === 'ADD' || geometryAction === 'MODIFY') {
+    return geometryAction
+  }
   return target ? 'MODIFY' : 'ADD'
 }
 
@@ -215,23 +244,29 @@ function inferAnnotationAction(target, intent) {
  * worldTarget 保留归一化坐标；target 记录圈选命中的元素，帮助模型把
  * “改成蓝色 / 文字改为提交 / 放大一倍”绑定到正确的组件。
  */
-function buildAnnotation(entry, source) {
+function buildAnnotation(entry, source, targetFile = TARGET_FILE) {
   const rect = entry.rect
   const instruction = entry.intent.trim()
-  // 旧 localStorage 里的标注没有 action：按指令与是否命中元素即时推断。
+  // 旧 localStorage 里的标注没有 action：按指令与几何判定即时推断。
   const action =
     entry.action === 'ADD' || entry.action === 'MODIFY'
       ? entry.action
-      : inferAnnotationAction(entry.target, instruction)
-  // ADD 且没有命中元素时 target 保持为空：后端按 worldTarget 几何位置
-  // 自行选择容器。MODIFY 没有命中元素时才回退到默认 CTA，保持旧行为。
+      : inferAnnotationAction(
+          entry.target,
+          instruction,
+          entry.geometryAction,
+        )
+  // ADD 的目标必须是“最近 data-source 父容器”，由 CanvasStage 在圈选时
+  // 计算；只命中叶子时不能把新增 JSX 塞进 button / p / h1。
+  // MODIFY 没有命中元素时才回退到默认 CTA，保持旧行为。
+  const addTarget = entry.addTarget ?? null
   const target =
-    entry.target ??
-    (action === 'ADD'
-      ? null
-      : {
+    action === 'ADD'
+      ? addTarget
+      : (entry.target ??
+        {
           marker: 'cta-button',
-          selector: "[data-vibe-target='cta-button']",
+          selector: "[data-source='cta-button']",
           label: '按钮',
           role: 'button',
           component: 'App',
@@ -241,13 +276,16 @@ function buildAnnotation(entry, source) {
   const acceptance =
     action === 'ADD'
       ? [
-          `在${target?.label || '圈选区域'}新增组件：${instruction}`,
-          '原有 DOM 结构、布局、文案与交互保持不变',
+          `在${target?.label || '圈选区域'}（${target?.selector || '父容器'}）内部新增组件：${instruction}`,
+          '按圈相对父容器的坐标决定插入顺序，原有 DOM 结构、布局、文案与交互保持不变',
         ]
       : [
           `按指令修改${target?.label || '目标组件'}：${instruction}`,
           '其余布局、文案与交互保持不变',
         ]
+  // relativeTarget 只在 ADD 时有意义：x/y/width/height 都是相对父容器的
+  // 归一化坐标（0~1），模型据此判断插入顺序与左右分栏。
+  const relative = action === 'ADD' ? entry.relativeRect : null
   return {
     version: 1,
     annotationId: entry.id,
@@ -260,15 +298,27 @@ function buildAnnotation(entry, source) {
       height: Number(rect.height.toFixed(6)),
       coordinateSpace: 'normalized',
     },
+    relativeTarget:
+      action === 'ADD'
+        ? {
+            x: relative?.x ?? 0,
+            y: relative?.y ?? 0,
+            width: relative?.width ?? 1,
+            height: relative?.height ?? 1,
+            coordinateSpace: 'parent-normalized',
+            parentSelector: target?.selector ?? null,
+            parentMarker: target?.marker ?? null,
+          }
+        : {},
     target: target
       ? {
           mode: 'source',
           source: {
-            file: TARGET_FILE,
+            file: targetFile,
             line,
             column: 7,
             component: target.component || 'App',
-            sourceKind: 'jsx',
+            sourceKind: targetFile.endsWith('.html') ? 'html' : 'jsx',
           },
           selector: target.selector,
           snippet: {
@@ -646,6 +696,7 @@ export default function WorkspacePage() {
     maxTabs,
     limitReached,
     createProject,
+    importProject,
     openProject,
     closeTab,
     setActiveTab,
@@ -708,6 +759,8 @@ export default function WorkspacePage() {
   // 导出状态只保留一个：同时下载多个项目没有意义，且提示条全局唯一。
   const [exportingProjectId, setExportingProjectId] = useState(null)
   const [exportNotice, setExportNotice] = useState(null)
+  // 导入是“上传 + 容器启动 + npm install”的长请求，同一时间只允许一个。
+  const [importing, setImporting] = useState(false)
   const inflightRef = useRef(new Set())
   // 每个项目最多一个 SSE 连接；关闭 Tab / 重新提交时主动 abort。
   const streamControllersRef = useRef(new Map())
@@ -844,14 +897,94 @@ export default function WorkspacePage() {
     }))
   }
 
+  /**
+   * 导入项目：上传 zip / 截图 -> Python 解包并启动沙盒 -> 新建 Tab。
+   *
+   * 导入完成后直接写入一个“已完成”的 Run 结果，使预览面板立刻显示沙盒，
+   * 后续画布标注与增量修改复用同一个 sandboxId。
+   */
+  const handleImportFile = async (file) => {
+    if (!file || importing) return
+    if (limitReached) {
+      showToast('error', '最多只能同时打开 5 个项目，请关闭其他项目后再导入')
+      return
+    }
+    const projectId = newId('proj')
+    const baseName = file.name.replace(/\.(zip|png|jpe?g)$/i, '').trim()
+    const projectName = baseName || '导入项目'
+    setImporting(true)
+    showToast('info', `正在导入 ${file.name}，首次 npm install 可能需要几分钟…`)
+    try {
+      const payload = await importProjectFile({
+        file,
+        projectId,
+        token: session?.token,
+      })
+      importProject({
+        id: projectId,
+        name: projectName,
+        files: payload.files ?? {},
+        entryFile: payload.entryFile || TARGET_FILE,
+        kind: payload.kind,
+        sourceName: payload.sourceName || file.name,
+      })
+      const result = {
+        // 导入不是一次 Agent Run，没有 runId；导出 / 预览仍按 sandboxId 工作。
+        runId: null,
+        status: 'SUCCEEDED',
+        sandboxId: payload.sandboxId,
+        previewUrl: payload.previewUrl,
+        commitHash: null,
+        baselineCommit: null,
+        retryCount: 0,
+        turnCount: 0,
+        commits: [],
+        assistantMessage: `已导入 ${payload.sourceName || file.name}（${
+          payload.kind === 'html' ? 'HTML' : 'React'
+        }），可以继续在画布上圈选修改。`,
+        generatedPatch: '',
+        verifyResult: null,
+        messages: [],
+        error: null,
+      }
+      setRunStates((previous) => ({
+        ...previous,
+        [projectId]: {
+          ...EMPTY_RUN,
+          result,
+          sandboxIds: payload.sandboxId ? [payload.sandboxId] : [],
+        },
+      }))
+      focusPreview(projectId)
+      const warnings = Array.isArray(payload.warnings) ? payload.warnings : []
+      showToast(
+        'success',
+        `已导入 ${projectName}，沙盒已启动${
+          warnings.length ? `（${warnings[0]}）` : ''
+        }`,
+      )
+    } catch (cause) {
+      showToast('error', `导入失败：${cause?.message || cause}`)
+    } finally {
+      setImporting(false)
+    }
+  }
+
   const gateIsActive = (projectId) => {
     const status = gateStates[projectId]?.status
     return status === 'AWAITING_CONTRACT' || status === 'RELEASING'
   }
 
-  const handleAnnotationAdd = (projectId, { rect, target }) => {
+  const handleAnnotationAdd = (
+    projectId,
+    { rect, target, addTarget, relativeRect, action: geometryAction, measured },
+  ) => {
     patchRun(projectId, (previous) => {
       if (previous.annotations.length >= MAX_ANNOTATIONS) return previous
+      const autoAction =
+        geometryAction === 'ADD' || geometryAction === 'MODIFY'
+          ? geometryAction
+          : inferAnnotationAction(target, '')
       return {
         ...previous,
         annotations: [
@@ -859,9 +992,17 @@ export default function WorkspacePage() {
           {
             id: newId('ann'),
             rect,
+            // 圈实际覆盖到的叶子节点（MODIFY 目标）。
             target,
-            // 空白区域默认 ADD；命中元素默认 MODIFY，输入“添加”后自动切换。
-            action: inferAnnotationAction(target, ''),
+            // 最近 data-source 容器（ADD 的插入父级）。
+            addTarget,
+            // 圈相对父容器的归一化坐标，直接进入 AnnotationEnvelope.relativeTarget。
+            relativeRect,
+            geometryAction: autoAction,
+            measured,
+            // 空白区域 / 圈远大于节点 → ADD；命中元素 → MODIFY，
+            // 输入“添加”后自动切换，用户也可在浮层内手动覆盖。
+            action: autoAction,
             actionSource: 'auto',
             intent: '',
             createdAt: new Date().toISOString(),
@@ -892,7 +1033,11 @@ export default function WorkspacePage() {
               action:
                 annotation.actionSource === 'manual'
                   ? annotation.action
-                  : inferAnnotationAction(annotation.target, intent),
+                  : inferAnnotationAction(
+                      annotation.target,
+                      intent,
+                      annotation.geometryAction,
+                    ),
             }
           : annotation,
       ),
@@ -1064,10 +1209,11 @@ export default function WorkspacePage() {
     }
   }
 
-  const projectSource = (project) =>
-    project.template === 'vibe-react'
-      ? INITIAL_APP
-      : (project.files?.[TARGET_FILE] ?? INITIAL_APP)
+  const projectSource = (project) => {
+    // 内置模板始终以最新 INITIAL_APP 为准；导入项目使用真实入口文件。
+    if (project.template === 'vibe-react') return INITIAL_APP
+    return projectSourceFile(project)
+  }
 
   /**
    * 构造 Supervisor 统一请求。
@@ -1083,8 +1229,9 @@ export default function WorkspacePage() {
     const run = runStates[projectId] ?? EMPTY_RUN
     if (!project) return null
     const sourceCode = projectSource(project)
+    const targetFile = projectEntryFile(project)
     const sandboxId = run.result?.sandboxId
-    const files = { [TARGET_FILE]: sourceCode }
+    const files = { [targetFile]: sourceCode }
     const source = {
       sandboxId: sandboxId || undefined,
       baseRunId: run.result?.runId || undefined,
@@ -1108,7 +1255,9 @@ export default function WorkspacePage() {
       message,
       annotations: annotations
         .filter((annotation) => annotation.intent?.trim())
-        .map((annotation) => buildAnnotation(annotation, sourceCode)),
+        .map((annotation) =>
+          buildAnnotation(annotation, sourceCode, targetFile),
+        ),
       sandboxId: sandboxId || undefined,
       files,
       source,
@@ -2074,8 +2223,10 @@ export default function WorkspacePage() {
             exporting={Boolean(
               activeProject && exportingProjectId === activeProject.id,
             )}
+            importing={importing}
             onOpenProject={openProject}
             onNewProject={createProject}
+            onImportFile={handleImportFile}
             onExport={handleExport}
           />
 

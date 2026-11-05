@@ -99,6 +99,10 @@ class AnnotationEnvelope(CamelModel):
     # 与源码结构自行选择父级 / 兄弟级插入点。
     action: Literal["MODIFY", "ADD"] = "MODIFY"
     world_target: dict[str, Any] = Field(default_factory=dict)
+    # ADD 专用：圈选区域相对“最近 data-source 父容器”的归一化位置。
+    # 模型据此决定插入顺序与子容器（例如左侧 / 右侧 / 末尾），而不是
+    # 只按整个页面坐标猜测。
+    relative_target: dict[str, Any] = Field(default_factory=dict)
     target: AnnotationTarget | None = None
     intent: AnnotationIntent | None = None
     payload: dict[str, Any] = Field(default_factory=dict)

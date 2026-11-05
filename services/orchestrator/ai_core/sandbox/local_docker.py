@@ -187,6 +187,100 @@ class LocalDockerSandbox(SandboxProvider):
             created_at=datetime.now(timezone.utc),
         )
 
+    def create_imported(
+        self,
+        project_id: str,
+        files: dict[str, bytes],
+        kind: str,
+        start_command: str,
+        template: str = "react-vite",
+    ) -> SandboxHandle:
+        """用上传的 zip / 图片生成源码创建沙盒。
+
+        文件通过 Docker put_archive 以 tar 形式写入容器（等价于在容器内解压），
+        然后执行导入服务生成的启动命令：
+          - React：``npm install && npm run dev``；
+          - HTML ：``node /opt/vibe-static-server.mjs /app 5173``。
+        """
+        if not files:
+            raise SandboxValidationError("导入项目没有可写入的文件")
+        self._ensure_image()
+
+        sandbox_id = f"sbx_{uuid.uuid4().hex[:20]}"
+        container_name = f"vibe-sandbox-{sandbox_id}"
+        host_port = self._reserve_host_port()
+        env = {
+            "PROJECT_ID": project_id,
+            "SANDBOX_ID": sandbox_id,
+            "VITE_HMR_CLIENT_PORT": str(host_port),
+            # CRA / 旧项目可能读取 PORT；Vite 由命令行参数覆盖。
+            "PORT": str(self.settings.sandbox_dev_port),
+            "HOST": "0.0.0.0",
+        }
+
+        client = self._require_client()
+        container = None
+        try:
+            container = client.containers.create(
+                image=self.settings.sandbox_image,
+                name=container_name,
+                detach=True,
+                working_dir=self.settings.sandbox_workdir,
+                environment=env,
+                command=["sh", "-lc", start_command],
+                ports={
+                    f"{self.settings.sandbox_dev_port}/tcp": ("127.0.0.1", host_port)
+                },
+                labels={
+                    LABEL_MANAGED: "true",
+                    LABEL_SANDBOX_ID: sandbox_id,
+                    LABEL_PROJECT_ID: project_id,
+                },
+                mem_limit=f"{self.settings.sandbox_memory_mb}m",
+                nano_cpus=int(self.settings.sandbox_cpu_limit * 1_000_000_000),
+                pids_limit=self.settings.sandbox_pids_limit,
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges"],
+                init=True,
+            )
+
+            # 先写文件再启动：npm install 与 Vite 启动必须看到完整源码。
+            self._put_archive_bytes(container, files)
+            container.start()
+            self._ensure_git_repo(container)
+            self._wait_until_ready(
+                container,
+                sandbox_id,
+                timeout=self.settings.sandbox_import_timeout_seconds,
+            )
+
+            with self._lock:
+                self._sandboxes[sandbox_id] = container.id
+                self._reserved_ports.add(host_port)
+        except (APIError, DockerException) as exc:
+            if container is not None:
+                self._safe_remove(container)
+            self._release_host_port(host_port)
+            raise SandboxStartupError(f"创建导入沙盒失败: {exc}") from exc
+        except SandboxError:
+            if container is not None:
+                self._safe_remove(container)
+            self._release_host_port(host_port)
+            raise
+
+        return SandboxHandle(
+            sandbox_id=sandbox_id,
+            container_id=container.id,
+            container_name=container_name,
+            project_id=project_id,
+            state="RUNNING",
+            preview_url=f"http://{self.settings.sandbox_preview_host}:{host_port}",
+            host_port=host_port,
+            internal_port=self.settings.sandbox_dev_port,
+            template=template,
+            created_at=datetime.now(timezone.utc),
+        )
+
     def get(self, sandbox_id: str) -> SandboxHandle:
         """恢复已存在沙盒的句柄，供同一标注的多轮增量修改复用。"""
         container = self._get_container(sandbox_id)
@@ -670,6 +764,22 @@ class LocalDockerSandbox(SandboxProvider):
         if not ok:
             raise SandboxError("写入沙盒文件失败: put_archive 返回 False")
 
+    def _put_archive_bytes(self, container: Any, files: dict[str, bytes]) -> None:
+        """写入二进制安全的导入文件；只允许沙盒工作目录内的相对路径。"""
+        normalized: dict[str, bytes] = {}
+        for raw_path, content in files.items():
+            rel_path = self._normalize_path(raw_path)
+            if not isinstance(content, (bytes, bytearray)):
+                raise SandboxValidationError(f"导入文件必须是 bytes: {rel_path}")
+            normalized[rel_path] = bytes(content)
+        archive = self._build_tar_bytes(normalized)
+        try:
+            ok = container.put_archive(self.settings.sandbox_workdir, archive)
+        except DockerException as exc:
+            raise SandboxError(f"写入导入文件失败: {exc}") from exc
+        if not ok:
+            raise SandboxError("写入导入文件失败: put_archive 返回 False")
+
     def _apply_unified_diff(self, container: Any, patch: str) -> None:
         patch_archive = self._build_tar({"vibe.patch.diff": patch})
         try:
@@ -691,11 +801,16 @@ class LocalDockerSandbox(SandboxProvider):
 
     def _build_tar(self, files: dict[str, str]) -> bytes:
         """把相对路径文本文件打成 Docker put_archive 需要的 tar。"""
+        return self._build_tar_bytes(
+            {path: content.encode("utf-8") for path, content in files.items()}
+        )
+
+    def _build_tar_bytes(self, files: dict[str, bytes]) -> bytes:
+        """二进制安全 tar；导入项目可能包含图片 / 字体等非 UTF-8 文件。"""
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w") as tar:
-            for rel_path, content in files.items():
+            for rel_path, data in files.items():
                 self._add_parent_dirs(tar, rel_path)
-                data = content.encode("utf-8")
                 info = tarfile.TarInfo(name=rel_path)
                 info.size = len(data)
                 info.mode = 0o644
@@ -746,9 +861,16 @@ class LocalDockerSandbox(SandboxProvider):
     # --------------------------------------------------------
     # 进程 / 端口 / 日志工具
     # --------------------------------------------------------
-    def _wait_until_ready(self, container: Any, sandbox_id: str) -> None:
-        """轮询容器内 Vite 开发服务器，确认端口已真正可用。"""
-        deadline = time.monotonic() + self.settings.sandbox_start_timeout_seconds
+    def _wait_until_ready(
+        self,
+        container: Any,
+        sandbox_id: str,
+        timeout: int | None = None,
+    ) -> None:
+        """轮询容器内开发服务器，确认端口已真正可用。"""
+        deadline = time.monotonic() + (
+            timeout or self.settings.sandbox_start_timeout_seconds
+        )
         probe = (
             "wget -q -T 2 -O /dev/null "
             f"http://127.0.0.1:{self.settings.sandbox_dev_port}/"

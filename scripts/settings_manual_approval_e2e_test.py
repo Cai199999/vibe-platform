@@ -4,7 +4,7 @@
 覆盖：
   1. 右上角账户菜单包含「账户」与「设置」；
   2. 设置弹窗开关默认关闭，并写入 localStorage；
-  3. 关闭时 `/runs/stream` 的 options 携带 requireManualApproval=false，
+  3. 关闭时 `/supervisor/route` 的 options 携带 requireManualApproval=false，
      构建验证通过后直接 SUCCEEDED，不出现审批暂停；
   4. 打开开关后同一字段变为 true，构建通过后暂停在审批面板；
   5. 批准后正常完成。
@@ -80,7 +80,7 @@ def main() -> int:
 
             def on_request(request) -> None:
                 if request.method == "POST" and request.url.endswith(
-                    "/api/v1/runs/stream"
+                    "/api/v1/supervisor/route"
                 ):
                     try:
                         requests.append(json.loads(request.post_data or "{}"))
@@ -133,9 +133,10 @@ def main() -> int:
             if not requests:
                 fail("未捕获 /runs/stream 请求")
             first_options = requests[-1].get("options") or {}
-            if first_options.get("requireManualApproval") is not False:
+            first_ui = first_options.get("ui") or {}
+            if first_ui.get("requireManualApproval") is not False:
                 fail(f"关闭时请求未携带 false: {first_options}")
-            if "approvalMode" in first_options:
+            if "approvalMode" in first_ui:
                 fail(f"新协议不应再发送 approvalMode: {first_options}")
             print(f"   requireManualApproval=false / sandbox={sandbox_id}")
 
@@ -154,17 +155,19 @@ def main() -> int:
             print("   localStorage 已同步为 true")
 
             print("\n== 5. 打开开关：构建通过后暂停审批 ==")
+            # 第一轮完成后已自动切到预览；重新发送需要先回到画布。
+            active.get_by_role("button", name="画布", exact=True).click()
+            expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
             expect(popover.locator("input")).to_be_enabled(timeout=30_000)
             popover.locator("input").fill("改成绿色", force=True)
             popover.locator(".popover-send").click(force=True)
 
-            pause_cta = active.locator(".view-result-cta.is-pending")
-            expect(pause_cta).to_be_visible(timeout=180_000)
-            pause_cta.click()
+            # 派发后自动聚焦预览，审批面板直接在预览侧展示。
             failure = active.locator(".loading-state.is-approval")
-            expect(failure).to_be_visible(timeout=30_000)
+            expect(failure).to_be_visible(timeout=180_000)
             second_options = requests[-1].get("options") or {}
-            if second_options.get("requireManualApproval") is not True:
+            second_ui = second_options.get("ui") or {}
+            if second_ui.get("requireManualApproval") is not True:
                 fail(f"开启时请求未携带 true: {second_options}")
             failure.get_by_role("button", name="批准并应用").click()
             expect(

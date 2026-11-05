@@ -12,16 +12,26 @@ const POPOVER_MAX_HEIGHT = 360
 const POPOVER_GAP = 14
 const MAX_ANNOTATIONS = 3
 
-// 画布 Mock 页面与沙盒初始源码共享的 data-vibe-target 标记。
-// 圈选时优先按选区中心命中的元素确定目标，帮助 Agent 把自然语言指令绑定到
-// 正确的组件，而不是把三个标注都当成同一个按钮。
+// 画布 Mock 页面与沙盒初始源码共享的 data-source 标记。
+// data-vibe-target 是 M1 的旧标记，保留读取兼容；新源码统一写 data-source。
+// data-source-kind="container" 用于 ADD：插入必须发生在容器内部，绝不能
+// 把新增 JSX 塞进 button / p / h1 等叶子元素。
 const TARGET_META = {
+  page: { label: '页面', role: 'container', component: 'App' },
   'cta-button': { label: '按钮', role: 'button', component: 'App' },
   title: { label: '标题', role: 'heading', component: 'App' },
   copy: { label: '说明文字', role: 'paragraph', component: 'App' },
   kicker: { label: '小标题', role: 'text', component: 'App' },
   card: { label: '卡片', role: 'card', component: 'App' },
 }
+
+// 圈选判定阈值（全部基于真实 DOM 面积，而不是只看中心点）：
+//  - 命中节点被圈覆盖 ≥ 35% 才算“改这个节点”；
+//  - 圈的展示面积超过节点 4 倍时，视为圈了一片留白，走 ADD；
+//  - 节点在圈内面积占比 < 12% 时，说明圈里大部分是空白，也走 ADD。
+const MODIFY_MIN_COVERAGE = 0.35
+const ADD_AREA_RATIO = 4
+const MODIFY_MIN_SELECTION_SHARE = 0.12
 
 function normalizeRect(originX, originY, x, y) {
   return {
@@ -32,11 +42,14 @@ function normalizeRect(originX, originY, x, y) {
   }
 }
 
-function readTarget(element) {
-  const node = element?.closest?.('[data-vibe-target]')
+/** 把一个带标记的 DOM 节点转换为可序列化的目标描述。 */
+function targetForNode(node) {
   if (!node) return null
-  const marker = node.dataset?.vibeTarget
+  const sourceMarker = node.getAttribute?.('data-source')
+  const legacyMarker = node.getAttribute?.('data-vibe-target')
+  const marker = sourceMarker || legacyMarker
   if (!marker) return null
+  const attr = sourceMarker ? 'data-source' : 'data-vibe-target'
   const meta = TARGET_META[marker] ?? {
     label: marker,
     role: node.tagName?.toLowerCase() || 'element',
@@ -44,11 +57,164 @@ function readTarget(element) {
   }
   return {
     marker,
-    selector: `[data-vibe-target='${marker}']`,
+    selector: `[${attr}="${marker}"]`,
     label: meta.label,
     role: meta.role,
     component: meta.component,
     tag: node.tagName?.toLowerCase() || '',
+    kind: node.getAttribute?.('data-source-kind') || 'element',
+  }
+}
+
+function readTarget(element) {
+  const node = element?.closest?.('[data-source], [data-vibe-target]')
+  return targetForNode(node)
+}
+
+/** 从任意节点向上找到最近的“容器型”data-source 祖先。 */
+function nearestSourceContainer(element) {
+  return element?.closest?.(
+    '[data-source-kind="container"], [data-vibe-target="card"]',
+  )
+}
+
+function intersectionArea(a, b) {
+  const left = Math.max(a.left, b.left)
+  const right = Math.min(a.right, b.right)
+  const top = Math.max(a.top, b.top)
+  const bottom = Math.min(a.bottom, b.bottom)
+  if (right <= left || bottom <= top) return 0
+  return (right - left) * (bottom - top)
+}
+
+/** 读取圈选区域内所有 data-source 叶子的真实覆盖面积。 */
+function measureCoverage(pageRoot, selectionRect) {
+  const selectionArea =
+    Math.max(0, selectionRect.width) * Math.max(0, selectionRect.height)
+  if (!pageRoot || selectionArea <= 0) {
+    return { selectionArea, nodes: [], best: null }
+  }
+  const seen = new Set()
+  const nodes = []
+  pageRoot
+    .querySelectorAll('[data-source], [data-vibe-target]')
+    .forEach((node) => {
+      if (seen.has(node)) return
+      seen.add(node)
+      const rect = node.getBoundingClientRect()
+      const area = rect.width * rect.height
+      if (area <= 0) return
+      const overlap = intersectionArea(rect, selectionRect)
+      if (overlap <= 0) return
+      const candidate = {
+        node,
+        target: targetForNode(node),
+        rect,
+        area,
+        overlap,
+        coverage: overlap / area,
+        share: overlap / selectionArea,
+        // 容器只作为 ADD 的插入父级，不参与 MODIFY 命中。
+        isContainer:
+          node.getAttribute('data-source-kind') === 'container' ||
+          node.getAttribute('data-vibe-target') === 'card',
+      }
+      nodes.push(candidate)
+    })
+  return { selectionArea, nodes, best: null }
+}
+
+/**
+ * 圈选几何判定：
+ *  - 命中叶子节点且覆盖充分 → MODIFY，目标是该节点；
+ *  - 没命中叶子 / 圈远大于节点 → ADD，目标是最近的容器型 data-source 父级，
+ *    并给出圈相对该父级的归一化坐标，供模型决定插入位置。
+ */
+function analyzeSelection(pageRoot, selectionRect, centerPoint) {
+  const { selectionArea, nodes } = measureCoverage(pageRoot, selectionRect)
+  const leaves = nodes.filter((item) => !item.isContainer && item.target)
+  const best = leaves.sort((a, b) => {
+    if (b.overlap !== a.overlap) return b.overlap - a.overlap
+    // 面积相同时选更具体的节点（面积更小）。
+    return a.area - b.area
+  })[0]
+
+  const coversEnough =
+    best &&
+    best.coverage >= MODIFY_MIN_COVERAGE &&
+    selectionArea <= best.area * ADD_AREA_RATIO &&
+    best.share >= MODIFY_MIN_SELECTION_SHARE
+  const action = coversEnough ? 'MODIFY' : 'ADD'
+
+  // ADD 的父容器：优先从圈中心向上找容器；中心落在页边距时再退回到
+  // “与圈重叠面积最大的容器”，最后兜底页面根容器。
+  let parentNode = null
+  if (centerPoint) {
+    const elements = document.elementsFromPoint(centerPoint.x, centerPoint.y)
+    for (const element of elements) {
+      if (
+        element.closest?.('.annotation-layer') ||
+        element.closest?.('.viewport-controls') ||
+        element.closest?.('.annotation-limit') ||
+        element.closest?.('.canvas-hint')
+      ) {
+        continue
+      }
+      const container = nearestSourceContainer(element)
+      if (container) {
+        parentNode = container
+        break
+      }
+    }
+  }
+  if (!parentNode) {
+    const centerX = selectionRect.left + selectionRect.width / 2
+    const centerY = selectionRect.top + selectionRect.height / 2
+    const containers = nodes
+      .filter((item) => item.isContainer && item.target)
+      .sort((a, b) => a.area - b.area)
+    const containing = containers.find(
+      (item) =>
+        centerX >= item.rect.left &&
+        centerX <= item.rect.right &&
+        centerY >= item.rect.top &&
+        centerY <= item.rect.bottom,
+    )
+    parentNode =
+      containing?.node ??
+      containers.sort((a, b) => b.overlap - a.overlap)[0]?.node ??
+      pageRoot
+  }
+
+  const parentTarget = targetForNode(parentNode)
+  let relativeRect = null
+  if (parentTarget && parentNode) {
+    const parentRect = parentNode.getBoundingClientRect()
+    if (parentRect.width > 0 && parentRect.height > 0) {
+      relativeRect = {
+        x: Number(
+          ((selectionRect.left - parentRect.left) / parentRect.width).toFixed(6),
+        ),
+        y: Number(
+          ((selectionRect.top - parentRect.top) / parentRect.height).toFixed(6),
+        ),
+        width: Number((selectionRect.width / parentRect.width).toFixed(6)),
+        height: Number((selectionRect.height / parentRect.height).toFixed(6)),
+      }
+    }
+  }
+
+  return {
+    action,
+    target: best?.target ?? null,
+    addTarget: action === 'ADD' ? parentTarget : parentTarget ?? null,
+    relativeRect,
+    measured: {
+      selectionArea: Math.round(selectionArea),
+      hitArea: best ? Math.round(best.overlap) : 0,
+      hitCoverage: best ? Number(best.coverage.toFixed(3)) : 0,
+      candidateCount: leaves.length,
+    },
   }
 }
 
@@ -583,25 +749,6 @@ export default function CanvasStage({
     }
   }
 
-  /** 忽略标注浮层，找到页面内容上的 data-vibe-target。 */
-  const targetAtPoint = (clientX, clientY) => {
-    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null
-    const elements = document.elementsFromPoint(clientX, clientY)
-    for (const element of elements) {
-      if (
-        element.closest?.('.annotation-layer') ||
-        element.closest?.('.viewport-controls') ||
-        element.closest?.('.annotation-limit') ||
-        element.closest?.('.canvas-hint')
-      ) {
-        continue
-      }
-      const target = readTarget(element)
-      if (target) return target
-    }
-    return null
-  }
-
   const handlePointerDown = (event) => {
     // 中键 / 空格 + 左键优先进入平移，避免误触发画布圈选。
     if (viewport.startPan(event)) {
@@ -653,16 +800,31 @@ export default function CanvasStage({
     setDraft(null)
 
     if (rect.width > 0.02 && rect.height > 0.02) {
-      // 以选区中心的页面元素为准；起点落在卡片留白时也能识别到按钮 / 标题。
+      // 把归一化选区还原为屏幕坐标，直接测量 DOM 节点的真实覆盖面积。
+      // 不再只看“中心点命中谁”，否则空白区域会被误判成修改父容器。
       const box = stageRef.current.getBoundingClientRect()
-      const centerWorldX = (rect.x + rect.width / 2) * VIEWPORT_BASE_WIDTH
-      const centerWorldY = (rect.y + rect.height / 2) * VIEWPORT_BASE_HEIGHT
-      const centerX =
-        box.left + viewport.translateX + centerWorldX * viewport.scale
-      const centerY =
-        box.top + viewport.translateY + centerWorldY * viewport.scale
-      const target = targetAtPoint(centerX, centerY) ?? startTargetRef.current
-      onAnnotationAdd?.({ rect, target })
+      const left =
+        box.left +
+        viewport.translateX +
+        rect.x * VIEWPORT_BASE_WIDTH * viewport.scale
+      const top =
+        box.top +
+        viewport.translateY +
+        rect.y * VIEWPORT_BASE_HEIGHT * viewport.scale
+      const screenRect = {
+        left,
+        top,
+        right: left + rect.width * VIEWPORT_BASE_WIDTH * viewport.scale,
+        bottom: top + rect.height * VIEWPORT_BASE_HEIGHT * viewport.scale,
+        width: rect.width * VIEWPORT_BASE_WIDTH * viewport.scale,
+        height: rect.height * VIEWPORT_BASE_HEIGHT * viewport.scale,
+      }
+      const pageRoot = stageRef.current.querySelector('.mock-page')
+      const analysis = analyzeSelection(pageRoot, screenRect, {
+        x: left + screenRect.width / 2,
+        y: top + screenRect.height / 2,
+      })
+      onAnnotationAdd?.({ rect, ...analysis })
     }
     startTargetRef.current = null
   }
@@ -702,20 +864,46 @@ export default function CanvasStage({
             transformOrigin: 'top left',
           }}
         >
-          <div className="mock-page">
-            <section className="mock-card" data-vibe-target="card">
-              <p className="mock-kicker" data-vibe-target="kicker">
+          <div
+            className="mock-page"
+            data-source="page"
+            data-source-kind="container"
+          >
+            <section
+              className="mock-card"
+              data-source="card"
+              data-source-kind="container"
+              data-vibe-target="card"
+            >
+              <p
+                className="mock-kicker"
+                data-source="kicker"
+                data-vibe-target="kicker"
+              >
                 Vibe Studio
               </p>
-              <h1 className="mock-title" data-vibe-target="title">
+              <h1
+                className="mock-title"
+                data-source="title"
+                data-vibe-target="title"
+              >
                 把想法画出来。
                 <br />
                 剩下的交给 Agent。
               </h1>
-              <p className="mock-copy" data-vibe-target="copy">
+              <p
+                className="mock-copy"
+                data-source="copy"
+                data-vibe-target="copy"
+              >
                 在画布上圈选任意组件，写下修改意图。Agent 会生成代码、运行构建，并自动修复错误。
               </p>
-              <button className="mock-cta" data-vibe-target="cta-button" type="button">
+              <button
+                className="mock-cta"
+                data-source="cta-button"
+                data-vibe-target="cta-button"
+                type="button"
+              >
                 开始体验
               </button>
               <span className="cta-hint">圈选任意组件，写下你的修改意图</span>

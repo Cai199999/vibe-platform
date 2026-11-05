@@ -2,8 +2,8 @@
 """E2E：在画布上圈选大卡片内部，要求“添加一个红色的提交按钮”。
 
 覆盖链路：
-  1. 圈选区域未命中具体控件 / 命中的是卡片容器时，前端自动把 action 推断为 ADD；
-  2. 浮层支持手动切换 修改 / 新增；
+  1. 输入“添加…”后 action 自动切换为 ADD；
+  2. 浮层支持手动切换 修改 / 新增（手动选择优先于自动推断）；
   3. AnnotationEnvelope.action=ADD 传到 python-ai，Mock Agent 在卡片内部
      插入完整 <button> JSX，而不是覆盖已有元素；
   4. Applier 全量写回沙盒，npm run build 通过；

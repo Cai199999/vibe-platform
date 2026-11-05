@@ -5,25 +5,44 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import (
+    APIRouter,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+)
+from starlette.concurrency import run_in_threadpool
 from docker.errors import DockerException
 
 from ai_core.api.errors import sandbox_error_to_http
+from ai_core.config import get_settings
 from ai_core.sandbox import get_sandbox_provider
 from ai_core.sandbox.base import SandboxError
+from ai_core.sandbox.importer import import_zip
+from ai_core.sandbox.vision_import import import_image
 from ai_core.schemas import (
     ApplyPatchRequest,
     ApplyPatchResponse,
     CreateSandboxRequest,
     DestroySandboxResponse,
+    ImportSandboxResponse,
     SandboxInfo,
     VerifyResponse,
 )
 
 router = APIRouter(prefix="/api/v1/internal/sandbox", tags=["sandbox"])
+
+_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_ZIP_SUFFIXES = (".zip",)
+_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
 
 
 @router.post("/create", response_model=SandboxInfo, status_code=201)
@@ -102,6 +121,98 @@ def verify(
         logs=result.logs,
         logs_truncated=result.logs_truncated,
         finished_at=datetime.now(timezone.utc),
+    )
+
+
+@router.post("/import", response_model=ImportSandboxResponse, status_code=201)
+async def import_project(
+    project_id: str = Form(min_length=1, max_length=64),
+    file: UploadFile = File(...),
+) -> ImportSandboxResponse:
+    """导入 zip / 图片并直接启动一个可预览沙盒。
+
+    浏览器 -> Java BFF -> 本接口。所有安全校验（路径穿越、zip 炸弹、
+    文件数量、体积、加密包、符号链接）都在服务端完成；上传内容绝不执行
+    宿主机命令，只在隔离容器内解压、npm install 或起静态服务器。
+    """
+    if not _PROJECT_ID_RE.fullmatch(project_id):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "IMPORT_INVALID_PROJECT_ID", "message": "非法 projectId"},
+        )
+
+    settings = get_settings()
+    filename = Path(file.filename or "upload").name
+    lowered = filename.lower()
+    is_zip = lowered.endswith(_ZIP_SUFFIXES)
+    is_image = lowered.endswith(_IMAGE_SUFFIXES)
+    if not is_zip and not is_image:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "IMPORT_UNSUPPORTED_FILE",
+                "message": "只支持 .zip / .png / .jpg / .jpeg",
+            },
+        )
+
+    limit = (
+        settings.import_max_archive_bytes if is_zip else settings.import_max_image_bytes
+    )
+    # 多读 1 字节用于判断是否超限，避免把超大文件完整读进内存。
+    data = await file.read(limit + 1)
+    if len(data) > limit:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "code": "IMPORT_FILE_TOO_LARGE",
+                "message": f"上传文件超过限制（{limit} 字节）",
+            },
+        )
+    if not data:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "IMPORT_EMPTY_FILE", "message": "上传文件为空"},
+        )
+
+    provider = get_sandbox_provider()
+    try:
+        if is_zip:
+            imported = await run_in_threadpool(import_zip, data, settings)
+        else:
+            imported = await run_in_threadpool(
+                import_image,
+                data,
+                filename,
+                file.content_type or "",
+                settings,
+            )
+        handle = await run_in_threadpool(
+            provider.create_imported,
+            project_id,
+            imported.files,
+            imported.kind,
+            imported.start_command,
+            imported.template,
+        )
+    except SandboxError as exc:
+        raise sandbox_error_to_http(exc) from exc
+    except DockerException as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "SANDBOX_DOCKER_UNAVAILABLE", "message": str(exc)},
+        ) from exc
+
+    return ImportSandboxResponse(
+        sandbox_id=handle.sandbox_id,
+        preview_url=handle.preview_url,
+        project_id=project_id,
+        kind=imported.kind,
+        entry_file=imported.entry_file,
+        file_count=imported.file_count,
+        files=imported.text_files,
+        warnings=imported.warnings,
+        source_name=filename,
+        created_at=datetime.now(timezone.utc),
     )
 
 

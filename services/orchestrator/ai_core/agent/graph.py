@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, interrupt
 
 from ai_core.agent.checkpoint import (
@@ -34,12 +35,14 @@ from ai_core.agent.checkpoint import (
 from ai_core.agent.events import EventSink, NullEventSink
 from ai_core.agent.llm import AgentLLM
 from ai_core.agent.state import AgentState
+from ai_core.config import get_settings
 from ai_core.editor import (
     CodeEdit,
     EditKind,
     default_editor_registry,
 )
 from ai_core.sandbox.base import SandboxError, SandboxProvider
+from ai_core.tools import ToolRegistry, build_default_toolbox
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +104,25 @@ class AgentGraphRunner:
         # 协作式取消：每个节点执行前后检查一次，无法打断正在进行的 LLM
         # 调用，但能保证写沙盒 / 构建之后不再继续推进。
         self._cancel_check = cancel_check
+
+        # LangGraph 工具箱：当前 Graph 以结构化 JSON 生成代码，不主动发起
+        # tool call；但工具已注册为真正的 ToolNode，后续接入 tool-calling
+        # 模型时可直接把 self._tool_node 作为图节点挂载，无需改业务代码。
+        #
+        # MCP 预留：官方 mcp SDK 的连接应放在 Service 启动阶段，而不是节点
+        # 内。示例（伪代码，未引入依赖）：
+        #   from mcp import ClientSession, StdioServerParameters
+        #   from mcp.client.stdio import stdio_client
+        #   params = StdioServerParameters(command=cfg["command"], args=cfg["args"])
+        #   async with stdio_client(params) as (read, write):
+        #       async with ClientSession(read, write) as session:
+        #           await session.initialize()
+        #           tools = await session.list_tools()
+        # 再把远端工具适配为 BaseTool 注册进 ToolRegistry；MCP 配置只允许
+        # 来自服务端 settings.mcp_servers，绝不接受浏览器输入。
+        self._settings = get_settings()
+        self._toolbox: ToolRegistry = build_default_toolbox(self._settings)
+        self._tool_node = ToolNode(self._toolbox.list_tools())
         self._graph = self._build()
 
     def run(

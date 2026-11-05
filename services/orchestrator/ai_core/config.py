@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Any
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -57,6 +58,8 @@ class Settings(BaseSettings):
     sandbox_pids_limit: int = 256
     sandbox_start_timeout_seconds: int = 90
     sandbox_verify_timeout_seconds: int = 180
+    # 导入项目需要先执行 npm install；首次安装依赖远慢于启动预装模板。
+    sandbox_import_timeout_seconds: int = 300
 
     # 单次响应返回的最大日志字符数，避免把超长构建日志塞进 HTTP 响应。
     sandbox_log_max_chars: int = 60_000
@@ -67,6 +70,26 @@ class Settings(BaseSettings):
 
     # 项目导出包上限（已排除 node_modules / .git / dist，正常源码项目远小于该值）。
     sandbox_max_export_bytes: int = 33_554_432
+
+    # ------------------------------------------------------------
+    # 项目导入（Zip / 图片）
+    # ------------------------------------------------------------
+    # 上传包 / 图片硬上限；在 FastAPI 读完请求体后立刻校验，避免 zip 炸弹。
+    import_max_archive_bytes: int = 33_554_432
+    import_max_image_bytes: int = 12_582_912
+    import_max_uncompressed_bytes: int = 134_217_728
+    import_max_entries: int = 4_000
+    # 返回给前端的文本源码预算；超出部分仍留在沙盒中，只是不进入浏览器状态。
+    import_max_text_files: int = 400
+    import_max_text_bytes: int = 8_388_608
+
+    # 图片导入视觉模型。协议固定为 OpenAI Chat Completions 兼容的
+    # image_url 消息；没有配置密钥时使用确定性 Mock，保证离线演示可用。
+    vision_api_key: str = ""
+    vision_base_url: str = "https://api.openai.com/v1"
+    vision_model: str = "gpt-4o"
+    vision_timeout_seconds: int = 90
+    vision_max_image_side: int = 1600
 
     # ------------------------------------------------------------
     # Agent
@@ -90,6 +113,26 @@ class Settings(BaseSettings):
     agent_approval_ttl_hours: int = 24
     # 每个 Run 的内存事件缓冲上限；生产切换 Redis Stream 后由 stream TTL 管理。
     agent_event_buffer_size: int = 2000
+
+    # 声明式 Skill 目录：*.skill.json，由 AgentRegistry 加载，并在 UI Agent
+    # 运行时把 systemPrompt 追加进模型上下文。
+    skills_dir: str = "config/skills"
+
+    # 示例 Shell Tool：默认关闭。开启后也只允许只读命令、限定工作目录，
+    # 绝不把宿主 AI Core 的任意命令执行能力直接暴露给模型。
+    tool_shell_enabled: bool = False
+    tool_shell_workdir: str = "/tmp/vibe-toolbox"
+    tool_shell_timeout_seconds: int = 10
+    tool_shell_max_output_chars: int = 20_000
+
+    # ------------------------------------------------------------
+    # MCP（Model Context Protocol）
+    # ------------------------------------------------------------
+    # 列表项示例（未来由官方 mcp SDK 挂载）：
+    #   [{"name":"filesystem","transport":"stdio",
+    #     "command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/tmp"]}]
+    # 当前只保存配置，不建立连接；绝不能从浏览器传入。
+    mcp_servers: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------
     # Architect（M2.5 全栈架构澄清与 Path 生成）
