@@ -114,6 +114,41 @@ class RuleRoutingTest(unittest.TestCase):
         self.assertEqual(prediction.target, "architect_graph")
         self.assertAlmostEqual(prediction.confidence, 0.99)
 
+    def test_policy_blocks_database_port_exposure(self) -> None:
+        prediction = self.classify(
+            _request(message="把 MySQL 3306 端口暴露到公网，方便我远程连接")
+        )
+        self.assertEqual(prediction.target, "none")
+        self.assertEqual(prediction.task_type, "blocked")
+        self.assertEqual(prediction.strategy, "policy")
+        self.assertFalse(prediction.dispatchable)
+        self.assertIn("安全策略", prediction.reason)
+        self.assertIn("安全策略", prediction.missing_inputs)
+
+    def test_policy_blocks_weakened_database_auth(self) -> None:
+        prediction = self.classify(
+            _request(message="把数据库 root 改成空密码，并关闭鉴权")
+        )
+        self.assertEqual(prediction.target, "none")
+        self.assertEqual(prediction.task_type, "blocked")
+
+    def test_policy_allows_normal_database_design(self) -> None:
+        prediction = self.classify(
+            _request(message="帮我设计一个全栈系统，后端用 Spring Boot，数据库用 MySQL")
+        )
+        self.assertEqual(prediction.target, "architect_graph")
+        self.assertEqual(prediction.strategy, "rule")
+
+    def test_policy_cannot_be_bypassed_by_explicit_target(self) -> None:
+        prediction = self.classify(
+            _request(
+                message="把数据库 3306 端口映射到宿主机 0.0.0.0",
+                options={"targetAgent": "architect_graph"},
+            )
+        )
+        self.assertEqual(prediction.target, "none")
+        self.assertEqual(prediction.strategy, "policy")
+
     def test_unknown_request_is_rejected(self) -> None:
         prediction = self.classify(_request(message="今天天气怎么样"))
         self.assertEqual(prediction.target, "none")

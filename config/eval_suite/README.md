@@ -83,6 +83,10 @@ python scripts/run_eval.py --filter case_001 --verbose
     expected_missing_inputs: []              # 只要求包含；空表示必须为空
     expected_code_contains: ["background-color:red"]
     expected_code_not_contains: ["background-color:blue"]
+    expected_reason_contains: ["安全策略"]     # 仅安全拦截类用例
+    expected_hitl: "architect.clarification.required"
+    expected_hitl_slot: "app.shape"
+    expected_gate_status: "AWAITING_CONTRACT"
     max_duration_ms: 2000
 ```
 
@@ -97,6 +101,10 @@ python scripts/run_eval.py --filter case_001 --verbose
 | `expected_handoffs` | 子图交接顺序；`both` 必须是 `["architect_graph", "ui_graph"]` |
 | `expected_missing_inputs` | 实际值必须包含这些项；声明为空列表时要求实际为空 |
 | `expected_code_contains` | Mock 生成代码必须包含的稳定片段；每条独立报告 |
+| `expected_reason_contains` | `decision.reason` 必须包含全部关键词；用于证明是策略拦截而非未知意图 |
+| `expected_hitl` | 期望的 Architect 暂停事件；离线引擎真实执行子图并观察事件缓冲 |
+| `expected_hitl_slot` | 首个澄清问题槽位；必须与 `expected_hitl` 同时声明 |
+| `expected_gate_status` | both 派发后的门控状态；真实引擎走 `/supervisor/dispatch` |
 | `max_duration_ms` | 单用例耗时预算；超出即失败 |
 
 未知字段、重复 ID、fixture 路径穿越都会在加载阶段直接报错，避免“配置写错

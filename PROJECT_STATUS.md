@@ -44,7 +44,8 @@ UI 修改在 Docker 沙盒中自动编码、构建、验证并生成 Git checkpo
 | M3 反馈自优化契约 | 📐 设计完成 | `REVISE` 采集、聚类、候选 Prompt、离线评估、人工审批；**不做微调** |
 | M3.1 管理中台骨架 | ✅ 已完成 | `/admin` 入口与路由守卫、`@IsAdmin` Mock RBAC、`GET /admin/metrics` 内存聚合、四卡 + Agent 占比 + 最近 10 次 Run |
 | Eval Suite v0.1 | ✅ 已完成 | 10 条核心 YAML 用例、Supervisor 路由断言、Mock 代码断言、JSON / Markdown / JUnit 报告、Docker 包装 CLI |
-| Eval Suite v0.2 | ✅ 已完成 | `scripts/run_eval.py` 真实 Docker 沙盒引擎：路由 + UI 子图执行 + 沙盒导出源码断言 + `docs/eval_report.md`；10/10 PASS |
+| Eval Suite v0.2 | ✅ 已完成 | `scripts/run_eval.py` 真实 Docker 沙盒引擎：路由 + UI 子图执行 + 沙盒导出源码断言 + `docs/eval_report.md` |
+| Eval Suite v0.3 | ✅ 已完成 | 安全策略拦截（数据库端口 / 鉴权弱化）、Architect HITL 真实 SSE 断言、both 门控断言；双引擎 10/10 PASS |
 | Admin Eval 契约 | 📐 契约预留 | `POST /api/v1/admin/eval/run`、评测详情 / 历史得分曲线；Eval 与 Knowledge“考题 / 教材”解耦 |
 | M3.2-M3.4 中台实现 | ⏳ 未开始 | 知识中台 → Prompt Registry → 反馈自优化 |
 | 全栈代码生成 | ⏳ 未开始 | 契约尚未驱动 Spring Boot / MySQL / 脚本生成 |
@@ -142,6 +143,7 @@ flowchart LR
 
 - `Supervisor Graph` 只做意图分类、Agent 解析与 Handoff，不写代码。
 - 路由优先级：
+  0. 安全策略（数据库端口公网暴露 / 鉴权弱化）→ `blocked`，不可被显式目标绕过
   1. 显式 `targetAgent`
   2. 显式 `scopeHint`
   3. UI + 架构关键词 → both
@@ -226,16 +228,19 @@ flowchart LR
 ### 4.9 自动化评测（Eval Suite）
 
 - `config/eval_suite/core_cases.yaml`：10 条核心用例，覆盖 UI 改色 / 文案 /
-  缩放 / 新增、双标注批量、Architect、both、CustomAgent、缺标注守卫与未知意图。
+  空白区域新增、双标注批量、Architect HITL、both 门控、安全策略拦截、
+  CustomAgent、缺标注守卫与未知意图。
 - `services/orchestrator/eval_suite/`：Loader 严格校验 → 真实 `SupervisorService`
-  路由 → `MockAgentLLM` 确定性代码生成 → 断言 → 报告；不启动业务服务与沙盒。
+  路由 → Architect HITL / both 门控真实执行 → `MockAgentLLM` 确定性代码生成
+  → 断言 → 报告；不启动 HTTP 服务与真实沙盒。
 - `./scripts/eval_suite.sh run`：复用 `python-ai` 镜像一次性容器执行，输出
   `reports/eval/` 下的 JSON / Markdown / JUnit；失败时逐条打印期望值与实际值。
 - `scripts/run_eval.py`：宿主机直连 BFF / AI Core，逐条走 Supervisor 路由；
-  有代码断言的用例启动真实 Docker 沙盒，完成构建与预览后从沙盒导出包读取
-  `src/App.jsx`，用正则断言并写入 `docs/eval_report.md`。
+  HITL 用例读取 Architect SSE 并断言暂停事件与首个问题槽位，both 用例读
+  `/dispatch` 门控，UI 用例启动真实 Docker 沙盒并从导出包读取 `src/App.jsx`，
+  最终写入 `docs/eval_report.md`。
 - 每条用例使用独立 `projectId + threadId`，避免历史会话快照污染；`finally`
-  删除沙盒，报告包含成功数、失败数、通过率、耗时与清理统计。
+  删除沙盒 / 取消后台 Run，报告包含成功数、失败数、通过率、耗时与清理统计。
 - Eval 与 Knowledge 解耦：评测集是“考题”，知识库是“教材”；考题不写教材、
   不被 RAG 检索，涉及知识库的评测需固定 `knowledgeSnapshotId`。
 - 管理中台预留 `POST /api/v1/admin/eval/run` 与历史得分曲线契约，后续一键触发。
@@ -285,9 +290,9 @@ flowchart LR
 
 | 类型 | 结果 |
 |---|---|
-| Python 单元测试 | **81 passed**（含 Eval Suite 9 项） |
-| Eval Suite 离线跑批 | **PASS**（10/10，约 40 ms） |
-| Eval Suite 真实沙盒跑批 | **PASS**（10/10，35.72s，创建 / 清理沙盒各 6 个） |
+| Python 单元测试 | **85 passed**（含 Eval Suite 9 项、安全策略 4 项） |
+| Eval Suite 离线跑批 | **PASS**（10/10，78.1 ms） |
+| Eval Suite 真实沙盒跑批 | **PASS**（10/10，22.71s，创建 / 清理沙盒各 4 个） |
 | Supervisor API E2E（直连 AI Core） | **PASS** |
 | Supervisor API E2E（经 Java BFF） | **PASS** |
 | both 混合 API E2E（直连 / BFF） | **PASS** |

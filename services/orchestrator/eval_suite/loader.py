@@ -45,7 +45,22 @@ _ASSERTION_KEYS = {
     "expected_missing_inputs",
     "expected_code_contains",
     "expected_code_not_contains",
+    "expected_reason_contains",
+    "expected_hitl",
+    "expected_hitl_slot",
+    "expected_gate_status",
     "max_duration_ms",
+}
+
+_ALLOWED_HITL_EVENTS = {
+    "architect.clarification.required",
+    "clarification.required",
+}
+_ALLOWED_GATE_STATUSES = {
+    "AWAITING_CONTRACT",
+    "RELEASING",
+    "RELEASED",
+    "FAILED",
 }
 
 
@@ -255,6 +270,39 @@ def _parse_assertions(raw: Mapping[str, Any], *, context: str) -> EvalAssertions
             f"{context} expected_missing_inputs",
         )
 
+    expected_hitl = _optional_str(
+        raw.get("expected_hitl"),
+        f"{context} expected_hitl",
+    )
+    if expected_hitl is not None and expected_hitl not in _ALLOWED_HITL_EVENTS:
+        allowed = ", ".join(sorted(_ALLOWED_HITL_EVENTS))
+        raise EvalSuiteError(
+            f"{context} expected_hitl 非法: {expected_hitl}；允许值: {allowed}"
+        )
+
+    expected_hitl_slot = _optional_str(
+        raw.get("expected_hitl_slot"),
+        f"{context} expected_hitl_slot",
+    )
+    if expected_hitl_slot and not expected_hitl:
+        raise EvalSuiteError(
+            f"{context} expected_hitl_slot 必须与 expected_hitl 同时声明"
+        )
+
+    expected_gate_status = _optional_str(
+        raw.get("expected_gate_status"),
+        f"{context} expected_gate_status",
+    )
+    if (
+        expected_gate_status is not None
+        and expected_gate_status not in _ALLOWED_GATE_STATUSES
+    ):
+        allowed = ", ".join(sorted(_ALLOWED_GATE_STATUSES))
+        raise EvalSuiteError(
+            f"{context} expected_gate_status 非法: {expected_gate_status}；"
+            f"允许值: {allowed}"
+        )
+
     return EvalAssertions(
         expected_handoff=handoff,
         expected_agent=_optional_str(
@@ -276,6 +324,13 @@ def _parse_assertions(raw: Mapping[str, Any], *, context: str) -> EvalAssertions
             raw.get("expected_code_not_contains", []),
             f"{context} expected_code_not_contains",
         ),
+        expected_reason_contains=_string_list(
+            raw.get("expected_reason_contains", []),
+            f"{context} expected_reason_contains",
+        ),
+        expected_hitl=expected_hitl,
+        expected_hitl_slot=expected_hitl_slot,
+        expected_gate_status=expected_gate_status,
         max_duration_ms=max_duration,
     )
 

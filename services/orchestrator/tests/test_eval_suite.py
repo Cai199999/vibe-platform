@@ -57,8 +57,11 @@ class LoaderTest(unittest.TestCase):
         self.assertEqual(len({case.case_id for case in suite.cases}), 10)
         self.assertEqual(
             sum(1 for case in suite.cases if case.needs_code_generation),
-            6,
+            4,
         )
+        # 新契约：HITL 与 both 门控必须各自有真实执行用例。
+        self.assertEqual(sum(1 for case in suite.cases if case.needs_hitl), 1)
+        self.assertEqual(sum(1 for case in suite.cases if case.needs_gate), 1)
 
     def test_duplicate_ids_are_rejected(self) -> None:
         path = self._write(
@@ -69,8 +72,7 @@ class LoaderTest(unittest.TestCase):
             load_suite(path)
 
     def test_unknown_assertion_field_is_rejected(self) -> None:
-        path = self._write(
-            """
+        path = self._write("""
 - id: "case_bad"
   name: "未知字段"
   input:
@@ -78,14 +80,12 @@ class LoaderTest(unittest.TestCase):
   assertions:
     expected_handoff: "handoff_ui"
     expected_magic: true
-"""
-        )
+""")
         with self.assertRaisesRegex(EvalSuiteError, "未知字段"):
             load_suite(path)
 
     def test_fixture_traversal_is_rejected(self) -> None:
-        path = self._write(
-            """
+        path = self._write("""
 - id: "case_traversal"
   name: "路径穿越"
   input:
@@ -93,14 +93,12 @@ class LoaderTest(unittest.TestCase):
     fixture: "../secret"
   assertions:
     expected_handoff: "handoff_ui"
-"""
-        )
+""")
         with self.assertRaisesRegex(EvalSuiteError, "穿越"):
             load_suite(path)
 
     def test_single_annotation_inherits_case_text(self) -> None:
-        path = self._write(
-            """
+        path = self._write("""
 - id: "case_inherit"
   name: "继承文案"
   input:
@@ -112,8 +110,7 @@ class LoaderTest(unittest.TestCase):
         selector: "[data-source='primary-action']"
   assertions:
     expected_handoff: "handoff_ui"
-"""
-        )
+""")
         suite = load_suite(path)
         annotation = suite.cases[0].input.annotations[0]
         self.assertEqual(annotation["payload"]["text"], "改成红色")

@@ -79,6 +79,13 @@ class Assertions:
     expected_missing_inputs: tuple[str, ...] | None = None
     expected_code_contains: tuple[str, ...] = ()
     expected_code_not_contains: tuple[str, ...] = ()
+    # 安全策略 / 路由原因断言：避免“未知意图 rejected”冒充“策略拦截”。
+    expected_reason_contains: tuple[str, ...] = ()
+    # Architect HITL：真实执行子图并等待暂停事件。
+    expected_hitl: str | None = None
+    expected_hitl_slot: str | None = None
+    # both 门控：dispatch 后断言门控状态。
+    expected_gate_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +105,16 @@ class CaseSpec:
             self.assertions.expected_code_contains
             or self.assertions.expected_code_not_contains
         )
+
+    @property
+    def needs_hitl(self) -> bool:
+        """是否真实启动 Architect 并等待澄清暂停事件。"""
+        return bool(self.assertions.expected_hitl)
+
+    @property
+    def needs_gate(self) -> bool:
+        """是否真实 dispatch both 并读取门控状态。"""
+        return bool(self.assertions.expected_gate_status)
 
 
 @dataclass
@@ -126,6 +143,9 @@ class CaseResult:
     sandbox_id: str | None = None
     run_status: str | None = None
     code_source: str | None = None
+    hitl_event: str | None = None
+    hitl_slot: str | None = None
+    gate_status: str | None = None
     error: str | None = None
 
     @property
@@ -163,6 +183,27 @@ class ApiClient:
     @property
     def run_path(self) -> str:
         return "/api/v1/runs" if self.is_bff else "/api/v1/internal/runs/execute"
+
+    @property
+    def supervisor_dispatch_path(self) -> str:
+        return (
+            "/api/v1/supervisor/dispatch"
+            if self.is_bff
+            else "/api/v1/internal/supervisor/dispatch"
+        )
+
+    @property
+    def architect_stream_path(self) -> str:
+        return (
+            "/api/v1/architect/runs/stream"
+            if self.is_bff
+            else "/api/v1/internal/architect/runs/stream"
+        )
+
+    def architect_cancel_path(self, run_id: str) -> str:
+        if self.is_bff:
+            return f"/api/v1/architect/runs/{run_id}/cancel"
+        return f"/api/v1/internal/architect/runs/{run_id}/cancel"
 
     def sandbox_path(self, sandbox_id: str) -> str:
         if self.is_bff:
@@ -229,6 +270,69 @@ class ApiClient:
         except TimeoutError as exc:
             raise EvalError(f"请求超时: {method} {path}") from exc
 
+    def post_sse_until(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        stop_types: set[str],
+        timeout: float = 120,
+    ) -> list[dict[str, Any]]:
+        """POST 并读取 SSE，直到命中终态事件或连接关闭。
+
+        只解析 ``data:`` 帧，忽略 ``retry:`` / 心跳注释。返回读到的事件
+        列表（含终止事件），由调用方判断实际类型，避免把“流正常结束”
+        误判成“事件命中”。
+        """
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
+        )
+        events: list[dict[str, Any]] = []
+        data_lines: list[str] = []
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if not line:
+                        if data_lines:
+                            event = _decode_sse_data(data_lines)
+                            data_lines = []
+                            if event is not None:
+                                events.append(event)
+                                if event.get("type") in stop_types:
+                                    break
+                        continue
+                    if line.startswith("data:"):
+                        data_lines.append(line[5:].lstrip())
+                if data_lines:
+                    event = _decode_sse_data(data_lines)
+                    if event is not None:
+                        events.append(event)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise EvalError(f"SSE HTTP {exc.code}: {body[:500]}") from exc
+        except urllib.error.URLError as exc:
+            raise EvalError(f"无法连接 {self.base_url}: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise EvalError(f"SSE 超时: {path}") from exc
+        return events
+
+    def cancel_architect_run(self, run_id: str, reason: str = "eval cleanup") -> None:
+        status, body = self.request_json(
+            "POST",
+            self.architect_cancel_path(run_id),
+            {"reason": reason},
+            timeout=30,
+        )
+        if status not in (200, 202, 204, 404):
+            raise EvalError(f"取消 Architect Run 失败 HTTP {status}: {body}")
+
     def read_sandbox_source(self, sandbox_id: str, path: str) -> str:
         """从沙盒导出包中读取真实源码，而不是 Vite 转换后的模块。"""
         status, data = self.request_bytes(
@@ -274,6 +378,18 @@ class ApiClient:
         )
         if status not in (200, 202, 204, 404):
             raise EvalError(f"清理沙盒失败 HTTP {status}: {body}")
+
+
+def _decode_sse_data(lines: list[str]) -> dict[str, Any] | None:
+    """把 SSE data 行拼成事件 dict；非 JSON 帧直接忽略。"""
+    raw = "\n".join(lines).strip()
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
 
 
 def _json_or_text(body: str) -> Any:
@@ -431,6 +547,26 @@ def _parse_assertions(raw: dict[str, Any], *, context: str) -> Assertions:
             )
         )
 
+    expected_hitl = _optional_str(raw.get("expected_hitl"))
+    if expected_hitl is not None and expected_hitl not in {
+        "architect.clarification.required",
+        "clarification.required",
+    }:
+        raise EvalError(f"{context} expected_hitl 非法: {expected_hitl}")
+
+    expected_hitl_slot = _optional_str(raw.get("expected_hitl_slot"))
+    if expected_hitl_slot and not expected_hitl:
+        raise EvalError(f"{context} expected_hitl_slot 必须与 expected_hitl 同时声明")
+
+    expected_gate_status = _optional_str(raw.get("expected_gate_status"))
+    if expected_gate_status is not None and expected_gate_status not in {
+        "AWAITING_CONTRACT",
+        "RELEASING",
+        "RELEASED",
+        "FAILED",
+    }:
+        raise EvalError(f"{context} expected_gate_status 非法: {expected_gate_status}")
+
     return Assertions(
         expected_handoff=handoff,
         expected_agent=_optional_str(raw.get("expected_agent")),
@@ -450,6 +586,15 @@ def _parse_assertions(raw: dict[str, Any], *, context: str) -> Assertions:
                 f"{context} expected_code_not_contains",
             )
         ),
+        expected_reason_contains=tuple(
+            _str_list(
+                raw.get("expected_reason_contains", []),
+                f"{context} expected_reason_contains",
+            )
+        ),
+        expected_hitl=expected_hitl,
+        expected_hitl_slot=expected_hitl_slot,
+        expected_gate_status=expected_gate_status,
     )
 
 
@@ -564,6 +709,28 @@ class RealSandboxEvalRunner:
                 if isinstance(item, dict) and item.get("agentId")
             ]
             result.checks.extend(_check_decision(decision, case.assertions, handoffs))
+            result.checks.extend(_check_reason(decision, case.assertions))
+
+            if case.needs_hitl:
+                (
+                    hitl_checks,
+                    hitl_event,
+                    hitl_slot,
+                    hitl_run_id,
+                ) = self._execute_architect_hitl(case, project_id)
+                result.checks.extend(hitl_checks)
+                result.hitl_event = hitl_event
+                result.hitl_slot = hitl_slot
+                result.run_id = hitl_run_id
+
+            if case.needs_gate:
+                gate_checks, gate_status, gate_run_id = self._execute_both_gate(
+                    route_payload,
+                    str(case.assertions.expected_gate_status),
+                )
+                result.checks.extend(gate_checks)
+                result.gate_status = gate_status
+                result.run_id = result.run_id or gate_run_id
 
             if case.needs_code_generation:
                 (
@@ -624,6 +791,152 @@ class RealSandboxEvalRunner:
                 },
             },
         }
+
+    def _execute_architect_hitl(
+        self,
+        case: CaseSpec,
+        project_id: str,
+    ) -> tuple[list[Check], str | None, str | None, str | None]:
+        """真实启动 Architect SSE，验证其在生成契约前暂停澄清。
+
+        断言“事件命中 + 首个问题槽位”，而不是只看 HTTP 200：Architect
+        也可能直接跑完并返回契约，那说明 HITL 中断失效。
+        """
+        expected_event = str(case.assertions.expected_hitl)
+        expected_slot = case.assertions.expected_hitl_slot
+        run_id = f"eval_hitl_{self.run_tag}_{case.case_id}"[:64]
+        payload = {
+            "runId": run_id,
+            "tenantId": TENANT_ID,
+            "projectId": project_id,
+            "projectName": f"Eval HITL {case.case_id}"[:128],
+            "source": {},
+            "options": {
+                "llmProvider": "mock",
+                "ragProvider": "markdown",
+                "ragTopK": 3,
+            },
+        }
+
+        events: list[dict[str, Any]] = []
+        checks: list[Check] = []
+        try:
+            events = self.client.post_sse_until(
+                self.client.architect_stream_path,
+                payload,
+                stop_types={
+                    expected_event,
+                    "architect.contract.ready",
+                    "architect.contract.confirmed",
+                    "architect.cancelled",
+                    "architect.failed",
+                },
+                timeout=min(self.client.timeout, 120),
+            )
+        finally:
+            try:
+                self.client.cancel_architect_run(run_id)
+            except Exception as exc:  # noqa: BLE001 - 清理失败只告警
+                self.cleanup_warnings.append(
+                    f"{case.case_id}: architect {run_id}: {exc}"
+                )
+
+        event = next(
+            (item for item in events if item.get("type") == expected_event),
+            None,
+        )
+        actual_type = events[-1].get("type") if events else None
+        checks.append(
+            Check(
+                name="hitl_event",
+                passed=event is not None,
+                expected=expected_event,
+                actual=actual_type,
+                message="Architect 未在契约生成前暂停澄清",
+            )
+        )
+
+        first_slot = None
+        if event is not None:
+            event_payload = event.get("payload") or {}
+            questions = event_payload.get("questions") or []
+            if questions and isinstance(questions[0], dict):
+                first_slot = questions[0].get("slot")
+        if expected_slot is not None:
+            checks.append(
+                Check(
+                    name="hitl_first_slot",
+                    passed=first_slot == expected_slot,
+                    expected=expected_slot,
+                    actual=first_slot,
+                    message="首个澄清问题的槽位与预期不一致",
+                )
+            )
+        return checks, event.get("type") if event else None, first_slot, run_id
+
+    def _execute_both_gate(
+        self,
+        route_payload: dict[str, Any],
+        expected_status: str,
+    ) -> tuple[list[Check], str | None, str | None]:
+        """真实 dispatch both，断言只启动 Architect 且门控等待契约。
+
+        dispatch 只负责启动 Architect；UI 必须等到契约 CONFIRMED 后由
+        ``/gates/{id}/release`` 放行，因此这里绝不能出现 ui_graph。
+        """
+        status, body = self.client.request_json(
+            "POST",
+            self.client.supervisor_dispatch_path,
+            route_payload,
+            timeout=min(self.client.timeout, 120),
+        )
+        # 派发是异步启动：BFF 返回 202 Accepted 与 AI Core 一致。
+        if status not in (200, 202):
+            raise EvalError(f"Supervisor dispatch HTTP {status}: {body}")
+        if not isinstance(body, dict):
+            raise EvalError(f"Supervisor dispatch 返回非 JSON: {body}")
+
+        gate = body.get("gate") if isinstance(body.get("gate"), dict) else None
+        actual_status = gate.get("status") if gate else None
+        architect_run_id = gate.get("architectRunId") if gate else None
+        dispatched = [
+            item.get("agentId")
+            for item in (body.get("dispatches") or [])
+            if isinstance(item, dict)
+        ]
+
+        checks = [
+            Check(
+                name="gate_status",
+                passed=actual_status == expected_status,
+                expected=expected_status,
+                actual=actual_status,
+                message="both 门控状态与预期不一致",
+            ),
+            Check(
+                name="gate_only_architect",
+                passed=dispatched == ["architect_graph"],
+                expected=["architect_graph"],
+                actual=dispatched,
+                message="契约确认前必须只启动 Architect",
+            ),
+            Check(
+                name="gate_ui_blocked",
+                passed="ui_graph" not in dispatched,
+                expected="不包含 ui_graph",
+                actual=dispatched,
+                message="UI 子图在门控释放前被启动",
+            ),
+        ]
+
+        if architect_run_id:
+            try:
+                self.client.cancel_architect_run(architect_run_id)
+            except Exception as exc:  # noqa: BLE001 - 清理失败只告警
+                self.cleanup_warnings.append(
+                    f"gate architect {architect_run_id}: {exc}"
+                )
+        return checks, actual_status, architect_run_id
 
     def _execute_ui_case(
         self,
@@ -841,6 +1154,22 @@ def _check_decision(
     return checks
 
 
+def _check_reason(decision: dict[str, Any], expected: Assertions) -> list[Check]:
+    """安全拦截必须验证原因关键词，防止未知意图冒充策略拒绝。"""
+    if not expected.expected_reason_contains:
+        return []
+    reason = str(decision.get("reason") or "")
+    return [
+        Check(
+            name="reason_contains",
+            passed=all(item in reason for item in expected.expected_reason_contains),
+            expected=list(expected.expected_reason_contains),
+            actual=reason,
+            message="路由原因未覆盖预期关键词",
+        )
+    ]
+
+
 def _check_code(code: str | None, expected: Assertions) -> list[Check]:
     if not expected.expected_code_contains and not expected.expected_code_not_contains:
         return []
@@ -941,6 +1270,8 @@ def _render_console(
                 f"       run={result.run_id or '-'} status={result.run_status} "
                 f"code={result.code_source or '-'}"
             )
+        if result.hitl_event or result.gate_status:
+            lines.append(f"       evidence={_evidence(result)}")
         if result.error:
             lines.append(f"       ERROR: {result.error}")
         for check in result.failures:
@@ -1008,7 +1339,7 @@ def _render_markdown(
         "",
         "## 2. 用例结果",
         "",
-        "| 用例 | 名称 | Handoff | 期望 | Run | 耗时 | 结果 |",
+        "| 用例 | 名称 | Handoff | 期望 | 执行证据 | 耗时 | 结果 |",
         "|---|---|---|---|---|---:|---|",
     ]
 
@@ -1021,7 +1352,7 @@ def _render_markdown(
                     _escape_cell(result.name),
                     f"`{result.handoff or '-'}`",
                     f"`{_expected_handoff(result)}`",
-                    f"`{result.run_status or '-'}`",
+                    _escape_cell(_evidence(result)),
                     f"{result.duration_ms / 1000:.2f}s",
                     "PASS" if result.passed else "FAIL",
                 ]
@@ -1079,8 +1410,12 @@ def _render_markdown(
             "1. 读取 `config/eval_suite/core_cases.yaml`，逐条调用 Supervisor 路由接口；",
             "2. 对声明了代码断言的用例，调用 UI 子图 `/runs` 创建**真实 Docker 沙盒**，",
             "   由 Mock LLM 生成代码、安装依赖、构建并启动预览；",
-            "3. 通过沙盒导出接口读取真实源码 `src/App.jsx`，用空白不敏感正则断言代码片段；",
-            "4. 每条用例结束后删除沙盒，避免资源泄漏。",
+            "3. 对 HITL 用例，调用 Architect SSE 并等待 `architect.clarification.required`，",
+            "   断言首个澄清问题槽位，随后取消 Run；",
+            "4. 对 both 用例，调用 Supervisor `/dispatch`，断言只启动 Architect 且门控为",
+            "   `AWAITING_CONTRACT`，随后取消 Architect Run；",
+            "5. 通过沙盒导出接口读取真实源码 `src/App.jsx`，用空白不敏感正则断言代码片段；",
+            "6. 每条用例结束后删除沙盒 / 取消后台 Run，避免资源泄漏。",
             "",
             "> 说明：路由断言走真实 Supervisor 规则；代码生成使用 `llmProvider=mock`，",
             "> 因而本报告验证的是“路由契约 + 沙盒执行链路”，不评价真实模型质量。",
@@ -1095,6 +1430,21 @@ def _render_markdown(
     if warnings:
         lines.extend(["## 5. 清理告警", "", *warnings, ""])
     return "\n".join(lines)
+
+
+def _evidence(result: CaseResult) -> str:
+    """用一行展示 HITL / 门控 / 沙盒三类运行证据。"""
+    parts: list[str] = []
+    if result.hitl_event:
+        slot = f":{result.hitl_slot}" if result.hitl_slot else ""
+        parts.append(f"{result.hitl_event}{slot}")
+    if result.gate_status:
+        parts.append(f"gate={result.gate_status}")
+    if result.run_status:
+        parts.append(f"run={result.run_status}")
+    if result.code_source:
+        parts.append(result.code_source)
+    return " · ".join(parts) if parts else "-"
 
 
 def _expected_handoff(result: CaseResult) -> str:

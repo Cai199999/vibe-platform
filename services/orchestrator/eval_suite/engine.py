@@ -16,14 +16,23 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 from ai_core.agent.llm import MockAgentLLM
 from ai_core.agent.schemas import RunOptions
+from ai_core.architect.schemas import (
+    ArchitectCancelRequest,
+    ArchitectRunOptions,
+    ArchitectRunRequest,
+    ArchitectSource,
+)
+from ai_core.architect.service import ArchitectService
+from ai_core.supervisor.gates import SupervisorGateRegistry
 from ai_core.supervisor.registry import AgentRegistry
 from ai_core.supervisor.schemas import SupervisorOptions, SupervisorRequest
-from ai_core.supervisor.service import SupervisorService
+from ai_core.supervisor.service import SubGraphHandle, SupervisorService
 
 from eval_suite.loader import load_fixture_files
 from eval_suite.models import (
@@ -36,6 +45,9 @@ from eval_suite.models import (
 
 ORCHESTRATOR_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CUSTOM_AGENTS_DIR = ORCHESTRATOR_ROOT / "config" / "custom_agents"
+
+# Architect Mock LLM 通常是纯内存计算；15 秒只用于兜底死锁，正常 <1s。
+_HITL_TIMEOUT_SECONDS = 15.0
 
 
 def build_registry(custom_agents_dir: str | Path | None = None) -> AgentRegistry:
@@ -91,6 +103,9 @@ class EvalEngine:
         checks: list[CheckResult] = []
         decision: Any = None
         route: Any = None
+        hitl_event: str | None = None
+        hitl_slot: str | None = None
+        gate_status: str | None = None
         error: str | None = None
 
         try:
@@ -99,6 +114,15 @@ class EvalEngine:
             decision = route.decision
             checks.extend(self._check_decision(case, decision))
             checks.extend(self._check_handoffs(case, route.handoffs))
+            checks.extend(self._check_reason(case, decision))
+            if case.needs_hitl:
+                hitl_checks, hitl_event, hitl_slot = self._check_architect_hitl(
+                    case, suite
+                )
+                checks.extend(hitl_checks)
+            if case.needs_gate:
+                gate_checks, gate_status = self._check_both_gate(case, suite)
+                checks.extend(gate_checks)
             if case.needs_code_generation:
                 checks.extend(self._check_generated_code(case, suite))
         except Exception as exc:  # noqa: BLE001 - 单条用例失败不拖垮整批
@@ -141,6 +165,9 @@ class EvalEngine:
                 if decision is not None
                 else []
             ),
+            hitl_event=hitl_event,
+            hitl_slot=hitl_slot,
+            gate_status=gate_status,
             error=error,
             tags=case.tags,
         )
@@ -251,6 +278,164 @@ class EvalEngine:
         ]
 
     @staticmethod
+    def _check_reason(case: EvalCase, decision: Any) -> list[CheckResult]:
+        """断言路由原因包含安全策略等关键信号。
+
+        安全拦截不能只看 handoff=rejected：未知意图也是 rejected。必须
+        同时验证原因文本，确保是“策略主动拦截”而不是“碰巧没识别”。
+        """
+        expected = case.assertions.expected_reason_contains
+        if not expected:
+            return []
+        reason = str(getattr(decision, "reason", "") or "")
+        return [
+            CheckResult(
+                name="reason_contains",
+                passed=all(item in reason for item in expected),
+                expected=list(expected),
+                actual=reason,
+                message="路由原因未覆盖预期关键词",
+            )
+        ]
+
+    def _check_architect_hitl(
+        self,
+        case: EvalCase,
+        suite: EvalSuite,
+    ) -> tuple[list[CheckResult], str | None, str | None]:
+        """真实执行 Architect 子图，验证它在契约生成前暂停等待澄清。
+
+        离线引擎同样走生产 ``ArchitectService`` + Mock LLM，只是不经过
+        HTTP/SSE：直接观察事件缓冲，避免用“假事件”自证。断言通过后立即
+        取消 Run，防止后台线程继续占用澄清状态。
+        """
+        assertions = case.assertions
+        expected_event = str(assertions.expected_hitl)
+        expected_slot = assertions.expected_hitl_slot
+        run_id = f"eval_hitl_{case.case_id}_{uuid.uuid4().hex[:8]}"
+        service = ArchitectService()
+        request = ArchitectRunRequest(
+            run_id=run_id,
+            project_id=case.input.project_id or f"eval_{case.case_id}",
+            project_name=case.name,
+            source=ArchitectSource(),
+            options=ArchitectRunOptions(
+                llm_provider="mock",
+                rag_provider="markdown",
+                rag_top_k=3,
+            ),
+        )
+
+        active = service.start_stream(request)
+        event = None
+        status_at_exit = "UNKNOWN"
+        error_at_exit: str | None = None
+        deadline = time.monotonic() + _HITL_TIMEOUT_SECONDS
+        try:
+            while time.monotonic() < deadline:
+                for item in active.buffer.snapshot():
+                    if item.type == expected_event:
+                        event = item
+                        break
+                if event is not None or active.is_terminal:
+                    break
+                time.sleep(0.02)
+            status_at_exit = active.status
+            error_at_exit = active.error
+        finally:
+            try:
+                service.cancel(run_id, ArchitectCancelRequest(reason="eval cleanup"))
+            except Exception:  # noqa: BLE001 - 清理失败不掩盖断言结果
+                pass
+
+        payload = dict(event.payload) if event is not None else {}
+        questions = payload.get("questions") or []
+        first_slot = None
+        if questions and isinstance(questions[0], dict):
+            first_slot = questions[0].get("slot")
+
+        checks = [
+            CheckResult(
+                name="hitl_event",
+                passed=event is not None,
+                expected=expected_event,
+                actual=event.type if event is not None else None,
+                message=(
+                    "Architect 未在超时前暂停；"
+                    f"status={status_at_exit} error={error_at_exit}"
+                ),
+            )
+        ]
+        if expected_slot is not None:
+            checks.append(
+                CheckResult(
+                    name="hitl_first_slot",
+                    passed=first_slot == expected_slot,
+                    expected=expected_slot,
+                    actual=first_slot,
+                    message="首个澄清问题的槽位与预期不一致",
+                )
+            )
+        return checks, event.type if event is not None else None, first_slot
+
+    def _check_both_gate(
+        self,
+        case: EvalCase,
+        suite: EvalSuite,
+    ) -> tuple[list[CheckResult], str | None]:
+        """真实 dispatch both，验证只启动 Architect 且门控锁住 UI。
+
+        使用本地 GateRegistry 与桩 Dispatcher：断言点是 Supervisor 的
+        编排契约，不需要真的拉起两个子图；桩仍会记录调用，确保 UI 在
+        dispatch 阶段一次都没有启动。
+        """
+        expected_status = str(case.assertions.expected_gate_status)
+        architect = _StubDispatcher("architect_graph")
+        ui = _StubDispatcher("ui_graph")
+        gates = SupervisorGateRegistry()
+        service = SupervisorService(
+            self.registry,
+            dispatchers={
+                "architect_graph": architect,
+                "ui_graph": ui,
+            },
+            gate_registry=gates,
+            # 门控对账只读 Architect Run 状态；这里给它一个“尚未确认”
+            # 的桩，确保 dispatch 阶段不会误释放门控。
+            architect_run_getter=lambda _run_id: None,
+        )
+        request = self._build_request(case, suite)
+        response = service.dispatch(request)
+
+        gate = response.gate
+        actual_status = gate.status if gate is not None else None
+        dispatched = [item.agent_id for item in response.dispatches]
+        checks = [
+            CheckResult(
+                name="gate_status",
+                passed=actual_status == expected_status,
+                expected=expected_status,
+                actual=actual_status,
+                message="both 门控状态与预期不一致",
+            ),
+            CheckResult(
+                name="gate_only_architect",
+                passed=dispatched == ["architect_graph"],
+                expected=["architect_graph"],
+                actual=dispatched,
+                message="both 在契约确认前必须只启动 Architect",
+            ),
+            CheckResult(
+                name="gate_ui_blocked",
+                passed=ui.calls == [],
+                expected=[],
+                actual=list(ui.calls),
+                message="UI 子图在门控释放前被提前启动",
+            ),
+        ]
+        return checks, actual_status
+
+    @staticmethod
     def _check_generated_code(
         case: EvalCase,
         suite: EvalSuite,
@@ -324,6 +509,22 @@ class EvalEngine:
                 )
             )
         return checks
+
+
+class _StubDispatcher:
+    """评测专用子图桩：只记录调用，不启动任何真实 Graph。"""
+
+    def __init__(self, agent_id: str) -> None:
+        self.agent_id = agent_id
+        self.calls: list[str] = []
+
+    def start(self, request: Any, descriptor: Any) -> SubGraphHandle:
+        self.calls.append(descriptor.agent_id)
+        return SubGraphHandle(
+            agent_id=descriptor.agent_id,
+            run_id=f"eval_{descriptor.agent_id}_{len(self.calls)}",
+            stream_path=f"/eval/{descriptor.agent_id}/events",
+        )
 
 
 def _target_files(

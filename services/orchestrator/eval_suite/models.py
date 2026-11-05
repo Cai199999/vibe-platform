@@ -53,6 +53,13 @@ class EvalAssertions:
     expected_missing_inputs: tuple[str, ...] | None = None
     expected_code_contains: tuple[str, ...] = ()
     expected_code_not_contains: tuple[str, ...] = ()
+    # 安全策略 / 路由原因断言。
+    expected_reason_contains: tuple[str, ...] = ()
+    # Architect HITL：真实执行子图并断言暂停事件与首个问题槽位。
+    expected_hitl: str | None = None
+    expected_hitl_slot: str | None = None
+    # both 门控：dispatch 后断言门控状态。
+    expected_gate_status: str | None = None
     max_duration_ms: int | None = None
 
 
@@ -75,6 +82,16 @@ class EvalCase:
             self.assertions.expected_code_contains
             or self.assertions.expected_code_not_contains
         )
+
+    @property
+    def needs_hitl(self) -> bool:
+        """是否真实执行 Architect 子图并验证 HITL 暂停。"""
+        return bool(self.assertions.expected_hitl)
+
+    @property
+    def needs_gate(self) -> bool:
+        """是否真实 dispatch both 并验证门控。"""
+        return bool(self.assertions.expected_gate_status)
 
 
 @dataclass(frozen=True)
@@ -115,6 +132,9 @@ class CaseResult:
     dispatchable: bool | None = None
     missing_inputs: list[str] = field(default_factory=list)
     handoffs: list[str] = field(default_factory=list)
+    hitl_event: str | None = None
+    hitl_slot: str | None = None
+    gate_status: str | None = None
     error: str | None = None
     tags: tuple[str, ...] = ()
 

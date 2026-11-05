@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from ai_core.supervisor.policy import evaluate_policy
 from ai_core.supervisor.registry import AgentDescriptor, AgentRegistry
 from ai_core.supervisor.schemas import SupervisorRequest
 
@@ -172,6 +173,22 @@ class RuleBasedIntentClassifier:
         request: SupervisorRequest,
         registry: AgentRegistry,
     ) -> IntentPrediction:
+        # ----------------------------------------------------
+        # 0. 安全策略优先：不允许被 targetAgent / scopeHint 绕过
+        # ----------------------------------------------------
+        policy = evaluate_policy(request.message)
+        if policy.blocked:
+            return IntentPrediction(
+                task_type="blocked",
+                target="none",
+                confidence=0.0,
+                reason=policy.reason,
+                signals=policy.signals,
+                dispatchable=False,
+                missing_inputs=policy.missing_inputs,
+                strategy="policy",
+            )
+
         # ----------------------------------------------------
         # 1. 显式 Agent 优先：企业 CustomAgent / 指定专家
         # ----------------------------------------------------
