@@ -1,7 +1,11 @@
 package com.vibeplatform.bff.architect;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.vibeplatform.bff.admin.AdminMetricsService;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,13 +40,16 @@ public class ArchitectStreamService {
 
     private final WebClient aiCoreStreamWebClient;
     private final ObjectMapper objectMapper;
+    private final AdminMetricsService adminMetricsService;
 
     public ArchitectStreamService(
             @Qualifier("aiCoreStreamWebClient") WebClient aiCoreStreamWebClient,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            AdminMetricsService adminMetricsService
     ) {
         this.aiCoreStreamWebClient = aiCoreStreamWebClient;
         this.objectMapper = objectMapper;
+        this.adminMetricsService = adminMetricsService;
     }
 
     public Flux<ServerSentEvent<String>> start(ArchitectStartRequest request) {
@@ -77,6 +84,7 @@ public class ArchitectStreamService {
                     }
                     return response.bodyToFlux(SSE_TYPE);
                 })
+                .doOnNext(this::observeEvent)
                 .doOnComplete(() -> log.info(
                         "architect stream completed elapsedMs={}",
                         elapsedMillis(startedAt)
@@ -126,6 +134,7 @@ public class ArchitectStreamService {
                     }
                     return response.bodyToFlux(SSE_TYPE);
                 })
+                .doOnNext(this::observeEvent)
                 .onErrorMap(
                         WebClientRequestException.class,
                         ex -> new ArchitectStreamException(
@@ -137,6 +146,53 @@ public class ArchitectStreamService {
                                 )
                         )
                 );
+    }
+
+    /**
+     * 把 Architect 事件写入管理中台指标。
+     *
+     * <p>若同一 Run 已由 Supervisor dispatch 登记过，指标服务会保留
+     * dispatch 写入的 Agent 归属；这里只做兜底。</p>
+     */
+    private void observeEvent(ServerSentEvent<String> event) {
+        String data = event.data();
+        if (data == null || data.isBlank()) {
+            return;
+        }
+        try {
+            JsonNode node = objectMapper.readTree(data);
+            JsonNode runIdNode = node.get("runId");
+            if (runIdNode == null || !runIdNode.isTextual()) {
+                return;
+            }
+            adminMetricsService.observeEvent(
+                    runIdNode.asText(),
+                    text(node, "type"),
+                    parseTimestamp(text(node, "ts")),
+                    node.path("payload"),
+                    AdminMetricsService.ARCHITECT_AGENT_ID
+            );
+        } catch (Exception ex) {
+            // 指标是旁路能力，解析失败绝不能中断事件转发。
+            log.warn("failed to parse architect event for metrics: {}",
+                    ex.getMessage());
+        }
+    }
+
+    private static String text(JsonNode node, String field) {
+        JsonNode value = node.get(field);
+        return value != null && value.isTextual() ? value.asText() : null;
+    }
+
+    private static Instant parseTimestamp(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Instant.parse(value);
+        } catch (DateTimeParseException ex) {
+            return null;
+        }
     }
 
     private String errorJson(String code, String message) {

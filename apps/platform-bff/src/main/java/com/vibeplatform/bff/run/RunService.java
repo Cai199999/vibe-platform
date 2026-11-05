@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.vibeplatform.bff.admin.AdminMetricsService;
+import java.time.Instant;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,15 +44,18 @@ public class RunService {
     private final RestClient aiCoreRunRestClient;
     private final ObjectMapper objectMapper;
     private final RunSandboxRegistry runSandboxRegistry;
+    private final AdminMetricsService adminMetricsService;
 
     public RunService(
             @Qualifier("aiCoreRunRestClient") RestClient aiCoreRunRestClient,
             ObjectMapper objectMapper,
-            RunSandboxRegistry runSandboxRegistry
+            RunSandboxRegistry runSandboxRegistry,
+            AdminMetricsService adminMetricsService
     ) {
         this.aiCoreRunRestClient = aiCoreRunRestClient;
         this.objectMapper = objectMapper;
         this.runSandboxRegistry = runSandboxRegistry;
+        this.adminMetricsService = adminMetricsService;
     }
 
     /**
@@ -62,6 +67,7 @@ public class RunService {
      */
     public ResponseEntity<JsonNode> execute(CreateRunRequest request) {
         long startedAt = System.nanoTime();
+        Instant requestStartedAt = Instant.now();
 
         // 显式序列化再以 String 发送：
         // 1) 保证 AI Core 一定收到 JSON 请求体（避免 POJO 转换器差异）；
@@ -99,6 +105,17 @@ public class RunService {
                 String runId = body.path("runId").asText(null);
                 String sandboxId = body.path("sandboxId").asText(null);
                 runSandboxRegistry.record(runId, sandboxId);
+                // 同步路径没有 SSE，直接在这里登记终态，保证看板口径一致。
+                String status = body.path("status").asText(null);
+                if (status != null && runId != null) {
+                    adminMetricsService.recordSynchronousRun(
+                            runId,
+                            AdminMetricsService.UI_AGENT_ID,
+                            requestStartedAt,
+                            status,
+                            sandboxId
+                    );
+                }
             }
 
             log.info(

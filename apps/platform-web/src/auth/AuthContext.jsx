@@ -2,6 +2,20 @@ import { createContext, useCallback, useContext, useMemo, useState } from 'react
 
 const STORAGE_KEY = 'vibe.auth.session'
 
+/**
+ * M3.1 Mock RBAC：
+ *  - `admin@...` 或账号名恰为 admin 时视为平台管理员；
+ *  - 登录页也可显式勾选“以管理员身份登录”；
+ *  - 真实 JWT 接入后，这里改为读取 /auth/me 返回的 roles。
+ */
+const ADMIN_ROLES = new Set(['platform_admin', 'tenant_admin'])
+
+export function isAdminUser(user) {
+  return ADMIN_ROLES.has(user?.role)
+}
+
+const looksLikeAdmin = (account = '') => /^admin(@|$)/i.test(account.trim())
+
 const newToken = () => {
   const random =
     typeof crypto !== 'undefined' && crypto.randomUUID
@@ -22,14 +36,15 @@ function readSession() {
   }
 }
 
-function buildUser(account, demo) {
+function buildUser(account, demo, admin) {
+  const isAdmin = Boolean(admin) || looksLikeAdmin(account)
   if (demo) {
     return {
-      id: 'usr_demo',
-      name: 'Vibe 体验官',
-      email: 'demo@vibe.local',
+      id: isAdmin ? 'usr_demo_admin' : 'usr_demo',
+      name: isAdmin ? 'Vibe 管理员' : 'Vibe 体验官',
+      email: isAdmin ? 'admin@vibe.local' : 'demo@vibe.local',
       tenantId: 'tenant_local',
-      role: 'owner',
+      role: isAdmin ? 'platform_admin' : 'member',
     }
   }
   const email = account.trim()
@@ -39,7 +54,7 @@ function buildUser(account, demo) {
     name,
     email,
     tenantId: 'tenant_local',
-    role: 'owner',
+    role: isAdmin ? 'platform_admin' : 'member',
   }
 }
 
@@ -52,7 +67,7 @@ const AuthContext = createContext(null)
 export function AuthProvider({ children }) {
   const [session, setSession] = useState(readSession)
 
-  const login = useCallback(({ account = '', password = '', demo = false }) => {
+  const login = useCallback(({ account = '', password = '', demo = false, admin = false }) => {
     if (!demo) {
       if (!account.trim() || !password.trim()) {
         throw new Error('请输入账号和密码')
@@ -60,7 +75,7 @@ export function AuthProvider({ children }) {
     }
     const next = {
       token: newToken(),
-      user: buildUser(account, demo),
+      user: buildUser(account, demo, admin),
       issuedAt: new Date().toISOString(),
       mode: 'mock',
     }
@@ -79,6 +94,7 @@ export function AuthProvider({ children }) {
       session,
       user: session?.user ?? null,
       isAuthenticated: Boolean(session),
+      isAdmin: isAdminUser(session?.user),
       login,
       logout,
     }),

@@ -43,6 +43,15 @@
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
+        <!--
+          @IsAdmin RBAC 切面依赖 Spring AOP。M3.1 仅校验 Mock Header；
+          接入真实 JWT 后只需替换 AdminAuthorizationAspect 的取值来源。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aop</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>

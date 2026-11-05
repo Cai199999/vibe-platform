@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.vibeplatform.bff.admin.AdminMetricsService;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,13 +40,16 @@ public class SupervisorProxyService {
 
     private final RestClient aiCoreRunRestClient;
     private final ObjectMapper objectMapper;
+    private final AdminMetricsService adminMetricsService;
 
     public SupervisorProxyService(
             @Qualifier("aiCoreRunRestClient") RestClient aiCoreRunRestClient,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            AdminMetricsService adminMetricsService
     ) {
         this.aiCoreRunRestClient = aiCoreRunRestClient;
         this.objectMapper = objectMapper;
+        this.adminMetricsService = adminMetricsService;
     }
 
     public ResponseEntity<JsonNode> route(JsonNode body) {
@@ -53,7 +57,11 @@ public class SupervisorProxyService {
     }
 
     public ResponseEntity<JsonNode> dispatch(JsonNode body) {
-        return postJson(DISPATCH_PATH, body, "supervisor dispatch");
+        ResponseEntity<JsonNode> response =
+                postJson(DISPATCH_PATH, body, "supervisor dispatch");
+        // 先于子图 SSE 写入 runId -> agentId，看板才能把 Run 归到正确 Agent。
+        adminMetricsService.registerDispatches(response.getBody());
+        return response;
     }
 
     public ResponseEntity<JsonNode> gate(String gateId) {
@@ -61,15 +69,22 @@ public class SupervisorProxyService {
     }
 
     public ResponseEntity<JsonNode> releaseGate(String gateId) {
-        return postJson(
+        ResponseEntity<JsonNode> response = postJson(
                 GATE_PATH + gateId + "/release",
                 null,
                 "supervisor gate release"
         );
+        // both 模式下 UI Run 在 gate release 时才真正启动。
+        adminMetricsService.registerDispatches(response.getBody());
+        return response;
     }
 
     public ResponseEntity<JsonNode> agents() {
-        return getJson(AGENTS_PATH, "supervisor agents");
+        ResponseEntity<JsonNode> response =
+                getJson(AGENTS_PATH, "supervisor agents");
+        // 缓存自定义 Agent 展示名，供看板表格与占比图使用。
+        adminMetricsService.registerAgentNames(response.getBody());
+        return response;
     }
 
     public ResponseEntity<JsonNode> reloadAgents() {

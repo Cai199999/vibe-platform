@@ -42,7 +42,8 @@ UI 修改在 Docker 沙盒中自动编码、构建、验证并生成 Git checkpo
 | M3 数据中台契约 | 📐 设计完成 | 独立 Knowledge Service、摄取流水线、租户隔离检索、`KnowledgeRAGProvider` |
 | M3 管理中台契约 | 📐 设计完成 | `/admin`、Agent 指标、Prompt Registry 版本/灰度/回滚、审计 |
 | M3 反馈自优化契约 | 📐 设计完成 | `REVISE` 采集、聚类、候选 Prompt、离线评估、人工审批；**不做微调** |
-| M3 中台实现 | ⏳ 未开始 | 按 M3.1 管理中台骨架 → M3.2 知识中台 → M3.3 Prompt Registry → M3.4 自优化 |
+| M3.1 管理中台骨架 | ✅ 已完成 | `/admin` 入口与路由守卫、`@IsAdmin` Mock RBAC、`GET /admin/metrics` 内存聚合、四卡 + Agent 占比 + 最近 10 次 Run |
+| M3.2-M3.4 中台实现 | ⏳ 未开始 | 知识中台 → Prompt Registry → 反馈自优化 |
 | 全栈代码生成 | ⏳ 未开始 | 契约尚未驱动 Spring Boot / MySQL / 脚本生成 |
 | 多服务沙盒 | ⏳ 未开始 | 当前只有单 React/Vite 沙盒 |
 | 真实认证 / 多租户 | ⏳ 未开始 | 前端 Mock 登录，BFF 无 Spring Security |
@@ -64,11 +65,12 @@ flowchart LR
     D -->|"previewUrl / sandboxId"| U
     P -->|"Docker SDK"| D
     P -.->|"M3 契约 · 未实现"| K["Knowledge Service<br/>摄取 / 向量检索"]
-    B -.->|"M3 契约 · 未实现"| ADM["Admin / Prompt Registry<br/>指标 / 灰度 / 回滚"]
-    FB["Feedback Collector<br/>REVISE 采集"] -.->|"M3 契约 · 未实现"| ADM
+    B -->|"/admin/metrics · M3.1"| ADM["Admin Console<br/>指标 / Mock RBAC 已实现"]
+    B -.->|"M3 契约 · 未实现"| PR["Prompt Registry<br/>灰度 / 热更新 / 回滚"]
+    FB["Feedback Collector<br/>REVISE 采集"] -.->|"M3 契约 · 未实现"| PR
     AR -.->|"REVISE 事件"| FB
     classDef future stroke-dasharray: 5 5,stroke:#999,fill:#fafafa;
-    class K,ADM,FB future;
+    class K,PR,FB future;
 ```
 
 | 层 | 技术栈 | 当前职责 |
@@ -304,7 +306,7 @@ API 级 both E2E 还覆盖：
 | 真实认证 | 前端 Mock Token | 无 Spring Security / JWT / RBAC |
 | RAG | Markdown + BM25 | 无向量库；`chroma.py` 为占位；`RAGProvider` 尚无 `tenant_id` |
 | Knowledge Service | 仅契约 | 文档摄取 / Embedding / Qdrant / 租户隔离检索未实现 |
-| Admin / Prompt Registry | 仅契约 | `/admin`、指标、版本、灰度、热更新、回滚未实现 |
+| Admin / Prompt Registry | 部分实现 | `/admin`、Mock RBAC、内存指标已落地；Prompt 版本 / 灰度 / 热更新 / 回滚未实现 |
 | Feedback / 自优化 | 仅契约 | REVISE 采集、聚类、候选 Prompt、评估、审批未实现；无微调链路 |
 | Tree-sitter 编辑 | 占位类 | 未安装依赖、未实现结构化替换 |
 | OpenAPI / Schema 代码生成 | 手写 DTO | `packages/protocol` 仅 README |
@@ -340,9 +342,10 @@ API 级 both E2E 还覆盖：
 3. Tree-sitter 结构化编辑、OpenAPI 代码生成。
 4. Agent 市场。
 
-### P3：Agent OS 中台（M3，契约已就绪）
+### P3：Agent OS 中台（M3，M3.1 已落地）
 
-1. **M3.1 管理中台骨架**：`/admin`、管理员 RBAC、Agent 指标聚合、审计。
+1. ~~**M3.1 管理中台骨架**~~ ✅：`/admin`、Mock RBAC、Agent 指标聚合已实现；
+   审计与真实 JWT 仍待接入。
 2. **M3.2 知识中台**：Knowledge Service 摄取流水线、Qdrant、租户隔离检索；
    `RAGProvider` 升级为强制 `tenant_id`，生产切换 `KnowledgeRAGProvider`。
 3. **M3.3 Prompt Registry**：不可变版本、校验、灰度、热更新、回滚、Diff。

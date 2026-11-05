@@ -3,6 +3,9 @@ package com.vibeplatform.bff.run;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.vibeplatform.bff.admin.AdminMetricsService;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,15 +41,18 @@ public class RunStreamService {
     private final WebClient aiCoreStreamWebClient;
     private final ObjectMapper objectMapper;
     private final RunSandboxRegistry runSandboxRegistry;
+    private final AdminMetricsService adminMetricsService;
 
     public RunStreamService(
             @Qualifier("aiCoreStreamWebClient") WebClient aiCoreStreamWebClient,
             ObjectMapper objectMapper,
-            RunSandboxRegistry runSandboxRegistry
+            RunSandboxRegistry runSandboxRegistry,
+            AdminMetricsService adminMetricsService
     ) {
         this.aiCoreStreamWebClient = aiCoreStreamWebClient;
         this.objectMapper = objectMapper;
         this.runSandboxRegistry = runSandboxRegistry;
+        this.adminMetricsService = adminMetricsService;
     }
 
     /**
@@ -84,7 +90,7 @@ public class RunStreamService {
                     }
                     return response.bodyToFlux(SSE_TYPE);
                 })
-                .doOnNext(this::recordSandbox)
+                .doOnNext(this::observeEvent)
                 .doOnComplete(() -> log.info(
                         "run stream completed elapsedMs={}",
                         elapsedMillis(startedAt)
@@ -136,7 +142,7 @@ public class RunStreamService {
                     }
                     return response.bodyToFlux(SSE_TYPE);
                 })
-                .doOnNext(this::recordSandbox)
+                .doOnNext(this::observeEvent)
                 .onErrorMap(
                         WebClientRequestException.class,
                         ex -> new AiCoreStreamException(
@@ -150,12 +156,14 @@ public class RunStreamService {
     }
 
     /**
-     * 从终态事件记录 runId -> sandboxId，供导出接口只凭 runId 定位沙盒。
+     * 从事件中提取 Run 生命周期指标与 sandboxId。
      *
-     * <p>只在 payload.sandboxId 是文本时覆盖，避免 run.started 的 null
-     * 把之前已记录的 ID 抹掉。</p>
+     * <p>本服务只处理 UI Graph 的 Run，因此事件流兜底归属为
+     * {@code ui_graph}；Supervisor dispatch 会在此之前写入权威 Agent ID。
+     * 只在 payload.sandboxId 是文本时覆盖，避免 run.started 的 null 把之前
+     * 已记录的 ID 抹掉。</p>
      */
-    private void recordSandbox(ServerSentEvent<String> event) {
+    private void observeEvent(ServerSentEvent<String> event) {
         String data = event.data();
         if (data == null || data.isBlank()) {
             return;
@@ -163,18 +171,43 @@ public class RunStreamService {
         try {
             JsonNode node = objectMapper.readTree(data);
             JsonNode runIdNode = node.get("runId");
-            JsonNode sandboxNode = node.path("payload").get("sandboxId");
-            if (runIdNode != null && runIdNode.isTextual()
-                    && sandboxNode != null && sandboxNode.isTextual()) {
-                runSandboxRegistry.record(
-                        runIdNode.asText(),
-                        sandboxNode.asText()
-                );
+            if (runIdNode == null || !runIdNode.isTextual()) {
+                return;
             }
+            String runId = runIdNode.asText();
+            JsonNode payload = node.path("payload");
+
+            JsonNode sandboxNode = payload.get("sandboxId");
+            if (sandboxNode != null && sandboxNode.isTextual()) {
+                runSandboxRegistry.record(runId, sandboxNode.asText());
+            }
+
+            adminMetricsService.observeEvent(
+                    runId,
+                    text(node, "type"),
+                    parseTimestamp(text(node, "ts")),
+                    payload,
+                    AdminMetricsService.UI_AGENT_ID
+            );
         } catch (Exception ex) {
             // 事件数据异常不能中断转发；下游仍按 seq 重连恢复。
-            log.warn("failed to parse run event for sandbox registry: {}",
-                    ex.getMessage());
+            log.warn("failed to parse run event for metrics: {}", ex.getMessage());
+        }
+    }
+
+    private static String text(JsonNode node, String field) {
+        JsonNode value = node.get(field);
+        return value != null && value.isTextual() ? value.asText() : null;
+    }
+
+    private static Instant parseTimestamp(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Instant.parse(value);
+        } catch (DateTimeParseException ex) {
+            return null;
         }
     }
 

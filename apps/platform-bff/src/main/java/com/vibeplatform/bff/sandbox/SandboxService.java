@@ -3,6 +3,7 @@ package com.vibeplatform.bff.sandbox;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.vibeplatform.bff.run.RunSandboxRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -28,13 +29,16 @@ public class SandboxService {
 
     private final RestClient aiCoreRunRestClient;
     private final ObjectMapper objectMapper;
+    private final RunSandboxRegistry runSandboxRegistry;
 
     public SandboxService(
             @Qualifier("aiCoreRunRestClient") RestClient aiCoreRunRestClient,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            RunSandboxRegistry runSandboxRegistry
     ) {
         this.aiCoreRunRestClient = aiCoreRunRestClient;
         this.objectMapper = objectMapper;
+        this.runSandboxRegistry = runSandboxRegistry;
     }
 
     /**
@@ -58,8 +62,14 @@ public class SandboxService {
                         return ResponseEntity.status(status).body(body);
                     });
 
+            // 2xx = 已销毁；404 = 本来就不存在（幂等）。两种情况都应从
+            // 看板的“活跃沙盒”计数中移除。
+            HttpStatusCode status = response.getStatusCode();
+            if (status.is2xxSuccessful() || status.value() == 404) {
+                runSandboxRegistry.remove(sandboxId);
+            }
             log.info("sandbox destroy proxy sandboxId={} status={}",
-                    sandboxId, response.getStatusCode());
+                    sandboxId, status);
             return response;
         } catch (RestClientException ex) {
             log.error("sandbox destroy proxy failed sandboxId={}: {}",

@@ -46,6 +46,12 @@
   本轮只交付架构、数据模型与接口契约，底层实现按 M3.1–M3.4 推进。
   细节见 `docs/design/06.Agent_OS_Data_Management.md` 与
   `docs/memory/2026-11-05_Agent_OS_data_management_architecture.md`。
+- **M3.1 管理中台入口与指标看板已落地（2026-11-05）**：BFF 新增 `@IsAdmin`
+  Mock RBAC 切面（`X-User-Role`）与 `GET /api/v1/admin/metrics`，内存聚合活跃
+  沙盒、今日 Run、成功率、平均耗时、Agent 占比与最近 10 次执行；前端新增
+  `/admin` 路由、管理员菜单入口、KPI 卡 + Agent 占比图 + 执行表，并由路由守卫
+  对非管理员整页 403。指标尚未持久化，`ADMIN_METRICS_DEMO_SEED=true` 可注入
+  演示数据。细节见 `docs/memory/2026-11-05_M3_1_admin_console_metrics.md`。
 
 ## 2. 核心技术栈
 
@@ -73,7 +79,8 @@
 - M32–M37：Supervisor 路由 / AgentRegistry / CustomAgent Manifest 已落地（M2.5）；
   FrontendCoder、BackendCoder、DBA、Reviewer/IntegrationVerifier、多服务沙盒编排仍按 M2 推进
 - M38–M41（M3）：Knowledge Service（数据中台）、Feedback Collector、
-  Prompt Registry / 自优化、Admin Console；当前仅契约，未实现
+  Prompt Registry / 自优化、Admin Console；M3.1 已完成 Admin Console 入口与
+  指标看板（含 Mock RBAC），其余仍为契约
 
 ## 4. 关键架构约束
 

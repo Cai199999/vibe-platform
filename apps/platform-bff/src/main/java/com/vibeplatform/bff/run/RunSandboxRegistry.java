@@ -1,5 +1,6 @@
 package com.vibeplatform.bff.run;
 
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.springframework.stereotype.Component;
@@ -39,5 +40,25 @@ public class RunSandboxRegistry {
      */
     public synchronized String find(String runId) {
         return sandboxes.get(runId);
+    }
+
+    /**
+     * 当前仍存活的沙盒数。
+     *
+     * <p>多个 Run 可能复用同一个沙盒，因此按 sandboxId 去重。BFF 重启后
+     * 计数从 0 开始，属于 M3.1 进程内指标的限制。</p>
+     */
+    public synchronized int activeCount() {
+        return new HashSet<>(sandboxes.values()).size();
+    }
+
+    /**
+     * 沙盒被显式销毁后移除所有指向它的映射，避免看板继续计入。
+     */
+    public synchronized void remove(String sandboxId) {
+        if (sandboxId == null || sandboxId.isBlank()) {
+            return;
+        }
+        sandboxes.values().removeIf(sandboxId::equals);
     }
 }

@@ -14,6 +14,7 @@ export default function LoginPage() {
   const location = useLocation()
   const [account, setAccount] = useState('')
   const [password, setPassword] = useState('')
+  const [asAdmin, setAsAdmin] = useState(false)
   const [error, setError] = useState('')
 
   const redirectTo = location.state?.from?.pathname || '/workspace'
@@ -34,7 +35,7 @@ export default function LoginPage() {
 
   const handleSubmit = (event) => {
     event.preventDefault()
-    enter({ account, password })
+    enter({ account, password, admin: asAdmin })
   }
 
   return (
@@ -106,6 +107,18 @@ export default function LoginPage() {
             />
           </label>
 
+          <label className="auth-checkbox">
+            <input
+              type="checkbox"
+              checked={asAdmin}
+              onChange={(event) => setAsAdmin(event.target.checked)}
+            />
+            <span>
+              以管理员身份登录
+              <small>Mock RBAC：写入 platform_admin 角色，可访问 /admin</small>
+            </span>
+          </label>
+
           {error && <div className="auth-error">{error}</div>}
 
           <button className="primary-button auth-submit" type="submit">
@@ -120,12 +133,15 @@ export default function LoginPage() {
           <button
             className="ghost-button auth-demo"
             type="button"
-            onClick={() => enter({ demo: true })}
+            onClick={() => enter({ demo: true, admin: asAdmin })}
           >
-            一键体验（推荐）
+            {asAdmin ? '一键体验管理员（Admin）' : '一键体验（推荐）'}
           </button>
 
-          <p className="auth-hint">M1 阶段仅做前端门禁，真实鉴权与 RBAC 在后续版本接入。</p>
+          <p className="auth-hint">
+            M1 阶段仅做前端门禁；M3.1 的 Admin 入口使用 Mock 角色，
+            真实鉴权与 RBAC 在后续版本接入。
+          </p>
         </form>
       </section>
     </div>

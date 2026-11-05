@@ -8,7 +8,7 @@ const initials = (name = 'V') => name.trim().slice(0, 1).toUpperCase()
  * 工作台顶栏：品牌、运行状态、用户头像与账户菜单。
  */
 export default function AppHeader({ busy, onOpenAccount, onOpenSettings }) {
-  const { user, logout } = useAuth()
+  const { user, isAdmin, logout } = useAuth()
   const navigate = useNavigate()
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef(null)
@@ -97,6 +97,22 @@ export default function AppHeader({ busy, onOpenAccount, onOpenSettings }) {
               >
                 设置
               </button>
+              {isAdmin && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="is-admin"
+                  onClick={() => {
+                    setMenuOpen(false)
+                    navigate('/admin')
+                  }}
+                >
+                  <span className="admin-menu-glyph" aria-hidden="true">
+                    ◆
+                  </span>
+                  管理中台（Admin Console）
+                </button>
+              )}
               <button type="button" role="menuitem" className="is-danger" onClick={handleLogout}>
                 退出登录
               </button>

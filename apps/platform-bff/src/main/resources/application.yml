@@ -59,6 +59,13 @@ minio:
   bucket: ${MINIO_BUCKET:vibe-platform}
   secure: ${MINIO_SECURE:false}
 
+# 管理中台（M3.1）
+platform:
+  admin:
+    # 本地演示：内存中还没有真实 Run 时预置样例看板数据；响应会带 demo=true。
+    # 生产环境必须保持 false。
+    demo-seed: ${ADMIN_METRICS_DEMO_SEED:false}
+
 info:
   app:
     name: java-bff
