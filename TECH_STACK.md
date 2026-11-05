@@ -1,7 +1,7 @@
 # vibe-platform 技术栈全记录
 
 > **快照日期**：2026-11-05  
-> **覆盖范围**：M1 前端闭环 → M2 SSE / HITL → M3-A Diff 审批与取消 → M3-B `CodeEditor` 抽象 → M2.5 应用形态与全栈契约 → Supervisor 多智能体路由
+> **覆盖范围**：M1 前端闭环 → M2 SSE / HITL → M3-A Diff 审批与取消 → M3-B `CodeEditor` 抽象 → M2.5 应用形态与全栈契约 → Supervisor 多智能体路由 / 前端统一入口 / both 强门控
 > **统计口径**：以仓库当前源码、`pom.xml`、`package.json`、`requirements.txt`、Dockerfile 和实际运行容器为准。  
 > **重要说明**：设计文档中的目标技术栈与当前已落地技术栈并不完全一致，本文严格区分「当前已使用」「已接入但未启用」「设计预留 / 未落地」。
 
@@ -34,7 +34,11 @@ M2.5 另有一条**独立的 Architect 链路**，与局部 UI Run 解耦：
 1. `Supervisor Graph` 只做意图路由，不写代码；
 2. 根据自然语言、标注与关键词判断 `ui_graph` / `architect_graph` / `both`；
 3. `AgentRegistry` 声明内置 Agent、预留 Agent 与企业 CustomAgent Manifest；
-4. `route` 返回 Handoff 计划，`dispatch` 才启动子图并返回独立 SSE 路径。
+4. `route` 返回 Handoff 计划，`dispatch` 才启动子图并返回独立 SSE 路径；
+5. 前端“发送 / 提交 / 下一步”统一走 `route → dispatch`，按
+   `decision.handoff` 切换局部时间轴 / Architect 面板 / rejected Toast；
+6. `handoff_both` 先只启动 Architect，契约 `CONFIRMED` 后
+   `POST /gates/{gateId}/release` 才启动 UI，项目锁与门控状态机拒绝乱序执行。
 
 当前仍是**单前端应用（React/Vite）沙盒**。契约尚未驱动全栈代码生成；多服务沙盒、Redis checkpoint、真实鉴权与持久化尚未落地。
 
@@ -380,9 +384,12 @@ START
 | Classifier | `ai_core/supervisor/router.py` | 确定性规则；`targetAgent` / `scopeHint` 显式意图优先 |
 | Registry | `ai_core/supervisor/registry.py` | 内置 / 预留 Agent 注册，能力、版本、SSE 路径、可用性 |
 | CustomAgent | `ai_core/supervisor/custom.py` | 受限 JSON Manifest 加载；路径穿越与任意 import 防护 |
-| Service | `ai_core/supervisor/service.py` | `route` 计划与 `dispatch` 真实启动；子图 Dispatcher 注入 |
-| API | `ai_core/api/supervisor.py` | 内部 `/api/v1/internal/supervisor/**` |
+| Gate Registry | `ai_core/supervisor/gates.py` | both 项目锁；`AWAITING_CONTRACT → RELEASING → RELEASED/FAILED` 状态机与幂等释放 |
+| Service | `ai_core/supervisor/service.py` | `route` 计划、`dispatch` 真实启动、契约校验与 gate release |
+| API | `ai_core/api/supervisor.py` | 内部 `/api/v1/internal/supervisor/**`，含 gates 查询 / 释放 |
 | BFF | `bff/supervisor/*` | 公开 `/api/v1/supervisor/**` 透传 |
+| 前端客户端 | `workspace/supervisorClient.js` | route / dispatch / gate release / gate query |
+| 前端接入 | `pages/WorkspacePage.jsx` | 统一提交入口、handoff 分支、自动释放门控、attach 预启动 Run |
 
 **内置能力**：
 
@@ -399,7 +406,16 @@ START
 **CustomAgent**：`SUPERVISOR_CUSTOM_AGENTS_DIR`（默认 `config/custom_agents`）
 只扫描 `*.json`；Manifest 声明 `taskTypes`、`keywords`、`systemPromptFile`、
 `ragKnowledgeDir`，禁止绝对路径与 `..`，不允许覆盖内置 Agent。当前只返回
-`handoff_custom` 路由计划，运行时尚待接入。
+`handoff_custom` 路由计划，运行时尚待接入。未来运行时必须使用独立受限沙盒 /
+临时 venv：非 root、只读 Prompt/RAG、无宿主网络与密钥、CPU/内存/时间配额，
+只向主系统返回结构化 `AgentResult`，详见设计文档 §9。
+
+**both 强门控**：`dispatch` 遇到 `handoff_both` 时先 `reserve_project`，只启动
+Architect 并创建 gate；UI 请求保存在 gate 内。`release` 校验
+`architect.contract.confirmed` 后才用原始请求启动 UI。重复 release 幂等；
+契约未确认 409；同项目并发 dispatch 409；Architect 取消 / 失败自动 FAILED 并
+释放项目锁。当前门控为单进程内存实现，多副本部署需替换为 Redis/MySQL 分布式
+锁，API 契约不变。
 
 ---
 
@@ -539,7 +555,7 @@ MinIO : http://127.0.0.1:9000  (admin/admin123，仅本地开发)
 
 | 类别 | 工具 / 命令 | 说明 |
 |---|---|---|
-| Python 单元测试 | `python3 -m unittest discover -s services/orchestrator/tests` | 编辑器、Run 选项、RAG、Architect、Supervisor 等 62 个用例 |
+| Python 单元测试 | `python3 -m unittest discover -s services/orchestrator/tests` | 编辑器、Run 选项、RAG、Architect、Supervisor 等 66 个用例 |
 | Python 语法检查 | `python3 -m compileall services/orchestrator/ai_core` | 编译检查 |
 | Python 格式化 | `black .` | 当前环境 black 26.10.1 |
 | 浏览器 E2E | Playwright 1.64.1，Chromium | Python API，`/tmp/vibe-browser/bin/python` |
@@ -651,13 +667,14 @@ docker compose up -d
 | `docs/design/02.整体架构设计.md` | 目标架构、ADR、全栈演进 |
 | `docs/design/03.API接口设计.md` | 对外 API 契约 |
 | `docs/design/04.M2_Agent_ToolCalling_SSE_HITL.md` | SSE、HITL、CodeEditor 实际协议 |
-| `docs/design/05.Supervisor_Multi_Agent.md` | Supervisor 总调度、AgentRegistry、CustomAgent |
+| `docs/design/05.Supervisor_Multi_Agent.md` | Supervisor 总调度、AgentRegistry、both 强门控、CustomAgent 沙盒隔离 |
 | `docs/memory/00_project_brief.md` | 项目简报与里程碑 |
 | `docs/memory/2026-11-04_M2_SSE_HITL.md` | M2 阶段总结 |
 | `docs/memory/2026-11-05_M3A_diff_approval_cancel.md` | Diff 审批与取消 |
 | `docs/memory/2026-11-05_M3B_code_editor_abstraction.md` | CodeEditor 抽象 |
 | `docs/memory/2026-11-05_M2_5_app_shape_contract.md` | M2.5 应用形态与全栈契约 |
 | `docs/memory/2026-11-05_M2_5_supervisor_multi_agent.md` | Supervisor 总调度与 AgentRegistry |
+| `docs/memory/2026-11-05_M2_5_supervisor_frontend_gate.md` | 前端统一调度、both 强门控与混合 E2E |
 
 ---
 

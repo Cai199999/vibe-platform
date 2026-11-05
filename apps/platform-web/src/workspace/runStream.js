@@ -109,6 +109,8 @@ export async function streamRun({
   payload,
   runId,
   replay = false,
+  attach = false,
+  streamPath = null,
   afterSeq = 0,
   token,
   signal,
@@ -117,7 +119,9 @@ export async function streamRun({
   let lastSeq = Math.max(0, afterSeq)
   const resolvedRunId = runId || payload?.runId
   let terminal = false
-  let mode = replay ? 'replay' : 'start'
+  // attach：Run 已由 Supervisor 在服务端启动，前端只订阅其 SSE，绝不再 POST
+  // 启动接口，避免重复创建沙盒。
+  let mode = attach ? 'attach' : replay ? 'replay' : 'start'
   let attempts = 0
 
   const headers = {
@@ -138,8 +142,12 @@ export async function streamRun({
         })
       } else {
         const query = lastSeq > 0 ? `?afterSeq=${lastSeq}` : ''
+        const readPath =
+          mode === 'attach' && streamPath
+            ? streamPath
+            : `/api/v1/runs/${encodeURIComponent(resolvedRunId)}/events/stream`
         response = await fetch(
-          `/api/v1/runs/${encodeURIComponent(resolvedRunId)}/events/stream${query}`,
+          `${readPath}${query}`,
           { method: 'GET', headers: { ...headers, 'Last-Event-ID': String(lastSeq) }, signal },
         )
       }

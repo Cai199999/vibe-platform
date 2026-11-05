@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from ai_core.supervisor.gates import SupervisorGateError
 from ai_core.supervisor.registry import (
     AgentNotAvailableError,
     AgentNotFoundError,
@@ -13,6 +14,7 @@ from ai_core.supervisor.registry import (
 from ai_core.supervisor.schemas import (
     AgentListResponse,
     SupervisorDispatchResponse,
+    SupervisorGateResponse,
     SupervisorRequest,
     SupervisorRouteResponse,
 )
@@ -48,6 +50,26 @@ def dispatch_request(request: SupervisorRequest) -> SupervisorDispatchResponse:
         _raise_http(exc)
 
 
+@router.get("/gates/{gate_id}", response_model=SupervisorGateResponse)
+def get_gate(gate_id: str) -> SupervisorGateResponse:
+    """查询 both 门控；Architect 取消 / 失败会自动转为 FAILED。"""
+    service = SupervisorService(get_agent_registry())
+    try:
+        return service.get_gate(gate_id)
+    except Exception as exc:  # noqa: BLE001
+        _raise_http(exc)
+
+
+@router.post("/gates/{gate_id}/release", response_model=SupervisorGateResponse)
+def release_gate(gate_id: str) -> SupervisorGateResponse:
+    """契约确认后放行 UI Graph；重复调用幂等，返回同一个 UI Run。"""
+    service = SupervisorService(get_agent_registry())
+    try:
+        return service.release_gate(gate_id)
+    except Exception as exc:  # noqa: BLE001
+        _raise_http(exc)
+
+
 @router.get("/agents", response_model=AgentListResponse)
 def list_agents() -> AgentListResponse:
     """列出内置、预留与企业 Manifest Agent。"""
@@ -74,6 +96,11 @@ def _raise_http(exc: Exception) -> None:
     if isinstance(exc, AgentNotAvailableError):
         raise HTTPException(
             status_code=409,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    if isinstance(exc, SupervisorGateError):
+        raise HTTPException(
+            status_code=exc.status_code,
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
     if isinstance(exc, SupervisorServiceError):

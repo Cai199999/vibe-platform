@@ -10,6 +10,11 @@ import { useSettings } from '../settings/SettingsContext.jsx'
 import { useWorkspace } from '../workspace/useWorkspace.js'
 import { EMPTY_ARCHITECT, useArchitect } from '../workspace/useArchitect.js'
 import { streamRun } from '../workspace/runStream.js'
+import {
+  dispatchSupervisor,
+  releaseSupervisorGate,
+  routeSupervisor,
+} from '../workspace/supervisorClient.js'
 import { INITIAL_APP } from '../mockProject.js'
 
 const TARGET_FILE = 'src/App.jsx'
@@ -48,6 +53,8 @@ const EMPTY_RUN = {
   cancelRequested: false,
   // patch.proposed 的截断 diff，用于详情抽屉；完整结果仍以终态为准。
   patchPreview: '',
+  // Supervisor 最近一次意图：handoff_ui / handoff_architect / handoff_both。
+  supervisorHandoff: null,
 }
 
 // 成功终态：M2 的旧快照仍可能是 AWAITING_APPROVAL，统一按成功渲染。
@@ -99,6 +106,30 @@ function loadRunStates(projects) {
         error: saved.error ?? null,
         lastInstruction: saved.lastInstruction ?? '',
         sandboxIds,
+      }
+    })
+    return restored
+  } catch {
+    return {}
+  }
+}
+
+// both 门控的前端镜像：只用于 UI 提示与刷新后恢复，权威状态仍在 AI Core。
+const GATE_STORAGE_KEY = 'vibe.supervisor.gates.v1'
+
+function loadGateStates(projects) {
+  const projectIds = new Set(projects.map((project) => project.id))
+  try {
+    const raw = window.sessionStorage.getItem(GATE_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    const restored = {}
+    Object.entries(parsed).forEach(([projectId, gate]) => {
+      if (!projectIds.has(projectId) || !gate?.gateId) return
+      restored[projectId] = {
+        ...gate,
+        releasing: false,
+        error: null,
       }
     })
     return restored
@@ -619,6 +650,12 @@ export default function WorkspacePage() {
   const architectStates = architect.states
 
   const [runStates, setRunStates] = useState(() => loadRunStates(projects))
+  // Supervisor both 门控：AWAITING_CONTRACT 时 UI 子图不执行。
+  const [gateStates, setGateStates] = useState(() => loadGateStates(projects))
+  // 通用操作提示（rejected / 门控释放失败等），与导出提示分离。
+  const [toast, setToast] = useState(null)
+  // 递增后 ProjectWorkspace 自动切到预览 Tab，露出局部的执行时间轴。
+  const [previewFocus, setPreviewFocus] = useState({})
   // 默认 auto：配置了 DEEPSEEK_API_KEY 时自动走真实模型；没有 Key 时回退 Mock。
   // 旧版本可能持久化过显式 deepseek，这里统一归一到 auto，UI 不再暴露内部
   // provider 名称（测试仍可通过 mock 进入离线模式）。
@@ -637,6 +674,10 @@ export default function WorkspacePage() {
   const streamControllersRef = useRef(new Map())
   // 记录已关闭项目，防止关闭瞬间仍在执行的 Run 回写状态或泄漏沙盒。
   const closedProjectsRef = useRef(new Set())
+  // 门控释放只允许一个在途请求；自动释放每个 gate 只尝试一次，失败后由用户
+  // 在架构面板中手动重试，避免 effect 死循环。
+  const gateReleaseInflightRef = useRef(new Set())
+  const gateAutoReleaseAttemptedRef = useRef(new Set())
 
   // 页面卸载 / 切换项目时关闭所有 SSE，避免后台继续占用连接。
   useEffect(
@@ -686,6 +727,29 @@ export default function WorkspacePage() {
     return () => window.clearTimeout(timer)
   }, [exportNotice])
 
+  useEffect(() => {
+    if (!toast) return undefined
+    const timer = window.setTimeout(
+      () => setToast(null),
+      toast.kind === 'error' ? 6000 : 3500,
+    )
+    return () => window.clearTimeout(timer)
+  }, [toast])
+
+  // 门控镜像持久化到 sessionStorage；刷新后仍能显示“请先确认契约”。
+  useEffect(() => {
+    const snapshot = {}
+    Object.entries(gateStates).forEach(([projectId, gate]) => {
+      if (!gate?.gateId) return
+      snapshot[projectId] = gate
+    })
+    try {
+      window.sessionStorage.setItem(GATE_STORAGE_KEY, JSON.stringify(snapshot))
+    } catch {
+      // 忽略隐私模式 / 配额错误。
+    }
+  }, [gateStates])
+
   // 所有 Tab 共用同一个计时器；按 startedAt 计算各自耗时，避免多项目并发时互相覆盖。
   useEffect(() => {
     if (!anyRunning) return undefined
@@ -718,6 +782,32 @@ export default function WorkspacePage() {
       if (next === base) return previous
       return { ...previous, [projectId]: next }
     })
+  }
+
+  const patchGate = (projectId, patch) => {
+    setGateStates((previous) => {
+      const base = previous[projectId]
+      if (!base) return previous
+      const next = typeof patch === 'function' ? patch(base) : { ...base, ...patch }
+      if (next === base) return previous
+      return { ...previous, [projectId]: next }
+    })
+  }
+
+  const showToast = (kind, text) => {
+    setToast({ id: Date.now(), kind, text })
+  }
+
+  const focusPreview = (projectId) => {
+    setPreviewFocus((previous) => ({
+      ...previous,
+      [projectId]: (previous[projectId] ?? 0) + 1,
+    }))
+  }
+
+  const gateIsActive = (projectId) => {
+    const status = gateStates[projectId]?.status
+    return status === 'AWAITING_CONTRACT' || status === 'RELEASING'
   }
 
   const handleAnnotationAdd = (projectId, { rect, target }) => {
@@ -941,61 +1031,360 @@ export default function WorkspacePage() {
       : (project.files?.[TARGET_FILE] ?? INITIAL_APP)
 
   /**
-   * 构造 Architect 请求。
+   * 构造 Supervisor 统一请求。
    *
-   * 有沙盒时只传 sandboxId，由 AI Core 导出真实源码；没有沙盒时才回退到
-   * 当前模板文件。全局澄清不复用 Run 的 runId / 事件坐标。
+   * 同一份 payload 先用于 /route 判定 UI 开关，再用于 /dispatch 真正启动
+   * 子图；两个子图的选项分仓，避免 Architect 选项污染 UI Run。
    */
-  const buildArchitectPayload = (projectId) => {
+  const buildSupervisorPayload = (
+    projectId,
+    { message = '', annotations = [], scopeHint = 'auto' } = {},
+  ) => {
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
     if (!project) return null
+    const sourceCode = projectSource(project)
     const sandboxId = run.result?.sandboxId
+    const files = { [TARGET_FILE]: sourceCode }
     const source = {
       sandboxId: sandboxId || undefined,
       baseRunId: run.result?.runId || undefined,
       baseCommitHash: run.result?.commitHash || undefined,
-    }
-    if (!sandboxId) {
-      source.files = { [TARGET_FILE]: projectSource(project) }
+      ...(sandboxId ? {} : { files }),
     }
     const uiHistory = run.annotations
       .flatMap((annotation) =>
-        (annotation.chatHistory ?? []).map((message) => ({
-          role: message.role,
-          content: message.content,
+        (annotation.chatHistory ?? []).map((item) => ({
+          role: item.role,
+          content: item.content,
         })),
       )
-      .filter((message) => message.content)
+      .filter((item) => item.content)
       .slice(-20)
 
     return {
-      runId: newId('architect'),
       tenantId: user?.tenantId || 'tenant_local',
       projectId: project.id,
       projectName: project.name,
+      message,
+      annotations: annotations
+        .filter((annotation) => annotation.intent?.trim())
+        .map((annotation) => buildAnnotation(annotation, sourceCode)),
+      sandboxId: sandboxId || undefined,
+      files,
       source,
       uiHistory,
       options: {
-        llmProvider: modelProvider,
-        confidenceThreshold: 0.85,
-        maxClarificationRounds: 5,
-        ragProvider: 'markdown',
-        ragTopK: 5,
+        scopeHint,
+        ui: {
+          llmProvider: modelProvider,
+          mockScenario: 'none',
+          maxRetries: 3,
+          keepSandbox: true,
+          requireManualApproval,
+        },
+        architect: {
+          llmProvider: modelProvider,
+          confidenceThreshold: 0.85,
+          maxClarificationRounds: 5,
+          ragProvider: 'markdown',
+          ragTopK: 5,
+        },
       },
     }
   }
 
-  const handleStartArchitect = (projectId) => {
-    const payload = buildArchitectPayload(projectId)
-    if (!payload) return
-    architect.start(projectId, payload)
+  /** 请求已成功派发后，才清空标注输入并写入用户气泡，失败时保留草稿。 */
+  const commitSentAnnotations = (projectId, sendEntries) => {
+    const byId = new Map(sendEntries.map((entry) => [entry.id, entry]))
+    patchRun(projectId, (previous) => ({
+      ...previous,
+      annotations: previous.annotations.map((annotation) => {
+        const entry = byId.get(annotation.id)
+        if (!entry) return annotation
+        return {
+          ...annotation,
+          intent: '',
+          chatHistory: [
+            ...(annotation.chatHistory ?? []),
+            ...(entry.userMessage ? [entry.userMessage] : []),
+          ],
+        }
+      }),
+    }))
   }
 
   /**
-   * 工具栏主 CTA：没有 Run 时直接发起并打开面板；已有 Run（含已确认契约）
-   * 时恢复同一面板，避免误销毁上一次澄清结果。
+   * 订阅 Supervisor 已经启动的 UI Run。
+   *
+   * 关键：attach 模式只 GET SSE，不再 POST /runs/stream，避免创建第二个沙盒。
    */
+  const attachUiDispatch = async (
+    projectId,
+    { runId, streamPath, annotationId, handoff },
+  ) => {
+    patchRun(projectId, (previous) => ({
+      ...previous,
+      submitting: true,
+      pendingAnnotationId: annotationId,
+      pendingAction: 'run',
+      elapsed: 0,
+      startedAt: Date.now(),
+      error: null,
+      runId,
+      lastSeq: 0,
+      timeline: [],
+      patchPreview: '',
+      clarification: null,
+      approval: null,
+      cancelRequested: false,
+      targetAnnotationId: annotationId,
+      supervisorHandoff: handoff,
+    }))
+    focusPreview(projectId)
+    await startRunStream(projectId, null, annotationId, {
+      attach: true,
+      runId,
+      streamPath,
+    })
+  }
+
+  /**
+   * 统一入口：route → 检查 handoff / 可派发性 → dispatch。
+   *
+   * 既处理画布“发送 / 提交”，也处理工具栏“下一步”；两者都不再硬编码
+   * UI / Architect 的启动接口。
+   */
+  const submitViaSupervisor = async (
+    projectId,
+    {
+      message,
+      annotations = [],
+      annotationId = null,
+      sendEntries = [],
+      commitOnSuccess = false,
+    },
+  ) => {
+    const project = projects.find((item) => item.id === projectId)
+    const run = runStates[projectId] ?? EMPTY_RUN
+    if (!project || run.submitting || inflightRef.current.has(projectId)) return
+    if (run.clarification || run.approval) {
+      showToast('error', '请先处理当前的澄清或审批，再发起新的请求')
+      return
+    }
+    if (gateIsActive(projectId)) {
+      showToast('info', '正在进行全局架构设计，请先确认契约')
+      return
+    }
+
+    const payload = buildSupervisorPayload(projectId, { message, annotations })
+    if (!payload) return
+    inflightRef.current.add(projectId)
+    patchRun(projectId, (previous) => ({
+      ...previous,
+      submitting: true,
+      pendingAnnotationId: annotationId,
+      pendingAction: 'run',
+      elapsed: 0,
+      startedAt: Date.now(),
+      error: null,
+      lastInstruction: message,
+      runId: null,
+      lastSeq: 0,
+      timeline: [],
+      patchPreview: '',
+      clarification: null,
+      approval: null,
+      cancelRequested: false,
+      targetAnnotationId: annotationId,
+      supervisorHandoff: null,
+    }))
+
+    try {
+      const route = await routeSupervisor(payload, session?.token)
+      const decision = route.decision ?? {}
+      if (decision.handoff === 'rejected' || !decision.dispatchable) {
+        const missing = decision.missing_inputs ?? []
+        patchRun(projectId, {
+          submitting: false,
+          pendingAnnotationId: null,
+          pendingAction: null,
+          supervisorHandoff: decision.handoff ?? 'rejected',
+        })
+        inflightRef.current.delete(projectId)
+        if (missing.includes('annotations')) {
+          showToast('error', '请先在画布上圈选组件，再发送修改指令')
+        } else {
+          showToast(
+            'error',
+            decision.reason || '没有识别到明确意图，请补充标注或说明',
+          )
+        }
+        return
+      }
+
+      const result = await dispatchSupervisor(payload, session?.token)
+      const handoff = result.decision?.handoff ?? decision.handoff
+      if (commitOnSuccess || handoff === 'handoff_ui' || handoff === 'handoff_both') {
+        commitSentAnnotations(projectId, sendEntries)
+      }
+
+      if (handoff === 'handoff_ui') {
+        const ui = (result.dispatches ?? []).find(
+          (item) => item.agentId === 'ui_graph',
+        )
+        if (!ui) throw new Error('Supervisor 未返回 UI Run')
+        await attachUiDispatch(projectId, {
+          runId: ui.runId,
+          streamPath: ui.streamPath,
+          annotationId,
+          handoff,
+        })
+        return
+      }
+
+      if (handoff === 'handoff_architect' || handoff === 'handoff_both') {
+        const architectDispatch = (result.dispatches ?? []).find(
+          (item) => item.agentId === 'architect_graph',
+        )
+        if (!architectDispatch) {
+          throw new Error('Supervisor 未返回 Architect Run')
+        }
+        architect.attach(projectId, {
+          runId: architectDispatch.runId,
+          streamPath: architectDispatch.streamPath,
+        })
+        patchRun(projectId, {
+          submitting: false,
+          pendingAnnotationId: null,
+          pendingAction: null,
+          error: null,
+          supervisorHandoff: handoff,
+        })
+        if (handoff === 'handoff_both') {
+          const gate = result.gate
+          if (!gate?.gateId) throw new Error('both 模式缺少门控信息')
+          setGateStates((previous) => ({
+            ...previous,
+            [projectId]: {
+              gateId: gate.gateId,
+              status: gate.status,
+              architectRunId: gate.architectRunId,
+              uiRunId: gate.uiRunId ?? null,
+              uiStreamPath: gate.uiStreamPath ?? null,
+              uiAnnotationId: annotationId,
+              releaseCondition: gate.releaseCondition,
+              releasing: false,
+              error: null,
+            },
+          }))
+          showToast('info', '正在进行全局架构设计，请先确认契约')
+        }
+        inflightRef.current.delete(projectId)
+        return
+      }
+
+      throw new Error(`暂不支持的 Handoff: ${handoff}`)
+    } catch (cause) {
+      inflightRef.current.delete(projectId)
+      const messageText = cause?.message || String(cause)
+      patchRun(projectId, {
+        submitting: false,
+        pendingAnnotationId: null,
+        pendingAction: null,
+        error: `Supervisor 调度失败：${messageText}`,
+      })
+      showToast('error', `调度失败：${messageText}`)
+    }
+  }
+
+  /**
+   * 释放 both 门控。只有 Architect 契约 CONFIRMED 后服务端才会启动 UI；
+   * 重复调用由后端幂等返回同一个 UI Run。
+   */
+  const releaseGateFor = async (projectId, gateId) => {
+    if (!gateId || gateReleaseInflightRef.current.has(projectId)) return
+    gateReleaseInflightRef.current.add(projectId)
+    patchGate(projectId, { releasing: true, error: null })
+    const gate = gateStates[projectId]
+    try {
+      const result = await releaseSupervisorGate(gateId, session?.token)
+      const remoteGate = result.gate
+      const ui = (result.dispatches ?? []).find(
+        (item) => item.agentId === 'ui_graph',
+      )
+      patchGate(projectId, {
+        status: remoteGate?.status ?? 'RELEASED',
+        uiRunId: remoteGate?.uiRunId ?? ui?.runId ?? null,
+        uiStreamPath: remoteGate?.uiStreamPath ?? ui?.streamPath ?? null,
+        releasing: false,
+        error: null,
+      })
+      if (!ui) {
+        if (remoteGate?.status === 'RELEASED') {
+          showToast('info', '门控已释放，UI Run 已由先前的请求启动')
+        }
+        return
+      }
+      const annotationId = gate?.uiAnnotationId ?? null
+      showToast('success', '契约已确认，开始执行界面修改')
+      await attachUiDispatch(projectId, {
+        runId: ui.runId,
+        streamPath: ui.streamPath,
+        annotationId,
+        handoff: 'handoff_both',
+      })
+    } catch (cause) {
+      const messageText = cause?.message || String(cause)
+      patchGate(projectId, { releasing: false, error: messageText })
+      showToast('error', `释放门控失败：${messageText}`)
+    } finally {
+      gateReleaseInflightRef.current.delete(projectId)
+    }
+  }
+
+  const handleReleaseGate = (projectId) => {
+    const gateId = gateStates[projectId]?.gateId
+    if (!gateId) return
+    // 手动重试：允许再次自动尝试。
+    gateAutoReleaseAttemptedRef.current.delete(gateId)
+    void releaseGateFor(projectId, gateId)
+  }
+
+  // architect.contract.confirmed → 自动释放门控。每个 gate 只自动尝试一次，
+  // 避免 409 未确认时 effect 反复触发。
+  useEffect(() => {
+    Object.entries(gateStates).forEach(([projectId, gate]) => {
+      if (!gate?.gateId || gate.status !== 'AWAITING_CONTRACT') return
+      if (gate.releasing) return
+      const architectStatus = architectStates[projectId]?.status
+      if (architectStatus !== 'CONFIRMED') return
+      if (gateAutoReleaseAttemptedRef.current.has(gate.gateId)) return
+      gateAutoReleaseAttemptedRef.current.add(gate.gateId)
+      void releaseGateFor(projectId, gate.gateId)
+    })
+  }, [architectStates, gateStates])
+
+  /**
+   * 工具栏主 CTA：已有 Run 时恢复同一面板；否则也走 Supervisor，
+   * 由后端决定是纯 Architect 还是 UI + Architect 的 both。
+   */
+  const handleStartArchitect = (projectId) => {
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const annotations = run.annotations.filter((item) => item.intent.trim())
+    const message = [
+      '下一步：构建全栈方案',
+      ...annotations.map((item) => item.intent.trim()),
+    ].join('。')
+    void submitViaSupervisor(projectId, {
+      message,
+      annotations,
+      annotationId: null,
+      sendEntries: [],
+      commitOnSuccess: false,
+    })
+  }
+
   const handleOpenArchitect = (projectId) => {
     if (architectStates[projectId]?.runId) {
       architect.openPanel(projectId)
@@ -1014,7 +1403,13 @@ export default function WorkspacePage() {
     projectId,
     payload,
     annotationId,
-    { replay = false, runId = null, afterSeq = 0 } = {},
+    {
+      replay = false,
+      attach = false,
+      streamPath = null,
+      runId = null,
+      afterSeq = 0,
+    } = {},
   ) => {
     const controller = new AbortController()
     streamControllersRef.current.get(projectId)?.abort()
@@ -1025,6 +1420,8 @@ export default function WorkspacePage() {
         payload,
         runId: runId || payload?.runId,
         replay,
+        attach,
+        streamPath,
         afterSeq,
         token: session?.token,
         signal: controller.signal,
@@ -1282,66 +1679,20 @@ export default function WorkspacePage() {
     }
 
     const userMessage = newMessage('user', instruction)
+    // 单标注也带自己的 threadId；commit 在 Supervisor 成功派发后才执行，
+    // 被 rejected / 调度失败时用户输入不会丢失。
     const sendEntry = {
       ...annotation,
       intent: instruction,
-      chatHistory: [...(annotation.chatHistory ?? []), userMessage],
+      userMessage,
     }
-    const source = projectSource(project)
-    const startedAt = Date.now()
-    inflightRef.current.add(projectId)
-    patchRun(projectId, (previous) => ({
-      ...previous,
-      submitting: true,
-      pendingAnnotationId: annotationId,
-      pendingAction: 'run',
-      elapsed: 0,
-      startedAt,
-      error: null,
-      lastInstruction: instruction,
-      // 新一轮 Run：重置事件坐标与时间轴。
-      runId: null,
-      lastSeq: 0,
-      timeline: [],
-      patchPreview: '',
-      clarification: null,
-      approval: null,
-      cancelRequested: false,
-      targetAnnotationId: annotationId,
-      // 输入框清空，对话气泡保留本轮用户指令。
-      annotations: previous.annotations.map((item) =>
-        item.id === annotationId
-          ? {
-              ...item,
-              intent: '',
-              chatHistory: [...(item.chatHistory ?? []), userMessage],
-            }
-          : item,
-      ),
-    }))
-
-    const payload = {
-      runId: newId('run'),
-      tenantId: user?.tenantId || 'tenant_local',
-      projectId: project.id,
-      // 复用项目当前沙盒：同一圈后续对话必须基于上一轮修改后的源码。
-      sandboxId: run.result?.sandboxId || annotation.lastSandboxId || undefined,
-      annotations: [buildAnnotation(sendEntry, source)],
-      files: { [TARGET_FILE]: source },
-      options: {
-        llmProvider: modelProvider,
-        // 对话交互要求即时反馈；不注入 Mock 的首次失败演示。
-        mockScenario: 'none',
-        maxRetries: 3,
-        keepSandbox: true,
-        // 用户设置：开启后构建通过会暂停等待人工审批；默认关闭，
-        // 验证通过直接提交 checkpoint 并返回 SUCCEEDED。
-        requireManualApproval,
-      },
-    }
-
-    // 时间轴 / 终态处理全部由 SSE reducer 完成；这里只负责发起连接。
-    await startRunStream(projectId, payload, annotationId)
+    await submitViaSupervisor(projectId, {
+      message: instruction,
+      annotations: [sendEntry],
+      annotationId,
+      sendEntries: [sendEntry],
+      commitOnSuccess: true,
+    })
   }
 
   const handleSubmit = async (projectId) => {
@@ -1361,61 +1712,19 @@ export default function WorkspacePage() {
       return
     }
 
-    // 批量提交也把每条指令写入对应圈的聊天历史，并各带自己的 threadId。
+    // 批量提交一次携带全部标注；每条指令写入各自圈的聊天历史。
     const sendEntries = annotations.map((annotation, index) => ({
       ...annotation,
-      chatHistory: [
-        ...(annotation.chatHistory ?? []),
-        newMessage('user', instructions[index]),
-      ],
+      userMessage: newMessage('user', instructions[index]),
     }))
-    const source = projectSource(project)
-    inflightRef.current.add(projectId)
-    const startedAt = Date.now()
-    const lastInstruction = instructions.join(' / ')
-    patchRun(projectId, {
-      submitting: true,
-      pendingAnnotationId: null,
-      pendingAction: 'run',
-      elapsed: 0,
-      startedAt,
-      result: null,
-      error: null,
-      lastInstruction,
-      runId: null,
-      lastSeq: 0,
-      timeline: [],
-      patchPreview: '',
-      clarification: null,
-      approval: null,
-      cancelRequested: false,
-      targetAnnotationId: null,
+    const message = instructions.join(' / ')
+    await submitViaSupervisor(projectId, {
+      message,
       annotations: sendEntries,
+      annotationId: null,
+      sendEntries,
+      commitOnSuccess: true,
     })
-
-    const payload = {
-      runId: newId('run'),
-      tenantId: user?.tenantId || 'tenant_local',
-      projectId: project.id,
-      sandboxId: run.result?.sandboxId || undefined,
-      // 关键：一次请求携带全部标注，后端 Planner / Coder 一次性综合处理。
-      annotations: sendEntries.map((annotation) =>
-        buildAnnotation(annotation, source),
-      ),
-      files: { [TARGET_FILE]: source },
-      options: {
-        // auto：有 DEEPSEEK_API_KEY 用 DeepSeek，否则回退 Mock。
-        llmProvider: modelProvider,
-        mockScenario: 'fail_first',
-        maxRetries: 3,
-        keepSandbox: true,
-        // 与单标注发送读取同一个全局设置。
-        requireManualApproval,
-      },
-    }
-
-    // 批量提交同样走 SSE；annotationId=null 表示终态回复写给全部标注。
-    await startRunStream(projectId, payload, null)
   }
 
   /**
@@ -1614,6 +1923,12 @@ export default function WorkspacePage() {
       delete next[projectId]
       return next
     })
+    setGateStates((previous) => {
+      if (!(projectId in previous)) return previous
+      const next = { ...previous }
+      delete next[projectId]
+      return next
+    })
     sandboxIds.forEach((sandboxId) => {
       void destroySandbox(sandboxId, session?.token)
     })
@@ -1744,6 +2059,8 @@ export default function WorkspacePage() {
                 architectState={
                   architectStates[project.id] ?? EMPTY_ARCHITECT
                 }
+                supervisorGate={gateStates[project.id] ?? null}
+                previewFocusNonce={previewFocus[project.id] ?? 0}
                 onArchitectOpen={() => handleOpenArchitect(project.id)}
                 onArchitectStart={() => handleStartArchitect(project.id)}
                 onArchitectClose={() => architect.closePanel(project.id)}
@@ -1754,6 +2071,7 @@ export default function WorkspacePage() {
                   architect.decide(project.id, decision, comment)
                 }
                 onArchitectCancel={() => architect.cancel(project.id)}
+                onReleaseGate={() => handleReleaseGate(project.id)}
               />
             )
           })}
@@ -1770,6 +2088,24 @@ export default function WorkspacePage() {
         >
           <span aria-hidden="true">{exportNotice.kind === 'success' ? '✓' : '⚠'}</span>
           {exportNotice.text}
+        </div>
+      )}
+
+      {toast && (
+        <div
+          key={toast.id}
+          className={`workspace-toast supervisor-toast is-${toast.kind}`}
+          role={toast.kind === 'error' ? 'alert' : 'status'}
+          data-toast={toast.kind}
+        >
+          <span aria-hidden="true">
+            {toast.kind === 'success'
+              ? '✓'
+              : toast.kind === 'error'
+                ? '⚠'
+                : '◈'}
+          </span>
+          {toast.text}
         </div>
       )}
 

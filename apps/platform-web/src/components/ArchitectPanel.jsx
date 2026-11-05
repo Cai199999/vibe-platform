@@ -357,6 +357,8 @@ export default function ArchitectPanel({
   onDecide,
   onCancel,
   onRestart,
+  gate,
+  onReleaseGate,
 }) {
   const scrollRef = useRef(null)
   const contractRef = useRef(null)
@@ -449,6 +451,68 @@ export default function ArchitectPanel({
             </button>
           </div>
         </header>
+
+        {gate?.gateId && (
+          <div
+            className={`architect-gate is-${String(gate.status).toLowerCase()}`}
+            data-supervisor-gate={gate.status}
+            role={gate.status === 'FAILED' ? 'alert' : 'status'}
+          >
+            <span className="architect-gate-mark" aria-hidden="true">
+              {gate.status === 'RELEASED'
+                ? '✓'
+                : gate.status === 'FAILED'
+                  ? '!'
+                  : '◈'}
+            </span>
+            <div className="architect-gate-copy">
+              {(gate.status === 'AWAITING_CONTRACT' ||
+                gate.status === 'RELEASING') && (
+                <>
+                  <strong>正在进行全局架构设计，请先确认契约</strong>
+                  <p>
+                    契约确认前不会执行界面修改，沙盒保持当前状态，避免门控乱序导致代码冲突。
+                  </p>
+                  {gate.status === 'AWAITING_CONTRACT' &&
+                    state?.status === 'CONFIRMED' && (
+                      <button
+                        type="button"
+                        className="architect-secondary"
+                        disabled={gate.releasing}
+                        onClick={onReleaseGate}
+                      >
+                        {gate.releasing ? (
+                          <>
+                            <span className="mini-spinner" aria-label="释放中" />
+                            正在放行…
+                          </>
+                        ) : (
+                          '继续执行界面修改'
+                        )}
+                      </button>
+                    )}
+                </>
+              )}
+              {gate.status === 'RELEASED' && (
+                <>
+                  <strong>契约已确认，界面修改已启动</strong>
+                  <p>
+                    UI Graph 已放行并在独立沙盒中执行，可关闭本面板查看右侧执行时间轴。
+                  </p>
+                </>
+              )}
+              {gate.status === 'FAILED' && (
+                <>
+                  <strong>both 门控已中止</strong>
+                  <p>{gate.error || '架构澄清被取消或失败，界面修改未执行。'}</p>
+                </>
+              )}
+              {gate.error && gate.status !== 'FAILED' && (
+                <p className="architect-gate-error">{gate.error}</p>
+              )}
+            </div>
+          </div>
+        )}
 
         {state?.runId && (
           <div className="architect-progress">

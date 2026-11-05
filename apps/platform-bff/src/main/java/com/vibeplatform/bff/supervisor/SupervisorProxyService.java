@@ -30,6 +30,8 @@ public class SupervisorProxyService {
             "/api/v1/internal/supervisor/route";
     private static final String DISPATCH_PATH =
             "/api/v1/internal/supervisor/dispatch";
+    private static final String GATE_PATH =
+            "/api/v1/internal/supervisor/gates/";
     private static final String AGENTS_PATH =
             "/api/v1/internal/supervisor/agents";
     private static final String RELOAD_PATH =
@@ -52,6 +54,18 @@ public class SupervisorProxyService {
 
     public ResponseEntity<JsonNode> dispatch(JsonNode body) {
         return postJson(DISPATCH_PATH, body, "supervisor dispatch");
+    }
+
+    public ResponseEntity<JsonNode> gate(String gateId) {
+        return getJson(GATE_PATH + gateId, "supervisor gate");
+    }
+
+    public ResponseEntity<JsonNode> releaseGate(String gateId) {
+        return postJson(
+                GATE_PATH + gateId + "/release",
+                null,
+                "supervisor gate release"
+        );
     }
 
     public ResponseEntity<JsonNode> agents() {

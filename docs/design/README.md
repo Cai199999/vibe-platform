@@ -6,7 +6,7 @@
 | [02.整体架构设计](02.整体架构设计.md) | v1.1 | 系统上下文、Multi-Agent、全栈沙盒、数据与部署 |
 | [03.API接口设计](03.API接口设计.md) | v1.1 | 公共/内部 API、Run 状态机、事件与错误码 |
 | [04.M2 Agent 执行架构](04.M2_Agent_ToolCalling_SSE_HITL.md) | v2.0 设计稿 | Tool Calling、SSE 时间轴、HITL 澄清 |
-| [05.Supervisor 多 Agent 协同](05.Supervisor_Multi_Agent.md) | v1.0 | 总调度、AgentRegistry、子图 Handoff、CustomAgent |
+| [05.Supervisor 多 Agent 协同](05.Supervisor_Multi_Agent.md) | v1.1 | 总调度、AgentRegistry、子图 Handoff、both 强门控、CustomAgent 沙盒隔离 |
 
 ## 阅读顺序
 

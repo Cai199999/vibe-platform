@@ -90,6 +90,8 @@ export async function streamArchitect({
   payload,
   runId,
   replay = false,
+  attach = false,
+  streamPath = null,
   afterSeq = 0,
   token,
   signal,
@@ -98,7 +100,8 @@ export async function streamArchitect({
   let lastSeq = Math.max(0, afterSeq)
   const resolvedRunId = runId || payload?.runId
   let terminal = false
-  let mode = replay ? 'replay' : 'start'
+  // attach：Run 已由 Supervisor 启动，前端只订阅，不重复 POST。
+  let mode = attach ? 'attach' : replay ? 'replay' : 'start'
   let attempts = 0
 
   const headers = {
@@ -119,8 +122,12 @@ export async function streamArchitect({
         })
       } else {
         const query = lastSeq > 0 ? `?afterSeq=${lastSeq}` : ''
+        const readPath =
+          mode === 'attach' && streamPath
+            ? streamPath
+            : `/api/v1/architect/runs/${encodeURIComponent(resolvedRunId)}/events/stream`
         response = await fetch(
-          `/api/v1/architect/runs/${encodeURIComponent(resolvedRunId)}/events/stream${query}`,
+          `${readPath}${query}`,
           {
             method: 'GET',
             headers: { ...headers, 'Last-Event-ID': String(lastSeq) },

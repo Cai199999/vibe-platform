@@ -21,6 +21,8 @@ const ACTIVE = new Set([
 export const EMPTY_ARCHITECT = {
   open: false,
   runId: null,
+  // Supervisor 派发时由服务端提供；恢复连接时优先复用该路径。
+  streamPath: null,
   status: 'IDLE',
   lastSeq: 0,
   appShape: null,
@@ -302,6 +304,7 @@ export function useArchitect({ token } = {}) {
       if (!state.runId) return
       snapshot[projectId] = {
         runId: state.runId,
+        streamPath: state.streamPath,
         status: state.status,
         lastSeq: state.lastSeq,
         appShape: state.appShape,
@@ -345,7 +348,17 @@ export function useArchitect({ token } = {}) {
   }, [])
 
   const connect = useCallback(
-    async (projectId, { payload = null, runId = null, replay = false, afterSeq = 0 } = {}) => {
+    async (
+      projectId,
+      {
+        payload = null,
+        runId = null,
+        replay = false,
+        attach = false,
+        streamPath = null,
+        afterSeq = 0,
+      } = {},
+    ) => {
       const controller = new AbortController()
       controllersRef.current.get(projectId)?.abort()
       controllersRef.current.set(projectId, controller)
@@ -354,6 +367,8 @@ export function useArchitect({ token } = {}) {
           payload,
           runId,
           replay,
+          attach,
+          streamPath,
           afterSeq,
           token,
           signal: controller.signal,
@@ -398,6 +413,32 @@ export function useArchitect({ token } = {}) {
     [connect, patch],
   )
 
+  /**
+   * 挂载一个已由 Supervisor 启动的 Architect Run。
+   *
+   * 与 start 的区别：不 POST /architect/runs/stream，只订阅服务端返回的
+   * streamPath，避免 both 模式重复启动架构子图。
+   */
+  const attach = useCallback(
+    (projectId, { runId, streamPath }) => {
+      patch(projectId, {
+        ...EMPTY_ARCHITECT,
+        open: true,
+        runId,
+        streamPath,
+        status: 'RUNNING',
+        submitting: true,
+      })
+      void connect(projectId, {
+        runId,
+        streamPath,
+        attach: true,
+        afterSeq: 0,
+      })
+    },
+    [connect, patch],
+  )
+
   const openPanel = useCallback(
     (projectId) => {
       const current = statesRef.current[projectId]
@@ -406,6 +447,7 @@ export function useArchitect({ token } = {}) {
       if (ACTIVE.has(current.status)) {
         void connect(projectId, {
           runId: current.runId,
+          streamPath: current.streamPath,
           replay: true,
           afterSeq: current.lastSeq,
         })
@@ -438,6 +480,7 @@ export function useArchitect({ token } = {}) {
         // 服务端已写入 clarification.answered，重放继续同一条时间轴。
         await connect(projectId, {
           runId: current.runId,
+          streamPath: current.streamPath,
           replay: true,
           afterSeq: current.lastSeq,
         })
@@ -467,6 +510,7 @@ export function useArchitect({ token } = {}) {
         )
         await connect(projectId, {
           runId: current.runId,
+          streamPath: current.streamPath,
           replay: true,
           afterSeq: current.lastSeq,
         })
@@ -489,6 +533,7 @@ export function useArchitect({ token } = {}) {
         await fetchArchitectCancel(current.runId, '用户取消架构澄清', token)
         await connect(projectId, {
           runId: current.runId,
+          streamPath: current.streamPath,
           replay: true,
           afterSeq: current.lastSeq,
         })
@@ -551,6 +596,7 @@ export function useArchitect({ token } = {}) {
   return {
     states,
     start,
+    attach,
     openPanel,
     closePanel,
     toggleOpen,

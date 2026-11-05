@@ -560,6 +560,104 @@ code {
   color: #fecaca;
 }
 
+.workspace-toast.is-info {
+  border-color: rgba(34, 211, 238, 0.45);
+  color: #a5f3fc;
+}
+
+/* 通用提示与导出提示同时存在时错开，避免互相遮挡。 */
+.supervisor-toast {
+  bottom: 72px;
+}
+
+/* both 门控：工具栏状态 + 架构面板提示。 */
+.supervisor-gate-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid rgba(34, 211, 238, 0.38);
+  border-radius: 999px;
+  background: rgba(8, 47, 73, 0.42);
+  color: #a5f3fc;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.supervisor-gate-chip .mini-spinner {
+  width: 11px;
+  height: 11px;
+}
+
+.architect-gate {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0 22px;
+  padding: 13px 14px;
+  border: 1px solid rgba(34, 211, 238, 0.32);
+  border-radius: 14px;
+  background: rgba(8, 47, 73, 0.28);
+}
+
+.architect-gate-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: rgba(34, 211, 238, 0.14);
+  color: #67e8f9;
+  font-weight: 700;
+}
+
+.architect-gate-copy strong {
+  display: block;
+  color: #cffafe;
+  font-size: 12.5px;
+}
+
+.architect-gate-copy p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.65;
+}
+
+.architect-gate-copy .architect-secondary {
+  margin-top: 9px;
+}
+
+.architect-gate.is-released {
+  border-color: rgba(52, 211, 153, 0.34);
+  background: rgba(6, 78, 59, 0.18);
+}
+
+.architect-gate.is-released .architect-gate-mark {
+  background: rgba(16, 185, 129, 0.16);
+  color: #6ee7b7;
+}
+
+.architect-gate.is-released strong {
+  color: #a7f3d0;
+}
+
+.architect-gate.is-failed {
+  border-color: rgba(248, 113, 113, 0.32);
+  background: rgba(127, 29, 29, 0.14);
+}
+
+.architect-gate.is-failed .architect-gate-mark {
+  background: rgba(248, 113, 113, 0.14);
+  color: #fca5a5;
+}
+
+.architect-gate-error {
+  color: #fca5a5 !important;
+}
+
 /* ------------------------------------------------------------------ */
 /* Canvas                                                              */
 /* ------------------------------------------------------------------ */

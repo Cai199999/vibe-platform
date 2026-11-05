@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import ArchitectPanel from './ArchitectPanel.jsx'
 import CanvasStage from './CanvasStage.jsx'
 import RuntimePanel from './RuntimePanel.jsx'
@@ -40,18 +40,27 @@ function ProjectWorkspaceInner({
   canExport = false,
   exporting = false,
   architectState,
+  supervisorGate,
+  previewFocusNonce = 0,
   onArchitectOpen,
   onArchitectStart,
   onArchitectClose,
   onArchitectAnswer,
   onArchitectDecide,
   onArchitectCancel,
+  onReleaseGate,
 }) {
   const { linked, setLinked } = useViewportState()
   // 当前布局：compare = 单屏切换，dual = 双屏同显。
   const [viewMode, setViewMode] = useState('compare')
   // 仅对比模式生效：当前显示画布还是预览。
   const [mode, setMode] = useState('canvas')
+
+  // Supervisor 派发 UI Run（或门控释放）后，自动露出右侧执行时间轴。
+  // 使用递增 nonce 而不是布尔值，保证连续两次 handoff 都能重新聚焦。
+  useEffect(() => {
+    if (previewFocusNonce > 0) setMode('preview')
+  }, [previewFocusNonce])
   const annotations = run.annotations
   const submitting = run.submitting
   const previewReady = Boolean(run.result?.previewUrl)
@@ -70,6 +79,14 @@ function ProjectWorkspaceInner({
     annotations.every((annotation) => annotation.intent.trim().length > 0)
   // 审批未决时不允许再发起新 Run，画布交互一并冻结。
   const approvalPending = Boolean(run.approval)
+  // both 门控未释放时 UI Graph 不能执行，画布与提交入口同步冻结。
+  const gateActive =
+    supervisorGate?.status === 'AWAITING_CONTRACT' ||
+    supervisorGate?.status === 'RELEASING'
+  const gateStatusText =
+    supervisorGate?.status === 'RELEASING'
+      ? '正在放行界面修改…'
+      : '正在进行全局架构设计，请先确认契约'
   const status = submitting
     ? 'running'
     : approvalPending
@@ -109,6 +126,12 @@ function ProjectWorkspaceInner({
         </div>
 
         <div className="project-toolbar-right">
+          {gateActive && (
+            <span className="supervisor-gate-chip" role="status">
+              <span className="mini-spinner" aria-hidden="true" />
+              {gateStatusText}
+            </span>
+          )}
           <button
             className={`architect-launch ${
               architectState?.contract ? 'has-contract' : ''
@@ -142,18 +165,21 @@ function ProjectWorkspaceInner({
               !submitReady ||
               submitting ||
               Boolean(run.clarification) ||
-              approvalPending
+              approvalPending ||
+              gateActive
             }
             title={
-              approvalPending
-                ? '请先处理预览面板中的 Diff 审批'
-                : run.clarification
-                  ? '请先回答画布浮层中的澄清问题'
-                  : submitReady
-                    ? `提交全部 ${annotations.length} 个标注`
-                    : annotations.length === 0
-                      ? '请先在画布上圈选组件'
-                      : '请为每个标注填写修改意图'
+              gateActive
+                ? gateStatusText
+                : approvalPending
+                  ? '请先处理预览面板中的 Diff 审批'
+                  : run.clarification
+                    ? '请先回答画布浮层中的澄清问题'
+                    : submitReady
+                      ? `提交全部 ${annotations.length} 个标注`
+                      : annotations.length === 0
+                        ? '请先在画布上圈选组件'
+                        : '请为每个标注填写修改意图'
             }
             onClick={onSubmit}
           >
@@ -256,7 +282,7 @@ function ProjectWorkspaceInner({
             pendingAction={run.pendingAction}
             submitting={submitting}
             disabled={submitting}
-            blocked={approvalPending}
+            blocked={approvalPending || gateActive}
           />
 
           {pauseCta && viewMode === 'compare' && mode === 'canvas' && (
@@ -311,6 +337,8 @@ function ProjectWorkspaceInner({
           onAnswer={onArchitectAnswer}
           onDecide={onArchitectDecide}
           onCancel={onArchitectCancel}
+          gate={supervisorGate}
+          onReleaseGate={onReleaseGate}
         />
       )}
     </section>

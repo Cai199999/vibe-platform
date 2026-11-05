@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,6 +19,12 @@ from typing import Any, Callable, Protocol
 
 from ai_core.agent.schemas import ExecuteRunRequest
 from ai_core.architect.schemas import ArchitectRunRequest
+from ai_core.supervisor.gates import (
+    GateRecord,
+    SupervisorGateRegistry,
+    SupervisorGateStateError,
+    get_gate_registry,
+)
 from ai_core.supervisor.graph import SupervisorGraphRunner
 from ai_core.supervisor.registry import AgentDescriptor, AgentRegistry
 from ai_core.supervisor.schemas import (
@@ -25,6 +32,7 @@ from ai_core.supervisor.schemas import (
     AgentListResponse,
     SubGraphDispatch,
     SupervisorDispatchResponse,
+    SupervisorGateResponse,
     SupervisorRequest,
     SupervisorRouteResponse,
 )
@@ -53,6 +61,22 @@ class SupervisorUiContextRequiredError(SupervisorServiceError):
 class SupervisorDispatchFailedError(SupervisorServiceError):
     code = "SUPERVISOR_DISPATCH_FAILED"
     status_code = 503
+
+
+class SupervisorContractNotConfirmedError(SupervisorServiceError):
+    code = "SUPERVISOR_CONTRACT_NOT_CONFIRMED"
+    status_code = 409
+
+
+class SupervisorGateAbortedError(SupervisorServiceError):
+    code = "SUPERVISOR_GATE_ABORTED"
+    status_code = 409
+
+
+def _get_architect_run(run_id: str) -> Any:  # noqa: ANN401 - 延迟导入避免启动耦合
+    from ai_core.architect.service import get_active_architect_run
+
+    return get_active_architect_run(run_id)
 
 
 # ------------------------------------------------------------
@@ -179,12 +203,16 @@ class SupervisorService:
         registry: AgentRegistry,
         graph: SupervisorGraphRunner | None = None,
         dispatchers: dict[str, SubGraphDispatcher] | None = None,
+        gate_registry: SupervisorGateRegistry | None = None,
+        architect_run_getter: Callable[[str], Any] | None = None,
     ) -> None:
         self._registry = registry
         self._graph = graph or SupervisorGraphRunner(registry)
         self._dispatchers = (
             dispatchers if dispatchers is not None else build_default_dispatchers()
         )
+        self._gates = gate_registry or get_gate_registry()
+        self._architect_run_getter = architect_run_getter or _get_architect_run
 
     # --------------------------------------------------------
     # 路由
@@ -216,6 +244,12 @@ class SupervisorService:
                 + (", ".join(decision.missing_inputs) or decision.reason)
             )
 
+        # 乱序保护：项目存在待确认的 both 门控时，禁止任何新的子图启动。
+        self._reconcile_project(request.project_id)
+        if decision.handoff == "handoff_both":
+            return self._dispatch_both(request, route)
+
+        self._gates.ensure_project_available(request.project_id)
         dispatches: list[SubGraphDispatch] = []
         for handoff in route.handoffs:
             dispatch = self._dispatch_one(request, handoff)
@@ -226,6 +260,169 @@ class SupervisorService:
             dispatches=dispatches,
             started_at=datetime.now(timezone.utc),
         )
+
+    def _dispatch_both(
+        self,
+        request: SupervisorRequest,
+        route: SupervisorRouteResponse,
+    ) -> SupervisorDispatchResponse:
+        """both：只启动 Architect，UI 被门控锁在契约确认之后。
+
+        先预留 project 级锁，再启动 Architect；预留期间其它请求无法绕过
+        门控启动 UI。Architect 启动成功后才落门控，失败则释放预留。
+        """
+        reservation = self._gates.reserve_project(request.project_id)
+        try:
+            architect_handoff = next(
+                item for item in route.handoffs if item.agent_id == "architect_graph"
+            )
+            architect_dispatch = self._dispatch_one(request, architect_handoff)
+        except Exception:
+            self._gates.release_reservation(request.project_id, reservation)
+            raise
+
+        try:
+            gate = self._gates.create(
+                request.project_id,
+                architect_dispatch.run_id,
+                request,
+                reservation=reservation,
+            )
+        except Exception:
+            # 门控落库失败时不能留下孤儿 Architect；尽力取消后释放锁。
+            self._best_effort_cancel_architect(architect_dispatch.run_id)
+            raise
+
+        logger.info(
+            "supervisor both gated gate_id=%s project_id=%s architect_run_id=%s",
+            gate.gate_id,
+            gate.project_id,
+            gate.architect_run_id,
+        )
+        return SupervisorDispatchResponse(
+            trace_id=route.trace_id,
+            decision=route.decision,
+            dispatches=[architect_dispatch],
+            gate=gate.to_view(),
+            started_at=datetime.now(timezone.utc),
+        )
+
+    # --------------------------------------------------------
+    # both 门控释放
+    # --------------------------------------------------------
+    def get_gate(self, gate_id: str) -> SupervisorGateResponse:
+        gate = self._gates.get(gate_id)
+        self._reconcile_gate(gate)
+        gate = self._gates.get(gate_id)
+        dispatches = [gate.ui_dispatch] if gate.ui_dispatch else []
+        return SupervisorGateResponse(gate=gate.to_view(), dispatches=dispatches)
+
+    def release_gate(self, gate_id: str) -> SupervisorGateResponse:
+        """校验契约后启动 UI；重复 release 返回同一个 UI Run。"""
+        gate = self._gates.get(gate_id)
+        self._reconcile_gate(gate)
+        gate = self._gates.get(gate_id)
+
+        if gate.status == "RELEASED":
+            return SupervisorGateResponse(
+                gate=gate.to_view(),
+                dispatches=[gate.ui_dispatch] if gate.ui_dispatch else [],
+            )
+        self._assert_contract_confirmed(gate)
+
+        # 抢占释放权：并发 release 只有一个能真正启动 UI。
+        gate = self._gates.begin_release(gate_id)
+        handoff = self._ui_handoff(order=2)
+        try:
+            ui_dispatch = self._dispatch_one(gate.request, handoff)
+        except Exception as exc:
+            self._gates.fail(gate_id, f"启动 UI Graph 失败: {exc}")
+            logger.exception("supervisor gate release failed gate_id=%s", gate_id)
+            raise
+
+        gate = self._gates.complete_release(gate_id, ui_dispatch)
+        logger.info(
+            "supervisor gate released gate_id=%s ui_run_id=%s",
+            gate_id,
+            ui_dispatch.run_id,
+        )
+        return SupervisorGateResponse(
+            gate=gate.to_view(),
+            dispatches=[ui_dispatch],
+        )
+
+    def _assert_contract_confirmed(self, gate: GateRecord) -> None:
+        if gate.status == "FAILED":
+            raise SupervisorGateAbortedError(
+                f"门控已失败，不能释放: {gate.message or '架构澄清已中止'}"
+            )
+        if gate.status == "RELEASING":
+            raise SupervisorGateStateError("门控正在释放，请稍后查询状态")
+
+        # architect.contract.confirmed 事件先于服务端 active.status 落定，
+        # 客户端收到事件后立刻 release 时给一个短暂收敛窗口，避免竞态误报。
+        deadline = time.monotonic() + 2.0
+        while True:
+            active = self._architect_run_getter(gate.architect_run_id)
+            if active is None:
+                message = "Architect Run 已不存在（服务可能重启）"
+                self._gates.fail(gate.gate_id, message)
+                raise SupervisorGateAbortedError(message)
+            status = getattr(active, "status", None)
+            contract = getattr(active, "contract", None)
+            contract_status = getattr(contract, "status", None)
+            if status == "CONFIRMED" and contract_status == "CONFIRMED":
+                return
+            if status in {"CANCELLED", "FAILED"}:
+                message = f"Architect 已处于 {status}，门控中止"
+                self._gates.fail(gate.gate_id, message)
+                raise SupervisorGateAbortedError(message)
+            if status == "CONFIRMING_CONTRACT" and time.monotonic() < deadline:
+                time.sleep(0.05)
+                continue
+            raise SupervisorContractNotConfirmedError(
+                "契约尚未确认，必须先完成 architect.contract.confirmed"
+            )
+
+    def _reconcile_project(self, project_id: str) -> None:
+        gate = self._gates.active_for_project(project_id)
+        if gate is not None:
+            self._reconcile_gate(gate)
+
+    def _reconcile_gate(self, gate: GateRecord) -> None:
+        """Architect 被取消 / 失败 / 丢失时自动将门控置为 FAILED。"""
+        if not gate.active:
+            return
+        active = self._architect_run_getter(gate.architect_run_id)
+        if active is None:
+            self._gates.fail(gate.gate_id, "Architect Run 已不存在")
+            return
+        status = getattr(active, "status", None)
+        if status in {"CANCELLED", "FAILED"}:
+            self._gates.fail(gate.gate_id, f"Architect 已处于 {status}")
+
+    def _ui_handoff(self, *, order: int) -> AgentHandoff:
+        descriptor = self._registry.require_routable("ui_graph")
+        return AgentHandoff(
+            agent_id=descriptor.agent_id,
+            display_name=descriptor.display_name,
+            graph=descriptor.graph,
+            order=order,
+            stream_path_template=descriptor.stream_path_template,
+        )
+
+    @staticmethod
+    def _best_effort_cancel_architect(run_id: str) -> None:
+        try:
+            from ai_core.architect.schemas import ArchitectCancelRequest
+            from ai_core.architect.service import ArchitectService
+
+            ArchitectService().cancel(
+                run_id,
+                ArchitectCancelRequest(reason="supervisor gate create failed"),
+            )
+        except Exception:  # noqa: BLE001 - 清理失败不覆盖原始异常
+            logger.warning("failed to cancel orphan architect run %s", run_id)
 
     def _dispatch_one(
         self,

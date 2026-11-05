@@ -3,6 +3,7 @@ package com.vibeplatform.bff.supervisor;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -38,6 +39,21 @@ public class SupervisorController {
             @RequestBody(required = false) JsonNode body
     ) {
         return supervisorService.dispatch(body);
+    }
+
+    /** 查询 both 门控状态。 */
+    @GetMapping("/gates/{gateId}")
+    public ResponseEntity<JsonNode> gate(@PathVariable String gateId) {
+        return supervisorService.gate(gateId);
+    }
+
+    /** 契约确认后放行 UI Graph；重复调用返回同一个 UI Run。 */
+    @PostMapping("/gates/{gateId}/release")
+    public ResponseEntity<JsonNode> releaseGate(
+            @PathVariable String gateId,
+            @RequestBody(required = false) JsonNode body
+    ) {
+        return supervisorService.releaseGate(gateId);
     }
 
     /** 列出内置、预留与企业 Manifest Agent。 */

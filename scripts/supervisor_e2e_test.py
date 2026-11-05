@@ -190,6 +190,7 @@ def route_case(
     expected_target: str,
     expected_targets: list[str] | None = None,
     expected_dispatchable: bool | None = None,
+    expected_handoff: str | None = None,
 ) -> dict[str, Any]:
     status, body = request_json("POST", f"{API_ROOT}/route", payload)
     check(status == 200, f"{label}: route 应返回 200，实际 {status}: {body}")
@@ -198,6 +199,12 @@ def route_case(
         decision.get("target") == expected_target,
         f"{label}: target 应为 {expected_target}，实际 {decision.get('target')}: {decision}",
     )
+    if expected_handoff is not None:
+        check(
+            decision.get("handoff") == expected_handoff,
+            f"{label}: handoff 应为 {expected_handoff}，"
+            f"实际 {decision.get('handoff')}: {decision}",
+        )
     if expected_targets is not None:
         check(
             decision.get("targets") == expected_targets,
@@ -245,7 +252,7 @@ def main() -> int:
         "message": "把提交按钮改成蓝色",
         "annotations": [ANNOTATION],
     }
-    route_case("ui", ui_payload, "ui_graph", ["ui_graph"], True)
+    route_case("ui", ui_payload, "ui_graph", ["ui_graph"], True, "handoff_ui")
 
     print("\n== 3. Architect 路由 ==")
     architect_payload = {
@@ -258,6 +265,7 @@ def main() -> int:
         "architect_graph",
         ["architect_graph"],
         True,
+        "handoff_architect",
     )
 
     print("\n== 4. both 路由（有序 targets） ==")
@@ -272,6 +280,7 @@ def main() -> int:
         "both",
         ["architect_graph", "ui_graph"],
         True,
+        "handoff_both",
     )
     handoffs = both.get("handoffs") or []
     check(
@@ -290,6 +299,7 @@ def main() -> int:
         "none",
         [],
         False,
+        "rejected",
     )
     check(
         (unknown.get("decision") or {}).get("targets") == [],
@@ -331,7 +341,85 @@ def main() -> int:
     )
     print("   SUPERVISOR_UI_CONTEXT_REQUIRED")
 
-    print("\n== 8. dispatch 真实 Architect 子图 ==")
+    print("\n== 8. both 强门控：只启动 Architect，UI 等待契约 ==")
+    status, gated = request_json("POST", f"{API_ROOT}/dispatch", both_payload)
+    check(status == 202, f"both dispatch 应返回 202，实际 {status}: {gated}")
+    gated_dispatches = gated.get("dispatches") or []
+    check(
+        [item.get("agentId") for item in gated_dispatches] == ["architect_graph"],
+        f"both 在门控释放前只应启动 Architect: {gated_dispatches}",
+    )
+    gate = gated.get("gate") or {}
+    gate_id = gate.get("gateId")
+    architect_run_id = gated_dispatches[0].get("runId")
+    check(bool(gate_id), f"both 必须返回 gateId: {gated}")
+    check(
+        gate.get("status") == "AWAITING_CONTRACT",
+        f"门控初始状态错误: {gate}",
+    )
+    check(
+        gate.get("pendingAgentId") == "ui_graph",
+        f"门控应等待 ui_graph: {gate}",
+    )
+    print(f"   gateId={gate_id} architectRunId={architect_run_id}")
+
+    status, early = request_json("POST", f"{API_ROOT}/gates/{gate_id}/release", {})
+    check(status == 409, f"契约未确认时 release 应返回 409，实际 {status}: {early}")
+    early_detail = early.get("detail") if isinstance(early, dict) else None
+    early_code = early_detail.get("code") if isinstance(early_detail, dict) else None
+    check(
+        early_code == "SUPERVISOR_CONTRACT_NOT_CONFIRMED",
+        f"早释放错误码错误: {early}",
+    )
+
+    status, locked = request_json(
+        "POST",
+        f"{API_ROOT}/dispatch",
+        {
+            # 必须使用同一个 projectId，才能验证项目级门控锁。
+            **both_payload,
+            "message": "把按钮改成绿色",
+            "annotations": [{**ANNOTATION, "annotationId": "ann_blocked"}],
+        },
+    )
+    check(status == 409, f"门控期间新派发应返回 409，实际 {status}: {locked}")
+    locked_detail = locked.get("detail") if isinstance(locked, dict) else None
+    locked_code = locked_detail.get("code") if isinstance(locked_detail, dict) else None
+    check(
+        locked_code == "SUPERVISOR_PROJECT_GATE_ACTIVE",
+        f"项目锁错误码错误: {locked}",
+    )
+    print("   CLOSED: 早释放 / 项目并发派发均被拒绝")
+
+    print("\n== 9. 取消 Architect 自动中止门控 ==")
+    status, cancelled = request_json(
+        "POST",
+        f"{ARCHITECT_API_ROOT}/runs/{architect_run_id}/cancel",
+        {"reason": "supervisor both gate e2e cleanup"},
+    )
+    check(status == 200, f"取消 Architect 失败: {status}: {cancelled}")
+    status, aborted = request_json("POST", f"{API_ROOT}/gates/{gate_id}/release", {})
+    check(
+        status == 409,
+        f"已取消 Architect 的 release 应返回 409，实际 {status}: {aborted}",
+    )
+    aborted_detail = aborted.get("detail") if isinstance(aborted, dict) else None
+    aborted_code = (
+        aborted_detail.get("code") if isinstance(aborted_detail, dict) else None
+    )
+    check(
+        aborted_code == "SUPERVISOR_GATE_ABORTED",
+        f"门控中止错误码错误: {aborted}",
+    )
+    status, gate_view = request_json("GET", f"{API_ROOT}/gates/{gate_id}")
+    check(status == 200, f"查询门控失败: {status}: {gate_view}")
+    check(
+        (gate_view.get("gate") or {}).get("status") == "FAILED",
+        f"Architect 取消后门控应为 FAILED: {gate_view}",
+    )
+    print("   FAILED: Architect 取消 -> 门控中止 -> 项目锁释放")
+
+    print("\n== 10. dispatch 真实 Architect 子图 ==")
     dispatch_payload = {
         **base_payload("dispatch_architect"),
         "message": "请做全局全栈架构设计和数据库规划",
@@ -357,7 +445,7 @@ def main() -> int:
     )
     print(f"   SSE 首事件={terminal.get('type')}")
 
-    print("\n== 9. 清理 Architect Run ==")
+    print("\n== 11. 清理 Architect Run ==")
     status, body = request_json(
         "POST",
         f"{ARCHITECT_API_ROOT}/runs/{run_id}/cancel",

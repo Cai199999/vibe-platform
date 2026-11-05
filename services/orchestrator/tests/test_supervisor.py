@@ -11,6 +11,10 @@ import unittest
 from pathlib import Path
 
 from ai_core.agent.schemas import AnnotationEnvelope
+from ai_core.supervisor.gates import (
+    SupervisorGateRegistry,
+    SupervisorProjectGateActiveError,
+)
 from ai_core.supervisor.registry import (
     AgentNotAvailableError,
     AgentRegistry,
@@ -19,6 +23,8 @@ from ai_core.supervisor.router import RuleBasedIntentClassifier
 from ai_core.supervisor.schemas import SupervisorRequest
 from ai_core.supervisor.service import (
     SubGraphHandle,
+    SupervisorContractNotConfirmedError,
+    SupervisorGateAbortedError,
     SupervisorService,
     SupervisorUiContextRequiredError,
 )
@@ -210,17 +216,30 @@ class _FakeDispatcher:
         )
 
 
+class _FakeArchitectRun:
+    def __init__(self, status: str = "CONFIRMED") -> None:
+        self.status = status
+        contract_status = "CONFIRMED" if status == "CONFIRMED" else "DRAFT"
+        self.contract = type("Contract", (), {"status": contract_status})()
+
+
 class DispatchTest(unittest.TestCase):
     def setUp(self) -> None:
         self.registry = AgentRegistry()
         self.architect = _FakeDispatcher("architect_graph")
         self.ui = _FakeDispatcher("ui_graph")
+        self.architect_runs: dict[str, _FakeArchitectRun] = {
+            "fake_architect_graph": _FakeArchitectRun()
+        }
+        self.gates = SupervisorGateRegistry()
         self.service = SupervisorService(
             self.registry,
             dispatchers={
                 "architect_graph": self.architect,
                 "ui_graph": self.ui,
             },
+            gate_registry=self.gates,
+            architect_run_getter=self.architect_runs.get,
         )
 
     def test_dispatch_architect(self) -> None:
@@ -231,20 +250,98 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(len(self.architect.calls), 1)
         self.assertEqual(self.ui.calls, [])
 
-    def test_dispatch_both_has_deterministic_order(self) -> None:
+    def test_dispatch_both_starts_only_architect_and_creates_gate(self) -> None:
         response = self.service.dispatch(
             _request(
                 message="把按钮改蓝，同时规划全栈后端",
                 annotations=[_annotation()],
             )
         )
+        self.assertEqual(response.decision.handoff, "handoff_both")
         self.assertEqual(
             [item.agent_id for item in response.dispatches],
-            ["architect_graph", "ui_graph"],
+            ["architect_graph"],
         )
+        self.assertIsNotNone(response.gate)
+        self.assertEqual(response.gate.status, "AWAITING_CONTRACT")
+        self.assertEqual(response.gate.architect_run_id, "fake_architect_graph")
+        self.assertEqual(response.gate.pending_agent_id, "ui_graph")
+        self.assertEqual(self.ui.calls, [])
+
+    def test_both_gate_rejects_early_release(self) -> None:
+        self.architect_runs["fake_architect_graph"] = _FakeArchitectRun(
+            status="AWAITING_CONTRACT_CONFIRMATION"
+        )
+        response = self.service.dispatch(
+            _request(
+                message="把按钮改蓝，同时规划全栈后端",
+                annotations=[_annotation()],
+            )
+        )
+        with self.assertRaises(SupervisorContractNotConfirmedError):
+            self.service.release_gate(response.gate.gate_id)
+        self.assertEqual(self.ui.calls, [])
+        # 早释放不能把门控打成 FAILED，用户确认契约后仍可继续。
         self.assertEqual(
-            [item.order for item in response.dispatches],
-            [1, 2],
+            self.service.get_gate(response.gate.gate_id).gate.status,
+            "AWAITING_CONTRACT",
+        )
+
+    def test_both_gate_release_starts_ui_once_and_is_idempotent(self) -> None:
+        response = self.service.dispatch(
+            _request(
+                message="把按钮改蓝，同时规划全栈后端",
+                annotations=[_annotation()],
+            )
+        )
+        released = self.service.release_gate(response.gate.gate_id)
+        self.assertEqual(released.gate.status, "RELEASED")
+        self.assertEqual(len(released.dispatches), 1)
+        self.assertEqual(released.dispatches[0].agent_id, "ui_graph")
+        self.assertEqual(released.gate.ui_run_id, "fake_ui_graph")
+
+        duplicate = self.service.release_gate(response.gate.gate_id)
+        self.assertEqual(duplicate.gate.ui_run_id, "fake_ui_graph")
+        self.assertEqual(len(self.ui.calls), 1)
+
+    def test_project_lock_blocks_new_dispatch_until_gate_released(self) -> None:
+        response = self.service.dispatch(
+            _request(
+                message="把按钮改蓝，同时规划全栈后端",
+                annotations=[_annotation()],
+            )
+        )
+        with self.assertRaises(SupervisorProjectGateActiveError):
+            self.service.dispatch(
+                _request(
+                    message="把按钮改成红色",
+                    annotations=[_annotation("ann_2")],
+                )
+            )
+        self.service.release_gate(response.gate.gate_id)
+        # 释放后门控不再阻塞新请求。
+        self.service.dispatch(
+            _request(
+                message="把按钮改成红色",
+                annotations=[_annotation("ann_2")],
+            )
+        )
+
+    def test_cancelled_architect_aborts_gate(self) -> None:
+        response = self.service.dispatch(
+            _request(
+                message="把按钮改蓝，同时规划全栈后端",
+                annotations=[_annotation()],
+            )
+        )
+        self.architect_runs["fake_architect_graph"] = _FakeArchitectRun(
+            status="CANCELLED"
+        )
+        with self.assertRaises(SupervisorGateAbortedError):
+            self.service.release_gate(response.gate.gate_id)
+        self.assertEqual(
+            self.service.get_gate(response.gate.gate_id).gate.status,
+            "FAILED",
         )
 
     def test_dispatch_ui_without_annotation_is_rejected(self) -> None:

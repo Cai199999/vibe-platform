@@ -167,6 +167,7 @@ class SupervisorGraphRunner:
             task_type=prediction.task_type,
             target=prediction.target,
             targets=[item.agent_id for item in descriptors],
+            handoff=self._handoff_kind(prediction.target),
             confidence=prediction.confidence,
             reason=prediction.reason,
             signals=list(prediction.signals),
@@ -224,7 +225,21 @@ class SupervisorGraphRunner:
         return [self._registry.require_routable(prediction.target)]
 
     @staticmethod
+    def _handoff_kind(target: str) -> str:
+        """把内部 target 映射为前端直接消费的 Handoff 语义。"""
+        if target == "ui_graph":
+            return "handoff_ui"
+        if target == "architect_graph":
+            return "handoff_architect"
+        if target == "both":
+            return "handoff_both"
+        if target == "none":
+            return "rejected"
+        return "handoff_custom"
+
+    @classmethod
     def _empty_decision(
+        cls,
         prediction: IntentPrediction,
         *,
         reason: str,
@@ -233,6 +248,7 @@ class SupervisorGraphRunner:
             task_type=prediction.task_type,
             target="none",
             targets=[],
+            handoff=cls._handoff_kind("none"),
             confidence=prediction.confidence,
             reason=reason,
             signals=list(prediction.signals),

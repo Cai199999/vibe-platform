@@ -19,6 +19,15 @@ from ai_core.architect.schemas import ArchitectRunOptions, ArchitectSource
 ScopeHint = Literal["auto", "ui", "architect", "both"]
 TargetKind = Literal["ui_graph", "architect_graph", "both", "custom", "none"]
 AgentStatus = Literal["available", "reserved", "custom"]
+# 前端直接消费的 Handoff 语义，避免在客户端重复推导 target 的含义。
+HandoffKind = Literal[
+    "handoff_ui",
+    "handoff_architect",
+    "handoff_both",
+    "handoff_custom",
+    "rejected",
+]
+GateStatus = Literal["AWAITING_CONTRACT", "RELEASING", "RELEASED", "FAILED"]
 
 
 class SupervisorOptions(CamelModel):
@@ -62,6 +71,9 @@ class SupervisorDecision(CamelModel):
     task_type: str
     target: str
     targets: list[str] = Field(default_factory=list)
+    # 前端 UI 开关直接依据该字段：handoff_ui / handoff_architect /
+    # handoff_both / handoff_custom / rejected。
+    handoff: HandoffKind
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str
     signals: list[str] = Field(default_factory=list)
@@ -100,11 +112,41 @@ class SubGraphDispatch(CamelModel):
     status: Literal["STARTED"] = "STARTED"
 
 
+class SupervisorGate(CamelModel):
+    """``both`` 模式的强门控。
+
+    Architect 先生成契约；UI Graph 的 Run 不会在 dispatch 阶段启动，
+    只有 release 校验 ``architect.contract.confirmed`` 通过后才启动一次。
+    """
+
+    gate_id: str
+    project_id: str
+    status: GateStatus
+    architect_run_id: str
+    pending_agent_id: str = "ui_graph"
+    release_condition: str = "architect.contract.confirmed"
+    ui_run_id: str | None = None
+    ui_stream_path: str | None = None
+    message: str | None = None
+    created_at: datetime
+    released_at: datetime | None = None
+    updated_at: datetime
+
+
 class SupervisorDispatchResponse(CamelModel):
     trace_id: str
     decision: SupervisorDecision
     dispatches: list[SubGraphDispatch] = Field(default_factory=list)
+    # 仅 ``handoff_both`` 返回；UI 子图处于 BLOCKED / 等待契约确认。
+    gate: SupervisorGate | None = None
     started_at: datetime
+
+
+class SupervisorGateResponse(CamelModel):
+    """门控状态查询 / 释放结果。"""
+
+    gate: SupervisorGate
+    dispatches: list[SubGraphDispatch] = Field(default_factory=list)
 
 
 class AgentView(CamelModel):

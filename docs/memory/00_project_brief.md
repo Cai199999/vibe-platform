@@ -24,6 +24,11 @@
   通过 AgentRegistry 把请求分发到 UI Graph / Architect Graph / both；预留
   BackendCoder、ScriptAgent 与企业 CustomAgent Manifest 扩展槽。
   细节见 `docs/memory/2026-11-05_M2_5_supervisor_multi_agent.md`。
+- **M2.5 Supervisor 前端接入 + both 强门控已落地（2026-11-05）**：画布“发送 /
+  提交”和工具栏“下一步”统一走 `route → dispatch`，按 `handoff` 动态切换 UI；
+  `handoff_both` 先只启动 Architect，契约确认后 `release` 才启动 UI，项目锁、
+  幂等释放与乱序拒绝全部落到代码；浏览器级混合 E2E 已通过。
+  细节见 `docs/memory/2026-11-05_M2_5_supervisor_frontend_gate.md`。
 
 ## 2. 核心技术栈
 
@@ -61,6 +66,13 @@
 7. 局部 Run 澄清最多 3 轮；M2.5 Architect 最多 5 轮，耗尽后返回 `CONFIDENCE_EXHAUSTED`；不得臆造业务模型。
 8. M2.5 以应用形态为第一判别项：轻量工具不追问后端 / 数据库，脚本不追问 UI，全栈才要求 API、DDL 与数据实体。
 9. 基础设施复用 `~/Workspace/infra` 的 MySQL/Redis/MinIO；平台 Compose 不重复部署中间件。
+10. 前端不得硬编码子图启动接口：所有“发送 / 提交 / 下一步”先走
+    `POST /api/v1/supervisor/route` + `/dispatch`，再按 `decision.handoff`
+    attach 到预启动 Run；`rejected` 必须提示先圈选组件。
+11. `handoff_both` 必须先契约后 UI：契约未 `CONFIRMED` 时任何路径都不得启动
+    UI Run；项目级 gate 保证单项目单门控、release 幂等、乱序 409。
+12. 用户上传的 CustomAgent 未来必须在独立受限沙盒 / 临时 venv 中执行，
+    其 Prompt、代码生成与脚本不得进入主进程或共享依赖环境。
 
 ## 5. 当前文档状态
 
