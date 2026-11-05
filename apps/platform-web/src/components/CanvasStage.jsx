@@ -295,11 +295,13 @@ function AnnotationPopover({
   pending,
   pendingAction,
   active,
+  hidden = false,
   panReady,
   inputRef,
   onChange,
   onActionChange,
   onRemove,
+  onUnmount,
   onSend,
   onClarificationAnswer,
   clarification,
@@ -315,11 +317,35 @@ function AnnotationPopover({
   )
   const history = annotation.chatHistory ?? []
   const [answers, setAnswers] = useState({})
+  const [confirmingClose, setConfirmingClose] = useState(false)
+  const sending = Boolean(submitting && pending)
+  // 关闭确认按项目级 submitting 判定：单圈 / 批量提交都要保护。
+  const executing = Boolean(submitting)
+  const onUnmountRef = useRef(onUnmount)
+
+  useEffect(() => {
+    onUnmountRef.current = onUnmount
+  }, [onUnmount])
+
+  // 卸载钩子：浮层被删除 / 项目切换 / 错误边界降级时，通知工作区中止
+  // 该标注的 route / dispatch / SSE，避免迟到结果回写已卸载的对话。
+  // 依赖只保留 annotation.id：父级 callback 每次渲染都会变化，不能让它
+  // 触发 cleanup，否则普通状态更新也会误中止请求。
+  useEffect(
+    () => () => {
+      onUnmountRef.current?.(annotation.id)
+    },
+    [annotation.id],
+  )
 
   useEffect(() => {
     const node = historyRef.current
     if (node) node.scrollTop = node.scrollHeight
   }, [history.length, pending, clarification])
+
+  useEffect(() => {
+    if (!executing) setConfirmingClose(false)
+  }, [executing])
 
   // 新一轮澄清使用独立草稿；默认值（如“颜色”）预选，用户可直接提交。
   useEffect(() => {
@@ -338,7 +364,6 @@ function AnnotationPopover({
 
   if (!style) return null
 
-  const sending = Boolean(submitting && pending)
   const rollingBack = sending && pendingAction === 'rollback'
   // 兼容旧项目状态：没有显式 action 时按是否命中元素推断。
   const action = annotation.action ?? (annotation.target ? 'MODIFY' : 'ADD')
@@ -391,9 +416,10 @@ function AnnotationPopover({
 
   return (
     <form
-      className={`canvas-popover tone-${index % 3} ${active ? 'is-active' : ''}`}
+      className={`canvas-popover tone-${index % 3} ${active ? 'is-active' : ''} ${hidden ? 'is-hidden' : ''}`}
       style={style}
       role="dialog"
+      aria-hidden={hidden}
       aria-label={`标注 ${index + 1} 多轮对话`}
       data-annotation-id={annotation.id}
       data-action={action}
@@ -444,16 +470,55 @@ function AnnotationPopover({
           ))}
         </div>
         <button
-          className="popover-remove"
+          className={`popover-remove ${executing ? 'is-running' : ''}`}
           type="button"
-          title="删除这个标注"
+          title={
+            executing
+              ? '任务执行中，关闭前需要确认'
+              : '删除这个标注'
+          }
           aria-label={`删除标注 ${index + 1}`}
-          disabled={blocked || submitting || Boolean(clarification)}
-          onClick={() => onRemove?.(annotation.id)}
+          disabled={blocked || Boolean(clarification)}
+          onClick={() => {
+            if (executing) {
+              setConfirmingClose(true)
+              return
+            }
+            onRemove?.(annotation.id)
+          }}
         >
           ×
         </button>
       </div>
+
+      {confirmingClose && (
+        <div
+          className="popover-close-confirm"
+          role="alertdialog"
+          aria-label="确认关闭标注"
+        >
+          <p>任务正在执行中，强行关闭可能丢失结果，是否继续？</p>
+          <div className="popover-close-actions">
+            <button
+              type="button"
+              className="popover-confirm-cancel"
+              onClick={() => setConfirmingClose(false)}
+            >
+              继续等待
+            </button>
+            <button
+              type="button"
+              className="popover-confirm-close"
+              onClick={() => {
+                setConfirmingClose(false)
+                onRemove?.(annotation.id)
+              }}
+            >
+              仍然关闭
+            </button>
+          </div>
+        </div>
+      )}
 
       {history.length > 0 && (
         <div
@@ -654,6 +719,7 @@ export default function CanvasStage({
   onAnnotationIntentChange,
   onAnnotationActionChange,
   onAnnotationRemove,
+  onAnnotationUnmount,
   onAnnotationSend,
   onClarificationAnswer,
   clarification,
@@ -946,12 +1012,12 @@ export default function CanvasStage({
               </div>
             )}
 
-            {!skipPopovers &&
-              annotations.map((annotation, index) => (
+            {annotations.map((annotation, index) => (
                 <AnnotationPopover
                   key={annotation.id}
                   annotation={annotation}
                   index={index}
+                  hidden={skipPopovers}
                   submitting={submitting}
                   blocked={blocked}
                   pending={pendingAnnotationId === annotation.id}
@@ -965,6 +1031,7 @@ export default function CanvasStage({
                   onChange={onAnnotationIntentChange}
                   onActionChange={onAnnotationActionChange}
                   onRemove={onAnnotationRemove}
+                  onUnmount={onAnnotationUnmount}
                   onSend={onAnnotationSend}
                   onClarificationAnswer={onClarificationAnswer}
                   clarificationPending={Boolean(clarification)}

@@ -182,6 +182,34 @@ async function destroySandbox(sandboxId, token) {
   }
 }
 
+/**
+ * 可中止的等待。
+ *
+ * Supervisor 路由后刻意停留 480ms 展示“分析中”，若用户此时关闭标注，
+ * 定时器必须立即清理并抛 AbortError，不能在卸载后继续写状态。
+ */
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'))
+      return
+    }
+    const timer = window.setTimeout(() => {
+      cleanup()
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      window.clearTimeout(timer)
+      cleanup()
+      reject(new DOMException('Aborted', 'AbortError'))
+    }
+    const cleanup = () => {
+      signal?.removeEventListener('abort', onAbort)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 const newId = (prefix) => {
   const random =
     typeof crypto !== 'undefined' && crypto.randomUUID
@@ -770,15 +798,33 @@ export default function WorkspacePage() {
   // 在架构面板中手动重试，避免 effect 死循环。
   const gateReleaseInflightRef = useRef(new Set())
   const gateAutoReleaseAttemptedRef = useRef(new Set())
+  // 页面级挂载标记：所有异步回调写状态前必须检查，避免卸载后 setState。
+  const workspaceMountedRef = useRef(true)
+  // 每个项目一个单调递增 epoch；新 Run / 强制关闭都会递增，旧请求的
+  // 迟到响应通过 epoch 判定为过期，绝不能覆盖新状态。
+  const runEpochRef = useRef(new Map())
+  // 已关闭的标注：即使后端任务仍在执行，也丢弃该 thread 的后续事件。
+  const closedAnnotationsRef = useRef(new Map())
+  // 按 projectId:annotationId 维度持有 AbortController，关闭浮层即中止。
+  const annotationAbortRef = useRef(new Map())
+  // 异步回调里需要读取最新 run 状态（state 本身是渲染快照）。
+  const runStatesRef = useRef(runStates)
+
+  useEffect(() => {
+    runStatesRef.current = runStates
+  }, [runStates])
 
   // 页面卸载 / 切换项目时关闭所有 SSE，避免后台继续占用连接。
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    workspaceMountedRef.current = true
+    return () => {
+      workspaceMountedRef.current = false
       streamControllersRef.current.forEach((controller) => controller.abort())
       streamControllersRef.current.clear()
-    },
-    [],
-  )
+      annotationAbortRef.current.forEach((controller) => controller.abort())
+      annotationAbortRef.current.clear()
+    }
+  }, [])
 
   // 刷新页面后恢复已完成的预览；只持久化会话内结果，不写入 localStorage。
   useEffect(() => {
@@ -867,6 +913,7 @@ export default function WorkspacePage() {
   }, [anyRunning])
 
   const patchRun = (projectId, patch) => {
+    if (!workspaceMountedRef.current) return
     if (closedProjectsRef.current.has(projectId)) return
     setRunStates((previous) => {
       const base = previous[projectId] ?? EMPTY_RUN
@@ -876,7 +923,107 @@ export default function WorkspacePage() {
     })
   }
 
+  const currentRunEpoch = (projectId) => runEpochRef.current.get(projectId) ?? 0
+
+  const bumpRunEpoch = (projectId) => {
+    const next = currentRunEpoch(projectId) + 1
+    runEpochRef.current.set(projectId, next)
+    return next
+  }
+
+  const isAnnotationClosed = (projectId, annotationId) => {
+    if (!annotationId) return false
+    return closedAnnotationsRef.current.get(projectId)?.has(annotationId) ?? false
+  }
+
+  const markAnnotationClosed = (projectId, annotationId) => {
+    if (!annotationId) return
+    let closed = closedAnnotationsRef.current.get(projectId)
+    if (!closed) {
+      closed = new Set()
+      closedAnnotationsRef.current.set(projectId, closed)
+    }
+    closed.add(annotationId)
+  }
+
+  const annotationScopeKey = (projectId, annotationId) =>
+    `${projectId}:${annotationId ?? 'batch'}`
+
+  /** 后台静默取消：不订阅事件、不写 UI 状态；失败也不打扰用户。 */
+  const cancelRunSilently = (runId) => {
+    if (!runId) return
+    void fetch(`/api/v1/runs/${encodeURIComponent(runId)}/cancel`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session?.token ?? ''}`,
+      },
+      body: JSON.stringify({ reason: '标注已由用户关闭' }),
+      keepalive: true,
+    }).catch(() => {
+      // 后端可能已进入终态；静默取消无需向用户报错。
+    })
+  }
+
+  /**
+   * 中止某个标注关联的所有异步工作。
+   *
+   * 触发时机：浮层卸载、用户确认强制关闭。函数必须幂等：
+   *  - abort 已发出的 route / dispatch；
+   *  - 中止该项目 SSE，并递增 epoch 让旧回调全部失效；
+   *  - 后端 Run 若已启动，再尽力发一次 cancel；
+   *  - 清理 submitting / pending / error，避免预览落入“执行失败”。
+   */
+  const abortAnnotationScope = (projectId, annotationId) => {
+    if (!workspaceMountedRef.current) return
+    if (!annotationId) return
+    const key = annotationScopeKey(projectId, annotationId)
+    const controller = annotationAbortRef.current.get(key)
+    if (controller) {
+      controller.abort()
+      annotationAbortRef.current.delete(key)
+    }
+
+    const run = runStatesRef.current?.[projectId]
+    if (!run) return
+    // 只有真正在途 / 等待澄清 / 等待审批的 Run 才需要中止。
+    // 已完成的 Run 保留 targetAnnotationId，不能因为删除旧标注而误取消。
+    const activeRun =
+      run.submitting ||
+      Boolean(run.clarification) ||
+      Boolean(run.approval) ||
+      inflightRef.current.has(projectId)
+    const ownsRun =
+      activeRun &&
+      (run.targetAnnotationId === annotationId ||
+        run.pendingAnnotationId === annotationId ||
+        run.annotations.some((item) => item.id === annotationId))
+    if (!ownsRun) return
+
+    bumpRunEpoch(projectId)
+    streamControllersRef.current.get(projectId)?.abort()
+    streamControllersRef.current.delete(projectId)
+    inflightRef.current.delete(projectId)
+    cancelRunSilently(run.runId)
+    patchRun(projectId, (previous) => ({
+      ...previous,
+      submitting: false,
+      pendingAnnotationId: null,
+      pendingAction: null,
+      // 关闭标注不再把取消 / 断流呈现为失败。
+      error: null,
+      clarification: null,
+      approval: null,
+      cancelRequested: false,
+      targetAnnotationId:
+        previous.targetAnnotationId === annotationId
+          ? null
+          : previous.targetAnnotationId,
+    }))
+  }
+
   const patchGate = (projectId, patch) => {
+    if (!workspaceMountedRef.current) return
     setGateStates((previous) => {
       const base = previous[projectId]
       if (!base) return previous
@@ -1088,7 +1235,22 @@ export default function WorkspacePage() {
   const handleAnnotationRemove = async (projectId, annotationId) => {
     const run = runStates[projectId] ?? EMPTY_RUN
     const annotation = run.annotations.find((item) => item.id === annotationId)
-    if (!annotation || run.submitting || inflightRef.current.has(projectId)) return
+    if (!annotation) return
+
+    // 执行中强行关闭：浮层已向用户确认过。先中止该标注的 route / dispatch /
+    // SSE，再立刻从 UI 移除；后端 Run 用 cancel 尽力收尾，但所有迟到结果
+    // 都会因 closedAnnotations + epoch 被丢弃，绝不会回写到已关闭的对话。
+    if (run.submitting || inflightRef.current.has(projectId)) {
+      markAnnotationClosed(projectId, annotationId)
+      abortAnnotationScope(projectId, annotationId)
+      patchRun(projectId, (previous) => ({
+        ...previous,
+        annotations: previous.annotations.filter(
+          (item) => item.id !== annotationId,
+        ),
+      }))
+      return
+    }
 
     const baseCommitHash =
       annotation.baseCommitHash || run.result?.baselineCommit || null
@@ -1097,6 +1259,7 @@ export default function WorkspacePage() {
       annotation.lastCommitHash && baseCommitHash && sandboxId,
     )
     if (!needsReset) {
+      markAnnotationClosed(projectId, annotationId)
       patchRun(projectId, (previous) => ({
         ...previous,
         annotations: previous.annotations.filter(
@@ -1120,6 +1283,7 @@ export default function WorkspacePage() {
         sandboxId,
       )
       if (closedProjectsRef.current.has(projectId)) return
+      markAnnotationClosed(projectId, annotationId)
       patchRun(projectId, (previous) => ({
         ...previous,
         error: null,
@@ -1309,8 +1473,14 @@ export default function WorkspacePage() {
    */
   const attachUiDispatch = async (
     projectId,
-    { runId, streamPath, annotationId, handoff },
+    { runId, streamPath, annotationId, handoff, epoch },
   ) => {
+    // 浮层在 dispatch 返回前已被用户关闭：不要订阅，也不要写任何状态；
+    // 后端 Run 可能已经启动，尽力取消它。
+    if (annotationId && isAnnotationClosed(projectId, annotationId)) {
+      cancelRunSilently(runId)
+      return
+    }
     patchRun(projectId, (previous) => ({
       ...previous,
       submitting: true,
@@ -1335,6 +1505,7 @@ export default function WorkspacePage() {
       attach: true,
       runId,
       streamPath,
+      epoch,
     })
   }
 
@@ -1368,6 +1539,30 @@ export default function WorkspacePage() {
 
     const payload = buildSupervisorPayload(projectId, { message, annotations })
     if (!payload) return
+
+    // 每次提交都开启新的 epoch，并为本标注持有 AbortController。
+    // 用户关闭浮层时 abort 会同时中断 route / dispatch 和后续 SSE。
+    const epoch = bumpRunEpoch(projectId)
+    const scopeKey = annotationId
+      ? annotationScopeKey(projectId, annotationId)
+      : null
+    let scopeController = null
+    if (scopeKey) {
+      annotationAbortRef.current.get(scopeKey)?.abort()
+      scopeController = new AbortController()
+      annotationAbortRef.current.set(scopeKey, scopeController)
+    }
+    const signal = scopeController?.signal
+    const isStale = () =>
+      !workspaceMountedRef.current ||
+      currentRunEpoch(projectId) !== epoch ||
+      isAnnotationClosed(projectId, annotationId)
+    const releaseInflight = () => {
+      if (currentRunEpoch(projectId) === epoch) {
+        inflightRef.current.delete(projectId)
+      }
+    }
+
     inflightRef.current.add(projectId)
     patchRun(projectId, (previous) => ({
       ...previous,
@@ -1395,12 +1590,14 @@ export default function WorkspacePage() {
       // 让“正在分析意图”至少可见一个呼吸节拍，避免本地路由过快导致
       // 用户只看到结果、看不到 Supervisor 的思考过程。
       const routeStartedAt = Date.now()
-      const route = await routeSupervisor(payload, session?.token)
+      const route = await routeSupervisor(payload, session?.token, signal)
+      if (isStale()) return
       const minThinkingMs = 480
       const remaining = minThinkingMs - (Date.now() - routeStartedAt)
       if (remaining > 0) {
-        await new Promise((resolve) => window.setTimeout(resolve, remaining))
+        await abortableDelay(remaining, signal)
       }
+      if (isStale()) return
       const decision = route.decision ?? {}
       const handoffMeta = (route.handoffs ?? []).find(
         (item) => item.agentId === decision.target,
@@ -1428,7 +1625,7 @@ export default function WorkspacePage() {
           supervisorPhase: 'custom',
           supervisorDecision: decisionView,
         })
-        inflightRef.current.delete(projectId)
+        releaseInflight()
         showToast(
           'info',
           `已匹配专属 Agent：${decisionView.agentDisplayName ?? decision.target}（本次演示仅完成路由）`,
@@ -1446,7 +1643,7 @@ export default function WorkspacePage() {
           supervisorPhase: 'rejected',
           supervisorDecision: decisionView,
         })
-        inflightRef.current.delete(projectId)
+        releaseInflight()
         if (missing.includes('annotations')) {
           showToast('error', '请先在画布上圈选组件，再发送修改指令')
         } else {
@@ -1458,7 +1655,14 @@ export default function WorkspacePage() {
         return
       }
 
-      const result = await dispatchSupervisor(payload, session?.token)
+      const result = await dispatchSupervisor(payload, session?.token, signal)
+      if (isStale()) {
+        // dispatch 已经可能创建了子图 Run：尽力取消，避免后台继续占用沙盒。
+        ;(result.dispatches ?? []).forEach((dispatch) =>
+          cancelRunSilently(dispatch.runId),
+        )
+        return
+      }
       const handoff = result.decision?.handoff ?? decision.handoff
       if (commitOnSuccess || handoff === 'handoff_ui' || handoff === 'handoff_both') {
         commitSentAnnotations(projectId, sendEntries)
@@ -1478,6 +1682,7 @@ export default function WorkspacePage() {
           streamPath: ui.streamPath,
           annotationId,
           handoff,
+          epoch,
         })
         return
       }
@@ -1521,13 +1726,16 @@ export default function WorkspacePage() {
           }))
           showToast('info', '正在进行全局架构设计，请先确认契约')
         }
-        inflightRef.current.delete(projectId)
+        releaseInflight()
         return
       }
 
       throw new Error(`暂不支持的 Handoff: ${handoff}`)
     } catch (cause) {
-      inflightRef.current.delete(projectId)
+      // 用户主动关闭 / 新一轮提交接管：静默退出，绝不能把 AbortError 或
+      // 过期请求渲染成“执行失败”。
+      if (cause?.name === 'AbortError' || isStale()) return
+      releaseInflight()
       const messageText = cause?.message || String(cause)
       patchRun(projectId, {
         submitting: false,
@@ -1537,6 +1745,13 @@ export default function WorkspacePage() {
         supervisorPhase: 'error',
       })
       showToast('error', `调度失败：${messageText}`)
+    } finally {
+      if (scopeKey) {
+        // 若同一 scope 已被新一轮提交替换，不要误删新 controller。
+        if (annotationAbortRef.current.get(scopeKey) === scopeController) {
+          annotationAbortRef.current.delete(scopeKey)
+        }
+      }
     }
   }
 
@@ -1651,8 +1866,16 @@ export default function WorkspacePage() {
       streamPath = null,
       runId = null,
       afterSeq = 0,
+      epoch = null,
     } = {},
   ) => {
+    const operationEpoch = epoch ?? currentRunEpoch(projectId)
+    const isStale = () =>
+      !workspaceMountedRef.current ||
+      currentRunEpoch(projectId) !== operationEpoch ||
+      (annotationId && isAnnotationClosed(projectId, annotationId))
+    if (isStale()) return
+
     const controller = new AbortController()
     streamControllersRef.current.get(projectId)?.abort()
     streamControllersRef.current.set(projectId, controller)
@@ -1668,6 +1891,7 @@ export default function WorkspacePage() {
         token: session?.token,
         signal: controller.signal,
         onEvent: (event) => {
+          if (isStale()) return
           if (closedProjectsRef.current.has(projectId)) {
             // 用户关闭项目后 Run 仍会完成；终态到达时销毁后端新沙盒，
             // 避免前端不再持有 sandboxId 导致容器泄漏。
@@ -1687,7 +1911,7 @@ export default function WorkspacePage() {
         },
       })
     } catch (cause) {
-      if (cause?.name === 'AbortError') return
+      if (cause?.name === 'AbortError' || isStale()) return
       if (closedProjectsRef.current.has(projectId)) return
       const message = `事件流失败：${cause?.message || cause}`
       patchRun(projectId, (previous) => ({
@@ -1706,19 +1930,28 @@ export default function WorkspacePage() {
         ),
       }))
     } finally {
-      streamControllersRef.current.delete(projectId)
-      inflightRef.current.delete(projectId)
-      // 终态 / 澄清 / 出错都已显式结束；这里只兜底清理 submitting。
-      patchRun(projectId, (previous) =>
-        previous.submitting
-          ? {
-              ...previous,
-              submitting: false,
-              pendingAnnotationId: null,
-              pendingAction: null,
-            }
-          : previous,
-      )
+      // 只有当前 controller 仍是自己的才允许清理；强制关闭 / 新一轮提交
+      // 可能已经替换了 Map 中的 controller，旧流不能误删新连接。
+      if (streamControllersRef.current.get(projectId) === controller) {
+        streamControllersRef.current.delete(projectId)
+      }
+      if (
+        workspaceMountedRef.current &&
+        currentRunEpoch(projectId) === operationEpoch
+      ) {
+        inflightRef.current.delete(projectId)
+        // 终态 / 澄清 / 出错都已显式结束；这里只兜底清理 submitting。
+        patchRun(projectId, (previous) =>
+          previous.submitting
+            ? {
+                ...previous,
+                submitting: false,
+                pendingAnnotationId: null,
+                pendingAction: null,
+              }
+            : previous,
+        )
+      }
     }
   }
 
@@ -1911,6 +2144,7 @@ export default function WorkspacePage() {
       !project ||
       !annotation ||
       !instruction ||
+      isAnnotationClosed(projectId, annotationId) ||
       run.submitting ||
       run.clarification ||
       // 审批未决时禁止启动新 Run：否则旧沙盒改动会被后续提交覆盖。
@@ -2157,6 +2391,15 @@ export default function WorkspacePage() {
     inflightRef.current.delete(projectId)
     streamControllersRef.current.get(projectId)?.abort()
     streamControllersRef.current.delete(projectId)
+    // 关闭 Tab 时清理所有标注级 controller / 已关闭标记，避免 Map 泄漏。
+    Array.from(annotationAbortRef.current.keys())
+      .filter((key) => key.startsWith(`${projectId}:`))
+      .forEach((key) => {
+        annotationAbortRef.current.get(key)?.abort()
+        annotationAbortRef.current.delete(key)
+      })
+    closedAnnotationsRef.current.delete(projectId)
+    runEpochRef.current.delete(projectId)
     void architect.dispose(projectId)
     closeTab(projectId)
     setRunStates((previous) => {
@@ -2275,6 +2518,11 @@ export default function WorkspacePage() {
                 }
                 onAnnotationRemove={(annotationId) =>
                   handleAnnotationRemove(project.id, annotationId)
+                }
+                onAnnotationUnmount={(annotationId) =>
+                  // 浮层卸载（关闭标注 / 错误边界降级 / 项目销毁）时，
+                  // 主动中止该标注的异步请求，并丢弃迟到结果。
+                  abortAnnotationScope(project.id, annotationId)
                 }
                 onAnnotationSend={(annotationId) =>
                   handleAnnotationSend(project.id, annotationId)

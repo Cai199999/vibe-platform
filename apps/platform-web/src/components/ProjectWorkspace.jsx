@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import AgentCatalogMenu from './AgentCatalogMenu.jsx'
 import ArchitectPanel from './ArchitectPanel.jsx'
 import CanvasStage from './CanvasStage.jsx'
+import ErrorBoundary from './ErrorBoundary.jsx'
 import RuntimePanel from './RuntimePanel.jsx'
 import SupervisorTrace from './SupervisorTrace.jsx'
 import {
@@ -30,6 +31,7 @@ function ProjectWorkspaceInner({
   onAnnotationIntentChange,
   onAnnotationActionChange,
   onAnnotationRemove,
+  onAnnotationUnmount,
   onAnnotationSend,
   onClarificationAnswer,
   onAnnotationRollback,
@@ -284,22 +286,29 @@ function ProjectWorkspaceInner({
         <div
           className={`viewport-pane canvas-pane ${canvasVisible ? 'is-visible' : 'is-hidden'}`}
         >
-          <CanvasStage
-            annotations={annotations}
-            onAnnotationAdd={onAnnotationAdd}
-            onAnnotationIntentChange={onAnnotationIntentChange}
-            onAnnotationActionChange={onAnnotationActionChange}
-            onAnnotationRemove={onAnnotationRemove}
-            onAnnotationSend={onAnnotationSend}
-            onClarificationAnswer={onClarificationAnswer}
-            clarification={run.clarification}
-            onAnnotationRollback={onAnnotationRollback}
-            pendingAnnotationId={run.pendingAnnotationId}
-            pendingAction={run.pendingAction}
-            submitting={submitting}
-            disabled={submitting}
-            blocked={approvalPending || gateActive}
-          />
+          <ErrorBoundary
+            label="画布区域"
+            compact
+            resetKey={project.id}
+          >
+            <CanvasStage
+              annotations={annotations}
+              onAnnotationAdd={onAnnotationAdd}
+              onAnnotationIntentChange={onAnnotationIntentChange}
+              onAnnotationActionChange={onAnnotationActionChange}
+              onAnnotationRemove={onAnnotationRemove}
+              onAnnotationUnmount={onAnnotationUnmount}
+              onAnnotationSend={onAnnotationSend}
+              onClarificationAnswer={onClarificationAnswer}
+              clarification={run.clarification}
+              onAnnotationRollback={onAnnotationRollback}
+              pendingAnnotationId={run.pendingAnnotationId}
+              pendingAction={run.pendingAction}
+              submitting={submitting}
+              disabled={submitting}
+              blocked={approvalPending || gateActive}
+            />
+          </ErrorBoundary>
 
           {pauseCta && viewMode === 'compare' && mode === 'canvas' && (
             <button
@@ -330,16 +339,22 @@ function ProjectWorkspaceInner({
         <div
           className={`viewport-pane preview-pane ${previewVisible ? 'is-visible' : 'is-hidden'}`}
         >
-          <RuntimePanel
-            run={run}
-            projectName={project.name}
-            expanded
-            visible={active && previewVisible}
-            onRetry={submitReady ? onRetry : undefined}
-            onGoToCanvas={() => setMode('canvas')}
-            onApprovalDecision={onApprovalDecision}
-            onCancelRun={onCancelRun}
-          />
+          <ErrorBoundary
+            label="预览区域"
+            compact
+            resetKey={`${project.id}:${run.result?.runId ?? 'idle'}`}
+          >
+            <RuntimePanel
+              run={run}
+              projectName={project.name}
+              expanded
+              visible={active && previewVisible}
+              onRetry={submitReady ? onRetry : undefined}
+              onGoToCanvas={() => setMode('canvas')}
+              onApprovalDecision={onApprovalDecision}
+              onCancelRun={onCancelRun}
+            />
+          </ErrorBoundary>
         </div>
       </div>
 

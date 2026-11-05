@@ -90,7 +90,26 @@ async function consumeStream(response, { signal, onRawFrame }) {
   }
 }
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+/**
+ * 可中止的退避等待：AbortController 触发时立即清理定时器并 reject，
+ * 避免浮层关闭后仍残留 setTimeout 并在旧请求链上继续重连。
+ */
+const delay = (ms, signal) =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError())
+      return
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(abortError())
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
 
 /**
  * 启动或恢复一个 Run 的事件流。
@@ -194,8 +213,8 @@ export async function streamRun({
       throw new Error('事件流多次重连失败，请稍后重试')
     }
     mode = 'replay'
-    // 500ms 起步，指数退避并封顶 8s。
-    await delay(Math.min(8000, 500 * 2 ** (attempts - 1)))
+    // 500ms 起步，指数退避并封顶 8s；signal 中止时立即清理定时器。
+    await delay(Math.min(8000, 500 * 2 ** (attempts - 1)), signal)
   }
   throw abortError()
 }

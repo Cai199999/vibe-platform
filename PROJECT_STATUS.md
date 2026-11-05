@@ -38,6 +38,7 @@ UI 修改在 Docker 沙盒中自动编码、构建、验证并生成 Git checkpo
 | M3 多格式导入 | ✅ 已完成 | React zip / HTML zip / 图片 → 沙盒 → 新 Tab + 预览 |
 | M3 空白区域 ADD | ✅ 已完成 | 圈选几何判定新增意图，父容器归一化坐标，Agent 插入 JSX |
 | M3 Tools / Skills / MCP | ✅ 已完成 | shell_tool 注册、tailwind_magic Skill、MCP 配置预留 |
+| 稳定性：浮层卸载竞态 | ✅ 已完成 | AbortController + epoch 防呆 + 区域错误边界 + 关闭确认 |
 | 全栈代码生成 | ⏳ 未开始 | 契约尚未驱动 Spring Boot / MySQL / 脚本生成 |
 | 多服务沙盒 | ⏳ 未开始 | 当前只有单 React/Vite 沙盒 |
 | 真实认证 / 多租户 | ⏳ 未开始 | 前端 Mock 登录，BFF 无 Spring Security |

@@ -26,7 +26,7 @@ async function responseError(response) {
   return error
 }
 
-async function postJson(path, payload, token) {
+async function postJson(path, payload, token, signal) {
   const response = await fetch(path, {
     method: 'POST',
     headers: {
@@ -34,6 +34,7 @@ async function postJson(path, payload, token) {
       Authorization: `Bearer ${token ?? ''}`,
     },
     body: JSON.stringify(payload ?? {}),
+    signal,
   })
   if (!response.ok) {
     throw await responseError(response)
@@ -41,19 +42,20 @@ async function postJson(path, payload, token) {
   return response.json()
 }
 
-export async function routeSupervisor(payload, token) {
-  return postJson('/api/v1/supervisor/route', payload, token)
+export async function routeSupervisor(payload, token, signal) {
+  return postJson('/api/v1/supervisor/route', payload, token, signal)
 }
 
-export async function dispatchSupervisor(payload, token) {
-  return postJson('/api/v1/supervisor/dispatch', payload, token)
+export async function dispatchSupervisor(payload, token, signal) {
+  return postJson('/api/v1/supervisor/dispatch', payload, token, signal)
 }
 
-export async function releaseSupervisorGate(gateId, token) {
+export async function releaseSupervisorGate(gateId, token, signal) {
   return postJson(
     `/api/v1/supervisor/gates/${encodeURIComponent(gateId)}/release`,
     {},
     token,
+    signal,
   )
 }
 

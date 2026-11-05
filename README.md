@@ -43,6 +43,7 @@ scripts/annotation_delete_rollback_e2e_test.py 浏览器 E2E（删除标注回�
 scripts/add_component_e2e_test.py     浏览器 E2E（圈选卡片内部 → ADD 红色提交按钮 → 构建/预览）
 scripts/blank_area_add_e2e_test.py    浏览器 E2E（画圈框住空白区域 → 自动判定 ADD → 父容器内插入按钮 → 构建）
 scripts/import_project_e2e_test.py    浏览器 E2E（导入 React zip / HTML zip / 图片，自动建 Tab 与预览）
+scripts/popover_close_race_e2e_test.py 浏览器 E2E（发送后立即关闭浮层：中止请求 / 丢弃迟到结果 / 预览不报错）
 scripts/supervisor_e2e_test.py        Supervisor 路由 / 注册中心 / 门控 API E2E
 scripts/supervisor_both_e2e_test.py   both 模式 API E2E（契约确认 → release → UI Run）
 scripts/supervisor_mixed_ui_e2e_test.py 浏览器级 both 混合 E2E（决策可视化 + 时间轴）
