@@ -33,7 +33,8 @@ M2.5 另有一条**独立的 Architect 链路**，与局部 UI Run 解耦：
 
 1. `Supervisor Graph` 只做意图路由，不写代码；
 2. 根据自然语言、标注与关键词判断 `ui_graph` / `architect_graph` / `both`；
-3. `AgentRegistry` 声明内置 Agent、预留 Agent 与企业 CustomAgent Manifest；
+3. `AgentRegistry` 启动扫描 `ai_core/*/manifest.json`，声明内置 / 预留 Agent，
+   并加载企业 CustomAgent；`SkillRegistry` 汇总 Manifest 中的 Skill 声明；
 4. `route` 返回 Handoff 计划，`dispatch` 才启动子图并返回独立 SSE 路径；
 5. 前端“发送 / 提交 / 下一步”统一走 `route → dispatch`，按
    `decision.handoff` 切换局部时间轴 / Architect 面板 / rejected Toast；
@@ -382,7 +383,9 @@ START
 |---|---|---|
 | Graph | `ai_core/supervisor/graph.py` | LangGraph 顶层路由：分类 → Registry 解析 → Handoff → 终态 |
 | Classifier | `ai_core/supervisor/router.py` | 确定性规则；`targetAgent` / `scopeHint` 显式意图优先 |
-| Registry | `ai_core/supervisor/registry.py` | 内置 / 预留 Agent 注册，能力、版本、SSE 路径、可用性 |
+| Registry | `ai_core/supervisor/registry.py` | 启动扫描 `ai_core/*/manifest.json`；能力、版本、SSE 路径、可用性与 Skill 汇总 |
+| Manifest | `ai_core/supervisor/manifest.py` | Agent Manifest Pydantic Schema、JSON Schema 根节点校验、重复能力 / Skill 校验 |
+| SkillRegistry | `ai_core/supervisor/skills.py` | M3 预留：登记 Skill（Prompt / RAG / Tool 子集），当前不执行 |
 | CustomAgent | `ai_core/supervisor/custom.py` | 受限 JSON Manifest 加载；路径穿越与任意 import 防护 |
 | Gate Registry | `ai_core/supervisor/gates.py` | both 项目锁；`AWAITING_CONTRACT → RELEASING → RELEASED/FAILED` 状态机与幂等释放 |
 | Service | `ai_core/supervisor/service.py` | `route` 计划、`dispatch` 真实启动、契约校验与 gate release |
@@ -393,12 +396,17 @@ START
 
 **内置能力**：
 
-| Agent | 能力 | 状态 |
-|---|---|---|
-| `ui_graph` | `ui_local_edit` | 可用 |
-| `architect_graph` | `global_architecture` | 可用 |
-| `backend_coder` | `backend_generation` | 预留 |
-| `script_agent` | `script_automation` | 预留 |
+| Agent | Manifest | 能力 | 状态 |
+|---|---|---|---|
+| `ui_graph` | `agent/manifest.json` | `ui_local_edit` | 可用 |
+| `architect_graph` | `architect/manifest.json` | `global_architecture` | 可用 |
+| `backend_coder` | `backend_coder/manifest.json` | `backend_generation` | 预留（无 Graph） |
+| `script_agent` | `script_agent/manifest.json` | `script_automation` | 预留（无 Graph） |
+
+**Skill**：每个 Manifest 的 `skills[]` 声明 `skill_id`、`prompt_ref`、`rag_refs`、
+`tools`；`SkillRegistry` 只汇总展示，M3 才实现 Agent + Skill 动态拼装。
+**Memory**：仅 LangGraph 线程级短期记忆；长期记忆 / 用户画像明确留待 M3。
+**MCP**：架构图虚线框预留 `MCP Client Adapter`，M2.5 不实现。
 
 **路由规则**：显式 `targetAgent` > 显式 `scopeHint` > UI + 架构关键词 = both >
 架构关键词 = Architect > 标注 / UI 关键词 = UI > 无信号 = rejected。
@@ -528,8 +536,8 @@ MinIO : http://127.0.0.1:9000  (admin/admin123，仅本地开发)
 | `GET` | `/api/v1/architect/runs/{runId}` | Architect 快照 |
 | `POST` | `/api/v1/supervisor/route` | 只返回意图路由与 Handoff 计划 |
 | `POST` | `/api/v1/supervisor/dispatch` | 启动目标子图，返回子 Run ID 与 SSE 路径 |
-| `GET` | `/api/v1/supervisor/agents` | 查询 AgentRegistry |
-| `POST` | `/api/v1/supervisor/agents/reload` | 重新扫描 CustomAgent Manifest |
+| `GET` | `/api/v1/supervisor/agents` | 查询 AgentRegistry、Manifest 能力与 Skill 列表 |
+| `POST` | `/api/v1/supervisor/agents/reload` | 重扫内置 Agent Manifest 与企业 CustomAgent Manifest |
 
 ### 9.3 SSE 事件模型
 
@@ -667,7 +675,7 @@ docker compose up -d
 | `docs/design/02.整体架构设计.md` | 目标架构、ADR、全栈演进 |
 | `docs/design/03.API接口设计.md` | 对外 API 契约 |
 | `docs/design/04.M2_Agent_ToolCalling_SSE_HITL.md` | SSE、HITL、CodeEditor 实际协议 |
-| `docs/design/05.Supervisor_Multi_Agent.md` | Supervisor 总调度、AgentRegistry、both 强门控、CustomAgent 沙盒隔离 |
+| `docs/design/05.Supervisor_Multi_Agent.md` | Supervisor 总调度、声明式 Manifest、SkillRegistry、Memory / MCP 边界、both 强门控、CustomAgent 沙盒隔离 |
 | `docs/memory/00_project_brief.md` | 项目简报与里程碑 |
 | `docs/memory/2026-11-04_M2_SSE_HITL.md` | M2 阶段总结 |
 | `docs/memory/2026-11-05_M3A_diff_approval_cancel.md` | Diff 审批与取消 |
@@ -675,6 +683,7 @@ docker compose up -d
 | `docs/memory/2026-11-05_M2_5_app_shape_contract.md` | M2.5 应用形态与全栈契约 |
 | `docs/memory/2026-11-05_M2_5_supervisor_multi_agent.md` | Supervisor 总调度与 AgentRegistry |
 | `docs/memory/2026-11-05_M2_5_supervisor_frontend_gate.md` | 前端统一调度、both 强门控与混合 E2E |
+| `docs/memory/2026-11-05_M2_5_agent_manifest_skill.md` | 声明式 Agent Manifest、SkillRegistry 与 Memory / MCP 边界 |
 
 ---
 

@@ -1,0 +1,94 @@
+{
+  "agent_id": "script_agent",
+  "name": "脚本工程师（预留）",
+  "description": "未来生成与验证后台自动化脚本，并在受限沙盒中执行。",
+  "version": "0.0.0",
+  "status": "reserved",
+  "graph": "ScriptAgentGraph",
+  "capabilities": [
+    {
+      "id": "script_automation",
+      "description": "根据任务描述生成定时 / 批处理脚本，并在独立沙盒中验证输入输出。"
+    }
+  ],
+  "supported_tools": [
+    "read_contract",
+    "read_file",
+    "create_file",
+    "run_script_sandbox",
+    "git_commit"
+  ],
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "ScriptAgentInput",
+    "type": "object",
+    "required": ["projectId", "task"],
+    "properties": {
+      "projectId": {"type": "string"},
+      "task": {"type": "string"},
+      "contract": {"type": ["object", "null"]},
+      "inputFiles": {
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+      },
+      "options": {"type": "object"}
+    }
+  },
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "ScriptAgentOutput",
+    "type": "object",
+    "required": ["runId", "status", "artifacts"],
+    "properties": {
+      "runId": {"type": "string"},
+      "status": {
+        "type": "string",
+        "enum": ["SUCCEEDED", "FAILED", "CANCELLED"]
+      },
+      "artifacts": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "path": {"type": "string"},
+            "sha256": {"type": "string"}
+          }
+        }
+      },
+      "stdout": {"type": ["string", "null"]},
+      "commitHash": {"type": ["string", "null"]}
+    }
+  },
+  "skills": [
+    {
+      "skill_id": "script.scheduled_job",
+      "name": "定时任务脚本",
+      "description": "生成 cron / 调度器脚本，并在沙盒中验证一次执行结果。",
+      "prompt_ref": "prompts/script/scheduled_job.md",
+      "rag_refs": ["knowledge/script/automation"],
+      "tools": ["read_contract", "create_file", "run_script_sandbox"],
+      "metadata": {"stage": "M3-preview"}
+    },
+    {
+      "skill_id": "script.batch_etl",
+      "name": "批处理与 ETL",
+      "description": "生成批量数据处理脚本，输出结构化产物与校验摘要。",
+      "prompt_ref": "prompts/script/batch_etl.md",
+      "rag_refs": ["knowledge/script/automation"],
+      "tools": ["read_contract", "create_file", "run_script_sandbox", "git_commit"],
+      "metadata": {"stage": "M3-preview"}
+    }
+  ],
+  "keywords": [
+    "脚本",
+    "定时任务",
+    "批处理",
+    "自动化",
+    "cron"
+  ],
+  "metadata": {
+    "manifest_version": 1,
+    "owner": "platform",
+    "contract_only": true
+  }
+}

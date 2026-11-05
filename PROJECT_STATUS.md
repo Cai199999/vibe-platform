@@ -29,6 +29,8 @@ UI 修改在 Docker 沙盒中自动编码、构建、验证并生成 Git checkpo
 | M3-B CodeEditor 抽象 | ✅ 已完成（部分实现） | `CodeEditor` / `AnchorCodeEditor` / `FileCreator` / `TreeSitterEditor` 占位与 Registry |
 | M2.5 Architect | ✅ 已完成 | 应用形态判别、动态澄清、Markdown + BM25 RAG、分级契约 |
 | M2.5 Supervisor 路由 | ✅ 已完成 | 意图分类、AgentRegistry、UI / Architect / both / custom / rejected |
+| M2.5 声明式 Manifest | ✅ 已完成 | 内置 Agent 由 `manifest.json` 启动扫描注册，替代硬编码 |
+| M2.5 Skill 预留 | ✅ 已完成 | `SkillRegistry` 只声明不执行；Agent / Tool / Skill 边界入库 |
 | M2.5 前端 Supervisor 接入 | ✅ 已完成 | “发送 / 提交 / 下一步”统一走 route + dispatch，按 handoff 切换 UI |
 | M2.5 both 强门控 | ✅ 已完成 | 项目锁、契约校验、幂等 release、乱序 409、自动中止 |
 | 全栈代码生成 | ⏳ 未开始 | 契约尚未驱动 Spring Boot / MySQL / 脚本生成 |
@@ -125,12 +127,14 @@ flowchart LR
   4. 架构关键词 → Architect
   5. 标注 / UI 关键词 → UI
   6. 无信号 → rejected
-- `AgentRegistry` 注册内置、预留与企业 CustomAgent：
-  - `ui_graph`：可用
-  - `architect_graph`：可用
-  - `backend_coder`：预留
-  - `script_agent`：预留
+- `AgentRegistry` 启动扫描 `ai_core/*/manifest.json`，注册内置、预留与企业 CustomAgent：
+  - `ui_graph`：可用（`agent/manifest.json`）
+  - `architect_graph`：可用（`architect/manifest.json`）
+  - `backend_coder`：预留（`backend_coder/manifest.json`，无 Graph）
+  - `script_agent`：预留（`script_agent/manifest.json`，无 Graph）
   - CustomAgent：受限 JSON Manifest，当前仅路由计划
+- `SkillRegistry` 汇总 Manifest 中的 Skill 声明（M3 才动态拼装 Prompt / RAG / Tool）。
+- Memory 当前仅 LangGraph 线程级短期记忆；长期记忆与 MCP Client Adapter 留待 M3。
 - `decision.handoff` 直接驱动前端：
   - `handoff_ui`
   - `handoff_architect`
@@ -260,6 +264,9 @@ API 级 both E2E 还覆盖：
 | 多服务沙盒 | 单 React/Vite 沙盒 | web / api / db / edge 未实现 |
 | BackendCoder / DBA / ScriptAgent | 仅注册为 reserved | 无运行时、无编排 |
 | CustomAgent 运行时 | 只有 Manifest 与路由计划 | 需独立受限沙盒 / 临时 venv |
+| Skill 动态拼装 | `SkillRegistry` 只登记声明 | M3 才注入 Prompt / RAG、裁剪 Tool |
+| 长期记忆 / 用户画像 | 仅线程级短期记忆 | 规划在 M3，当前刻意不引入 |
+| MCP Client Adapter | 架构图虚线框 | M2.5 不引入依赖、不建立连接 |
 | Redis 事件总线 | 进程内 `RunEventBuffer` | 重启丢失、无法多副本 |
 | LangGraph checkpoint | `MemorySaver` | 重启丢失中断状态 |
 | BFF 持久化 | 无数据库访问层 | 用户 / 项目 / Run 仍主要在前端或 Python 内存 |
@@ -309,9 +316,10 @@ API 级 both E2E 还覆盖：
 | `docs/design/02.整体架构设计.md` | 目标架构与演进路线 |
 | `docs/design/03.API接口设计.md` | 公共 / 内部 API 契约 |
 | `docs/design/04.M2_Agent_ToolCalling_SSE_HITL.md` | SSE、HITL、执行层 |
-| `docs/design/05.Supervisor_Multi_Agent.md` | Supervisor、AgentRegistry、both 强门控、CustomAgent 沙盒隔离 |
+| `docs/design/05.Supervisor_Multi_Agent.md` | Supervisor、声明式 Manifest、SkillRegistry、Memory / MCP 边界、both 强门控、CustomAgent 沙盒隔离 |
 | `docs/memory/00_project_brief.md` | 项目简报与里程碑 |
 | `docs/memory/2026-11-05_M2_5_supervisor_frontend_gate.md` | 前端统一调度与 both 强门控实现记录 |
+| `docs/memory/2026-11-05_M2_5_agent_manifest_skill.md` | 声明式 Manifest、Skill 预留与边界 |
 
 ---
 

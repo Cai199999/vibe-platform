@@ -1,0 +1,105 @@
+{
+  "agent_id": "ui_graph",
+  "name": "局部 UI 工程师",
+  "description": "处理画布标注、局部组件修改、样式与交互增量调整。",
+  "version": "1.0.0",
+  "status": "available",
+  "graph": "AgentGraphRunner",
+  "capabilities": [
+    {
+      "id": "ui_local_edit",
+      "description": "根据画布标注对局部组件进行增量代码修改，并在沙盒中构建验证。"
+    }
+  ],
+  "supported_tools": [
+    "read_file",
+    "apply_code_edit",
+    "create_file",
+    "run_build",
+    "git_commit",
+    "rollback_checkpoint"
+  ],
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "UiGraphInput",
+    "type": "object",
+    "required": ["projectId", "annotations"],
+    "properties": {
+      "projectId": {"type": "string"},
+      "projectName": {"type": "string"},
+      "annotations": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 3,
+        "items": {"type": "object"}
+      },
+      "sandboxId": {"type": ["string", "null"]},
+      "files": {
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+      },
+      "options": {"type": "object"}
+    }
+  },
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "UiGraphOutput",
+    "type": "object",
+    "required": ["runId", "status"],
+    "properties": {
+      "runId": {"type": "string"},
+      "status": {
+        "type": "string",
+        "enum": ["SUCCEEDED", "AWAITING_APPROVAL", "FAILED", "CANCELLED"]
+      },
+      "sandboxId": {"type": ["string", "null"]},
+      "previewUrl": {"type": ["string", "null"]},
+      "commitHash": {"type": ["string", "null"]},
+      "generatedPatch": {"type": ["string", "null"]},
+      "threadContext": {"type": "object"}
+    }
+  },
+  "skills": [
+    {
+      "skill_id": "ui.style_edit",
+      "name": "样式与布局修改",
+      "description": "处理颜色、字号、间距、对齐、布局等视觉属性调整。",
+      "prompt_ref": "prompts/ui/style_edit.md",
+      "rag_refs": ["knowledge/ui/style"],
+      "tools": ["read_file", "apply_code_edit", "run_build"],
+      "metadata": {"stage": "M3-preview"}
+    },
+    {
+      "skill_id": "ui.content_structure_edit",
+      "name": "文案与结构修改",
+      "description": "处理文案替换、组件插入、局部结构重排等修改。",
+      "prompt_ref": "prompts/ui/content_structure_edit.md",
+      "rag_refs": ["knowledge/ui/components"],
+      "tools": ["read_file", "apply_code_edit", "create_file", "run_build"],
+      "metadata": {"stage": "M3-preview"}
+    }
+  ],
+  "keywords": [
+    "按钮",
+    "样式",
+    "颜色",
+    "间距",
+    "字体",
+    "文案",
+    "布局",
+    "动画",
+    "组件",
+    "页面",
+    "弹窗",
+    "对齐",
+    "字号",
+    "圈选",
+    "改一下",
+    "局部"
+  ],
+  "stream_path_template": "/api/v1/runs/{runId}/events/stream",
+  "metadata": {
+    "manifest_version": 1,
+    "owner": "platform"
+  }
+}

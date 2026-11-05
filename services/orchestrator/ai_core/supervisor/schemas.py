@@ -149,6 +149,19 @@ class SupervisorGateResponse(CamelModel):
     dispatches: list[SubGraphDispatch] = Field(default_factory=list)
 
 
+class SkillView(CamelModel):
+    """Skill 的只读视图；当前只声明，不执行。"""
+
+    skill_id: str
+    name: str
+    agent_id: str
+    description: str = ""
+    prompt_ref: str | None = None
+    rag_refs: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentView(CamelModel):
     """AgentRegistry 对外视图。"""
 
@@ -163,10 +176,17 @@ class AgentView(CamelModel):
     stream_path_template: str | None = None
     keywords: list[str] = Field(default_factory=list)
     manifest_path: str | None = None
+    capabilities: list[dict[str, Any]] = Field(default_factory=list)
+    supported_tools: list[str] = Field(default_factory=list)
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    output_schema: dict[str, Any] = Field(default_factory=dict)
+    skills: list[SkillView] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentListResponse(CamelModel):
     agents: list[AgentView]
     registry_version: str = "1"
+    skill_registry_version: str = "1"
+    skills: list[SkillView] = Field(default_factory=list)
     custom_agents_dir: str | None = None

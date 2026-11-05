@@ -1,0 +1,116 @@
+{
+  "agent_id": "architect_graph",
+  "name": "全局架构师",
+  "description": "应用形态判别、全局架构澄清与全栈实施契约生成。",
+  "version": "1.0.0",
+  "status": "available",
+  "graph": "ArchitectGraphRunner",
+  "capabilities": [
+    {
+      "id": "global_architecture",
+      "description": "根据源码、UI 历史与应用形态生成分级《全栈实施契约》。"
+    }
+  ],
+  "supported_tools": [
+    "read_source",
+    "retrieve_knowledge",
+    "generate_contract",
+    "validate_contract"
+  ],
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "ArchitectGraphInput",
+    "type": "object",
+    "required": ["projectId"],
+    "properties": {
+      "projectId": {"type": "string"},
+      "projectName": {"type": "string"},
+      "source": {
+        "type": "object",
+        "properties": {
+          "sandboxId": {"type": ["string", "null"]},
+          "files": {
+            "type": "object",
+            "additionalProperties": {"type": "string"}
+          }
+        }
+      },
+      "uiHistory": {"type": "array", "items": {"type": "object"}},
+      "options": {"type": "object"}
+    }
+  },
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "ArchitectGraphOutput",
+    "type": "object",
+    "required": ["runId", "status"],
+    "properties": {
+      "runId": {"type": "string"},
+      "status": {
+        "type": "string",
+        "enum": [
+          "AWAITING_CLARIFICATION",
+          "AWAITING_CONTRACT_CONFIRMATION",
+          "CONFIRMED",
+          "CANCELLED",
+          "FAILED"
+        ]
+      },
+      "clarification": {"type": ["object", "null"]},
+      "contract": {
+        "type": ["object", "null"],
+        "properties": {
+          "contractId": {"type": "string"},
+          "appShape": {"type": "string"},
+          "status": {"type": "string"}
+        }
+      },
+      "confidence": {"type": "number"}
+    }
+  },
+  "skills": [
+    {
+      "skill_id": "architect.fullstack_contract",
+      "name": "全栈实施契约",
+      "description": "面向 full_stack_system，补问技术栈、数据库、业务动作与数据实体。",
+      "prompt_ref": "prompts/architect/fullstack_contract.md",
+      "rag_refs": ["knowledge/fullstack"],
+      "tools": ["read_source", "retrieve_knowledge", "generate_contract"],
+      "metadata": {"stage": "M3-preview"}
+    },
+    {
+      "skill_id": "architect.lightweight_contract",
+      "name": "轻量应用契约",
+      "description": "面向 lightweight_web / script_automation，只生成必要的前端或脚本规格。",
+      "prompt_ref": "prompts/architect/lightweight_contract.md",
+      "rag_refs": ["knowledge/fullstack"],
+      "tools": ["read_source", "retrieve_knowledge", "validate_contract"],
+      "metadata": {"stage": "M3-preview"}
+    }
+  ],
+  "keywords": [
+    "全栈",
+    "架构",
+    "后端",
+    "数据库",
+    "表结构",
+    "接口",
+    "api",
+    "服务端",
+    "技术栈",
+    "部署",
+    "spring",
+    "fastapi",
+    "mysql",
+    "redis",
+    "ddl",
+    "迁移",
+    "数据实体",
+    "业务模型"
+  ],
+  "stream_path_template": "/api/v1/architect/runs/{runId}/events/stream",
+  "metadata": {
+    "manifest_version": 1,
+    "owner": "platform"
+  }
+}

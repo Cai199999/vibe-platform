@@ -18,6 +18,7 @@ from ai_core.supervisor.gates import (
 from ai_core.supervisor.registry import (
     AgentNotAvailableError,
     AgentRegistry,
+    AgentRegistryError,
 )
 from ai_core.supervisor.router import RuleBasedIntentClassifier
 from ai_core.supervisor.schemas import SupervisorRequest
@@ -200,6 +201,67 @@ class RegistryTest(unittest.TestCase):
         registry = AgentRegistry(custom_agents_dir=self.root)
         self.assertEqual(registry.reload_custom_agents(), [])
         self.assertEqual(registry.require("ui_graph").display_name, "局部 UI 工程师")
+
+    def test_builtin_agents_are_loaded_from_manifests(self) -> None:
+        registry = AgentRegistry()
+        expected = {
+            "ui_graph": "agent/manifest.json",
+            "architect_graph": "architect/manifest.json",
+            "backend_coder": "backend_coder/manifest.json",
+            "script_agent": "script_agent/manifest.json",
+        }
+        for agent_id, manifest_path in expected.items():
+            descriptor = registry.require(agent_id)
+            self.assertEqual(descriptor.source, "builtin")
+            self.assertEqual(descriptor.manifest_path, manifest_path)
+            self.assertTrue(descriptor.capabilities)
+            self.assertTrue(descriptor.supported_tools)
+            self.assertTrue(descriptor.input_schema)
+            self.assertTrue(descriptor.output_schema)
+            # Manifest 中的能力 ID 直接成为可路由 taskType。
+            self.assertEqual(
+                descriptor.task_types,
+                tuple(item["id"] for item in descriptor.capabilities),
+            )
+
+    def test_skill_registry_aggregates_manifest_skills(self) -> None:
+        registry = AgentRegistry()
+        skills = registry.list_skills()
+        skill_ids = {item.skill_id for item in skills}
+        self.assertIn("ui.style_edit", skill_ids)
+        self.assertIn("architect.fullstack_contract", skill_ids)
+        self.assertIn("backend.spring_boot_crud", skill_ids)
+        self.assertIn("script.scheduled_job", skill_ids)
+        self.assertEqual(len(skills), len(skill_ids))
+        # 每个 Skill 都能反查到所属 Agent。
+        ui_skill = registry.skill_registry.get("ui.style_edit")
+        self.assertIsNotNone(ui_skill)
+        self.assertEqual(ui_skill.agent_id, "ui_graph")
+        self.assertTrue(ui_skill.tools)
+
+    def test_invalid_builtin_manifest_does_not_block_others(self) -> None:
+        good_dir = self.root / "good_agent"
+        bad_dir = self.root / "bad_agent"
+        good_dir.mkdir()
+        bad_dir.mkdir()
+        source = Path(__file__).resolve().parents[1] / "ai_core/agent/manifest.json"
+        good_dir.joinpath("manifest.json").write_text(
+            source.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        bad_dir.joinpath("manifest.json").write_text("{not-json", encoding="utf-8")
+
+        registry = AgentRegistry(manifest_dir=self.root)
+        self.assertEqual(
+            [item.agent_id for item in registry.list_agents()], ["ui_graph"]
+        )
+
+    def test_all_invalid_builtin_manifests_fail_fast(self) -> None:
+        bad_dir = self.root / "bad_agent"
+        bad_dir.mkdir()
+        bad_dir.joinpath("manifest.json").write_text("{not-json", encoding="utf-8")
+        with self.assertRaises(AgentRegistryError):
+            AgentRegistry(manifest_dir=self.root)
 
 
 class _FakeDispatcher:

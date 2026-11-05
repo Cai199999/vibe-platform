@@ -29,6 +29,11 @@
   `handoff_both` 先只启动 Architect，契约确认后 `release` 才启动 UI，项目锁、
   幂等释放与乱序拒绝全部落到代码；浏览器级混合 E2E 已通过。
   细节见 `docs/memory/2026-11-05_M2_5_supervisor_frontend_gate.md`。
+- **M2.5 声明式 Manifest + Skill 预留已落地（2026-11-05）**：内置 Agent 改由
+  `ai_core/*/manifest.json` 启动扫描注册，`AgentRegistry` 不再硬编码；新增
+  `SkillRegistry` 抽象与 Agent / Tool / Skill 三层文档；明确当前仅线程级短期记忆、
+  长期记忆与 MCP 留待 M3，架构图以虚线框预留 `MCP Client Adapter`。
+  细节见 `docs/memory/2026-11-05_M2_5_agent_manifest_skill.md`。
 
 ## 2. 核心技术栈
 
@@ -73,6 +78,12 @@
     UI Run；项目级 gate 保证单项目单门控、release 幂等、乱序 409。
 12. 用户上传的 CustomAgent 未来必须在独立受限沙盒 / 临时 venv 中执行，
     其 Prompt、代码生成与脚本不得进入主进程或共享依赖环境。
+13. Agent 能力以 `manifest.json` 为唯一声明源；新增 Agent 只加目录与 Manifest，
+    不改 Supervisor / Registry 代码；`reserved` 能力不可路由。
+14. 当前只有 LangGraph 线程级短期记忆；不引入跨会话长期记忆与用户画像，
+    防止一次性意图污染后续上下文（长期记忆规划在 M3）。
+15. MCP 仅以虚线框预留 `MCP Client Adapter`，M2.5 不引入依赖、不建立连接；
+    Skill 当前只声明不执行，M3 再实现 Prompt + RAG + Tool 子集动态拼装。
 
 ## 5. 当前文档状态
 
@@ -80,7 +91,8 @@
 - `docs/design/02.整体架构设计.md`：v1.1，已加入多 Agent 拓扑、全栈多服务沙盒、澄清状态机、全栈数据表与演进路线。
 - `docs/design/03.API接口设计.md`：v1.1，已加入 `appType`、`services[]`、澄清接口、全栈标注契约、迁移/验证/事件/错误码。
 - `docs/design/04.M2_Agent_ToolCalling_SSE_HITL.md`：M2 执行层。
-- `docs/design/05.Supervisor_Multi_Agent.md`：Supervisor 总调度、AgentRegistry、Handoff 与 CustomAgent。
+- `docs/design/05.Supervisor_Multi_Agent.md`：v1.2，Supervisor 总调度、声明式 Manifest 注册、
+  Agent / Tool / Skill 三层、SkillRegistry、Memory / MCP 边界与 CustomAgent。
 - 本阶段只做设计，不写业务代码；实现按 M1 前端闭环优先推进。
 
 ## 6. 下一步

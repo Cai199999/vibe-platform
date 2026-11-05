@@ -467,5 +467,7 @@ class SupervisorService:
         return AgentListResponse(
             agents=self._registry.to_views(),
             registry_version=self._registry.version,
+            skill_registry_version=self._registry.skill_registry.version,
+            skills=self._registry.to_skill_views(),
             custom_agents_dir=self._registry.custom_agents_dir,
         )

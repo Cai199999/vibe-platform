@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     # Supervisor：企业 CustomAgent Manifest 目录。
     # 只加载 JSON 声明，不执行代码；目录不存在时忽略。
     supervisor_custom_agents_dir: str = "config/custom_agents"
+    # 内置 Agent Manifest 根目录；留空则使用 ai_core/ 下各 Agent 目录。
+    # 仅允许指向声明文件，部署时应指向只读路径。
+    supervisor_agent_manifest_dir: str = ""
 
     # HITL：Planner 置信度低于该阈值时触发澄清；请求可通过
     # options.confidenceThreshold 覆盖。

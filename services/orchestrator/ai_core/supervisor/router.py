@@ -11,12 +11,36 @@ import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from ai_core.supervisor.registry import (
-    ARCHITECT_KEYWORDS,
-    UI_KEYWORDS,
-    AgentRegistry,
-)
+from ai_core.supervisor.registry import AgentRegistry
 from ai_core.supervisor.schemas import SupervisorRequest
+
+# 关键词已迁移到各 Agent 的 manifest.json；以下常量仅作为
+# Manifest 缺失 keywords 时的兜底，保证规则分类器不因配置错误失声。
+FALLBACK_UI_KEYWORDS: tuple[str, ...] = (
+    "按钮",
+    "颜色",
+    "字号",
+    "间距",
+    "布局",
+    "样式",
+    "文案",
+    "标题",
+    "页面",
+    "组件",
+    "ui",
+    "css",
+)
+FALLBACK_ARCHITECT_KEYWORDS: tuple[str, ...] = (
+    "架构",
+    "全栈",
+    "后端",
+    "数据库",
+    "接口",
+    "表结构",
+    "api",
+    "spring",
+    "微服务",
+)
 
 # 组合意图的额外信号：用户明确要求“同时 / 两者 / 先...再...”。
 COMBINED_KEYWORDS: tuple[str, ...] = (
@@ -80,6 +104,18 @@ def _match_terms(
     prefix: str,
 ) -> list[str]:
     return [f"{prefix}:{term}" for term in terms if _contains_term(message, term)]
+
+
+def _descriptor_keywords(
+    registry: AgentRegistry,
+    agent_id: str,
+    fallback: tuple[str, ...],
+) -> tuple[str, ...]:
+    """从 Manifest 描述符读取路由关键词，缺失时回退到内置词表。"""
+    descriptor = registry.get(agent_id)
+    if descriptor is None or not descriptor.keywords:
+        return fallback
+    return descriptor.keywords
 
 
 def _ui_dispatchability(
@@ -181,8 +217,20 @@ class RuleBasedIntentClassifier:
         # 3. 关键词规则
         # ----------------------------------------------------
         message = request.message.casefold().strip()
-        ui_signals = _match_terms(message, UI_KEYWORDS, prefix="ui")
-        arch_signals = _match_terms(message, ARCHITECT_KEYWORDS, prefix="arch")
+        # 关键词由 Manifest 驱动：替换 Manifest 即可调整路由词表，
+        # 无需改 Python 代码。
+        ui_signals = _match_terms(
+            message,
+            _descriptor_keywords(registry, "ui_graph", FALLBACK_UI_KEYWORDS),
+            prefix="ui",
+        )
+        arch_signals = _match_terms(
+            message,
+            _descriptor_keywords(
+                registry, "architect_graph", FALLBACK_ARCHITECT_KEYWORDS
+            ),
+            prefix="arch",
+        )
         combined_hits = [
             f"combined:{term}"
             for term in COMBINED_KEYWORDS

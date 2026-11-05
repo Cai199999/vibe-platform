@@ -1,0 +1,90 @@
+{
+  "agent_id": "backend_coder",
+  "name": "后端工程师（预留）",
+  "description": "未来根据已确认的实施契约生成 Spring Boot 后端、测试与迁移脚本。",
+  "version": "0.0.0",
+  "status": "reserved",
+  "graph": "BackendCoderGraph",
+  "capabilities": [
+    {
+      "id": "backend_generation",
+      "description": "读取《全栈实施契约》，生成 Spring Boot Controller / Service / Repository 与测试。"
+    }
+  ],
+  "supported_tools": [
+    "read_contract",
+    "read_file",
+    "create_file",
+    "apply_code_edit",
+    "run_maven_test",
+    "git_commit"
+  ],
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "BackendCoderInput",
+    "type": "object",
+    "required": ["projectId", "contract"],
+    "properties": {
+      "projectId": {"type": "string"},
+      "contract": {"type": "object"},
+      "sandboxId": {"type": ["string", "null"]},
+      "files": {
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+      },
+      "options": {"type": "object"}
+    }
+  },
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "BackendCoderOutput",
+    "type": "object",
+    "required": ["runId", "status", "files"],
+    "properties": {
+      "runId": {"type": "string"},
+      "status": {
+        "type": "string",
+        "enum": ["SUCCEEDED", "FAILED", "CANCELLED"]
+      },
+      "files": {
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+      },
+      "testReport": {"type": ["object", "null"]},
+      "commitHash": {"type": ["string", "null"]}
+    }
+  },
+  "skills": [
+    {
+      "skill_id": "backend.spring_boot_crud",
+      "name": "Spring Boot CRUD 生成",
+      "description": "按契约中的实体与 API 路由生成分层后端代码和测试。",
+      "prompt_ref": "prompts/backend/spring_boot_crud.md",
+      "rag_refs": ["knowledge/backend/spring"],
+      "tools": ["read_contract", "create_file", "run_maven_test"],
+      "metadata": {"stage": "M3-preview"}
+    },
+    {
+      "skill_id": "backend.db_migration",
+      "name": "数据库迁移生成",
+      "description": "根据契约 DDL 生成 Flyway 迁移并验证 up / down。",
+      "prompt_ref": "prompts/backend/db_migration.md",
+      "rag_refs": ["knowledge/backend/mysql"],
+      "tools": ["read_contract", "create_file", "run_maven_test", "git_commit"],
+      "metadata": {"stage": "M3-preview"}
+    }
+  ],
+  "keywords": [
+    "后端代码",
+    "spring boot",
+    "controller",
+    "service",
+    "repository",
+    "实体类"
+  ],
+  "metadata": {
+    "manifest_version": 1,
+    "owner": "platform",
+    "contract_only": true
+  }
+}

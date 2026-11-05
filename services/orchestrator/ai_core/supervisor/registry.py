@@ -1,8 +1,11 @@
 """AgentRegistry：所有专家 Agent 的能力注册中心。
 
-Supervisor 不直接 import UI / Architect Graph，只依赖注册中心返回的
-``AgentDescriptor``。未来新增 BackendCoder、ScriptAgent 或企业 CustomAgent
-时，只需注册描述符，Supervisor 的路由协议保持不变。
+内置 Agent 不再硬编码在 Python 中，而是由每个代码目录下的
+``manifest.json`` 声明。启动时扫描 ``ai_core/*/manifest.json``，解析为
+``AgentDescriptor``；Supervisor 只依赖注册中心，不直接 import 子图。
+
+同时维护一个 ``SkillRegistry``：Skill 当前只做声明与展示，M3 阶段再由
+运行时把 Prompt + RAG + Tool 子集动态拼装进 Agent。
 """
 
 from __future__ import annotations
@@ -18,7 +21,13 @@ from ai_core.supervisor.custom import (
     CustomAgentError,
     read_manifest,
 )
-from ai_core.supervisor.schemas import AgentStatus, AgentView
+from ai_core.supervisor.manifest import (
+    AgentManifest,
+    AgentManifestError,
+    discover_agent_manifests,
+)
+from ai_core.supervisor.schemas import AgentStatus, AgentView, SkillView
+from ai_core.supervisor.skills import SkillDescriptor, SkillRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +61,11 @@ class AgentDescriptor:
     stream_path_template: str | None = None
     keywords: tuple[str, ...] = ()
     manifest_path: str | None = None
+    capabilities: tuple[dict[str, Any], ...] = ()
+    supported_tools: tuple[str, ...] = ()
+    input_schema: dict[str, Any] = field(default_factory=dict)
+    output_schema: dict[str, Any] = field(default_factory=dict)
+    skills: tuple[SkillDescriptor, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -75,116 +89,86 @@ class AgentDescriptor:
             stream_path_template=self.stream_path_template,
             keywords=list(self.keywords),
             manifest_path=self.manifest_path,
+            capabilities=[dict(item) for item in self.capabilities],
+            supported_tools=list(self.supported_tools),
+            input_schema=dict(self.input_schema),
+            output_schema=dict(self.output_schema),
+            skills=[SkillView.model_validate(item.to_view()) for item in self.skills],
             metadata=dict(self.metadata),
         )
 
 
-# ------------------------------------------------------------
-# 内置 Agent 注册表
-# ------------------------------------------------------------
-UI_KEYWORDS: tuple[str, ...] = (
-    "按钮",
-    "样式",
-    "颜色",
-    "间距",
-    "字体",
-    "文案",
-    "布局",
-    "动画",
-    "组件",
-    "页面",
-    "弹窗",
-    "对齐",
-    "字号",
-    "圈选",
-    "改一下",
-    "局部",
-)
-
-ARCHITECT_KEYWORDS: tuple[str, ...] = (
-    "全栈",
-    "架构",
-    "后端",
-    "数据库",
-    "表结构",
-    "接口",
-    "api",
-    "服务端",
-    "技术栈",
-    "部署",
-    "spring",
-    "fastapi",
-    "mysql",
-    "redis",
-    "ddl",
-    "迁移",
-    "数据实体",
-    "业务模型",
-)
+# 每个专家 Agent 独占 <ai_core>/<agent_dir>/manifest.json。
+DEFAULT_AGENT_MANIFEST_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _builtin_descriptors() -> list[AgentDescriptor]:
-    return [
-        AgentDescriptor(
-            agent_id="ui_graph",
-            display_name="局部 UI 工程师",
-            graph="AgentGraphRunner",
-            description="处理画布标注、局部组件修改、样式与交互增量调整",
-            task_types=("ui_local_edit",),
-            status="available",
-            source="builtin",
-            version="1.0.0",
-            stream_path_template="/api/v1/runs/{runId}/events/stream",
-            keywords=UI_KEYWORDS,
-        ),
-        AgentDescriptor(
-            agent_id="architect_graph",
-            display_name="全局架构师",
-            graph="ArchitectGraphRunner",
-            description="应用形态判别、全局架构澄清与全栈实施契约生成",
-            task_types=("global_architecture",),
-            status="available",
-            source="builtin",
-            version="1.0.0",
-            stream_path_template="/api/v1/architect/runs/{runId}/events/stream",
-            keywords=ARCHITECT_KEYWORDS,
-        ),
-        AgentDescriptor(
-            agent_id="backend_coder",
-            display_name="后端工程师（预留）",
-            graph="BackendCoderGraph",
-            description="未来根据实施契约生成 Spring Boot 后端",
-            task_types=("backend_generation",),
-            status="reserved",
-            source="builtin",
-            version="0.0.0",
-            keywords=("后端代码", "spring boot", "controller", "service"),
-        ),
-        AgentDescriptor(
-            agent_id="script_agent",
-            display_name="脚本工程师（预留）",
-            graph="ScriptAgentGraph",
-            description="未来生成与验证后台自动化脚本",
-            task_types=("script_automation",),
-            status="reserved",
-            source="builtin",
-            version="0.0.0",
-            keywords=("脚本", "定时任务", "批处理"),
-        ),
-    ]
+def _descriptor_from_manifest(
+    manifest: AgentManifest,
+    *,
+    manifest_path: str,
+    source: Literal["builtin", "manifest"],
+) -> AgentDescriptor:
+    """把声明式 Manifest 转为注册中心描述符。"""
+    capabilities = tuple(
+        {"id": item.id, "description": item.description}
+        for item in manifest.capabilities
+    )
+    skills = tuple(
+        SkillDescriptor(
+            skill_id=item.skill_id,
+            name=item.name,
+            agent_id=manifest.agent_id,
+            description=item.description,
+            prompt_ref=item.prompt_ref,
+            rag_refs=tuple(item.rag_refs),
+            tools=tuple(item.tools),
+            metadata=dict(item.metadata),
+        )
+        for item in manifest.skills
+    )
+    return AgentDescriptor(
+        agent_id=manifest.agent_id,
+        display_name=manifest.name,
+        graph=manifest.graph,
+        description=manifest.description,
+        task_types=manifest.task_types,
+        status=manifest.status,
+        source=source,
+        version=manifest.version,
+        stream_path_template=manifest.stream_path_template,
+        keywords=tuple(manifest.keywords),
+        manifest_path=manifest_path,
+        capabilities=capabilities,
+        supported_tools=tuple(manifest.supported_tools),
+        input_schema=dict(manifest.input_schema),
+        output_schema=dict(manifest.output_schema),
+        skills=skills,
+        metadata={
+            **manifest.metadata,
+            "manifestVersion": manifest.metadata.get("manifest_version", 1),
+        },
+    )
 
 
 class AgentRegistry:
     """线程安全的 Agent 注册中心。"""
 
-    def __init__(self, custom_agents_dir: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        custom_agents_dir: Path | str | None = None,
+        manifest_dir: Path | str | None = None,
+    ) -> None:
         self._lock = threading.RLock()
         self._agents: dict[str, AgentDescriptor] = {}
+        self._builtin_ids: set[str] = set()
         self._custom_ids: set[str] = set()
         self._version = 1
+        self._skills = SkillRegistry()
+        self._manifest_dir = (
+            Path(manifest_dir) if manifest_dir else DEFAULT_AGENT_MANIFEST_ROOT
+        )
         self._custom_agents_dir = Path(custom_agents_dir) if custom_agents_dir else None
-        for descriptor in _builtin_descriptors():
-            self.register(descriptor)
+        self.reload_builtin_agents()
 
     @property
     def version(self) -> str:
@@ -199,6 +183,14 @@ class AgentRegistry:
                 if self._custom_agents_dir is not None
                 else None
             )
+
+    @property
+    def manifest_dir(self) -> str:
+        return str(self._manifest_dir)
+
+    @property
+    def skill_registry(self) -> SkillRegistry:
+        return self._skills
 
     # --------------------------------------------------------
     # 注册 / 查询
@@ -271,6 +263,97 @@ class AgentRegistry:
         return matches
 
     # --------------------------------------------------------
+    # 内置 Manifest 自动扫描
+    # --------------------------------------------------------
+    def reload_builtin_agents(
+        self, directory: Path | str | None = None
+    ) -> list[AgentDescriptor]:
+        """重新扫描内置 Agent Manifest，并重建 Skill 注册表。
+
+        任何单个 Manifest 校验失败只记录 warning，不阻断其余 Agent；
+        但如果最终一个内置 Agent 都没有，说明部署包不完整，必须快速失败。
+        """
+        target = Path(directory) if directory is not None else self._manifest_dir
+        with self._lock:
+            for agent_id in list(self._builtin_ids):
+                self._agents.pop(agent_id, None)
+            self._builtin_ids.clear()
+            self._manifest_dir = target
+
+        loaded: list[AgentDescriptor] = []
+        for path, manifest in self._safe_discover(target):
+            descriptor = self._safe_builtin_descriptor(path, manifest)
+            if descriptor is None:
+                continue
+            with self._lock:
+                if descriptor.agent_id in self._agents:
+                    logger.warning(
+                        "skip builtin agent %s: id already registered",
+                        descriptor.agent_id,
+                    )
+                    continue
+            try:
+                self.register(descriptor)
+            except AgentRegistryError as exc:
+                logger.warning(
+                    "skip builtin agent %s: %s",
+                    descriptor.agent_id,
+                    exc,
+                )
+                continue
+            with self._lock:
+                self._builtin_ids.add(descriptor.agent_id)
+            loaded.append(descriptor)
+
+        if not loaded:
+            raise AgentRegistryError(f"未发现可用的内置 Agent Manifest: {target}")
+        self._rebuild_skills()
+        logger.info("loaded %s builtin agent(s) from %s", len(loaded), target)
+        return loaded
+
+    def _safe_discover(self, target: Path) -> list[tuple[Path, AgentManifest]]:
+        """逐文件隔离解析错误，避免一个坏 Manifest 拖垮启动。"""
+        if not target.exists() or not target.is_dir():
+            logger.error("agent manifest directory not found: %s", target)
+            return []
+        discovered: list[tuple[Path, AgentManifest]] = []
+        try:
+            discovered = discover_agent_manifests(target)
+        except AgentManifestError as exc:
+            # discover 目前会抛首个错误；逐个重扫以隔离坏文件。
+            logger.warning("agent manifest discovery failed: %s", exc)
+            discovered = []
+            for path in sorted(target.glob("*/manifest.json")):
+                try:
+                    discovered.append((path, _read_one(path)))
+                except AgentManifestError as item_exc:
+                    logger.warning(
+                        "skip invalid agent manifest %s: %s",
+                        path,
+                        item_exc,
+                    )
+        return discovered
+
+    def _safe_builtin_descriptor(
+        self,
+        path: Path,
+        manifest: AgentManifest,
+    ) -> AgentDescriptor | None:
+        try:
+            relative = path.relative_to(self._manifest_dir).as_posix()
+        except ValueError:
+            relative = path.as_posix()
+        try:
+            return _descriptor_from_manifest(
+                manifest,
+                manifest_path=relative,
+                source="builtin",
+            )
+        except Exception as exc:  # noqa: BLE001 - 单条 Manifest 失败隔离
+            logger.warning("failed to build descriptor from %s: %s", path, exc)
+            return None
+
+    # --------------------------------------------------------
     # CustomAgent Manifest 动态加载
     # --------------------------------------------------------
     def reload_custom_agents(
@@ -288,6 +371,7 @@ class AgentRegistry:
             self._custom_ids.clear()
             if target is None:
                 self._version += 1
+                self._rebuild_skills()
                 return []
             self._custom_agents_dir = target
 
@@ -325,6 +409,10 @@ class AgentRegistry:
                 keywords=tuple(manifest.keywords),
                 # 不向公开接口泄露宿主机绝对路径，只保留文件名。
                 manifest_path=path.name,
+                capabilities=tuple(
+                    {"id": task_type, "description": ""}
+                    for task_type in manifest.task_types
+                ),
                 metadata={
                     **manifest.metadata,
                     "enabled": manifest.enabled,
@@ -338,6 +426,7 @@ class AgentRegistry:
                 logger.warning("skip custom agent %s: %s", manifest.agent_id, exc)
                 continue
             loaded.append(descriptor)
+        self._rebuild_skills()
         logger.info(
             "loaded %s custom agent(s) from %s",
             len(loaded),
@@ -345,8 +434,41 @@ class AgentRegistry:
         )
         return loaded
 
+    # --------------------------------------------------------
+    # SkillRegistry
+    # --------------------------------------------------------
+    def _rebuild_skills(self) -> None:
+        """从当前全部 Agent 描述符重建 Skill 视图。"""
+        with self._lock:
+            registry = SkillRegistry()
+            for descriptor in self._agents.values():
+                for skill in descriptor.skills:
+                    try:
+                        registry.register(skill)
+                    except Exception as exc:  # noqa: BLE001 - Skill 冲突不阻断 Agent
+                        logger.warning(
+                            "skip duplicate skill %s from %s: %s",
+                            skill.skill_id,
+                            descriptor.agent_id,
+                            exc,
+                        )
+            self._skills = registry
+
+    def list_skills(self) -> list[SkillDescriptor]:
+        return self._skills.list_skills()
+
     def to_views(self) -> list[AgentView]:
         return [item.to_view() for item in self.list_agents()]
+
+    def to_skill_views(self) -> list[SkillView]:
+        return [SkillView.model_validate(item.to_view()) for item in self.list_skills()]
+
+
+def _read_one(path: Path) -> AgentManifest:
+    """延迟导入避免模块顶部重复；供坏文件隔离重扫使用。"""
+    from ai_core.supervisor.manifest import read_agent_manifest
+
+    return read_agent_manifest(path)
 
 
 # ------------------------------------------------------------
@@ -357,9 +479,13 @@ _REGISTRY_LOCK = threading.Lock()
 
 
 def build_default_registry(settings: Settings | None = None) -> AgentRegistry:
-    """创建并加载内置 + 企业 Manifest Agent。"""
+    """创建并加载内置 Manifest + 企业 CustomAgent Manifest。"""
     resolved = settings or get_settings()
-    registry = AgentRegistry(custom_agents_dir=resolved.supervisor_custom_agents_dir)
+    manifest_dir = resolved.supervisor_agent_manifest_dir or None
+    registry = AgentRegistry(
+        custom_agents_dir=resolved.supervisor_custom_agents_dir,
+        manifest_dir=manifest_dir,
+    )
     registry.reload_custom_agents()
     return registry
 

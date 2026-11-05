@@ -79,9 +79,10 @@ def list_agents() -> AgentListResponse:
 
 @router.post("/agents/reload", response_model=AgentListResponse)
 def reload_agents() -> AgentListResponse:
-    """重新扫描 CustomAgent Manifest。
+    """重新扫描内置 Agent Manifest 与企业 CustomAgent Manifest。
 
-    仅限内部网络调用；Manifest 不允许执行代码，也不会覆盖内置 Agent。
+    仅限内部网络调用；Manifest 只做声明解析，不允许执行代码，也不会
+    覆盖已注册的内置 Agent。
     """
     registry = reload_agent_registry()
     return SupervisorService(registry).list_agents()
