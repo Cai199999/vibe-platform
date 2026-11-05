@@ -128,6 +128,10 @@ class RunOptions(CamelModel):
       - auto  : 置信度低于阈值或缺少关键槽位时中断（默认）；
       - always: 即使高置信度也先确认范围（调试用）；
       - off   : 禁用 HITL，按当前最佳计划执行（降级 / 回归用）。
+
+    approval_mode：
+      - required: 构建通过后暂停，等待用户逐文件查看 Diff 后批准/拒绝；
+      - off     : 兼容旧客户端与回归脚本，构建通过后直接提交 checkpoint。
     """
 
     llm_provider: Literal["auto", "mock", "deepseek"] = "auto"
@@ -140,6 +144,8 @@ class RunOptions(CamelModel):
     max_clarification_rounds: int = Field(default=3, ge=1, le=3)
     # None 时使用服务端配置 AGENT_CLARIFICATION_THRESHOLD。
     confidence_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    # 默认 off 保持 M2 同步 / 回归接口行为；产品前端显式传 required。
+    approval_mode: Literal["required", "off"] = "off"
 
 
 class ExecuteRunRequest(CamelModel):
@@ -284,6 +290,91 @@ class ClarificationListResponse(CamelModel):
     clarifications: list[Clarification] = Field(default_factory=list)
 
 
+# ------------------------------------------------------------
+# HITL 审批（Diff Approve / Reject）
+# ------------------------------------------------------------
+class ApprovalFileDiff(CamelModel):
+    """单个文件的审批证据；diff 过长时由后端截断并标记 ``truncated``。"""
+
+    path: str
+    change_type: Literal["added", "modified", "deleted"] = "modified"
+    insertions: int = 0
+    deletions: int = 0
+    diff: str = ""
+    truncated: bool = False
+
+
+class ApprovalEvidence(CamelModel):
+    files_changed: int = 0
+    insertions: int = 0
+    deletions: int = 0
+    files: list[ApprovalFileDiff] = Field(default_factory=list)
+    build: dict[str, Any] = Field(default_factory=dict)
+
+
+class Approval(CamelModel):
+    """一次待决策的 Diff 审批。
+
+    构建通过后 Graph 在 ``approval_gate`` 调用 ``interrupt()``，payload 即
+    本模型；用户决策后通过 ``Command(resume=...)`` 恢复同一状态机，
+    只有批准才会写入 Git checkpoint。
+    """
+
+    approval_id: str
+    run_id: str | None = None
+    status: Literal[
+        "PENDING",
+        "APPROVED",
+        "REJECTED",
+        "CANCELLED",
+        "EXPIRED",
+    ] = "PENDING"
+    summary: str = ""
+    risk_level: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
+    options: list[str] = Field(default_factory=lambda: ["approve", "reject"])
+    evidence: ApprovalEvidence | None = None
+    sandbox_id: str | None = None
+    preview_url: str | None = None
+    expires_at: datetime | None = None
+    decided_at: datetime | None = None
+    comment: str | None = None
+
+
+class ApprovalDecisionRequest(CamelModel):
+    """审批决策请求；兼容 approve/APPROVED 等写法。"""
+
+    decision: str = Field(min_length=1, max_length=32)
+    comment: str | None = Field(default=None, max_length=1000)
+    expected_version: int | None = None
+    approval_id: str | None = Field(default=None, max_length=128)
+
+
+class ApprovalStatus(CamelModel):
+    approval_id: str
+    status: Literal["APPROVED", "REJECTED", "CANCELLED", "EXPIRED"]
+    decided_at: datetime
+
+
+class ApprovalDecisionResponse(CamelModel):
+    approval: ApprovalStatus
+    run: ClarificationRunStatus
+
+
+class ApprovalListResponse(CamelModel):
+    run_id: str
+    approvals: list[Approval] = Field(default_factory=list)
+
+
+class CancelRunRequest(CamelModel):
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class CancelRunResponse(CamelModel):
+    run_id: str
+    status: str
+    cancel_requested_at: datetime
+
+
 class RunSnapshotResponse(CamelModel):
     """GET /runs/{runId} 的轻量快照；完整结果仍以 SSE 终态 payload 为准。"""
 
@@ -292,6 +383,8 @@ class RunSnapshotResponse(CamelModel):
     sandbox_id: str = ""
     preview_url: str = ""
     clarification: Clarification | None = None
+    approval: Approval | None = None
+    cancel_requested: bool = False
     assistant_message: str = ""
     error: str | None = None
     last_seq: int = 0
@@ -302,6 +395,9 @@ class ExecuteRunResponse(CamelModel):
     status: Literal[
         "AWAITING_APPROVAL",
         "AWAITING_CLARIFICATION",
+        "SUCCEEDED",
+        "REJECTED",
+        "CANCELLED",
         "EXPIRED",
         "FAILED",
     ]
@@ -321,8 +417,10 @@ class ExecuteRunResponse(CamelModel):
     turn_count: int = 0
     baseline_commit: str | None = None
     commits: list[RunCommitRecord] = Field(default_factory=list)
-    # HITL：仅 AWAITING_CLARIFICATION 时非空。
+    # HITL：仅 AWAITING_CLARIFICATION 时 non-null。
     clarification: Clarification | None = None
+    # HITL：仅 AWAITING_APPROVAL（等待审批）时 non-null。
+    approval: Approval | None = None
     error: str | None = None
 
 

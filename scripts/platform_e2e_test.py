@@ -205,7 +205,7 @@ def main() -> None:
 
     print("\n== 2. 校验 Agent 闭环结果 ==")
     require(
-        body.get("status") == "AWAITING_APPROVAL", f"状态异常: {body.get('status')}"
+        body.get("status") in ("SUCCEEDED", "AWAITING_APPROVAL"), f"状态异常: {body.get('status')}"
     )
     require(
         body.get("retryCount") == 1, f"应自动修复 1 次，实际 {body.get('retryCount')}"

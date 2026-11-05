@@ -111,7 +111,7 @@ def main() -> int:
 
             print("\n== 2. 第一轮：改成红色 ==")
             first = send_in_popover(page, popover, "改成红色", "第一轮")
-            if first.get("status") != "AWAITING_APPROVAL":
+            if first.get("status") not in ("SUCCEEDED", "AWAITING_APPROVAL"):
                 fail(f"第一轮执行失败: {first}")
             sandbox_id = first.get("sandboxId") or ""
             first_commit = (first.get("commits") or [{}])[0]

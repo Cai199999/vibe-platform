@@ -33,6 +33,11 @@ public class RunService {
             "/api/v1/internal/runs/{runId}/clarifications";
     private static final String CLARIFICATION_ANSWER_PATH =
             "/api/v1/internal/runs/{runId}/clarifications/{clarificationId}/answers";
+    private static final String APPROVALS_PATH =
+            "/api/v1/internal/runs/{runId}/approvals";
+    private static final String APPROVAL_DECISION_PATH =
+            "/api/v1/internal/runs/{runId}/approvals/{approvalId}/decision";
+    private static final String CANCEL_PATH = "/api/v1/internal/runs/{runId}/cancel";
 
     private final RestClient aiCoreRunRestClient;
     private final ObjectMapper objectMapper;
@@ -195,6 +200,34 @@ public class RunService {
 
     public ResponseEntity<JsonNode> getClarifications(String runId) {
         return getJson(CLARIFICATIONS_PATH, "clarifications", runId);
+    }
+
+    /**
+     * 代理 Diff 审批决策；保持 AI Core 的 4xx 语义（重复决策 / 过期）。
+     */
+    public ResponseEntity<JsonNode> decideApproval(
+            String runId,
+            String approvalId,
+            JsonNode body
+    ) {
+        return postJson(
+                APPROVAL_DECISION_PATH,
+                body,
+                "approval decision",
+                runId,
+                approvalId
+        );
+    }
+
+    public ResponseEntity<JsonNode> getApprovals(String runId) {
+        return getJson(APPROVALS_PATH, "approvals", runId);
+    }
+
+    /**
+     * 代理取消 Run；暂停中的 Run 会立即回滚并在事件流中收到终态。
+     */
+    public ResponseEntity<JsonNode> cancelRun(String runId, JsonNode body) {
+        return postJson(CANCEL_PATH, body, "run cancel", runId);
     }
 
     private ResponseEntity<JsonNode> postJson(

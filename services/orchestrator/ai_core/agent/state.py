@@ -42,6 +42,9 @@ class AgentState(TypedDict, total=False):
     current_code: str
     # 所有目标文件的最新完整内容：{path: source}
     current_files: dict[str, str]
+    # 本轮 Run 开始前的文件快照；审批 Diff / 拒绝回滚都以它为基线。
+    # 节点不会更新该字段，始终保持“写沙盒之前”的内容。
+    initial_files: dict[str, str]
 
     # ---- 生成结果 ----
     plan: str
@@ -67,6 +70,17 @@ class AgentState(TypedDict, total=False):
     # 计算 expiresAt。
     clarification_ttl_hours: int
 
+    # ---- HITL Diff 审批 ----
+    # 是否在构建通过后暂停等待人工审批；由 options.approvalMode 决定。
+    approval_required: bool
+    # 当前待决策审批（暂停时由 checkpoint 保留）。
+    approval: dict[str, Any] | None
+    approval_id: str | None
+    approval_decision: Literal["approve", "reject"] | None
+    approval_comment: str | None
+    # 审批有效期（小时），由 Service 注入。
+    approval_ttl_hours: int
+
     # ---- 校验与修复 ----
     verify_result: VerifyState
     apply_failed: bool
@@ -84,6 +98,9 @@ class AgentState(TypedDict, total=False):
         "REPAIRING",
         "AWAITING_APPROVAL",
         "AWAITING_CLARIFICATION",
+        "SUCCEEDED",
+        "REJECTED",
+        "CANCELLED",
         "EXPIRED",
         "FAILED",
     ]

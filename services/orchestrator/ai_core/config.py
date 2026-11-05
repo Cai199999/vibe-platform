@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     agent_clarification_threshold: float = 0.7
     # 澄清最长等待时间；回答接口超时返回 CLARIFICATION_EXPIRED。
     agent_clarification_ttl_hours: int = 24
+    # Diff 审批最长等待时间；超时决策返回 APPROVAL_EXPIRED 并回滚沙盒。
+    agent_approval_ttl_hours: int = 24
     # 每个 Run 的内存事件缓冲上限；生产切换 Redis Stream 后由 stream TTL 管理。
     agent_event_buffer_size: int = 2000
 

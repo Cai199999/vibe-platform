@@ -124,6 +124,8 @@ function AnnotationPopover({
   annotation,
   index,
   submitting,
+  // 审批未决时禁止修改标注 / 发起新 Run，但聊天记录仍可查看。
+  blocked = false,
   pending,
   pendingAction,
   active,
@@ -268,7 +270,7 @@ function AnnotationPopover({
               className={action === option.value ? 'is-active' : ''}
               aria-pressed={action === option.value}
               title={option.title}
-              disabled={submitting || Boolean(clarification)}
+              disabled={blocked || submitting || Boolean(clarification)}
               onClick={() => onActionChange?.(annotation.id, option.value)}
             >
               {option.label}
@@ -280,7 +282,7 @@ function AnnotationPopover({
           type="button"
           title="删除这个标注"
           aria-label={`删除标注 ${index + 1}`}
-          disabled={submitting || Boolean(clarification)}
+          disabled={blocked || submitting || Boolean(clarification)}
           onClick={() => onRemove?.(annotation.id)}
         >
           ×
@@ -314,7 +316,7 @@ function AnnotationPopover({
                   <button
                     className="chat-rollback"
                     type="button"
-                    disabled={submitting}
+                    disabled={blocked || submitting}
                     title="恢复这一轮的代码与对话，丢弃之后的所有修改"
                     onClick={() => onRollback?.(annotation.id, message)}
                   >
@@ -440,15 +442,24 @@ function AnnotationPopover({
           type="text"
           value={annotation.intent}
           maxLength={120}
-          placeholder={clarificationPending ? '请先回答上方问题…' : '描述修改意图...'}
-          disabled={submitting || clarificationPending}
+          placeholder={
+            blocked
+              ? '请先在上方处理待审批的修改…'
+              : clarificationPending
+                ? '请先回答上方问题…'
+                : '描述修改意图...'
+          }
+          disabled={blocked || submitting || clarificationPending}
           onChange={(event) => onChange?.(annotation.id, event.target.value)}
         />
         <button
           className="popover-send"
           type="submit"
           disabled={
-            submitting || clarificationPending || !annotation.intent.trim()
+            blocked ||
+            submitting ||
+            clarificationPending ||
+            !annotation.intent.trim()
           }
           title="只对当前圈执行一次增量修改"
         >
@@ -485,6 +496,7 @@ export default function CanvasStage({
   pendingAction,
   submitting,
   disabled,
+  blocked = false,
 }) {
   const stageRef = useRef(null)
   const startTargetRef = useRef(null)
@@ -673,7 +685,7 @@ export default function CanvasStage({
 
       <div
         ref={stageRef}
-        className={`canvas-stage ${disabled ? 'is-disabled' : ''} ${drawing ? 'is-drawing' : ''} ${viewport.spaceHeld ? 'is-pan-ready' : ''} ${viewport.panning ? 'is-panning' : ''}`}
+        className={`canvas-stage ${disabled || blocked ? 'is-disabled' : ''} ${drawing ? 'is-drawing' : ''} ${viewport.spaceHeld ? 'is-pan-ready' : ''} ${viewport.panning ? 'is-panning' : ''}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={finishDrawing}
@@ -753,6 +765,7 @@ export default function CanvasStage({
                   annotation={annotation}
                   index={index}
                   submitting={submitting}
+                  blocked={blocked}
                   pending={pendingAnnotationId === annotation.id}
                   pendingAction={pendingAnnotationId === annotation.id ? pendingAction : null}
                   active={annotation.id === activeAnnotationId}

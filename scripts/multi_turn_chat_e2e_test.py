@@ -224,7 +224,7 @@ def main() -> int:
             expect(popover.locator(".chat-bubble.is-assistant")).to_be_visible(
                 timeout=120_000
             )
-            if first_payload.get("status") != "AWAITING_APPROVAL":
+            if first_payload.get("status") not in ("SUCCEEDED", "AWAITING_APPROVAL"):
                 fail(f"第一轮执行失败: {first_payload}")
             sandbox_id = first_payload.get("sandboxId") or ""
             if not sandbox_id:
@@ -242,7 +242,7 @@ def main() -> int:
             expect(popover.locator(".chat-bubble.is-user").last).to_contain_text(
                 "不，我要蓝色"
             )
-            if second_payload.get("status") != "AWAITING_APPROVAL":
+            if second_payload.get("status") not in ("SUCCEEDED", "AWAITING_APPROVAL"):
                 fail(f"第二轮执行失败: {second_payload}")
             if second_payload.get("sandboxId") != sandbox_id:
                 fail("第二轮没有复用同一沙盒")

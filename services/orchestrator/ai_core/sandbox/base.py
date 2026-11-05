@@ -98,6 +98,14 @@ class SandboxProvider(ABC):
         """返回沙盒初始基线 commit（root commit）。"""
         raise SandboxGitError(f"当前 Provider 不支持 Git baseline: {sandbox_id}")
 
+    def git_head(self, sandbox_id: str) -> str:
+        """返回当前 HEAD commit。
+
+        Run 开始前记录一次，审批拒绝 / 取消时把工作区恢复到该提交，
+        避免未批准的代码残留在多轮会话中。
+        """
+        raise SandboxGitError(f"当前 Provider 不支持读取 HEAD: {sandbox_id}")
+
     @abstractmethod
     def apply_patch(
         self,

@@ -36,9 +36,20 @@ const EMPTY_RUN = {
   lastSeq: 0,
   timeline: [],
   clarification: null,
+  // 本次 Run 对应的标注：审批 / 取消恢复事件流时用它定位要写入哪条聊天。
+  // null 表示批量提交，终态回复写给全部标注。
+  targetAnnotationId: null,
+  // Diff 审批：approval.required 的 payload，非空时 RuntimePanel 显示审批栏。
+  approval: null,
+  // 协作式取消：已请求但尚未收到 run.cancelled。
+  cancelRequested: false,
   // patch.proposed 的截断 diff，用于详情抽屉；完整结果仍以终态为准。
   patchPreview: '',
 }
+
+// 成功终态：M2 的旧快照仍可能是 AWAITING_APPROVAL，统一按成功渲染。
+const SUCCESS_STATUSES = new Set(['SUCCEEDED', 'AWAITING_APPROVAL'])
+const isSuccessStatus = (status) => SUCCESS_STATUSES.has(status)
 
 // 已完成 Run 的轻量会话快照：刷新页面后仍能显示「查看效果」，
 // 且 sandboxIds 不丢失，关闭 Tab 时仍能正确销毁容器。
@@ -426,10 +437,27 @@ function timelineMessages(timeline) {
 function resultFromTerminalEvent(run, event) {
   const payload = event.payload ?? {}
   const success = event.type === 'run.succeeded'
+  const cancelled = event.type === 'run.cancelled'
+  const rejected = event.type === 'run.rejected'
+  const status = success
+    ? payload.status || 'SUCCEEDED'
+    : cancelled
+      ? 'CANCELLED'
+      : rejected
+        ? 'REJECTED'
+        : 'FAILED'
+  const fallbackMessage = success
+    ? '已更新预览，可以继续提出修改。'
+    : cancelled
+      ? '已取消本次修改，代码已回滚到执行前状态。'
+      : rejected
+        ? '已拒绝本次修改，代码已回滚到执行前状态。'
+        : ''
   return {
     runId: event.runId,
-    status: success ? payload.status || 'AWAITING_APPROVAL' : 'FAILED',
+    status,
     sandboxId: payload.sandboxId ?? '',
+    // 拒绝 / 取消的 previewUrl 带 cache-busting，iframe 会强制刷新回滚后的代码。
     previewUrl: payload.previewUrl ?? '',
     commitHash: payload.commitHash ?? null,
     baselineCommit: payload.baselineCommit ?? null,
@@ -438,9 +466,13 @@ function resultFromTerminalEvent(run, event) {
     commits: payload.commits ?? [],
     assistantMessage:
       payload.assistantMessage ||
-      (success ? '已更新预览，可以继续提出修改。' : ''),
-    error: success ? null : payload.message || '构建验证未通过',
-    generatedPatch: run.patchPreview || '',
+      payload.message ||
+      fallbackMessage,
+    error:
+      event.type === 'run.failed'
+        ? payload.message || '构建验证未通过'
+        : null,
+    generatedPatch: success ? run.patchPreview || '' : '',
     verifyResult: null,
     messages: timelineMessages(run.timeline),
   }
@@ -486,6 +518,8 @@ function finalizeFromResult(run, result, annotationId) {
     pendingAnnotationId: null,
     pendingAction: null,
     clarification: null,
+    approval: null,
+    cancelRequested: false,
   }
 }
 
@@ -513,11 +547,33 @@ function applyStreamEvent(run, event, annotationId) {
   if (event.type === 'clarification.answered') {
     return { ...base, clarification: null }
   }
-  if (event.type === 'run.succeeded' || event.type === 'run.failed') {
+  if (event.type === 'approval.required') {
+    return {
+      ...base,
+      approval: payload,
+      clarification: null,
+      submitting: false,
+      pendingAnnotationId: null,
+      pendingAction: null,
+      cancelRequested: false,
+    }
+  }
+  if (event.type === 'approval.answered') {
+    return { ...base, approval: null }
+  }
+  if (event.type === 'run.cancel_requested') {
+    return { ...base, cancelRequested: true }
+  }
+  if (
+    event.type === 'run.succeeded' ||
+    event.type === 'run.failed' ||
+    event.type === 'run.cancelled' ||
+    event.type === 'run.rejected'
+  ) {
     return finalizeFromResult(
       base,
       resultFromTerminalEvent(base, event),
-      annotationId,
+      annotationId ?? base.targetAnnotationId,
     )
   }
   return base
@@ -905,7 +961,9 @@ export default function WorkspacePage() {
             // 避免前端不再持有 sandboxId 导致容器泄漏。
             if (
               event.type === 'run.succeeded' ||
-              event.type === 'run.failed'
+              event.type === 'run.failed' ||
+              event.type === 'run.cancelled' ||
+              event.type === 'run.rejected'
             ) {
               void destroySandbox(event.payload?.sandboxId, session?.token)
             }
@@ -1013,6 +1071,122 @@ export default function WorkspacePage() {
   }
 
   /**
+   * Diff 审批决策：POST 202 后用 lastSeq 重放事件流。
+   *
+   * 批准 → 服务端提交 Git checkpoint 并发送 run.succeeded；
+   * 拒绝 → 服务端 git reset 回执行前 HEAD 并发送 run.rejected。
+   * 决策本身不重建 Run，因此时间轴与审批卡片保持连续。
+   */
+  const handleApprovalDecision = async (projectId, decision, comment = '') => {
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const approval = run.approval
+    if (
+      !run.runId ||
+      !approval?.approvalId ||
+      run.submitting ||
+      inflightRef.current.has(projectId)
+    ) {
+      return
+    }
+    inflightRef.current.add(projectId)
+    patchRun(projectId, {
+      submitting: true,
+      pendingAnnotationId: run.targetAnnotationId,
+      pendingAction: 'run',
+      error: null,
+    })
+
+    try {
+      const response = await fetch(
+        `/api/v1/runs/${encodeURIComponent(run.runId)}/approvals/${encodeURIComponent(approval.approvalId)}/decision`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session?.token ?? ''}`,
+          },
+          body: JSON.stringify({ decision, comment: comment || undefined }),
+        },
+      )
+      if (!response.ok) {
+        throw new Error(await extractError(response))
+      }
+      // 202 已把 approval.answered 写入缓冲；从 lastSeq 继续消费终态。
+      await startRunStream(projectId, null, run.targetAnnotationId, {
+        replay: true,
+        runId: run.runId,
+        afterSeq: run.lastSeq,
+      })
+    } catch (cause) {
+      patchRun(projectId, {
+        submitting: false,
+        pendingAnnotationId: null,
+        pendingAction: null,
+        error: `提交审批失败：${cause?.message || cause}`,
+      })
+      inflightRef.current.delete(projectId)
+    }
+  }
+
+  /**
+   * 协作式取消：停止后续节点，服务端回滚未提交的沙盒改动。
+   *
+   * 暂停中的 Run（等待澄清 / 审批）会立即产生 run.cancelled；执行中的
+   * Run 进入 CANCELLING，终态仍需通过事件流送达。
+   */
+  const handleCancelRun = async (projectId) => {
+    const run = runStates[projectId] ?? EMPTY_RUN
+    // 只有“正在执行”或“等待审批”的 Run 可取消；终态 Run 不能再取消。
+    // 注意不能判断 run.result：同一标注多轮对话会保留上一轮的预览结果。
+    if (
+      !run.runId ||
+      run.cancelRequested ||
+      (!run.submitting && !run.approval) ||
+      inflightRef.current.has(projectId)
+    ) {
+      return
+    }
+    // 审批暂停时 run.submitting 已是 false，这里重新置为 true 以禁用按钮；
+    // 若执行中则保持不变。
+    patchRun(projectId, {
+      submitting: true,
+      pendingAnnotationId: run.pendingAnnotationId ?? run.targetAnnotationId,
+      pendingAction: 'run',
+      cancelRequested: true,
+      error: null,
+    })
+
+    try {
+      const response = await fetch(
+        `/api/v1/runs/${encodeURIComponent(run.runId)}/cancel`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session?.token ?? ''}`,
+          },
+          body: JSON.stringify({ reason: '用户在工作区取消' }),
+        },
+      )
+      if (!response.ok) {
+        throw new Error(await extractError(response))
+      }
+      await startRunStream(projectId, null, run.targetAnnotationId, {
+        replay: true,
+        runId: run.runId,
+        afterSeq: run.lastSeq,
+      })
+    } catch (cause) {
+      patchRun(projectId, {
+        submitting: false,
+        pendingAnnotationId: null,
+        pendingAction: null,
+        error: `取消执行失败：${cause?.message || cause}`,
+      })
+    }
+  }
+
+  /**
    * 单个圈的多轮发送：只提交当前标注，携带 threadId + chatHistory + 当前
    * 沙盒 ID。后端据此复用沙盒，基于上一轮修改后的源码做增量修改。
    */
@@ -1027,6 +1201,8 @@ export default function WorkspacePage() {
       !instruction ||
       run.submitting ||
       run.clarification ||
+      // 审批未决时禁止启动新 Run：否则旧沙盒改动会被后续提交覆盖。
+      run.approval ||
       inflightRef.current.has(projectId)
     ) {
       return
@@ -1056,6 +1232,9 @@ export default function WorkspacePage() {
       timeline: [],
       patchPreview: '',
       clarification: null,
+      approval: null,
+      cancelRequested: false,
+      targetAnnotationId: annotationId,
       // 输入框清空，对话气泡保留本轮用户指令。
       annotations: previous.annotations.map((item) =>
         item.id === annotationId
@@ -1082,6 +1261,8 @@ export default function WorkspacePage() {
         mockScenario: 'none',
         maxRetries: 3,
         keepSandbox: true,
+        // 构建通过后先暂停，等待用户查看 Diff 再写入 Git。
+        approvalMode: 'required',
       },
     }
 
@@ -1100,6 +1281,7 @@ export default function WorkspacePage() {
       instructions.some((text) => !text) ||
       run.submitting ||
       run.clarification ||
+      run.approval ||
       inflightRef.current.has(projectId)
     ) {
       return
@@ -1131,6 +1313,9 @@ export default function WorkspacePage() {
       timeline: [],
       patchPreview: '',
       clarification: null,
+      approval: null,
+      cancelRequested: false,
+      targetAnnotationId: null,
       annotations: sendEntries,
     })
 
@@ -1150,6 +1335,8 @@ export default function WorkspacePage() {
         mockScenario: 'fail_first',
         maxRetries: 3,
         keepSandbox: true,
+        // 批量提交同样需要人工确认，批准后才提交 Git checkpoint。
+        approvalMode: 'required',
       },
     }
 
@@ -1365,10 +1552,13 @@ export default function WorkspacePage() {
         map[projectId] = 'idle'
       } else if (run.submitting) {
         map[projectId] = 'running'
-      } else if (run.error) {
+      } else if (run.approval) {
+        // 待审批：Tab 上用警示色提示需要人工处理，不当作成功或失败。
+        map[projectId] = 'pending'
+      } else if (run.error || run.result?.status === 'FAILED') {
         map[projectId] = 'error'
       } else if (run.result) {
-        map[projectId] = 'success'
+        map[projectId] = isSuccessStatus(run.result.status) ? 'success' : 'error'
       } else {
         map[projectId] = 'idle'
       }
@@ -1463,6 +1653,10 @@ export default function WorkspacePage() {
                   handleAnnotationRollback(project.id, annotationId, message)
                 }
                 onClearAnnotations={() => handleClearAnnotations(project.id)}
+                onApprovalDecision={(decision, comment) =>
+                  handleApprovalDecision(project.id, decision, comment)
+                }
+                onCancelRun={() => handleCancelRun(project.id)}
                 onSubmit={() => handleSubmit(project.id)}
                 onRetry={() => handleRetry(project.id)}
                 canExport={Boolean(run.result?.sandboxId)}

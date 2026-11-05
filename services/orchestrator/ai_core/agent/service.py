@@ -32,7 +32,11 @@ from ai_core.agent.context_doc import (
     render_vibe_context,
 )
 from ai_core.agent.events import RunEventBuffer, get_event_buffer
-from ai_core.agent.graph import AgentGraphRunner, GraphRunOutcome
+from ai_core.agent.graph import (
+    AgentGraphRunner,
+    GraphRunOutcome,
+    RunCancelledError,
+)
 from ai_core.agent.llm import (
     AgentLLM,
     AgentLLMConfigurationError,
@@ -41,6 +45,13 @@ from ai_core.agent.llm import (
 )
 from ai_core.agent.schemas import (
     AnnotationEnvelope,
+    Approval,
+    ApprovalDecisionRequest,
+    ApprovalDecisionResponse,
+    ApprovalListResponse,
+    ApprovalStatus,
+    CancelRunRequest,
+    CancelRunResponse,
     Clarification,
     ClarificationAnswerResponse,
     ClarificationAnswersRequest,
@@ -64,19 +75,24 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TARGET_FILE = "src/App.jsx"
 TERMINAL_RUN_STATUSES = {
-    "AWAITING_APPROVAL",
+    "SUCCEEDED",
     "FAILED",
     "EXPIRED",
     "CANCELLED",
+    "REJECTED",
 }
+# AWAITING_APPROVAL 是暂停态而不是终态：审批通过前代码尚未形成 Git
+# checkpoint，同一 thread 不能被新的 Run 复用。
 ACTIVE_RUN_STATUSES = {
     "RUNNING",
+    "CANCELLING",
     "PLANNING",
     "CODING",
     "APPLYING",
     "VERIFYING",
     "REPAIRING",
     "AWAITING_CLARIFICATION",
+    "AWAITING_APPROVAL",
 }
 
 
@@ -145,6 +161,36 @@ class ClarificationAnswersRequiredError(RunServiceError):
 
 
 # ------------------------------------------------------------
+# 审批 / 取消异常
+# ------------------------------------------------------------
+class ApprovalNotFoundError(RunServiceError):
+    code = "APPROVAL_NOT_FOUND"
+    status_code = 404
+
+
+class ApprovalStateConflictError(RunServiceError):
+    code = "APPROVAL_STATE_CONFLICT"
+    status_code = 409
+
+
+class ApprovalExpiredError(RunServiceError):
+    code = "APPROVAL_EXPIRED"
+    status_code = 410
+
+
+class ApprovalDecisionConflictError(RunServiceError):
+    """同一审批重复提交了不同 decision。"""
+
+    code = "APPROVAL_DECISION_CONFLICT"
+    status_code = 409
+
+
+class RunCancelNotAllowedError(RunServiceError):
+    code = "RUN_CANCEL_NOT_ALLOWED"
+    status_code = 409
+
+
+# ------------------------------------------------------------
 # 运行期数据结构
 # ------------------------------------------------------------
 @dataclass
@@ -162,6 +208,8 @@ class PreparedRun:
     handle: SandboxHandle
     reused_sandbox: bool
     current_files: dict[str, str]
+    # Run 开始前的 HEAD；审批拒绝 / 取消时回滚到该提交。
+    base_commit: str | None
     initial_state: dict[str, Any]
     event_buffer: RunEventBuffer
 
@@ -180,6 +228,12 @@ class ActiveRun:
     response: ExecuteRunResponse | None = None
     clarification: Clarification | None = None
     clarifications: list[Clarification] = field(default_factory=list)
+    approval: Approval | None = None
+    approvals: list[Approval] = field(default_factory=list)
+    # 协作式取消：API 只置位，后台线程在节点安全点响应。
+    cancel_requested: bool = False
+    cancel_requested_at: datetime | None = None
+    cancel_reason: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -276,6 +330,14 @@ class RunExecutionService:
         try:
             prepared = self._prepare(active.request, active.run_id, active.buffer)
             active.prepared = prepared
+            # 准备沙盒期间用户可能已经取消：还没有执行任何节点，直接收敛。
+            if active.cancel_requested:
+                self._complete_cancelled(
+                    active,
+                    prepared,
+                    reason=active.cancel_reason,
+                )
+                return
             self._execute_prepared(active, prepared)
         except Exception as exc:  # noqa: BLE001 - 后台线程必须把错误转成事件
             logger.exception("stream run failed run_id=%s", active.run_id)
@@ -373,6 +435,270 @@ class RunExecutionService:
             )
 
     # --------------------------------------------------------
+    # HITL：Diff 审批
+    # --------------------------------------------------------
+    def decide_approval(
+        self,
+        run_id: str,
+        approval_id: str | None,
+        request: ApprovalDecisionRequest,
+    ) -> ApprovalDecisionResponse:
+        """批准 / 拒绝待审批的 Run，并通过 checkpoint 恢复状态机。
+
+        - 批准：恢复 ``approval_gate`` -> ``awaiting_approval``，Service 写
+          Git checkpoint 后发送 ``run.succeeded``；
+        - 拒绝：恢复后进入 ``rejected`` 分支，沙盒 ``git reset`` 回基线，
+          发送 ``run.rejected``；
+        - 同一 decision 重复提交幂等；不同 decision 返回 409。
+        """
+        active = get_active_run(run_id)
+        if active is None:
+            raise RunNotFoundError(f"Run 不存在或已过期: {run_id}")
+
+        decision = _normalize_decision(request.decision)
+        expected_id = approval_id or request.approval_id
+        now = datetime.now(timezone.utc)
+        expired = False
+        paused_approval: Approval | None = None
+        prepared: PreparedRun | None = None
+
+        with _ACTIVE_LOCK:
+            # 幂等：先按 approvalId 查找历史决策。
+            recorded = _find_approval(active, expected_id)
+            if recorded is not None and recorded.status in {
+                "APPROVED",
+                "REJECTED",
+                "CANCELLED",
+                "EXPIRED",
+            }:
+                recorded_decision = (
+                    "approve" if recorded.status == "APPROVED" else "reject"
+                )
+                if recorded.status == "CANCELLED":
+                    raise ApprovalStateConflictError("审批已随 Run 取消，不能再次决策")
+                if recorded.status == "EXPIRED":
+                    raise ApprovalExpiredError("审批已过期，请重新发起修改")
+                if recorded_decision != decision:
+                    raise ApprovalDecisionConflictError(
+                        "该审批已提交其它决策，不能修改"
+                    )
+                return ApprovalDecisionResponse(
+                    approval=ApprovalStatus(
+                        approval_id=recorded.approval_id,
+                        status=recorded.status,
+                        decided_at=recorded.decided_at or now,
+                    ),
+                    run=ClarificationRunStatus(run_id=run_id, status=active.status),
+                )
+
+            approval = active.approval
+            if active.status != "AWAITING_APPROVAL" or approval is None:
+                raise ApprovalStateConflictError(
+                    f"Run 当前状态为 {active.status}，没有待审批的修改"
+                )
+            if expected_id and approval.approval_id != expected_id:
+                raise ApprovalNotFoundError(f"审批不存在: {expected_id}")
+            if request.expected_version is not None and request.expected_version != 1:
+                raise ApprovalStateConflictError("expectedVersion 与当前审批不一致")
+            if approval.expires_at is not None:
+                expires_at = approval.expires_at
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                if now > expires_at:
+                    approval.status = "EXPIRED"
+                    approval.decided_at = now
+                    active.approval = None
+                    active.status = "EXPIRED"
+                    active.touch()
+                    expired = True
+                else:
+                    paused_approval = approval
+            if not expired:
+                paused_approval = approval
+                approval.status = "APPROVED" if decision == "approve" else "REJECTED"
+                approval.decided_at = now
+                approval.comment = request.comment
+                active.approval = None
+                # 恢复执行期间保持非终态，事件流可继续订阅。
+                active.status = "RUNNING"
+                active.touch()
+                prepared = active.prepared
+
+        if expired:
+            # 过期后同样要丢弃未批准的代码，避免污染下一轮。
+            expired_prepared = active.prepared
+            if expired_prepared is not None:
+                self._revert_sandbox(expired_prepared)
+            raise ApprovalExpiredError("审批已过期，请重新发起修改")
+
+        if paused_approval is None:
+            raise ApprovalStateConflictError("审批状态异常")
+
+        active.buffer.emit(
+            "approval.answered",
+            {
+                "approvalId": paused_approval.approval_id,
+                "decision": decision,
+                "comment": request.comment,
+                "status": paused_approval.status,
+            },
+            dedupe_key=f"approval.answered:{paused_approval.approval_id}",
+        )
+
+        if prepared is None:
+            self._emit_prepare_failure(
+                active, RunCheckpointLostError("审批 checkpoint 已丢失")
+            )
+            raise RunCheckpointLostError("审批 checkpoint 已丢失")
+
+        # 后台恢复，API 立即返回 202；前端用 lastSeq 重放事件流。
+        thread = threading.Thread(
+            target=self._approval_resume_worker,
+            args=(
+                active,
+                prepared,
+                decision,
+                paused_approval.approval_id,
+                request.comment,
+            ),
+            name=f"approval-{run_id}",
+            daemon=True,
+        )
+        thread.start()
+        return ApprovalDecisionResponse(
+            approval=ApprovalStatus(
+                approval_id=paused_approval.approval_id,
+                status=paused_approval.status,
+                decided_at=now,
+            ),
+            run=ClarificationRunStatus(run_id=run_id, status="RUNNING"),
+        )
+
+    def _approval_resume_worker(
+        self,
+        active: ActiveRun,
+        prepared: PreparedRun,
+        decision: str,
+        approval_id: str,
+        comment: str | None,
+    ) -> None:
+        try:
+            self._execute_prepared(
+                active,
+                prepared,
+                resume={
+                    "kind": "approval",
+                    "approvalId": approval_id,
+                    "decision": decision,
+                    "comment": comment,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - 后台线程必须收敛为事件
+            logger.exception("approval resume failed run_id=%s", prepared.run_id)
+            self._complete_failure(
+                active,
+                prepared,
+                error=f"审批恢复失败: {exc}",
+                code="APPROVAL_RESUME_FAILED",
+            )
+
+    def list_approvals(self, run_id: str) -> ApprovalListResponse:
+        active = get_active_run(run_id)
+        if active is None:
+            raise RunNotFoundError(f"Run 不存在或已过期: {run_id}")
+        with _ACTIVE_LOCK:
+            items = [item.model_copy(deep=True) for item in active.approvals]
+        return ApprovalListResponse(run_id=run_id, approvals=items)
+
+    # --------------------------------------------------------
+    # 取消 Run
+    # --------------------------------------------------------
+    def cancel_run(
+        self,
+        run_id: str,
+        request: CancelRunRequest,
+    ) -> CancelRunResponse:
+        """协作式取消。
+
+        - 暂停在澄清 / 审批：可立即回滚并发送 ``run.cancelled``；
+        - 正在执行：置位取消标志，节点安全点抛 ``RunCancelledError``，
+          由后台线程发送终态；
+        - 已终态：幂等返回当前状态，不重复发事件。
+        """
+        active = get_active_run(run_id)
+        if active is None:
+            raise RunNotFoundError(f"Run 不存在或已过期: {run_id}")
+
+        now = datetime.now(timezone.utc)
+        immediate_prepared: PreparedRun | None = None
+        emit_requested = False
+        with _ACTIVE_LOCK:
+            self._expire_if_needed(active)
+            if active.status in TERMINAL_RUN_STATUSES:
+                return CancelRunResponse(
+                    run_id=run_id,
+                    status=active.status,
+                    cancel_requested_at=active.cancel_requested_at or now,
+                )
+
+            if active.cancel_requested:
+                # 重复取消：保持幂等，不再发事件。
+                return CancelRunResponse(
+                    run_id=run_id,
+                    status=active.status,
+                    cancel_requested_at=active.cancel_requested_at or now,
+                )
+
+            active.cancel_requested = True
+            active.cancel_requested_at = now
+            active.cancel_reason = request.reason or "用户取消执行"
+
+            if active.status in {"AWAITING_APPROVAL", "AWAITING_CLARIFICATION"}:
+                if active.approval is not None:
+                    active.approval.status = "CANCELLED"
+                    active.approval.decided_at = now
+                    active.approval = None
+                active.clarification = None
+                active.status = "CANCELLED"
+                active.touch()
+                immediate_prepared = active.prepared
+            else:
+                # 执行中：进入 CANCELLING，等待后台线程在安全点收敛。
+                active.status = "CANCELLING"
+                active.touch()
+                emit_requested = True
+
+        if immediate_prepared is not None:
+            self._complete_cancelled(
+                active,
+                immediate_prepared,
+                reason=request.reason,
+            )
+            return CancelRunResponse(
+                run_id=run_id,
+                status="CANCELLED",
+                cancel_requested_at=now,
+            )
+
+        if emit_requested:
+            active.buffer.emit(
+                "run.cancel_requested",
+                {
+                    "status": "CANCELLING",
+                    "reason": request.reason or "用户取消执行",
+                    "requestedAt": now.isoformat(timespec="seconds").replace(
+                        "+00:00", "Z"
+                    ),
+                },
+                dedupe_key=f"run.cancel_requested:{run_id}",
+            )
+        return CancelRunResponse(
+            run_id=run_id,
+            status=active.status,
+            cancel_requested_at=now,
+        )
+
+    # --------------------------------------------------------
     # 查询
     # --------------------------------------------------------
     def snapshot(self, run_id: str) -> RunSnapshotResponse:
@@ -388,6 +714,8 @@ class RunExecutionService:
             sandbox_id=response.sandbox_id if response else "",
             preview_url=response.preview_url if response else "",
             clarification=active.clarification,
+            approval=active.approval,
+            cancel_requested=active.cancel_requested,
             assistant_message=response.assistant_message if response else "",
             error=response.error if response else None,
             last_seq=active.buffer.last_seq,
@@ -436,6 +764,7 @@ class RunExecutionService:
             {"node": "provision", "label": "准备沙盒", "attempt": 0},
             dedupe_key=f"node.started:provision:{run_id}",
         )
+        base_commit: str | None = None
         try:
             # 先构造 LLM，避免密钥缺失时已经创建了沙盒。
             llm = build_agent_llm(request, self._settings)
@@ -449,6 +778,17 @@ class RunExecutionService:
             handle, reused_sandbox, current_files = self._open_sandbox(
                 request, target_files, thread_ids
             )
+            # 记录写代码前的 HEAD：审批拒绝 / 取消时 git reset 回这里，
+            # 未批准的修改不会污染同一 thread 的下一轮。
+            try:
+                base_commit = self._sandbox.git_head(handle.sandbox_id)
+            except SandboxError:
+                logger.warning(
+                    "failed to read git HEAD run_id=%s sandbox_id=%s",
+                    run_id,
+                    handle.sandbox_id,
+                    exc_info=True,
+                )
             try:
                 # 把全部画布标注渲染成 VIBE_CONTEXT.md 写进沙盒，导出源码包时
                 # 自动带上；写入失败只记录日志，不阻塞 Run。
@@ -488,6 +828,8 @@ class RunExecutionService:
                 "messages": [],
                 "current_code": current_files[primary_file],
                 "current_files": current_files,
+                # 写沙盒前的快照：审批 Diff 与拒绝回滚的共同基线。
+                "initial_files": dict(current_files),
                 "plan": "",
                 "generated_patch": "",
                 "generated_files": {},
@@ -507,6 +849,13 @@ class RunExecutionService:
                 "clarification_round": 0,
                 "clarification_answers": [],
                 "clarification": None,
+                # HITL Diff 审批
+                "approval_required": request.options.approval_mode == "required",
+                "approval": None,
+                "approval_id": None,
+                "approval_decision": None,
+                "approval_comment": None,
+                "approval_ttl_hours": self._settings.agent_approval_ttl_hours,
                 "status": "RUNNING",
                 "error": None,
                 "error_code": None,
@@ -546,6 +895,7 @@ class RunExecutionService:
             handle=handle,
             reused_sandbox=reused_sandbox,
             current_files=current_files,
+            base_commit=base_commit,
             initial_state=initial_state,
             event_buffer=buffer,
         )
@@ -564,6 +914,9 @@ class RunExecutionService:
             recursion_limit=self._settings.agent_graph_recursion_limit,
             event_sink=prepared.event_buffer,
             checkpointer_provider=self._checkpointer_provider,
+            # 取消由 API 置位，Graph 在节点安全点检查；不打断进行中的
+            # 模型调用，但保证写沙盒 / 构建后不再继续推进。
+            cancel_check=lambda: active.cancel_requested,
         )
         try:
             outcome = runner.run(
@@ -571,6 +924,9 @@ class RunExecutionService:
                 thread_id=prepared.run_id,
                 resume=resume,
             )
+        except RunCancelledError:
+            logger.info("agent run cancelled run_id=%s", prepared.run_id)
+            return self._complete_cancelled(active, prepared)
         except AgentLLMError as exc:
             logger.exception("agent llm failed run_id=%s", prepared.run_id)
             return self._complete_failure(
@@ -596,13 +952,20 @@ class RunExecutionService:
                 code="INTERNAL_ERROR",
             )
 
+        # 用户在最后一个节点执行期间点了取消：取消优先于成功落地。
+        if active.cancel_requested:
+            return self._complete_cancelled(active, prepared)
+
         if outcome.interrupted:
-            if outcome.interrupt:
+            payload = outcome.interrupt
+            if payload and payload.get("kind") == "approval":
+                return self._complete_approval_pause(active, prepared, outcome)
+            if payload:
                 return self._complete_paused(active, prepared, outcome)
             return self._complete_failure(
                 active,
                 prepared,
-                error="状态机已暂停但缺少澄清内容，checkpoint 可能已损坏",
+                error="状态机已暂停但缺少澄清/审批内容，checkpoint 可能已损坏",
                 code="RUN_CHECKPOINT_LOST",
             )
         return self._complete_finished(active, prepared, outcome)
@@ -655,11 +1018,14 @@ class RunExecutionService:
         error = final_state.get("error")
         error_code = final_state.get("error_code")
         retry_count = int(final_state.get("retry_count", 0))
+        preview_url = prepared.handle.preview_url
 
         commit_hash: str | None = None
         baseline_commit: str | None = None
         commits: list[RunCommitRecord] = []
+
         if status == "AWAITING_APPROVAL":
+            # 审批通过或无审批模式：此时才允许形成可回滚 checkpoint。
             try:
                 commit_hash = self._sandbox.git_commit(
                     prepared.handle.sandbox_id,
@@ -684,6 +1050,7 @@ class RunExecutionService:
                         prepared.run_id,
                         exc_info=True,
                     )
+                status = "SUCCEEDED"
             except SandboxError as exc:
                 # 代码已经构建通过，但没有可回滚的 checkpoint 不能宣称成功。
                 logger.exception("git checkpoint failed run_id=%s", prepared.run_id)
@@ -692,6 +1059,9 @@ class RunExecutionService:
                 error_code = "COMMIT_FAILED"
                 commit_hash = None
                 commits = []
+        elif status == "REJECTED":
+            # 用户拒绝：丢弃工作区改动，不生成 commit，不写 thread 成功记忆。
+            preview_url = self._revert_sandbox(prepared)
 
         assistant_message = self._assistant_message(
             prepared.instructions,
@@ -699,16 +1069,27 @@ class RunExecutionService:
             error=error,
             retry_count=retry_count,
         )
-        final_files = dict(final_state.get("current_files") or prepared.current_files)
-        generated_files = final_state.get("generated_files") or {}
-        generated_patch = str(final_state.get("generated_patch") or "")
-        changed_files = sorted(generated_files) or list(
-            prepared.initial_state["target_files"]
-        )
+        if status == "REJECTED":
+            final_files = dict(
+                final_state.get("initial_files") or prepared.current_files
+            )
+            generated_files: dict[str, Any] = {}
+            generated_patch = ""
+            changed_files: list[str] = []
+        else:
+            final_files = dict(
+                final_state.get("current_files") or prepared.current_files
+            )
+            generated_files = final_state.get("generated_files") or {}
+            generated_patch = str(final_state.get("generated_patch") or "")
+            changed_files = sorted(generated_files) or list(
+                prepared.initial_state["target_files"]
+            )
+
         response = self._to_response(
             prepared.run_id,
             prepared.handle.sandbox_id,
-            prepared.handle.preview_url,
+            preview_url,
             {**final_state, "status": status, "error": error},
             reused_sandbox=prepared.reused_sandbox,
             assistant_message=assistant_message,
@@ -736,15 +1117,17 @@ class RunExecutionService:
         with _ACTIVE_LOCK:
             active.response = response
             active.status = status
+            active.approval = None
             active.touch()
 
-        if status == "AWAITING_APPROVAL":
+        if status == "SUCCEEDED":
             prepared.event_buffer.emit(
                 "run.succeeded",
                 {
                     "status": status,
+                    "approvalId": final_state.get("approval_id"),
                     "sandboxId": prepared.handle.sandbox_id,
-                    "previewUrl": prepared.handle.preview_url,
+                    "previewUrl": preview_url,
                     "commitHash": commit_hash,
                     "baselineCommit": baseline_commit,
                     "retryCount": retry_count,
@@ -755,6 +1138,19 @@ class RunExecutionService:
                 },
                 dedupe_key=f"run.succeeded:{prepared.run_id}",
             )
+        elif status == "REJECTED":
+            prepared.event_buffer.emit(
+                "run.rejected",
+                {
+                    "status": status,
+                    "approvalId": final_state.get("approval_id"),
+                    "sandboxId": prepared.handle.sandbox_id,
+                    "previewUrl": preview_url,
+                    "message": assistant_message,
+                    "assistantMessage": assistant_message,
+                },
+                dedupe_key=f"run.rejected:{prepared.run_id}",
+            )
         else:
             prepared.event_buffer.emit(
                 "run.failed",
@@ -764,11 +1160,123 @@ class RunExecutionService:
                     "retryable": False,
                     "retryCount": retry_count,
                     "sandboxId": prepared.handle.sandbox_id,
-                    "previewUrl": prepared.handle.preview_url,
+                    "previewUrl": preview_url,
                 },
                 dedupe_key=f"run.failed:{prepared.run_id}",
             )
         return response
+
+    def _complete_approval_pause(
+        self,
+        active: ActiveRun,
+        prepared: PreparedRun,
+        outcome: GraphRunOutcome,
+    ) -> ExecuteRunResponse:
+        """构建通过但等待审批：不提交 Git，不销毁沙盒，不写 thread 记忆。"""
+        payload = dict(outcome.interrupt or {})
+        approval = Approval.model_validate(payload)
+        with _ACTIVE_LOCK:
+            active.approval = approval
+            active.approvals.append(approval)
+            active.status = "AWAITING_APPROVAL"
+            active.touch()
+
+        evidence = approval.evidence
+        files_changed = evidence.files_changed if evidence else 0
+        assistant_message = (
+            f"构建已通过，{files_changed} 个文件待审批。" "请查看 Diff 后批准或拒绝。"
+        )
+        response = self._to_response(
+            prepared.run_id,
+            prepared.handle.sandbox_id,
+            prepared.handle.preview_url,
+            {
+                **outcome.state,
+                "status": "AWAITING_APPROVAL",
+                "error": None,
+            },
+            reused_sandbox=prepared.reused_sandbox,
+            assistant_message=assistant_message,
+            approval=approval,
+        )
+        with _ACTIVE_LOCK:
+            active.response = response
+            active.touch()
+        # approval.required 已由 Graph 在 interrupt 前写入事件缓冲；
+        # 这里不追加终态事件，订阅者会在该事件后自动关闭。
+        return response
+
+    def _complete_cancelled(
+        self,
+        active: ActiveRun,
+        prepared: PreparedRun,
+        *,
+        reason: str | None = None,
+    ) -> ExecuteRunResponse:
+        """用户取消：回滚到 Run 开始前的 HEAD，不写 thread 成功记忆。"""
+        preview_url = self._revert_sandbox(prepared)
+        reason = reason or active.cancel_reason or "用户取消执行"
+        assistant_message = "已取消本次修改，沙盒代码已回滚到执行前状态。"
+        response = self._to_response(
+            prepared.run_id,
+            prepared.handle.sandbox_id,
+            preview_url,
+            {
+                **prepared.initial_state,
+                "status": "CANCELLED",
+                "error": None,
+                "error_code": "RUN_CANCELLED",
+            },
+            reused_sandbox=prepared.reused_sandbox,
+            assistant_message=assistant_message,
+        )
+        with _ACTIVE_LOCK:
+            active.response = response
+            active.status = "CANCELLED"
+            active.approval = None
+            active.clarification = None
+            active.touch()
+        prepared.event_buffer.emit(
+            "run.cancelled",
+            {
+                "status": "CANCELLED",
+                "code": "RUN_CANCELLED",
+                "message": assistant_message,
+                "reason": reason,
+                "sandboxId": prepared.handle.sandbox_id,
+                "previewUrl": preview_url,
+                "assistantMessage": assistant_message,
+            },
+            dedupe_key=f"run.cancelled:{prepared.run_id}",
+        )
+        return response
+
+    def _revert_sandbox(self, prepared: PreparedRun) -> str:
+        """把沙盒恢复到本轮 Run 开始前；返回带 cache-busting 的预览地址。"""
+        preview_url = prepared.handle.preview_url
+        if not prepared.base_commit:
+            logger.warning(
+                "no base commit to revert run_id=%s sandbox_id=%s",
+                prepared.run_id,
+                prepared.handle.sandbox_id,
+            )
+            return preview_url
+        try:
+            self._sandbox.git_reset_hard(
+                prepared.handle.sandbox_id,
+                prepared.base_commit,
+            )
+        except SandboxError:
+            logger.warning(
+                "failed to revert sandbox run_id=%s commit=%s",
+                prepared.run_id,
+                prepared.base_commit,
+                exc_info=True,
+            )
+            return preview_url
+        revision = str(int(time.time() * 1000))
+        separator = "&" if "?" in preview_url else "?"
+        return f"{preview_url}{separator}v={revision}"
 
     def _complete_failure(
         self,
@@ -906,6 +1414,67 @@ class RunExecutionService:
 
     def _mark_failed_before_prepared(self, active: ActiveRun, exc: Exception) -> None:
         self._emit_prepare_failure(active, exc)
+
+    # --------------------------------------------------------
+    # 回滚（单标注 / 删除标注）
+    # --------------------------------------------------------
+    def rollback(self, request: RollbackRunRequest) -> RollbackRunResponse:
+        """把沙盒代码与单个 thread 的上下文回滚到指定成功轮次。
+
+        顺序很重要：
+          1. 先校验 thread checkpoint 与前端 commit 是否指向同一轮；
+          2. 再执行 ``git reset --hard``，失败时绝不修改 thread 记忆；
+          3. 最后恢复 ThreadMemoryStore 的 chatHistory / runs / files 快照，
+             丢弃该轮之后的所有上下文。
+
+        当前 Git 历史是全局线性的：回滚线程 B 也会丢弃 B 之后的 A/C 提交。
+        M1.5 接受该限制；M2 用事件溯源重放未撤销标注的意图。
+        """
+        handle = self._sandbox.get(request.sandbox_id)
+        checkpoint = self._threads.checkpoint(
+            request.thread_id,
+            run_id=request.run_id,
+            turn_count=request.turn_count,
+            commit_hash=request.commit_hash,
+        )
+        if checkpoint and checkpoint.get("commitHash") != request.commit_hash:
+            raise RollbackTargetMismatchError(
+                "回滚目标与 thread checkpoint 不一致："
+                f"request={request.commit_hash}, "
+                f"checkpoint={checkpoint.get('commitHash')}"
+            )
+
+        self._sandbox.git_reset_hard(request.sandbox_id, request.commit_hash)
+        restored = self._threads.rollback_to_checkpoint(
+            request.thread_id,
+            run_id=request.run_id,
+            turn_count=request.turn_count,
+            commit_hash=request.commit_hash,
+        )
+        if restored is None:
+            # python-ai 重启后内存 checkpoint 可能不存在；Git 回滚仍然有效，
+            # 前端会按消息坐标自行截断本地历史。
+            logger.warning(
+                "thread checkpoint missing thread_id=%s run_id=%s commit=%s",
+                request.thread_id,
+                request.run_id,
+                request.commit_hash,
+            )
+
+        revision = str(int(time.time() * 1000))
+        separator = "&" if "?" in handle.preview_url else "?"
+        preview_url = f"{handle.preview_url}{separator}v={revision}"
+        return RollbackRunResponse(
+            sandbox_id=request.sandbox_id,
+            thread_id=request.thread_id,
+            commit_hash=request.commit_hash,
+            turn_count=(restored or checkpoint or {}).get("turnCount")
+            or request.turn_count,
+            run_id=(restored or checkpoint or {}).get("runId") or request.run_id,
+            checkpoint_restored=restored is not None,
+            preview_url=preview_url,
+            preview_revision=revision,
+        )
 
     # --------------------------------------------------------
     # 澄清状态
@@ -1101,10 +1670,14 @@ class RunExecutionService:
         retry_count: int,
     ) -> str:
         """生成与前端聊天记录、服务端 thread 记忆一致的一条助手回复。"""
-        if status == "AWAITING_APPROVAL":
+        if status in {"SUCCEEDED", "AWAITING_APPROVAL"}:
             summary = "；".join(item for item in instructions if item)
             suffix = f"（自动修复 {retry_count} 次）" if retry_count else ""
             return f"已应用：{summary[:300]}{suffix}"
+        if status == "REJECTED":
+            return "已拒绝本次修改，沙盒代码已回滚到执行前状态。"
+        if status == "CANCELLED":
+            return "已取消本次修改。"
         reason = str(error or "构建验证未通过").strip()
         return f"执行失败：{reason[:300]}"
 
@@ -1143,7 +1716,7 @@ class RunExecutionService:
             run_id=run_id,
             user_messages=user_messages,
             assistant_message=assistant_message,
-            success=status == "AWAITING_APPROVAL",
+            success=status == "SUCCEEDED",
             sandbox_id=sandbox_id,
             files=files,
             patch=patch,
@@ -1254,6 +1827,7 @@ class RunExecutionService:
         baseline_commit: str | None = None,
         commits: list[RunCommitRecord] | None = None,
         clarification: Clarification | None = None,
+        approval: Approval | None = None,
     ) -> ExecuteRunResponse:
         verify_state = state.get("verify_result") or {}
         verify_result = VerifyResultModel(**verify_state) if verify_state else None
@@ -1261,6 +1835,9 @@ class RunExecutionService:
         if status not in {
             "AWAITING_APPROVAL",
             "AWAITING_CLARIFICATION",
+            "SUCCEEDED",
+            "REJECTED",
+            "CANCELLED",
             "EXPIRED",
             "FAILED",
         }:
@@ -1284,6 +1861,7 @@ class RunExecutionService:
             baseline_commit=baseline_commit,
             commits=commits or [],
             clarification=clarification,
+            approval=approval,
             error=state.get("error"),
         )
 
@@ -1317,6 +1895,25 @@ def _trace_id(request: ExecuteRunRequest) -> str | None:
 def _request_fingerprint(request: ExecuteRunRequest) -> str:
     payload = request.model_dump_json(by_alias=True, exclude_none=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalize_decision(raw: str) -> str:
+    """把前端 / BFF 的决策写法归一为 approve / reject。"""
+    normalized = (raw or "").strip().lower()
+    if normalized in {"approve", "approved", "accept", "accepted", "ok"}:
+        return "approve"
+    if normalized in {"reject", "rejected", "deny", "denied", "takeover"}:
+        return "reject"
+    raise ApprovalStateConflictError(f"不支持的审批决策: {raw}")
+
+
+def _find_approval(active: ActiveRun, approval_id: str | None) -> Approval | None:
+    if not approval_id:
+        return None
+    for item in active.approvals:
+        if item.approval_id == approval_id:
+            return item
+    return None
 
 
 def _error_code(exc: Exception) -> str:

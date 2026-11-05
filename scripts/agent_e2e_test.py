@@ -3,7 +3,7 @@
 
 场景：
   1. fail_first + 3 个批量标注：首次生成语法错误 -> 自动修复 -> 3 处修改
-     同时生效 -> AWAITING_APPROVAL；
+     同时生效 -> SUCCEEDED；
   2. always_fail：持续失败 -> 3 次重试耗尽 -> FAILED；
   3. FULLSTACK 意图：M1 必须显式返回 FULLSTACK_NOT_SUPPORTED；
   4. 超过 3 个标注：请求必须被 422 拒绝。
@@ -183,7 +183,7 @@ def message_text(response: dict) -> str:
 def main() -> int:
     sandbox_ids: list[str] = []
     try:
-        log_step("1. fail_first：首次语法错误 -> 自动修复 -> AWAITING_APPROVAL")
+        log_step("1. fail_first：首次语法错误 -> 自动修复 -> SUCCEEDED")
         status, result = execute("fail_first", run_suffix="repair")
         assert status == 200, f"execute 期望 200，实际 {status}: {result}"
         sandbox_ids.append(result["sandboxId"])
@@ -203,7 +203,7 @@ def main() -> int:
         trace = message_text(result)
         print("--- agent messages ---")
         print(trace)
-        assert result["status"] == "AWAITING_APPROVAL", "最终状态应为 AWAITING_APPROVAL"
+        assert result["status"] in ("SUCCEEDED", "AWAITING_APPROVAL"), "最终状态应为 SUCCEEDED（旧版本为 AWAITING_APPROVAL）"
         assert result["retryCount"] == 1, "应恰好发生 1 次自动修复"
         assert result["verifyResult"]["success"] is True, "最终构建应成功"
         assert "构建失败" in trace, "messages 中应记录首次构建失败"

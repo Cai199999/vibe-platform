@@ -64,7 +64,7 @@ def send(page, popover, text: str, label: str) -> dict:
         f"commit={(commit.get('commitHash') or '')[:7]} "
         f"baseline={(payload.get('baselineCommit') or '')[:7]}"
     )
-    if payload.get("status") != "AWAITING_APPROVAL":
+    if payload.get("status") not in ("SUCCEEDED", "AWAITING_APPROVAL"):
         fail(f"{label} 执行失败: {payload}")
     return payload
 

@@ -17,6 +17,7 @@ import { CSS } from '@dnd-kit/utilities'
 const STATUS_LABEL = {
   idle: '未运行',
   running: '执行中',
+  pending: '待审批',
   success: '已完成',
   error: '失败',
 }

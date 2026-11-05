@@ -106,6 +106,35 @@ public class RunController {
     }
 
     /**
+     * Diff 审批：批准 / 拒绝本次修改；AI Core 后台恢复状态机并返回 202。
+     */
+    @PostMapping("/{runId}/approvals/{approvalId}/decision")
+    public ResponseEntity<JsonNode> decideApproval(
+            @PathVariable String runId,
+            @PathVariable String approvalId,
+            @RequestBody(required = false) JsonNode body
+    ) {
+        return runService.decideApproval(runId, approvalId, body);
+    }
+
+    @GetMapping("/{runId}/approvals")
+    public ResponseEntity<JsonNode> getApprovals(@PathVariable String runId) {
+        return runService.getApprovals(runId);
+    }
+
+    /**
+     * 协作式取消：暂停中的 Run 立即回滚；执行中的 Run 进入 CANCELLING，
+     * 终态通过事件流送达。
+     */
+    @PostMapping("/{runId}/cancel")
+    public ResponseEntity<JsonNode> cancelRun(
+            @PathVariable String runId,
+            @RequestBody(required = false) JsonNode body
+    ) {
+        return runService.cancelRun(runId, body);
+    }
+
+    /**
      * 把某个标注 thread 回滚到指定成功轮次。
      *
      * <p>AI Core 会执行 {@code git reset --hard} 并恢复该 thread 的

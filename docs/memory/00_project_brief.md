@@ -7,6 +7,8 @@
 - **终极目标**：生成完整可运行的全栈应用——React 前端 + Spring Boot 后端 + MySQL + API 契约 + 迁移脚本，并在同一沙盒内启动、联调、验证、预览。
 - **M1 边界**：只实现 React/Vite 纯前端闭环（单 Agent、单服务沙盒）；但数据库表、Run 状态机、Task Contract、Sandbox spec、事件与 API 契约已为全栈生成完全预留。
 - **M2 目标**：启用 Supervisor + Planner/FrontendCoder/BackendCoder/DBA/Reviewer 多 Agent、`AWAITING_CLARIFICATION` 多轮澄清、多服务沙盒与数据库迁移验证。
+- **M3-A 已落地（2026-11-05）**：SSE 时间轴、HITL 澄清、Diff 审批闸门与协作式取消 Run；
+  细节见 `docs/memory/2026-11-04_M2_SSE_HITL.md` 与 `docs/memory/2026-11-05_M3A_diff_approval_cancel.md`。
 
 ## 2. 核心技术栈
 

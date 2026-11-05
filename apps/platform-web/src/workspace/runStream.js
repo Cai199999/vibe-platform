@@ -9,7 +9,10 @@ const TERMINAL_EVENTS = new Set([
   'run.succeeded',
   'run.failed',
   'run.cancelled',
+  'run.rejected',
   'clarification.required',
+  // 审批暂停同样结束当前连接；决策后用 afterSeq 重放继续。
+  'approval.required',
 ])
 
 const RECONNECT_LIMIT = 6

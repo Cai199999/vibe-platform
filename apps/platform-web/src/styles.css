@@ -2603,6 +2603,11 @@ body.is-viewport-panning * {
   animation: pulse-dot 1.3s infinite;
 }
 
+.tab-status-pending {
+  background: var(--amber);
+  box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.16);
+}
+
 .tab-status-success {
   background: var(--success);
 }
@@ -3470,6 +3475,187 @@ body.is-viewport-panning * {
 .paused-action {
   flex-shrink: 0;
   margin-top: 10px;
+}
+
+.paused-actions {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Diff 审批：构建通过后、写入 Git checkpoint 之前的人工确认栏。 */
+.loading-state.is-approval {
+  gap: 0;
+}
+
+.approval-summary {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 10.5px;
+}
+
+.approval-risk,
+.approval-build {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.approval-risk.is-low,
+.approval-build.is-passed {
+  border: 1px solid rgba(52, 211, 153, 0.3);
+  background: rgba(52, 211, 153, 0.12);
+  color: #86efac;
+}
+
+.approval-risk.is-medium {
+  border: 1px solid rgba(251, 191, 36, 0.32);
+  background: rgba(251, 191, 36, 0.12);
+  color: #fde68a;
+}
+
+.approval-risk.is-high,
+.approval-build.is-failed {
+  border: 1px solid rgba(251, 113, 133, 0.32);
+  background: rgba(251, 113, 133, 0.12);
+  color: #fecdd3;
+}
+
+.approval-stat {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.approval-stat.is-add,
+.approval-file-stat .is-add {
+  color: #86efac;
+}
+
+.approval-stat.is-del,
+.approval-file-stat .is-del {
+  color: #fca5a5;
+}
+
+.approval-lead {
+  flex-shrink: 0;
+  margin: 10px 0 0;
+  color: #cbd5e1;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.approval-files {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  margin-top: 12px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.approval-file {
+  flex: none;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.5);
+}
+
+.approval-file > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  color: #bae6fd;
+  font-size: 11px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.approval-file > summary::-webkit-details-marker {
+  display: none;
+}
+
+.approval-file > summary code {
+  overflow: hidden;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-file-stat {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.approval-diff {
+  max-height: 220px;
+  border: 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 0;
+}
+
+.approval-truncated {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 10px;
+}
+
+.approval-comment {
+  flex-shrink: 0;
+  width: 100%;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: rgba(2, 6, 23, 0.78);
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+
+.approval-comment:focus {
+  border-color: rgba(56, 189, 248, 0.55);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
+}
+
+.approval-actions {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.approval-actions .primary-button,
+.approval-actions .ghost-button {
+  margin: 0;
+}
+
+.ghost-button.is-danger {
+  border-color: rgba(251, 113, 133, 0.32);
+  color: #fecdd3;
+}
+
+.ghost-button.is-danger:hover:not(:disabled) {
+  border-color: rgba(251, 113, 133, 0.5);
+  background: rgba(251, 113, 133, 0.14);
 }
 
 .runtime-overlay .runtime-error {

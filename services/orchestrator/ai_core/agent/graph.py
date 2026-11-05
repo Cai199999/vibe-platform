@@ -44,9 +44,19 @@ NODE_LABELS = {
     "applier": "写入沙盒",
     "verifier": "构建与校验",
     "evaluator": "整理结果",
-    "awaiting_approval": "等待确认",
+    "approval_gate": "等待人工审批",
+    "awaiting_approval": "确认结果",
+    "rejected": "用户拒绝",
     "failed": "执行失败",
 }
+
+
+class RunCancelledError(Exception):
+    """用户主动取消 Run。
+
+    Graph 在节点安全点抛出，Service 捕获后回滚沙盒并发送
+    ``run.cancelled`` 终态事件。放在 graph 模块避免依赖 Service 层。
+    """
 
 
 @dataclass
@@ -70,6 +80,7 @@ class AgentGraphRunner:
         recursion_limit: int = 60,
         event_sink: EventSink | None = None,
         checkpointer_provider: CheckpointerProvider | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> None:
         # 硬限制：无论调用方传入什么，最多 3 次修复。
         self._max_retries = min(max(0, max_retries), 3)
@@ -80,6 +91,9 @@ class AgentGraphRunner:
         self._checkpointer_provider = (
             checkpointer_provider or get_checkpointer_provider()
         )
+        # 协作式取消：每个节点执行前后检查一次，无法打断正在进行的 LLM
+        # 调用，但能保证写沙盒 / 构建之后不再继续推进。
+        self._cancel_check = cancel_check
         self._graph = self._build()
 
     def run(
@@ -161,7 +175,14 @@ class AgentGraphRunner:
             "evaluator",
             self._instrument("evaluator", NODE_LABELS["evaluator"], self._evaluator),
         )
+        builder.add_node(
+            "approval_gate",
+            self._instrument(
+                "approval_gate", NODE_LABELS["approval_gate"], self._approval_gate
+            ),
+        )
         builder.add_node("awaiting_approval", self._awaiting_approval)
+        builder.add_node("rejected", self._rejected)
         builder.add_node("failed", self._failed)
 
         builder.add_edge(START, "planner")
@@ -187,11 +208,21 @@ class AgentGraphRunner:
             self._route_after_evaluator,
             {
                 "coder": "coder",
+                "approval_gate": "approval_gate",
                 "awaiting_approval": "awaiting_approval",
                 "failed": "failed",
             },
         )
+        builder.add_conditional_edges(
+            "approval_gate",
+            self._route_after_approval,
+            {
+                "awaiting_approval": "awaiting_approval",
+                "rejected": "rejected",
+            },
+        )
         builder.add_edge("awaiting_approval", END)
+        builder.add_edge("rejected", END)
         builder.add_edge("failed", END)
         return builder.compile(checkpointer=self._checkpointer_provider.get())
 
@@ -208,6 +239,8 @@ class AgentGraphRunner:
             round_no = int(state.get("clarification_round", 0))
             attempt = int(state.get("retry_count", 0))
             key_base = f"{name}:{round_no}:{attempt}"
+            # 进入节点前先响应取消，避免用户取消后仍启动新的模型调用 / 构建。
+            self._check_cancelled(name, key_base, started)
             self._emit(
                 "node.started",
                 {
@@ -227,7 +260,11 @@ class AgentGraphRunner:
                         "node": name,
                         "status": "paused",
                         "durationMs": _duration_ms(started),
-                        "summary": "等待用户澄清",
+                        "summary": (
+                            "等待人工审批"
+                            if name == "approval_gate"
+                            else "等待用户澄清"
+                        ),
                     },
                     dedupe_key=f"node.finished:{key_base}:paused",
                 )
@@ -244,6 +281,10 @@ class AgentGraphRunner:
                     dedupe_key=f"node.finished:{key_base}:error",
                 )
                 raise
+
+            # 节点执行期间用户可能已取消：返回值不写回状态，交给 Service
+            # 统一回滚沙盒并发 run.cancelled。
+            self._check_cancelled(name, key_base, started)
 
             status = "ok"
             if update.get("apply_failed"):
@@ -268,6 +309,27 @@ class AgentGraphRunner:
             return update
 
         return wrapped
+
+    def _check_cancelled(
+        self,
+        node: str,
+        key_base: str,
+        started: float,
+    ) -> None:
+        """在安全点检查协作式取消标志；已取消则发事件并抛出控制流异常。"""
+        if self._cancel_check is None or not self._cancel_check():
+            return
+        self._emit(
+            "node.finished",
+            {
+                "node": node,
+                "status": "cancelled",
+                "durationMs": _duration_ms(started),
+                "summary": "用户取消执行",
+            },
+            dedupe_key=f"node.finished:{key_base}:cancelled",
+        )
+        raise RunCancelledError("用户取消执行")
 
     def _emit(
         self,
@@ -638,13 +700,77 @@ class AgentGraphRunner:
             ],
         }
 
+    def _approval_gate(self, state: AgentState) -> dict[str, Any]:
+        """构建通过后暂停，等待用户逐文件查看 Diff 并批准 / 拒绝。
+
+        与澄清相同的终态帧规则：先补 ``node.finished(paused)``，再发
+        ``approval.required``，保证暂停事件是该连接最后一帧；用户决策后
+        通过 ``Command(resume=...)`` 恢复同一状态机。
+        """
+        round_no = int(state.get("clarification_round", 0))
+        attempt = int(state.get("retry_count", 0))
+        key_base = f"approval_gate:{round_no}:{attempt}"
+        payload = _build_approval_payload(state)
+        self._emit(
+            "node.finished",
+            {
+                "node": "approval_gate",
+                "status": "paused",
+                "durationMs": 0,
+                "summary": "等待人工审批",
+            },
+            dedupe_key=f"node.finished:{key_base}:paused",
+        )
+        self._emit(
+            "approval.required",
+            payload,
+            dedupe_key=f"approval.required:{payload['approvalId']}",
+        )
+        decision = interrupt(payload)
+        normalized = _normalize_approval_decision(decision)
+        if normalized == "reject":
+            comment = _approval_comment(decision)
+            return {
+                "approval_decision": "reject",
+                "approval_id": payload["approvalId"],
+                "approval": None,
+                "approval_comment": comment,
+                "status": "REJECTED",
+                "messages": [
+                    _message(
+                        "approval_gate",
+                        f"用户拒绝了本次修改{f'：{comment}' if comment else ''}",
+                    )
+                ],
+            }
+        return {
+            "approval_decision": "approve",
+            "approval_id": payload["approvalId"],
+            "approval": None,
+            "approval_comment": _approval_comment(decision),
+            "status": "AWAITING_APPROVAL",
+            "messages": [_message("approval_gate", "用户已批准本次修改")],
+        }
+
     def _awaiting_approval(self, state: AgentState) -> dict[str, Any]:
+        if state.get("approval_required"):
+            content = "用户已批准，正在写入 Git checkpoint"
+        else:
+            content = "代码已通过构建验证，进入结果确认"
         return {
             "status": "AWAITING_APPROVAL",
+            "messages": [_message("awaiting_approval", content)],
+        }
+
+    def _rejected(self, state: AgentState) -> dict[str, Any]:
+        return {
+            "status": "REJECTED",
+            "error": None,
+            "error_code": "APPROVAL_REJECTED",
             "messages": [
                 _message(
-                    "awaiting_approval",
-                    "代码已通过构建验证，等待人工审批或前端预览确认",
+                    "rejected",
+                    "已拒绝本次修改，沙盒将回滚到执行前状态",
                 )
             ],
         }
@@ -678,10 +804,22 @@ class AgentGraphRunner:
     def _route_after_evaluator(self, state: AgentState) -> str:
         action = state.get("next_action")
         if action == "approve":
-            return "awaiting_approval"
+            # 产品前端显式开启审批；旧客户端 / 回归直接进入确认节点。
+            return (
+                "approval_gate"
+                if state.get("approval_required")
+                else "awaiting_approval"
+            )
         if action == "retry":
             return "coder"
         return "failed"
+
+    def _route_after_approval(self, state: AgentState) -> str:
+        return (
+            "rejected"
+            if state.get("approval_decision") == "reject"
+            else "awaiting_approval"
+        )
 
 
 # ------------------------------------------------------------
@@ -694,6 +832,135 @@ def _find_interrupt(snapshot: Any) -> dict[str, Any] | None:
             if isinstance(value, dict):
                 return value
     return None
+
+
+APPROVAL_DIFF_LIMIT = 20000
+
+
+def _build_approval_payload(state: AgentState) -> dict[str, Any]:
+    """构造审批证据：逐文件 unified diff + 汇总统计 + 构建结果。
+
+    以前端传入时的 ``initial_files`` 为基线，而不是用一个可能已被其它节点
+    覆盖的 current_files；这样“拒绝”回滚和 Diff 展示使用同一份事实。
+    """
+    initial = dict(state.get("initial_files") or {})
+    current = dict(state.get("current_files") or {})
+    generated = dict(state.get("generated_files") or {})
+    patch = str(state.get("generated_patch") or "")
+
+    paths: set[str] = set(generated) | set(_diff_paths(patch))
+    for path in set(initial) | set(current):
+        if initial.get(path) != current.get(path):
+            paths.add(path)
+
+    files: list[dict[str, Any]] = []
+    total_insertions = 0
+    total_deletions = 0
+    for path in sorted(paths):
+        old = initial.get(path)
+        new = current.get(path)
+        if new is None:
+            new = generated.get(path, "")
+        if old is None:
+            change_type = "added"
+            old = ""
+        else:
+            change_type = "modified"
+        if old == new:
+            continue
+        diff = _unified_diff(old, str(new), path)
+        insertions, deletions = _diff_stat(diff)
+        total_insertions += insertions
+        total_deletions += deletions
+        truncated = len(diff) > APPROVAL_DIFF_LIMIT
+        files.append(
+            {
+                "path": path,
+                "changeType": change_type,
+                "insertions": insertions,
+                "deletions": deletions,
+                "diff": (
+                    f"{diff[:APPROVAL_DIFF_LIMIT]}\n...[truncated]..."
+                    if truncated
+                    else diff
+                ),
+                "truncated": truncated,
+            }
+        )
+
+    total_changes = total_insertions + total_deletions
+    if len(files) > 3 or total_changes > 400:
+        risk_level = "HIGH"
+    elif len(files) > 1 or total_changes > 80:
+        risk_level = "MEDIUM"
+    else:
+        risk_level = "LOW"
+
+    annotations = (state.get("annotation_context") or {}).get("annotations", [])
+    summaries = [
+        str(item.get("ui_summary") or item.get("instruction") or "").strip()
+        for item in annotations
+    ]
+    summary = "；".join(item for item in summaries if item) or "应用本轮代码修改"
+    verify = state.get("verify_result") or {}
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        hours=int(state.get("approval_ttl_hours", 24))
+    )
+    return {
+        "kind": "approval",
+        "approvalId": f"apr_{state.get('run_id')}",
+        "runId": state.get("run_id"),
+        "status": "PENDING",
+        "summary": summary[:300],
+        "riskLevel": risk_level,
+        "options": ["approve", "reject"],
+        "evidence": {
+            "filesChanged": len(files),
+            "insertions": total_insertions,
+            "deletions": total_deletions,
+            "files": files,
+            "build": {
+                "status": "PASSED" if verify.get("success") else "FAILED",
+                "durationMs": verify.get("duration_ms", 0),
+                "exitCode": verify.get("exit_code", 0),
+            },
+        },
+        "sandboxId": state.get("sandbox_id"),
+        "previewUrl": state.get("preview_url"),
+        "expiresAt": expires_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+
+
+def _normalize_approval_decision(raw: Any) -> str:
+    """把前端 / BFF 的多种写法归一为 approve / reject。
+
+    未知决策一律按 reject 处理：宁可回滚，也不能在用户没有明确批准时
+    把代码写入 Git checkpoint。
+    """
+    value: Any = raw
+    if isinstance(raw, dict):
+        value = raw.get("decision") or raw.get("approvalDecision") or raw.get("action")
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"approve", "approved", "accept", "accepted", "ok"}:
+            return "approve"
+        if normalized in {
+            "reject",
+            "rejected",
+            "deny",
+            "denied",
+            "refuse",
+            "takeover",
+        }:
+            return "reject"
+    return "reject"
+
+
+def _approval_comment(raw: Any) -> str | None:
+    if not isinstance(raw, dict):
+        return None
+    comment = raw.get("comment") or raw.get("reason")
+    return str(comment)[:1000] if comment else None
 
 
 def _build_clarification_payload(
@@ -713,6 +980,7 @@ def _build_clarification_payload(
         hours=int(state.get("clarification_ttl_hours", 24))
     )
     return {
+        "kind": "clarification",
         "clarificationId": f"clr_{state.get('run_id')}_{round_no}",
         "runId": state.get("run_id"),
         "annotationId": annotation_id,
@@ -868,6 +1136,14 @@ def _node_summary(
         return {"approve": "验证通过", "retry": "安排自动修复"}.get(
             action, "重试预算耗尽"
         )
+    if name == "approval_gate":
+        return (
+            "已拒绝，回滚沙盒"
+            if update.get("approval_decision") == "reject"
+            else "已批准"
+        )
+    if name == "rejected":
+        return "本次修改已拒绝并回滚"
     return ""
 
 

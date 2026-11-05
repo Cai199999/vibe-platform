@@ -31,6 +31,8 @@ function ProjectWorkspaceInner({
   onClarificationAnswer,
   onAnnotationRollback,
   onClearAnnotations,
+  onApprovalDecision,
+  onCancelRun,
   onSubmit,
   onRetry,
   onExport,
@@ -51,13 +53,17 @@ function ProjectWorkspaceInner({
   const submitReady =
     annotations.length > 0 &&
     annotations.every((annotation) => annotation.intent.trim().length > 0)
+  // 审批未决时不允许再发起新 Run，画布交互一并冻结。
+  const approvalPending = Boolean(run.approval)
   const status = submitting
     ? 'running'
-    : run.error
-      ? 'error'
-      : run.result
-        ? 'success'
-        : 'idle'
+    : approvalPending
+      ? 'pending'
+      : run.error
+        ? 'error'
+        : run.result
+          ? 'success'
+          : 'idle'
 
   return (
     <section
@@ -91,7 +97,7 @@ function ProjectWorkspaceInner({
           <button
             className="ghost-button"
             type="button"
-            disabled={annotations.length === 0 || submitting}
+            disabled={annotations.length === 0 || submitting || approvalPending}
             onClick={onClearAnnotations}
           >
             清除标注
@@ -100,15 +106,22 @@ function ProjectWorkspaceInner({
           <button
             className="submit-annotations"
             type="button"
-            disabled={!submitReady || submitting || Boolean(run.clarification)}
+            disabled={
+              !submitReady ||
+              submitting ||
+              Boolean(run.clarification) ||
+              approvalPending
+            }
             title={
-              run.clarification
-                ? '请先回答画布浮层中的澄清问题'
-                : submitReady
-                  ? `提交全部 ${annotations.length} 个标注`
-                  : annotations.length === 0
-                    ? '请先在画布上圈选组件'
-                    : '请为每个标注填写修改意图'
+              approvalPending
+                ? '请先处理预览面板中的 Diff 审批'
+                : run.clarification
+                  ? '请先回答画布浮层中的澄清问题'
+                  : submitReady
+                    ? `提交全部 ${annotations.length} 个标注`
+                    : annotations.length === 0
+                      ? '请先在画布上圈选组件'
+                      : '请为每个标注填写修改意图'
             }
             onClick={onSubmit}
           >
@@ -211,6 +224,7 @@ function ProjectWorkspaceInner({
             pendingAction={run.pendingAction}
             submitting={submitting}
             disabled={submitting}
+            blocked={approvalPending}
           />
 
           {previewReady && viewMode === 'compare' && mode === 'canvas' && (
@@ -235,6 +249,8 @@ function ProjectWorkspaceInner({
             visible={active && previewVisible}
             onRetry={submitReady ? onRetry : undefined}
             onGoToCanvas={() => setMode('canvas')}
+            onApprovalDecision={onApprovalDecision}
+            onCancelRun={onCancelRun}
           />
         </div>
       </div>

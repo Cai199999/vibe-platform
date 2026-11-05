@@ -19,6 +19,140 @@ const formatDuration = (ms) => {
   return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`
 }
 
+// 成功终态：M2 的旧快照仍可能是 AWAITING_APPROVAL，统一按成功展示。
+const SUCCESS_STATUSES = new Set(['SUCCEEDED', 'AWAITING_APPROVAL'])
+
+// 与 DiffView 相同的行着色规则；审批面板按文件分别渲染。
+const diffLineClass = (line) => {
+  if (line.startsWith('+++') || line.startsWith('---')) return 'meta'
+  if (line.startsWith('@@')) return 'hunk'
+  if (line.startsWith('+')) return 'add'
+  if (line.startsWith('-')) return 'del'
+  return ''
+}
+
+const RISK_TEXT = { LOW: '低风险', MEDIUM: '中风险', HIGH: '高风险' }
+
+/**
+ * Diff 审批面板：逐个文件展示 unified diff，批准才会写入 Git checkpoint。
+ *
+ * 决策通过 POST /runs/{runId}/approvals/{approvalId}/decision 提交，
+ * 服务端 202 后恢复同一个 Run，事件流继续推进。
+ */
+function ApprovalPanel({
+  approval,
+  busy,
+  cancelRequested,
+  onDecision,
+  onCancel,
+  onGoToCanvas,
+}) {
+  const [comment, setComment] = useState('')
+  const evidence = approval.evidence ?? {}
+  const files = evidence.files ?? []
+  const build = evidence.build ?? {}
+  const risk = approval.riskLevel || 'LOW'
+
+  return (
+    <div className="loading-state runtime-loading is-approval">
+      <div className="loading-copy timeline-head">
+        <h3 className="loading-title">等待审批</h3>
+        <p className="muted">构建已通过；确认 Diff 后才会写入 Git checkpoint。</p>
+      </div>
+
+      <div className="approval-summary">
+        <span className={`approval-risk is-${risk.toLowerCase()}`}>
+          {RISK_TEXT[risk] ?? risk}
+        </span>
+        <span className="approval-stat is-add">+{evidence.insertions ?? 0}</span>
+        <span className="approval-stat is-del">−{evidence.deletions ?? 0}</span>
+        <span className="muted">{files.length} 个文件</span>
+        {build.status && (
+          <span className={`approval-build is-${String(build.status).toLowerCase()}`}>
+            构建 {build.status}
+          </span>
+        )}
+      </div>
+
+      {approval.summary && <p className="approval-lead">{approval.summary}</p>}
+
+      <div className="approval-files">
+        {files.length === 0 && <p className="muted">本次没有文件变更。</p>}
+        {files.map((file) => (
+          <details
+            className="approval-file"
+            key={file.path}
+            open={files.length === 1}
+          >
+            <summary>
+              <code>{file.path}</code>
+              <span className="approval-file-stat">
+                <em className="is-add">+{file.insertions}</em>
+                <em className="is-del">−{file.deletions}</em>
+              </span>
+            </summary>
+            <pre className="diff-view approval-diff">
+              {(file.diff || '').split('\n').map((line, index) => (
+                <span
+                  key={`${index}-${line}`}
+                  className={`diff-line ${diffLineClass(line)}`}
+                >
+                  <span className="diff-text">{line || ' '}</span>
+                </span>
+              ))}
+            </pre>
+            {file.truncated && (
+              <p className="muted approval-truncated">Diff 过长，已截断。</p>
+            )}
+          </details>
+        ))}
+      </div>
+
+      <input
+        className="approval-comment"
+        type="text"
+        value={comment}
+        maxLength={200}
+        placeholder="审批备注（可选）"
+        disabled={busy}
+        onChange={(event) => setComment(event.target.value)}
+      />
+
+      <div className="approval-actions">
+        <button
+          className="primary-button"
+          type="button"
+          disabled={busy}
+          onClick={() => onDecision?.('approve', comment)}
+        >
+          {busy ? <span className="mini-spinner" aria-label="提交中" /> : '批准并应用'}
+        </button>
+        <button
+          className="ghost-button is-danger"
+          type="button"
+          disabled={busy}
+          onClick={() => onDecision?.('reject', comment)}
+        >
+          拒绝并撤销
+        </button>
+        <button
+          className="ghost-button"
+          type="button"
+          disabled={busy || cancelRequested}
+          onClick={onCancel}
+        >
+          {cancelRequested ? '正在取消…' : '取消执行'}
+        </button>
+        {onGoToCanvas && (
+          <button className="ghost-button" type="button" onClick={onGoToCanvas}>
+            去画布查看
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function Timeline({ items }) {
   if (!items?.length) {
     return (
@@ -62,28 +196,68 @@ function Timeline({ items }) {
 }
 
 function StatusPill({ status }) {
-  const isSuccess = status === 'AWAITING_APPROVAL'
+  const isSuccess = SUCCESS_STATUSES.has(status)
+  const label = isSuccess
+    ? '已完成'
+    : status === 'REJECTED'
+      ? '已拒绝'
+      : status === 'CANCELLED'
+        ? '已取消'
+        : '执行失败'
   return (
     <span className={`status-pill ${isSuccess ? 'is-success' : 'is-failed'}`}>
       <i />
-      {isSuccess ? '已完成' : '执行失败'}
+      {label}
     </span>
   )
 }
 
-function LoadingState({ elapsed, timeline }) {
+function CancelButton({ busy, cancelRequested, onCancel }) {
+  if (!onCancel) return null
+  return (
+    <button
+      className="ghost-button paused-action"
+      type="button"
+      disabled={busy || cancelRequested}
+      onClick={onCancel}
+    >
+      {cancelRequested ? (
+        <>
+          <span className="mini-spinner" aria-label="取消中" /> 正在取消…
+        </>
+      ) : (
+        '取消执行'
+      )}
+    </button>
+  )
+}
+
+function LoadingState({ elapsed, timeline, cancelRequested, onCancel }) {
   return (
     <div className="loading-state runtime-loading is-timeline">
       <div className="loading-copy timeline-head">
-        <h3 className="loading-title">Agent 正在执行</h3>
+        <h3 className="loading-title">
+          {cancelRequested ? '正在取消…' : 'Agent 正在执行'}
+        </h3>
         <p className="muted">{elapsed < 1 ? '<1' : elapsed}s</p>
       </div>
       <Timeline items={timeline} />
+      <CancelButton
+        busy={false}
+        cancelRequested={cancelRequested}
+        onCancel={onCancel}
+      />
     </div>
   )
 }
 
-function PausedState({ timeline, clarification, onGoToCanvas }) {
+function PausedState({
+  timeline,
+  clarification,
+  onGoToCanvas,
+  onCancel,
+  cancelRequested,
+}) {
   return (
     <div className="loading-state runtime-loading is-paused">
       <div className="loading-copy timeline-head">
@@ -98,15 +272,22 @@ function PausedState({ timeline, clarification, onGoToCanvas }) {
           ))}
         </ul>
       )}
-      {onGoToCanvas && (
-        <button
-          className="ghost-button paused-action"
-          type="button"
-          onClick={onGoToCanvas}
-        >
-          去画布回答
-        </button>
-      )}
+      <div className="paused-actions">
+        {onGoToCanvas && (
+          <button
+            className="ghost-button paused-action"
+            type="button"
+            onClick={onGoToCanvas}
+          >
+            去画布回答
+          </button>
+        )}
+        <CancelButton
+          busy={false}
+          cancelRequested={cancelRequested}
+          onCancel={onCancel}
+        />
+      </div>
     </div>
   )
 }
@@ -270,6 +451,8 @@ export default function RuntimePanel({
   visible = true,
   onRetry,
   onGoToCanvas,
+  onApprovalDecision,
+  onCancelRun,
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false)
   const {
@@ -280,27 +463,45 @@ export default function RuntimePanel({
     annotations = [],
     timeline = [],
     clarification = null,
+    approval = null,
+    cancelRequested = false,
+    pendingAction = null,
   } = run
   const previewUrl = result?.previewUrl
-  const success = result?.status === 'AWAITING_APPROVAL'
+  const success = SUCCESS_STATUSES.has(result?.status)
   const diffLines = result?.generatedPatch ? result.generatedPatch.split('\n').length : 0
   const connection = usePreviewConnection(previewUrl, visible && !submitting)
   const previewOffline = connection === 'offline'
+  // 只有真正的“执行”可以取消；回滚 / 审批决策提交中不显示取消。
+  const cancellable = Boolean(onCancelRun) && pendingAction !== 'rollback'
 
   let stateLabel = 'IDLE'
   let stateClass = 'is-idle'
-  if (clarification) {
+  if (approval && !submitting) {
+    stateLabel = 'APPROVAL · 待审批'
+    stateClass = 'is-paused'
+  } else if (clarification && !submitting) {
     stateLabel = 'PAUSED · 待确认'
     stateClass = 'is-paused'
   } else if (submitting) {
-    stateLabel = `RUNNING · ${elapsed < 1 ? '<1' : elapsed}s`
+    stateLabel = cancelRequested
+      ? 'CANCELLING…'
+      : `RUNNING · ${elapsed < 1 ? '<1' : elapsed}s`
     stateClass = 'is-running'
   } else if (error) {
     stateLabel = 'FAILED'
     stateClass = 'is-failed'
   } else if (result) {
-    stateLabel = previewOffline ? 'OFFLINE' : success ? 'READY' : 'FAILED'
-    stateClass = previewOffline ? 'is-failed' : success ? 'is-ready' : 'is-failed'
+    stateLabel = previewOffline
+      ? 'OFFLINE'
+      : success
+        ? 'READY'
+        : result.status === 'REJECTED'
+          ? 'REJECTED'
+          : result.status === 'CANCELLED'
+            ? 'CANCELLED'
+            : 'FAILED'
+    stateClass = previewOffline || !success ? 'is-failed' : 'is-ready'
   }
 
   return (
@@ -332,21 +533,41 @@ export default function RuntimePanel({
 
         {submitting && (
           <div className="runtime-overlay">
-            <LoadingState elapsed={elapsed} timeline={timeline} />
+            <LoadingState
+              elapsed={elapsed}
+              timeline={timeline}
+              cancelRequested={cancelRequested}
+              onCancel={cancellable ? onCancelRun : undefined}
+            />
           </div>
         )}
 
-        {!submitting && clarification && (
+        {!submitting && approval && (
           <div className="runtime-overlay">
-            <PausedState
-              timeline={timeline}
-              clarification={clarification}
+            <ApprovalPanel
+              approval={approval}
+              busy={submitting}
+              cancelRequested={cancelRequested}
+              onDecision={onApprovalDecision}
+              onCancel={onCancelRun}
               onGoToCanvas={onGoToCanvas}
             />
           </div>
         )}
 
-        {!submitting && !clarification && error && (
+        {!submitting && !approval && clarification && (
+          <div className="runtime-overlay">
+            <PausedState
+              timeline={timeline}
+              clarification={clarification}
+              onGoToCanvas={onGoToCanvas}
+              cancelRequested={cancelRequested}
+              onCancel={onCancelRun}
+            />
+          </div>
+        )}
+
+        {!submitting && !approval && !clarification && error && (
           <div className="runtime-overlay">
             <div className="error-state runtime-error">
               <span className="error-code">RUN_FAILED</span>
@@ -357,19 +578,24 @@ export default function RuntimePanel({
           </div>
         )}
 
-        {!submitting && !clarification && !error && !result && (
+        {!submitting && !approval && !clarification && !error && !result && (
           <div className="runtime-overlay">
             <IdleState hasAnnotation={annotations.length > 0} />
           </div>
         )}
 
-        {!submitting && !clarification && !error && result && !previewUrl && (
-          <div className="runtime-overlay">
-            <p className="muted">没有可用的预览地址。</p>
-          </div>
-        )}
+        {!submitting &&
+          !approval &&
+          !clarification &&
+          !error &&
+          result &&
+          !previewUrl && (
+            <div className="runtime-overlay">
+              <p className="muted">没有可用的预览地址。</p>
+            </div>
+          )}
 
-        {!submitting && !clarification && !error && previewOffline && (
+        {!submitting && !approval && !clarification && !error && previewOffline && (
           <div className="runtime-overlay">
             <div className="error-state runtime-error">
               <span className="error-code">PREVIEW_OFFLINE</span>
@@ -386,7 +612,12 @@ export default function RuntimePanel({
           </div>
         )}
 
-        {!submitting && !clarification && !error && result && !previewOffline && (
+        {!submitting &&
+          !approval &&
+          !clarification &&
+          !error &&
+          result &&
+          !previewOffline && (
           <div className="runtime-result-overlay">
             <div className="runtime-result-status">
               <StatusPill status={result.status} />

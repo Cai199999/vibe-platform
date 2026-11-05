@@ -9,6 +9,11 @@ from docker.errors import DockerException
 from ai_core.agent.events import RunEventBuffer, peer_event_buffer
 from ai_core.agent.llm import AgentLLMConfigurationError
 from ai_core.agent.schemas import (
+    ApprovalDecisionRequest,
+    ApprovalDecisionResponse,
+    ApprovalListResponse,
+    CancelRunRequest,
+    CancelRunResponse,
     ClarificationAnswerResponse,
     ClarificationAnswersRequest,
     ClarificationListResponse,
@@ -140,6 +145,60 @@ def list_clarifications(run_id: str) -> ClarificationListResponse:
     service = RunExecutionService()
     try:
         return service.list_clarifications(run_id)
+    except Exception as exc:  # noqa: BLE001
+        _raise_http(exc)
+
+
+# ------------------------------------------------------------
+# HITL Diff 审批
+# ------------------------------------------------------------
+@router.post(
+    "/{run_id}/approvals/{approval_id}/decision",
+    response_model=ApprovalDecisionResponse,
+    status_code=202,
+)
+def decide_approval(
+    run_id: str,
+    approval_id: str,
+    request: ApprovalDecisionRequest,
+) -> ApprovalDecisionResponse:
+    """提交审批决策并后台恢复状态机，返回 202。
+
+    前端随后用 ``lastSeq`` 重放 ``GET /{runId}/events/stream``，接收
+    ``approval.answered`` 与最终 ``run.succeeded`` / ``run.rejected``。
+    """
+    service = RunExecutionService()
+    try:
+        return service.decide_approval(run_id, approval_id, request)
+    except Exception as exc:  # noqa: BLE001
+        _raise_http(exc)
+
+
+@router.get("/{run_id}/approvals", response_model=ApprovalListResponse)
+def list_approvals(run_id: str) -> ApprovalListResponse:
+    service = RunExecutionService()
+    try:
+        return service.list_approvals(run_id)
+    except Exception as exc:  # noqa: BLE001
+        _raise_http(exc)
+
+
+# ------------------------------------------------------------
+# 取消 Run
+# ------------------------------------------------------------
+@router.post("/{run_id}/cancel", response_model=CancelRunResponse)
+def cancel_run(
+    run_id: str,
+    request: CancelRunRequest | None = None,
+) -> CancelRunResponse:
+    """协作式取消 Run。
+
+    暂停中的 Run 立即回滚并发送 ``run.cancelled``；执行中的 Run 返回
+    ``CANCELLING``，终态由事件流送达。
+    """
+    service = RunExecutionService()
+    try:
+        return service.cancel_run(run_id, request or CancelRunRequest())
     except Exception as exc:  # noqa: BLE001
         _raise_http(exc)
 

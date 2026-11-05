@@ -283,6 +283,21 @@ class LocalDockerSandbox(SandboxProvider):
             if code != 0:
                 raise SandboxGitError(f"git reset --hard 失败: {self._decode(output)}")
 
+    def git_head(self, sandbox_id: str) -> str:
+        """读取当前 HEAD，作为本轮 Run 的撤销/拒绝回滚锚点。"""
+        container = self._get_container(sandbox_id)
+        with self._git_lock:
+            self._ensure_git_repo(container)
+            code, output = self._exec(
+                container,
+                ["git", "rev-parse", "HEAD"],
+                workdir=self.settings.sandbox_workdir,
+            )
+            value = self._extract_commit_hash(self._decode(output))
+            if code != 0 or value is None:
+                raise SandboxGitError(f"读取 HEAD 失败: {self._decode(output)}")
+            return value
+
     def git_baseline_commit(self, sandbox_id: str) -> str:
         """读取沙盒根提交（创建容器时建立的初始代码快照）。"""
         container = self._get_container(sandbox_id)

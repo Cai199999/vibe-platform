@@ -5,7 +5,9 @@
   - Run 执行与 HTTP 连接解耦：没有订阅者时事件写缓冲，客户端重连后按
     ``afterSeq`` 补齐；
   - 订阅先注册队列、再回放历史，避免回放与实时事件之间出现空洞；
-  - ``clarification.required`` 也会结束当前 SSE 连接，但它表示暂停而非失败。
+  - ``clarification.required`` / ``approval.required`` 也会结束当前 SSE
+    连接，但它们表示暂停而非失败；用户决策后用 ``afterSeq`` 重放继续。
+  - ``run.cancelled`` / ``run.rejected`` 是用户主动结束 Run 的终态。
 """
 
 from __future__ import annotations
@@ -23,7 +25,11 @@ TERMINAL_EVENT_TYPES = {
     "run.succeeded",
     "run.failed",
     "run.cancelled",
+    "run.rejected",
     "clarification.required",
+    # 审批暂停与澄清暂停一样会结束当前 SSE 连接；用户决策后通过
+    # afterSeq 重放继续同一条事件流。
+    "approval.required",
 }
 SSE_EVENT_NAME = "run.event"
 HEARTBEAT_SECONDS = 15
