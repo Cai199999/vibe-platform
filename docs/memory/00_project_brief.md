@@ -39,6 +39,13 @@
   `excel_report_agent` 通过 Manifest 关键词秒级接入；README 增加 Mermaid 架构图，
   并新增《3 分钟演示脚本》。
   细节见 `docs/memory/2026-11-05_M2_5_demo_visualization_custom_agent.md`。
+- **M3 数据中台 / 管理中台契约（2026-11-05，设计完成）**：新增独立
+  `Knowledge Service`（摄取 / 切分 / Embedding / 租户隔离检索）、Admin API 与
+  Prompt Registry（版本 / 灰度 / 热更新 / 回滚）、Feedback Collector 与基于
+  Architect `REVISE` 的 Prompt 自优化闭环；**明确不做大模型微调**。
+  本轮只交付架构、数据模型与接口契约，底层实现按 M3.1–M3.4 推进。
+  细节见 `docs/design/06.Agent_OS_Data_Management.md` 与
+  `docs/memory/2026-11-05_Agent_OS_data_management_architecture.md`。
 
 ## 2. 核心技术栈
 
@@ -48,8 +55,10 @@
 | BFF/业务 | Java 21 + Spring Boot 3.3 + MyBatis-Plus + Flyway；用户、项目、配额、审批、长连接 |
 | AI 编排 | Python 3.12 + FastAPI + LangGraph + Redis checkpoint；Supervisor/多 Agent |
 | 沙盒 | Python Sandbox Service + Docker（M1）/ gVisor（M2）；多服务 + edge 单入口 |
-| 数据 | MySQL 8（业务）、Redis（事件/checkpoint/租约）、MinIO（源码/快照/产物） |
-| 模型 | DeepSeek + Mock；ModelRouter 预留多 provider |
+| 数据 | MySQL 8（业务/知识元数据/Prompt/反馈）、Redis（事件/checkpoint/租约/缓存）、MinIO（源码/快照/产物/知识文档）、Qdrant（M3 向量） |
+| 数据中台 | Knowledge Service（Python/FastAPI）；bge-m3 + bge-reranker；按租户 collection |
+| 管理中台 | Java BFF：Admin API、Agent 指标、Prompt Registry、Feedback / 审批、审计 |
+| 模型 | DeepSeek + Mock；ModelRouter 预留多 provider；**不做微调** |
 | 协议 | OpenAPI/JSON Schema 作为唯一事实源，生成 TS/Java/Python 类型 |
 | 兼容 | `apps/legacy` 冻结为 Prompt/视觉兜底，不参与新平台主链路 |
 
@@ -63,6 +72,8 @@
 - M27–M31：配额、审计、管理后台、legacy 兼容
 - M32–M37：Supervisor 路由 / AgentRegistry / CustomAgent Manifest 已落地（M2.5）；
   FrontendCoder、BackendCoder、DBA、Reviewer/IntegrationVerifier、多服务沙盒编排仍按 M2 推进
+- M38–M41（M3）：Knowledge Service（数据中台）、Feedback Collector、
+  Prompt Registry / 自优化、Admin Console；当前仅契约，未实现
 
 ## 4. 关键架构约束
 
@@ -89,12 +100,20 @@
     防止一次性意图污染后续上下文（长期记忆规划在 M3）。
 15. MCP 仅以虚线框预留 `MCP Client Adapter`，M2.5 不引入依赖、不建立连接；
     Skill 当前只声明不执行，M3 再实现 Prompt + RAG + Tool 子集动态拼装。
+16. 知识检索必须带 `tenantId`；内部 API 缺 `X-Tenant-Id` 直接失败，跨租户资源返回 404。
+17. 生产 RAG 走 `KnowledgeRAGProvider`；本地 Markdown 仅 `APP_ENV=local` 兜底，
+    检索内容视为不可信引用，不得覆盖系统指令。
+18. Prompt 是不可变版本 + 可变指针；发布 / 灰度 / 回滚 / 热更新必须审计，
+    Run 创建时 pin `promptVersionId`。
+19. Agent 自进化只允许改 Prompt / 检索参数 / 工具策略；不做 SFT / LoRA / RLHF；
+    LLM 只提议，人工审批后灰度，默认关闭。
 
 ## 5. 当前文档状态
 
-- `docs/design/01.功能模块梳理.md`：v1.1，已加入 M32–M37、澄清状态、全栈流程与 M1 预留验收。
-- `docs/design/02.整体架构设计.md`：v1.1，已加入多 Agent 拓扑、全栈多服务沙盒、澄清状态机、全栈数据表与演进路线。
-- `docs/design/03.API接口设计.md`：v1.1，已加入 `appType`、`services[]`、澄清接口、全栈标注契约、迁移/验证/事件/错误码。
+- `docs/design/01.功能模块梳理.md`：v1.1，已加入 M32–M41、澄清状态、全栈流程、中台流程与验收。
+- `docs/design/02.整体架构设计.md`：v1.2，已加入多 Agent 拓扑、全栈多服务沙盒、知识中台、管理中台、全栈数据表与演进路线。
+- `docs/design/03.API接口设计.md`：v1.2，已加入 `appType`、`services[]`、澄清接口、全栈标注契约、迁移/验证/事件/错误码，以及 §14 中台端点索引。
+- `docs/design/06.Agent_OS_Data_Management.md`：v1.0，Knowledge Service、Admin、Prompt Registry、Feedback 自优化契约（M3 设计稿）。
 - `docs/design/04.M2_Agent_ToolCalling_SSE_HITL.md`：M2 执行层。
 - `docs/design/05.Supervisor_Multi_Agent.md`：v1.2，Supervisor 总调度、声明式 Manifest 注册、
   Agent / Tool / Skill 三层、SkillRegistry、Memory / MCP 边界与 CustomAgent。
@@ -105,3 +124,5 @@
 1. 按 M1 设计基线拆分实现任务：协议包 → BFF → AI Core → Sandbox → platform-web。
 2. 优先固化 `packages/protocol` 与契约测试，确保 M2 全栈扩展不产生破坏性变更。
 3. M1 完成后以同一套契约启用 M2：多 Agent、`AWAITING_CLARIFICATION`、web/api/db/edge 多服务沙盒。
+4. M3 中台按 M3.1 管理中台骨架 → M3.2 知识中台 → M3.3 Prompt Registry →
+   M3.4 反馈与自优化推进；先做契约测试与租户隔离用例，再接真实向量库。

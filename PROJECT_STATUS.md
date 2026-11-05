@@ -1,7 +1,7 @@
 # vibe-platform 项目完成情况摘要
 
 > 快照日期：2026-11-05  
-> 当前提交：`aa9bdc7 feat: 前端接入 Supervisor 统一调度并落地 both 强门控`  
+> 当前提交：以 `git log -1 --oneline` 为准
 > 结论：已完成 **可运行的单前端应用（React/Vite）Vibe Coding 闭环**，
 > 并落地 Supervisor 多智能体路由、Architect 全栈契约与 both 强门控；
 > 真正的全栈代码生成 / 多服务沙盒仍处于设计或预留阶段。
@@ -39,6 +39,10 @@ UI 修改在 Docker 沙盒中自动编码、构建、验证并生成 Git checkpo
 | M3 空白区域 ADD | ✅ 已完成 | 圈选几何判定新增意图，父容器归一化坐标，Agent 插入 JSX |
 | M3 Tools / Skills / MCP | ✅ 已完成 | shell_tool 注册、tailwind_magic Skill、MCP 配置预留 |
 | 稳定性：浮层卸载竞态 | ✅ 已完成 | AbortController + epoch 防呆 + 区域错误边界 + 关闭确认 |
+| M3 数据中台契约 | 📐 设计完成 | 独立 Knowledge Service、摄取流水线、租户隔离检索、`KnowledgeRAGProvider` |
+| M3 管理中台契约 | 📐 设计完成 | `/admin`、Agent 指标、Prompt Registry 版本/灰度/回滚、审计 |
+| M3 反馈自优化契约 | 📐 设计完成 | `REVISE` 采集、聚类、候选 Prompt、离线评估、人工审批；**不做微调** |
+| M3 中台实现 | ⏳ 未开始 | 按 M3.1 管理中台骨架 → M3.2 知识中台 → M3.3 Prompt Registry → M3.4 自优化 |
 | 全栈代码生成 | ⏳ 未开始 | 契约尚未驱动 Spring Boot / MySQL / 脚本生成 |
 | 多服务沙盒 | ⏳ 未开始 | 当前只有单 React/Vite 沙盒 |
 | 真实认证 / 多租户 | ⏳ 未开始 | 前端 Mock 登录，BFF 无 Spring Security |
@@ -56,9 +60,15 @@ flowchart LR
     S --> UI["UI Graph<br/>局部修改"]
     S --> AR["Architect Graph<br/>全栈契约"]
     UI --> D["Docker 沙盒<br/>React + Vite"]
-    AR --> R["Markdown RAG"]
+    AR --> R["Markdown RAG<br/>当前兜底"]
     D -->|"previewUrl / sandboxId"| U
     P -->|"Docker SDK"| D
+    P -.->|"M3 契约 · 未实现"| K["Knowledge Service<br/>摄取 / 向量检索"]
+    B -.->|"M3 契约 · 未实现"| ADM["Admin / Prompt Registry<br/>指标 / 灰度 / 回滚"]
+    FB["Feedback Collector<br/>REVISE 采集"] -.->|"M3 契约 · 未实现"| ADM
+    AR -.->|"REVISE 事件"| FB
+    classDef future stroke-dasharray: 5 5,stroke:#999,fill:#fafafa;
+    class K,ADM,FB future;
 ```
 
 | 层 | 技术栈 | 当前职责 |
@@ -292,7 +302,10 @@ API 级 both E2E 还覆盖：
 | LangGraph checkpoint | `MemorySaver` | 重启丢失中断状态 |
 | BFF 持久化 | 无数据库访问层 | 用户 / 项目 / Run 仍主要在前端或 Python 内存 |
 | 真实认证 | 前端 Mock Token | 无 Spring Security / JWT / RBAC |
-| RAG | Markdown + BM25 | 无向量库；`chroma.py` 为占位 |
+| RAG | Markdown + BM25 | 无向量库；`chroma.py` 为占位；`RAGProvider` 尚无 `tenant_id` |
+| Knowledge Service | 仅契约 | 文档摄取 / Embedding / Qdrant / 租户隔离检索未实现 |
+| Admin / Prompt Registry | 仅契约 | `/admin`、指标、版本、灰度、热更新、回滚未实现 |
+| Feedback / 自优化 | 仅契约 | REVISE 采集、聚类、候选 Prompt、评估、审批未实现；无微调链路 |
 | Tree-sitter 编辑 | 占位类 | 未安装依赖、未实现结构化替换 |
 | OpenAPI / Schema 代码生成 | 手写 DTO | `packages/protocol` 仅 README |
 | 配额 / 审计 / 管理后台 | 无 | 未实现 |
@@ -324,8 +337,17 @@ API 级 both E2E 还覆盖：
 1. `CustomAgent` 独立受限沙盒运行时：非 root、临时 venv、只读 Prompt/RAG、
    无宿主网络与密钥、资源配额、结构化 `AgentResult`。
 2. 真实认证、租户隔离、审计与配额。
-3. 向量 RAG、Tree-sitter 结构化编辑、OpenAPI 代码生成。
-4. 管理后台与 Agent 市场。
+3. Tree-sitter 结构化编辑、OpenAPI 代码生成。
+4. Agent 市场。
+
+### P3：Agent OS 中台（M3，契约已就绪）
+
+1. **M3.1 管理中台骨架**：`/admin`、管理员 RBAC、Agent 指标聚合、审计。
+2. **M3.2 知识中台**：Knowledge Service 摄取流水线、Qdrant、租户隔离检索；
+   `RAGProvider` 升级为强制 `tenant_id`，生产切换 `KnowledgeRAGProvider`。
+3. **M3.3 Prompt Registry**：不可变版本、校验、灰度、热更新、回滚、Diff。
+4. **M3.4 反馈与自优化**：Feedback Collector、聚类、候选 Prompt、离线评估、
+   人工审批与灰度回滚；**不做微调**。
 
 ---
 
@@ -338,6 +360,7 @@ API 级 both E2E 还覆盖：
 | `docs/design/03.API接口设计.md` | 公共 / 内部 API 契约 |
 | `docs/design/04.M2_Agent_ToolCalling_SSE_HITL.md` | SSE、HITL、执行层 |
 | `docs/design/05.Supervisor_Multi_Agent.md` | Supervisor、声明式 Manifest、SkillRegistry、Memory / MCP 边界、both 强门控、CustomAgent 沙盒隔离 |
+| `docs/design/06.Agent_OS_Data_Management.md` | M3 数据中台 / 管理中台 / 反馈自优化契约（设计） |
 | `docs/memory/00_project_brief.md` | 项目简报与里程碑 |
 | `docs/memory/2026-11-05_M2_5_supervisor_frontend_gate.md` | 前端统一调度与 both 强门控实现记录 |
 | `docs/memory/2026-11-05_M2_5_agent_manifest_skill.md` | 声明式 Manifest、Skill 预留与边界 |

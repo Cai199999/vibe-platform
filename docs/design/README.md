@@ -2,11 +2,12 @@
 
 | 文档 | 状态 | 范围 |
 |---|---|---|
-| [01.功能模块梳理](01.功能模块梳理.md) | v1.0 | 产品模块、角色、边界与里程碑 |
-| [02.整体架构设计](02.整体架构设计.md) | v1.1 | 系统上下文、Multi-Agent、全栈沙盒、数据与部署 |
-| [03.API接口设计](03.API接口设计.md) | v1.1 | 公共/内部 API、Run 状态机、事件与错误码 |
+| [01.功能模块梳理](01.功能模块梳理.md) | v1.2 | 产品模块、角色、边界与里程碑 |
+| [02.整体架构设计](02.整体架构设计.md) | v1.2 | 系统上下文、Multi-Agent、全栈沙盒、数据与部署、数据/管理中台 |
+| [03.API接口设计](03.API接口设计.md) | v1.2 | 公共/内部 API、Run 状态机、事件与错误码、§14 中台端点 |
 | [04.M2 Agent 执行架构](04.M2_Agent_ToolCalling_SSE_HITL.md) | v2.0 设计稿 | Tool Calling、SSE 时间轴、HITL 澄清 |
 | [05.Supervisor 多 Agent 协同](05.Supervisor_Multi_Agent.md) | v1.1 | 总调度、AgentRegistry、子图 Handoff、both 强门控、CustomAgent 沙盒隔离 |
+| [06.Agent OS 数据中台与管理中台](06.Agent_OS_Data_Management.md) | v1.0 | Knowledge Service、多租户检索、Admin / Prompt Registry、Feedback 自优化闭环 |
 
 ## 阅读顺序
 
@@ -16,6 +17,8 @@
 4. 04 是 M2 执行层设计；与 03 冲突时，事件 envelope 与公共路径以 03 为准，
    M2 新增的工具/澄清细节以 04 为准。
 5. 05 是多 Agent 总调度设计；Supervisor 只路由，子图协议仍以 04 为准。
+6. 06 定义 M3 数据中台与管理中台；知识库 / Admin / Prompt / Feedback 的字段
+   细节以 06 为准，03 §14 提供端点索引与错误码汇总。
 
 ## 约定
 

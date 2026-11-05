@@ -17,6 +17,14 @@ Chatbox 可逐轮回滚代码与 thread 上下文；删除标注则回到该圈�
 即可对颜色、文案、字号、布局等任意 UI 属性生成修改，不再局限于 Mock 的
 固定示例。
 
+> **M3 中台设计（2026-11-05，契约先行）**：新增独立 **Knowledge Service**
+> 承载文档摄取、切分、Embedding 与租户隔离检索；`RAGProvider` 升级为强制
+> `tenantId` 的 HTTP 契约。管理中台新增 `/admin` 入口、Agent 指标、
+> Prompt 版本/灰度/热更新，以及基于 Architect `REVISE` 反馈的 Prompt
+> 自优化闭环。**明确不做大模型微调**，且优化结果必须人工审批。
+> 当前阶段仅完成架构与接口契约，底层实现按 M3.1–M3.4 推进。
+> 详见 [`docs/design/06.Agent_OS_Data_Management.md`](docs/design/06.Agent_OS_Data_Management.md)。
+
 ## 目录
 
 ```text
@@ -736,6 +744,15 @@ docker exec -it geo-mysql mysql -uroot -proot -N -e \
 ```
 
 预期外键数量为 `0`。
+
+## 设计文档
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/design/02.整体架构设计.md`](docs/design/02.整体架构设计.md) | 系统上下文、逻辑架构、数据/安全/部署 |
+| [`docs/design/03.API接口设计.md`](docs/design/03.API接口设计.md) | 公共 / 内部 API 契约；§14 为中台端点索引 |
+| [`docs/design/05.Supervisor_Multi_Agent.md`](docs/design/05.Supervisor_Multi_Agent.md) | Supervisor、Manifest、both 强门控 |
+| [`docs/design/06.Agent_OS_Data_Management.md`](docs/design/06.Agent_OS_Data_Management.md) | Knowledge Service、Admin / Prompt Registry、Feedback 自优化 |
 
 ## 停止
 

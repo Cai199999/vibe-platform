@@ -1,7 +1,7 @@
 # vibe-platform 技术栈全记录
 
 > **快照日期**：2026-11-05  
-> **覆盖范围**：M1 前端闭环 → M2 SSE / HITL → M3-A Diff 审批与取消 → M3-B `CodeEditor` 抽象 → M2.5 应用形态与全栈契约 → Supervisor 多智能体路由 / 前端统一入口 / both 强门控 → 声明式 Manifest / 专属 Agent 演示 / 决策可视化
+> **覆盖范围**：M1 前端闭环 → M2 SSE / HITL → M3-A Diff 审批与取消 → M3-B `CodeEditor` 抽象 → M2.5 应用形态与全栈契约 → Supervisor 多智能体路由 / 前端统一入口 / both 强门控 → 声明式 Manifest / 专属 Agent 演示 / 决策可视化 → M3 数据中台 / 管理中台**架构设计**（未实现）
 > **统计口径**：以仓库当前源码、`pom.xml`、`package.json`、`requirements.txt`、Dockerfile 和实际运行容器为准。  
 > **重要说明**：设计文档中的目标技术栈与当前已落地技术栈并不完全一致，本文严格区分「当前已使用」「已接入但未启用」「设计预留 / 未落地」。
 
@@ -622,6 +622,11 @@ scripts/supervisor_e2e_test.py
 | 真实认证 / 多租户 | 前端 Mock 登录 | 无 Spring Security、无 JWT |
 | MinIO 源码 / 快照存储 | 客户端 Bean | 未写入对象 |
 | 配额、审计、管理后台 | 无 | 未实现 |
+| Knowledge Service（独立数据中台） | 无；`services/rag` 仅 Markdown/BM25 与 Chroma 占位 | M3 契约已定义（`06` §4），未实现 |
+| 多租户向量检索 / Qdrant | 无；`RAGProvider` 当前无 `tenant_id` 参数 | M3 契约要求强制租户，未实现 |
+| Admin API / Prompt Registry | 无 | M3 契约已定义（`06` §5），未实现 |
+| Feedback Collector / Prompt 自优化 | 无 | M3 契约已定义（`06` §6），未实现 |
+| 大模型微调（SFT / LoRA / RLHF） | 无，且架构明确禁止 | **非目标**，不列入路线图 |
 
 ---
 
@@ -683,6 +688,7 @@ docker compose up -d
 | `docs/design/03.API接口设计.md` | 对外 API 契约 |
 | `docs/design/04.M2_Agent_ToolCalling_SSE_HITL.md` | SSE、HITL、CodeEditor 实际协议 |
 | `docs/design/05.Supervisor_Multi_Agent.md` | Supervisor 总调度、声明式 Manifest、SkillRegistry、Memory / MCP 边界、both 强门控、CustomAgent 沙盒隔离 |
+| `docs/design/06.Agent_OS_Data_Management.md` | M3 Knowledge Service、Admin、Prompt Registry、Feedback 自优化契约（设计，未实现） |
 | `docs/memory/00_project_brief.md` | 项目简报与里程碑 |
 | `docs/memory/2026-11-04_M2_SSE_HITL.md` | M2 阶段总结 |
 | `docs/memory/2026-11-05_M3A_diff_approval_cancel.md` | Diff 审批与取消 |
