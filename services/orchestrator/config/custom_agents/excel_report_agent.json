@@ -1,0 +1,29 @@
+{
+  "agentId": "excel_report_agent",
+  "displayName": "Excel 报表专家",
+  "description": "把业务数据整理成可下载的 Excel 报表，自动生成表头、汇总行与月份筛选说明。",
+  "version": "1.0.0",
+  "taskTypes": ["excel_report_generation"],
+  "keywords": [
+    "数据报表",
+    "报表",
+    "Excel生成",
+    "excel",
+    "销售数据",
+    "本月销售",
+    "导出报表",
+    "报表导出",
+    "数据导出",
+    "销售报表"
+  ],
+  "systemPromptFile": "prompts/excel_report_agent.md",
+  "ragKnowledgeDir": "knowledge/excel_report",
+  "enabled": true,
+  "metadata": {
+    "tenantId": "tenant_demo",
+    "owner": "data-team",
+    "stage": "M3-preview",
+    "runtime": "isolated-sandbox",
+    "note": "当前只演示 Manifest 注册与 Supervisor 路由，代码执行在 M3 接入独立沙盒"
+  }
+}

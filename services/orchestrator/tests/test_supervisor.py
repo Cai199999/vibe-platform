@@ -123,6 +123,35 @@ class RuleRoutingTest(unittest.TestCase):
         with self.assertRaises(AgentNotAvailableError):
             self.classify(_request(options={"targetAgent": "backend_coder"}))
 
+    def test_custom_agent_keyword_routes_to_manifest_agent(self) -> None:
+        custom_dir = Path(__file__).resolve().parents[1] / "config/custom_agents"
+        registry = AgentRegistry(custom_agents_dir=custom_dir)
+        registry.reload_custom_agents()
+        self.assertIsNotNone(registry.get("excel_report_agent"))
+
+        prediction = RuleBasedIntentClassifier().classify(
+            _request(message="帮我导出一份本月的销售数据"),
+            registry,
+        )
+        self.assertEqual(prediction.target, "excel_report_agent")
+        self.assertEqual(prediction.task_type, "excel_report_generation")
+        self.assertFalse(prediction.dispatchable)
+        self.assertIn("customAgentRuntime", prediction.missing_inputs)
+        self.assertIn("销售数据", prediction.signals[0])
+
+    def test_ui_keyword_prevents_custom_agent_hijack(self) -> None:
+        custom_dir = Path(__file__).resolve().parents[1] / "config/custom_agents"
+        registry = AgentRegistry(custom_agents_dir=custom_dir)
+        registry.reload_custom_agents()
+        prediction = RuleBasedIntentClassifier().classify(
+            _request(
+                message="把报表页面的按钮改成蓝色",
+                annotations=[_annotation()],
+            ),
+            registry,
+        )
+        self.assertEqual(prediction.target, "ui_graph")
+
 
 class RegistryTest(unittest.TestCase):
     def setUp(self) -> None:

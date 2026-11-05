@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import AppHeader from '../components/AppHeader.jsx'
 import AccountDialog from '../components/AccountDialog.jsx'
 import SettingsDialog from '../components/SettingsDialog.jsx'
@@ -12,6 +12,7 @@ import { EMPTY_ARCHITECT, useArchitect } from '../workspace/useArchitect.js'
 import { streamRun } from '../workspace/runStream.js'
 import {
   dispatchSupervisor,
+  fetchSupervisorAgents,
   releaseSupervisorGate,
   routeSupervisor,
 } from '../workspace/supervisorClient.js'
@@ -53,8 +54,14 @@ const EMPTY_RUN = {
   cancelRequested: false,
   // patch.proposed 的截断 diff，用于详情抽屉；完整结果仍以终态为准。
   patchPreview: '',
-  // Supervisor 最近一次意图：handoff_ui / handoff_architect / handoff_both。
+  // Supervisor 最近一次意图：handoff_ui / handoff_architect / handoff_both /
+  // handoff_custom / rejected。
   supervisorHandoff: null,
+  // 可视化“AI 思考”的轻量状态：analyzing → decided → dispatching →
+  // both_waiting / ui_running / custom / rejected / error。
+  supervisorPhase: null,
+  // route 返回的完整决策 + handoff 展示名，用于顶部轨迹与专属 Agent 卡片。
+  supervisorDecision: null,
 }
 
 // 成功终态：M2 的旧快照仍可能是 AWAITING_APPROVAL，统一按成功渲染。
@@ -652,6 +659,38 @@ export default function WorkspacePage() {
   const [runStates, setRunStates] = useState(() => loadRunStates(projects))
   // Supervisor both 门控：AWAITING_CONTRACT 时 UI 子图不执行。
   const [gateStates, setGateStates] = useState(() => loadGateStates(projects))
+  // “我的专属 Agent”目录：只读 AgentRegistry，不触发任何执行。
+  const [agentCatalog, setAgentCatalog] = useState({
+    agents: [],
+    loading: true,
+    error: null,
+  })
+  const agentCatalogRequestRef = useRef(0)
+  const loadAgentCatalog = useCallback(async () => {
+    const requestId = agentCatalogRequestRef.current + 1
+    agentCatalogRequestRef.current = requestId
+    setAgentCatalog((previous) => ({ ...previous, loading: true, error: null }))
+    try {
+      const payload = await fetchSupervisorAgents(session?.token)
+      if (agentCatalogRequestRef.current !== requestId) return
+      setAgentCatalog({
+        agents: Array.isArray(payload?.agents) ? payload.agents : [],
+        loading: false,
+        error: null,
+      })
+    } catch (cause) {
+      if (agentCatalogRequestRef.current !== requestId) return
+      setAgentCatalog((previous) => ({
+        ...previous,
+        loading: false,
+        error: `专属 Agent 加载失败：${cause?.message || cause}`,
+      }))
+    }
+  }, [session?.token])
+
+  useEffect(() => {
+    void loadAgentCatalog()
+  }, [loadAgentCatalog])
   // 通用操作提示（rejected / 门控释放失败等），与导出提示分离。
   const [toast, setToast] = useState(null)
   // 递增后 ProjectWorkspace 自动切到预览 Tab，露出局部的执行时间轴。
@@ -1140,6 +1179,7 @@ export default function WorkspacePage() {
       cancelRequested: false,
       targetAnnotationId: annotationId,
       supervisorHandoff: handoff,
+      supervisorPhase: 'ui_running',
     }))
     focusPreview(projectId)
     await startRunStream(projectId, null, annotationId, {
@@ -1198,11 +1238,55 @@ export default function WorkspacePage() {
       cancelRequested: false,
       targetAnnotationId: annotationId,
       supervisorHandoff: null,
+      supervisorPhase: 'analyzing',
+      supervisorDecision: null,
     }))
 
     try {
+      // 让“正在分析意图”至少可见一个呼吸节拍，避免本地路由过快导致
+      // 用户只看到结果、看不到 Supervisor 的思考过程。
+      const routeStartedAt = Date.now()
       const route = await routeSupervisor(payload, session?.token)
+      const minThinkingMs = 480
+      const remaining = minThinkingMs - (Date.now() - routeStartedAt)
+      if (remaining > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, remaining))
+      }
       const decision = route.decision ?? {}
+      const handoffMeta = (route.handoffs ?? []).find(
+        (item) => item.agentId === decision.target,
+      )
+      const decisionView = {
+        handoff: decision.handoff,
+        target: decision.target,
+        taskType: decision.taskType,
+        reason: decision.reason,
+        confidence: decision.confidence,
+        signals: decision.signals ?? [],
+        strategy: decision.strategy,
+        missingInputs: decision.missing_inputs ?? [],
+        agentDisplayName: handoffMeta?.displayName ?? null,
+      }
+
+      // handoff_custom：路由已成功命中 Manifest Agent，但运行时尚未接入。
+      // 此时不能 dispatch，也不应提示成错误；展示专属 Agent 卡片即可。
+      if (decision.handoff === 'handoff_custom') {
+        patchRun(projectId, {
+          submitting: false,
+          pendingAnnotationId: null,
+          pendingAction: null,
+          supervisorHandoff: 'handoff_custom',
+          supervisorPhase: 'custom',
+          supervisorDecision: decisionView,
+        })
+        inflightRef.current.delete(projectId)
+        showToast(
+          'info',
+          `已匹配专属 Agent：${decisionView.agentDisplayName ?? decision.target}（本次演示仅完成路由）`,
+        )
+        return
+      }
+
       if (decision.handoff === 'rejected' || !decision.dispatchable) {
         const missing = decision.missing_inputs ?? []
         patchRun(projectId, {
@@ -1210,6 +1294,8 @@ export default function WorkspacePage() {
           pendingAnnotationId: null,
           pendingAction: null,
           supervisorHandoff: decision.handoff ?? 'rejected',
+          supervisorPhase: 'rejected',
+          supervisorDecision: decisionView,
         })
         inflightRef.current.delete(projectId)
         if (missing.includes('annotations')) {
@@ -1234,6 +1320,10 @@ export default function WorkspacePage() {
           (item) => item.agentId === 'ui_graph',
         )
         if (!ui) throw new Error('Supervisor 未返回 UI Run')
+        patchRun(projectId, {
+          supervisorDecision: decisionView,
+          supervisorHandoff: handoff,
+        })
         await attachUiDispatch(projectId, {
           runId: ui.runId,
           streamPath: ui.streamPath,
@@ -1260,6 +1350,8 @@ export default function WorkspacePage() {
           pendingAction: null,
           error: null,
           supervisorHandoff: handoff,
+          supervisorPhase: handoff === 'handoff_both' ? 'both_waiting' : 'architect_running',
+          supervisorDecision: decisionView,
         })
         if (handoff === 'handoff_both') {
           const gate = result.gate
@@ -1293,6 +1385,7 @@ export default function WorkspacePage() {
         pendingAnnotationId: null,
         pendingAction: null,
         error: `Supervisor 调度失败：${messageText}`,
+        supervisorPhase: 'error',
       })
       showToast('error', `调度失败：${messageText}`)
     }
@@ -2060,6 +2153,8 @@ export default function WorkspacePage() {
                   architectStates[project.id] ?? EMPTY_ARCHITECT
                 }
                 supervisorGate={gateStates[project.id] ?? null}
+                agentCatalog={agentCatalog}
+                onRefreshAgents={loadAgentCatalog}
                 previewFocusNonce={previewFocus[project.id] ?? 0}
                 onArchitectOpen={() => handleOpenArchitect(project.id)}
                 onArchitectStart={() => handleStartArchitect(project.id)}

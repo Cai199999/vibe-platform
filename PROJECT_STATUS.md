@@ -31,6 +31,8 @@ UI 修改在 Docker 沙盒中自动编码、构建、验证并生成 Git checkpo
 | M2.5 Supervisor 路由 | ✅ 已完成 | 意图分类、AgentRegistry、UI / Architect / both / custom / rejected |
 | M2.5 声明式 Manifest | ✅ 已完成 | 内置 Agent 由 `manifest.json` 启动扫描注册，替代硬编码 |
 | M2.5 Skill 预留 | ✅ 已完成 | `SkillRegistry` 只声明不执行；Agent / Tool / Skill 边界入库 |
+| M2.5 决策可视化 | ✅ 已完成 | 分析意图 → 判定结果 → both 双阶段时间轴 |
+| M2.5 专属 Agent 演示 | ✅ 已完成 | Excel 报表 Manifest 自动注册、关键词路由、前端目录 |
 | M2.5 前端 Supervisor 接入 | ✅ 已完成 | “发送 / 提交 / 下一步”统一走 route + dispatch，按 handoff 切换 UI |
 | M2.5 both 强门控 | ✅ 已完成 | 项目锁、契约校验、幂等 release、乱序 409、自动中止 |
 | 全栈代码生成 | ⏳ 未开始 | 契约尚未驱动 Spring Boot / MySQL / 脚本生成 |
@@ -143,6 +145,11 @@ flowchart LR
   - `rejected`
 - `route` 只返回计划；`dispatch` 才启动真实子图并返回独立 SSE 路径。
 - 前端不再硬编码 `/runs/stream` 或 `/architect/runs/stream`。
+- 决策可视化：发送后显示“正在分析意图”，route 返回后显示判定与理由；
+  both 模式显示「架构澄清 → 前端修改」双阶段时间轴。
+- 「我的专属 Agent」目录展示 Manifest Agent；演示 Agent
+  `excel_report_agent`（Excel 报表专家）命中“销售数据”等关键词后返回
+  `handoff_custom`，只路由不执行。
 
 ### 4.5 both 强门控
 
@@ -320,6 +327,8 @@ API 级 both E2E 还覆盖：
 | `docs/memory/00_project_brief.md` | 项目简报与里程碑 |
 | `docs/memory/2026-11-05_M2_5_supervisor_frontend_gate.md` | 前端统一调度与 both 强门控实现记录 |
 | `docs/memory/2026-11-05_M2_5_agent_manifest_skill.md` | 声明式 Manifest、Skill 预留与边界 |
+| `docs/memory/2026-11-05_M2_5_demo_visualization_custom_agent.md` | 决策可视化与专属 Agent 演示 |
+| `docs/DEMO_3_MIN.md` | 3 分钟面试演示脚本 |
 
 ---
 
@@ -342,8 +351,11 @@ AI_BASE_URL=http://127.0.0.1:8080 python3 scripts/supervisor_e2e_test.py
 python3 scripts/supervisor_both_e2e_test.py
 AI_BASE_URL=http://127.0.0.1:8080 python3 scripts/supervisor_both_e2e_test.py
 
-# 浏览器级 UI + 架构澄清混合 E2E
+# 浏览器级 UI + 架构澄清混合 E2E（含决策时间轴）
 /tmp/vibe-browser/bin/python scripts/supervisor_mixed_ui_e2e_test.py
+
+# 浏览器级专属 Agent 秒级接入 E2E
+/tmp/vibe-browser/bin/python scripts/custom_agent_e2e_test.py
 
 # 前端生产构建
 docker exec vibe-platform-web npx vite build \

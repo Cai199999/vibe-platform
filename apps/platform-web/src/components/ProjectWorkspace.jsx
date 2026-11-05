@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
+import AgentCatalogMenu from './AgentCatalogMenu.jsx'
 import ArchitectPanel from './ArchitectPanel.jsx'
 import CanvasStage from './CanvasStage.jsx'
 import RuntimePanel from './RuntimePanel.jsx'
+import SupervisorTrace from './SupervisorTrace.jsx'
 import {
   ViewportProvider,
   useViewportState,
@@ -41,6 +43,8 @@ function ProjectWorkspaceInner({
   exporting = false,
   architectState,
   supervisorGate,
+  agentCatalog,
+  onRefreshAgents,
   previewFocusNonce = 0,
   onArchitectOpen,
   onArchitectStart,
@@ -126,6 +130,12 @@ function ProjectWorkspaceInner({
         </div>
 
         <div className="project-toolbar-right">
+          <AgentCatalogMenu
+            agents={agentCatalog?.agents ?? []}
+            loading={Boolean(agentCatalog?.loading)}
+            error={agentCatalog?.error ?? null}
+            onRefresh={onRefreshAgents}
+          />
           {gateActive && (
             <span className="supervisor-gate-chip" role="status">
               <span className="mini-spinner" aria-hidden="true" />
@@ -263,6 +273,12 @@ function ProjectWorkspaceInner({
           </button>
         </div>
       </div>
+
+      <SupervisorTrace
+        run={run}
+        architectState={architectState}
+        gate={supervisorGate}
+      />
 
       <div className={`project-viewport view-${viewMode}`}>
         <div

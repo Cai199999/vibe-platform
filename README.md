@@ -2,8 +2,10 @@
 
 以前端可视化为抓手、多轮交互生成完整全栈应用的 Vibe Coding 平台。
 
-当前阶段：**M1 完成 · Phase 7 沙盒 Git Checkpoint 与单圈 Undo +
-ADD 组件**。画布最多 3 个标注 → `AnnotationEnvelope[]`（`action` 为
+当前阶段：**M2.5 完成 · Supervisor 多 Agent 路由 + 声明式 Manifest +
+both 强门控 + 专属 Agent 秒级接入**。顶部 Supervisor 统一调度层根据自然语言、
+画布标注与 Agent Manifest 能力，把请求分发到局部 UI 修改、全局架构澄清、
+both 串行门控或企业自定义 Agent。画布最多 3 个标注 → `AnnotationEnvelope[]`（`action` 为
 `MODIFY` 修改已有元素 / `ADD` 新增组件）→ Java BFF → Python AI Core → LangGraph
 单 Agent 一次性规划 / 编码 / 写入 / 构建验证 → Docker 沙盒 → 项目内预览与
 Diff，全链路已打通；工作台支持对比/展示两种布局、无缝缩放预览、多项目
@@ -22,6 +24,8 @@ apps/platform-web/                    React 18 + Vite（登录 / 多 Tab 工作�
 apps/platform-bff/                    Java 21 + Spring Boot 3.3 BFF
 services/orchestrator/                Python 3.12 + FastAPI + LangGraph AI Core
 services/orchestrator/ai_core/        Sandbox / Agent / API
+services/orchestrator/ai_core/*/manifest.json 声明式 Agent 能力清单
+services/orchestrator/config/custom_agents/   企业专属 Agent Manifest（演示：Excel 报表专家）
 services/orchestrator/sandbox_template/ React + Vite 沙盒基础镜像
 infra/migrations/schema.sql           M1 初始 MySQL schema（无物理外键）
 scripts/init-db.sh                    应用 schema 到已有 Docker MySQL
@@ -35,7 +39,12 @@ scripts/multi_turn_chat_e2e_test.py   浏览器 E2E（平移缩放不漂移 / �
 scripts/rollback_e2e_test.py          浏览器 E2E（Git 提交顺序 / 逐轮回滚 / 回滚后续写）
 scripts/annotation_delete_rollback_e2e_test.py 浏览器 E2E（删除标注回到创建前基线 / 清除全部）
 scripts/add_component_e2e_test.py     浏览器 E2E（圈选卡片内部 → ADD 红色提交按钮 → 构建/预览）
-docs/screenshots/                     M1 联调截图
+scripts/supervisor_e2e_test.py        Supervisor 路由 / 注册中心 / 门控 API E2E
+scripts/supervisor_both_e2e_test.py   both 模式 API E2E（契约确认 → release → UI Run）
+scripts/supervisor_mixed_ui_e2e_test.py 浏览器级 both 混合 E2E（决策可视化 + 时间轴）
+scripts/custom_agent_e2e_test.py      浏览器级专属 Agent 秒级接入 E2E
+docs/DEMO_3_MIN.md                    3 分钟面试演示脚本
+docs/screenshots/                     联调截图
 docker-compose.yml                    只编排平台自身服务
 ```
 
@@ -71,6 +80,70 @@ Mock 会话写入 `localStorage`。浏览器只请求同源 `/api`，由 Vite �
 Browser ──/api──▶ platform-web(Vite proxy) ──▶ java-bff ──▶ python-ai ──▶ Docker sandbox
                      :5173                       :8080          :8100         127.0.0.1:<random>
 ```
+
+## 多 Agent 调度架构（M2.5）
+
+```mermaid
+flowchart TD
+    U["用户输入<br/>自然语言 + 画布标注"] --> FE["platform-web<br/>发送 / 提交 / 下一步"]
+    FE -->|"POST /api/v1/supervisor/route"| BFF["Java BFF"]
+    BFF --> SUP["Supervisor Graph<br/>只路由，不写代码"]
+
+    SUP --> CLS["意图分类<br/>显式指令 > 关键词 > 标注"]
+    CLS --> REG["AgentRegistry<br/>启动扫描 manifest.json"]
+
+    REG --> UI_M["agent/manifest.json<br/>ui_graph"]
+    REG --> AR_M["architect/manifest.json<br/>architect_graph"]
+    REG --> BC_M["backend_coder/manifest.json<br/>reserved"]
+    REG --> SA_M["script_agent/manifest.json<br/>reserved"]
+    REG --> CA_M["config/custom_agents/*.json<br/>企业专属 Agent"]
+    REG --> SK["SkillRegistry<br/>Prompt + RAG + Tool 声明<br/>M3 动态拼装"]
+
+    SUP -->|"handoff_ui"| UI["UI Graph<br/>局部修改 · 沙盒构建"]
+    SUP -->|"handoff_architect"| AR["Architect Graph<br/>澄清 + 全栈契约"]
+    SUP -->|"handoff_custom"| CA["CustomAgent 路由<br/>Excel 报表专家"]
+    SUP -->|"handoff_both"| GATE{"both 强门控<br/>项目级锁 · 契约先行"}
+
+    AR -->|"architect.contract.confirmed"| GATE
+    GATE -->|"release 通过"| UI
+    GATE -.->|"未确认"| BLOCK["UI Run 冻结<br/>不创建沙盒"]
+    UI --> SANDBOX["Docker 沙盒<br/>构建 / 预览 / Git checkpoint"]
+    AR --> CONTRACT["《全栈实施契约》"]
+    CA -.->|"M3 隔离沙盒执行"| FUTURE["CustomAgent Runtime<br/>当前仅路由"]
+
+    classDef future stroke-dasharray: 5 5,stroke:#999,fill:#fafafa;
+    class FUTURE,BLOCK future;
+```
+
+**四个可演示的架构点**：
+
+| 能力 | 用户体验 | 架构落点 |
+|---|---|---|
+| 多 Agent 路由 | 一句话自动进入 UI / Architect / 专属 Agent，不需要选菜单 | Supervisor Graph + 规则分类器 |
+| 声明式注册 | 新增 Agent 只加 `manifest.json`，不改 Python / Java | `AgentRegistry` 启动扫描 + `SkillRegistry` |
+| both 强门控 | 先确认契约，再修改界面；阶段时间轴实时可见 | 项目锁 + `AWAITING_CONTRACT → RELEASED` 状态机 |
+| 专属 Agent 秒级接入 | 放入 JSON → 刷新 → 关键词命中即路由 | `config/custom_agents` + Manifest 关键词匹配 |
+
+### 秒级接入一个专属 Agent
+
+```bash
+# 1. 放入 Manifest（示例已内置 Excel 报表专家）
+cat services/orchestrator/config/custom_agents/excel_report_agent.json
+
+# 2. 运行中的 AI Core 立即重扫，无需改代码、无需重启
+curl -X POST http://127.0.0.1:8100/api/v1/internal/supervisor/agents/reload
+
+# 3. 验证路由：应返回 handoff_custom / excel_report_agent
+curl -X POST http://127.0.0.1:8080/api/v1/supervisor/route \
+  -H 'Content-Type: application/json' \
+  -d '{"projectId":"demo","message":"帮我导出一份本月的销售数据"}'
+```
+
+前端工具栏的 **「✨ 我的专属 Agent」** 会展示当前注册的企业 Agent、能力与关键词。
+CustomAgent 在本阶段只完成声明与路由，运行时将在 M3 进入独立受限沙盒。
+
+> 面试现场如何按顺序点击、每步该讲什么：见
+> **[3 分钟演示脚本](docs/DEMO_3_MIN.md)**。
 
 ## 画布全链路（M1）
 
@@ -298,7 +371,25 @@ python3 scripts/platform_e2e_test.py
 颜色 / 文案 / 尺寸）→ Java BFF → Python Agent → 沙盒创建 → 首次构建失败 →
 自动修复 → 预览页与 `/src/App.jsx` 同时包含 3 处修改 → 清理沙盒。
 
-### 2. 浏览器 UI E2E（Playwright）
+### 2. Supervisor / 专属 Agent E2E
+
+```bash
+# API：路由、注册中心、both 门控、CustomAgent 关键词路由
+python3 scripts/supervisor_e2e_test.py
+AI_BASE_URL=http://127.0.0.1:8080 python3 scripts/supervisor_e2e_test.py
+python3 scripts/supervisor_both_e2e_test.py
+
+# 浏览器：决策可视化 + both 双阶段时间轴 + 专属 Agent 目录/路由
+/tmp/vibe-browser/bin/python scripts/supervisor_mixed_ui_e2e_test.py
+/tmp/vibe-browser/bin/python scripts/custom_agent_e2e_test.py
+```
+
+覆盖：`handoff_ui / handoff_architect / handoff_both / handoff_custom /
+rejected` 五类路由、`reserved` Agent 拒绝、both 项目锁与幂等 release、
+顶部「正在分析意图 → 判定结果」、两阶段时间轴、专属 Agent 目录与
+`Excel 报表专家` 关键词路由（只 route，不 dispatch）。
+
+### 3. 浏览器 UI E2E（Playwright）
 
 ```bash
 pip install playwright
@@ -322,7 +413,7 @@ cover 缩放后完全覆盖预览屏幕（居中、无留白）→ 对比画布 
 5 Tab 上限 → 关闭项目后按存活数递增命名且不重名 → 账户设置 / 退出 /
 账号密码登录。截图输出到 `docs/screenshots/`（`phase4-*.png`）。
 
-### 3. 批量标注 UI E2E
+### 4. 批量标注 UI E2E
 
 ```bash
 /tmp/vibe-browser/bin/python scripts/multi_annotation_e2e_test.py
@@ -333,7 +424,7 @@ cover 缩放后完全覆盖预览屏幕（居中、无留白）→ 对比画布 
 `annotations` 数组（且不再发送单 `annotation`）、预览与导出包 /
 `VIBE_CONTEXT.md` / Diff 同时包含颜色、文案、尺寸 3 处修改。
 
-### 4. 单圈多轮对话 / 世界坐标 E2E
+### 5. 单圈多轮对话 / 世界坐标 E2E
 
 ```bash
 /tmp/vibe-browser/bin/python scripts/multi_turn_chat_e2e_test.py
@@ -346,7 +437,7 @@ cover 缩放后完全覆盖预览屏幕（居中、无留白）→ 对比画布 
 `reusedSandbox=true`，最终 iframe 按钮为 `rgb(0, 0, 255)`；刷新后两轮对话
 仍从会话快照恢复。
 
-### 5. 单圈回滚 / Git 提交顺序 E2E
+### 6. 单圈回滚 / Git 提交顺序 E2E
 
 ```bash
 /tmp/vibe-browser/bin/python scripts/rollback_e2e_test.py
@@ -359,7 +450,7 @@ HEAD 指回第一轮 commit、聊天记录从 4 条截断为 2 条、预览从�
 不再是 HEAD 的祖先。后端响应 `checkpointRestored=true`，previewUrl 带
 `?v=` cache-busting。
 
-### 6. 删除标注 / 全局基线回滚 E2E
+### 7. 删除标注 / 全局基线回滚 E2E
 
 ```bash
 /tmp/vibe-browser/bin/python scripts/annotation_delete_rollback_e2e_test.py
@@ -369,7 +460,7 @@ HEAD 指回第一轮 commit、聊天记录从 4 条截断为 2 条、预览从�
 A 的聊天记录保留且预览恢复红色；再点「清除标注」回到沙盒 root baseline，
 预览恢复初始颜色。该用例明确覆盖 M1.5 “全局线性历史”限制。
 
-### 7. 新增组件 E2E
+### 8. 新增组件 E2E
 
 ```bash
 /tmp/vibe-browser/bin/python scripts/add_component_e2e_test.py
@@ -380,7 +471,7 @@ A 的聊天记录保留且预览恢复红色；再点「清除标注」回到沙
 卡片内插入 `button.vibe-added-button`，`npm run build` 通过，预览 iframe
 中新增按钮文本为「提交」、背景为 `rgb(255, 0, 0)`，原有 CTA 仍保留。
 
-### 8. 分层验证
+### 9. 分层验证
 
 ```bash
 python3 scripts/sandbox_e2e_test.py   # 沙盒生命周期 / 补丁 / 构建
@@ -388,7 +479,7 @@ python3 scripts/agent_e2e_test.py     # 批量标注 / 自动修复 / 3 次上�
 ./scripts/smoke-test.sh               # Java -> Python 健康检查
 ```
 
-### 9. 手动调用
+### 10. 手动调用
 
 ```bash
 curl -s http://127.0.0.1:5173/api/v1/health | python3 -m json.tool

@@ -228,6 +228,20 @@ def main() -> int:
                 "正在进行全局架构设计，请先确认契约"
             )
             expect(active.locator(".submit-annotations")).to_be_disabled()
+
+            # Supervisor 决策可视化：判定 + both 双阶段时间轴。
+            trace = active.locator("[data-supervisor-trace]")
+            expect(trace).to_be_visible()
+            expect(trace).to_have_attribute("data-supervisor-handoff", "handoff_both")
+            expect(trace).to_contain_text("判定为全栈构建")
+            expect(trace.locator("[data-both-timeline]")).to_be_visible()
+            expect(trace.locator('[data-both-stage="architect"]')).to_have_attribute(
+                "data-stage-state", "active"
+            )
+            expect(trace.locator('[data-both-stage="ui"]')).to_have_attribute(
+                "data-stage-state", "waiting"
+            )
+
             # 门控未释放前 UI 时间轴不能拿到沙盒。
             expect(active.locator(".runtime-panel")).to_have_attribute(
                 "data-sandbox-id", ""
@@ -255,6 +269,12 @@ def main() -> int:
                 "data-supervisor-gate", "RELEASED", timeout=60_000
             )
             expect(gate).to_contain_text("契约已确认，界面修改已启动")
+            expect(
+                active.locator('[data-supervisor-trace] [data-both-stage="architect"]')
+            ).to_have_attribute("data-stage-state", "done")
+            expect(
+                active.locator('[data-supervisor-trace] [data-both-stage="ui"]')
+            ).to_have_attribute("data-stage-state", "active")
             # 前端放行时调用 release，而不是自行 POST 启动 UI。
             assert any(
                 url.endswith("/release") for url, _ in posts
@@ -275,6 +295,9 @@ def main() -> int:
                 path=str(SCREENSHOT_DIR / "supervisor-mixed-gate-released.png"),
                 full_page=True,
             )
+            expect(
+                active.locator('[data-supervisor-trace] [data-both-stage="ui"]')
+            ).to_have_attribute("data-stage-state", "done")
             print(f"   run.succeeded sandbox={sandbox_id}")
 
             print("\n== 7. 校验没有重复 UI Run / 沙盒 ==")

@@ -57,6 +57,16 @@ export async function releaseSupervisorGate(gateId, token) {
   )
 }
 
+export async function fetchSupervisorAgents(token) {
+  const response = await fetch('/api/v1/supervisor/agents', {
+    headers: { Authorization: `Bearer ${token ?? ''}` },
+  })
+  if (!response.ok) {
+    throw await responseError(response)
+  }
+  return response.json()
+}
+
 export async function fetchSupervisorGate(gateId, token) {
   const response = await fetch(
     `/api/v1/supervisor/gates/${encodeURIComponent(gateId)}`,

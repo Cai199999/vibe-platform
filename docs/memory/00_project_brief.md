@@ -34,6 +34,11 @@
   `SkillRegistry` 抽象与 Agent / Tool / Skill 三层文档；明确当前仅线程级短期记忆、
   长期记忆与 MCP 留待 M3，架构图以虚线框预留 `MCP Client Adapter`。
   细节见 `docs/memory/2026-11-05_M2_5_agent_manifest_skill.md`。
+- **M2.5 终局体验打磨已落地（2026-11-05）**：前端新增 Supervisor 决策可视化
+  （分析 → 判定 → both 双阶段时间轴）与「我的专属 Agent」目录；Demo CustomAgent
+  `excel_report_agent` 通过 Manifest 关键词秒级接入；README 增加 Mermaid 架构图，
+  并新增《3 分钟演示脚本》。
+  细节见 `docs/memory/2026-11-05_M2_5_demo_visualization_custom_agent.md`。
 
 ## 2. 核心技术栈
 

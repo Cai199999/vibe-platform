@@ -246,6 +246,23 @@ def main() -> int:
     check("ui_graph" in reloaded_ids, "重载后丢失 ui_graph")
     print(f"   reload registryVersion={reloaded.get('registryVersion')}")
 
+    print("\n== 1.5 CustomAgent Manifest 秒级接入 ==")
+    check(
+        "excel_report_agent" in reloaded_ids,
+        "未加载 config/custom_agents/excel_report_agent.json",
+    )
+    custom = by_id.get("excel_report_agent") or {}
+    check(custom.get("source") == "manifest", "excel_report_agent 应来自 manifest")
+    check(custom.get("status") == "custom", "excel_report_agent 应为 custom")
+    route_case(
+        "custom",
+        {**base_payload("custom"), "message": "帮我导出一份本月的销售数据"},
+        "excel_report_agent",
+        ["excel_report_agent"],
+        False,
+        "handoff_custom",
+    )
+
     print("\n== 2. UI 路由（有标注） ==")
     ui_payload = {
         **base_payload("ui"),

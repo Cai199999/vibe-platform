@@ -1,7 +1,7 @@
 # vibe-platform 技术栈全记录
 
 > **快照日期**：2026-11-05  
-> **覆盖范围**：M1 前端闭环 → M2 SSE / HITL → M3-A Diff 审批与取消 → M3-B `CodeEditor` 抽象 → M2.5 应用形态与全栈契约 → Supervisor 多智能体路由 / 前端统一入口 / both 强门控
+> **覆盖范围**：M1 前端闭环 → M2 SSE / HITL → M3-A Diff 审批与取消 → M3-B `CodeEditor` 抽象 → M2.5 应用形态与全栈契约 → Supervisor 多智能体路由 / 前端统一入口 / both 强门控 → 声明式 Manifest / 专属 Agent 演示 / 决策可视化
 > **统计口径**：以仓库当前源码、`pom.xml`、`package.json`、`requirements.txt`、Dockerfile 和实际运行容器为准。  
 > **重要说明**：设计文档中的目标技术栈与当前已落地技术栈并不完全一致，本文严格区分「当前已使用」「已接入但未启用」「设计预留 / 未落地」。
 
@@ -391,8 +391,10 @@ START
 | Service | `ai_core/supervisor/service.py` | `route` 计划、`dispatch` 真实启动、契约校验与 gate release |
 | API | `ai_core/api/supervisor.py` | 内部 `/api/v1/internal/supervisor/**`，含 gates 查询 / 释放 |
 | BFF | `bff/supervisor/*` | 公开 `/api/v1/supervisor/**` 透传 |
-| 前端客户端 | `workspace/supervisorClient.js` | route / dispatch / gate release / gate query |
-| 前端接入 | `pages/WorkspacePage.jsx` | 统一提交入口、handoff 分支、自动释放门控、attach 预启动 Run |
+| 前端客户端 | `workspace/supervisorClient.js` | route / dispatch / gate release / gate query / agents |
+| 前端接入 | `pages/WorkspacePage.jsx` | 统一提交入口、handoff 分支、自动释放门控、attach 预启动 Run、supervisorPhase |
+| 决策可视化 | `components/SupervisorTrace.jsx` | 分析意图 → 判定结果 → both 双阶段时间轴 / 专属 Agent 卡片 |
+| 专属 Agent 目录 | `components/AgentCatalogMenu.jsx` | 读取 AgentRegistry，展示 Manifest Agent 能力与关键词 |
 
 **内置能力**：
 
@@ -408,8 +410,13 @@ START
 **Memory**：仅 LangGraph 线程级短期记忆；长期记忆 / 用户画像明确留待 M3。
 **MCP**：架构图虚线框预留 `MCP Client Adapter`，M2.5 不实现。
 
-**路由规则**：显式 `targetAgent` > 显式 `scopeHint` > UI + 架构关键词 = both >
-架构关键词 = Architect > 标注 / UI 关键词 = UI > 无信号 = rejected。
+**路由规则**：显式 `targetAgent` > 显式 `scopeHint` > CustomAgent 关键词
+（未命中 UI / 架构词）= custom > UI + 架构关键词 = both > 架构关键词 =
+Architect > 标注 / UI 关键词 = UI > 无信号 = rejected。
+
+**演示 Agent**：`config/custom_agents/excel_report_agent.json`（Excel 报表专家）
+声明 `excel_report_generation` 与“数据报表 / Excel生成 / 销售数据”关键词；
+输入“帮我导出一份本月的销售数据”返回 `handoff_custom`，只路由不执行。
 
 **CustomAgent**：`SUPERVISOR_CUSTOM_AGENTS_DIR`（默认 `config/custom_agents`）
 只扫描 `*.json`；Manifest 声明 `taskTypes`、`keywords`、`systemPromptFile`、
@@ -563,7 +570,7 @@ MinIO : http://127.0.0.1:9000  (admin/admin123，仅本地开发)
 
 | 类别 | 工具 / 命令 | 说明 |
 |---|---|---|
-| Python 单元测试 | `python3 -m unittest discover -s services/orchestrator/tests` | 编辑器、Run 选项、RAG、Architect、Supervisor 等 66 个用例 |
+| Python 单元测试 | `python3 -m unittest discover -s services/orchestrator/tests` | 编辑器、Run 选项、RAG、Architect、Supervisor、Manifest、CustomAgent 等 72 个用例 |
 | Python 语法检查 | `python3 -m compileall services/orchestrator/ai_core` | 编译检查 |
 | Python 格式化 | `black .` | 当前环境 black 26.10.1 |
 | 浏览器 E2E | Playwright 1.64.1，Chromium | Python API，`/tmp/vibe-browser/bin/python` |
@@ -684,6 +691,8 @@ docker compose up -d
 | `docs/memory/2026-11-05_M2_5_supervisor_multi_agent.md` | Supervisor 总调度与 AgentRegistry |
 | `docs/memory/2026-11-05_M2_5_supervisor_frontend_gate.md` | 前端统一调度、both 强门控与混合 E2E |
 | `docs/memory/2026-11-05_M2_5_agent_manifest_skill.md` | 声明式 Agent Manifest、SkillRegistry 与 Memory / MCP 边界 |
+| `docs/memory/2026-11-05_M2_5_demo_visualization_custom_agent.md` | Supervisor 决策可视化与专属 Agent 演示 |
+| `docs/DEMO_3_MIN.md` | 3 分钟面试演示脚本 |
 
 ---
 

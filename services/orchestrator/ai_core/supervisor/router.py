@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from ai_core.supervisor.registry import AgentRegistry
+from ai_core.supervisor.registry import AgentDescriptor, AgentRegistry
 from ai_core.supervisor.schemas import SupervisorRequest
 
 # 关键词已迁移到各 Agent 的 manifest.json；以下常量仅作为
@@ -116,6 +116,35 @@ def _descriptor_keywords(
     if descriptor is None or not descriptor.keywords:
         return fallback
     return descriptor.keywords
+
+
+def _match_custom_agent(
+    message: str,
+    registry: AgentRegistry,
+) -> tuple[AgentDescriptor, list[str]] | None:
+    """按 Manifest 关键词匹配企业 CustomAgent。
+
+    只在消息只命中 CustomAgent、没有 UI / 架构信号时使用（调用方保证），
+    避免“报表页面改颜色”被误判为报表生成。多个 Agent 命中时按命中词总
+    长度排序，长词（如“Excel 报表”）优先于短词（如“报表”）。
+    """
+    best: tuple[int, AgentDescriptor, list[str]] | None = None
+    for descriptor in registry.list_agents():
+        if descriptor.source != "manifest" or not descriptor.routable:
+            continue
+        hits = [
+            keyword
+            for keyword in descriptor.keywords
+            if _contains_term(message, keyword.casefold())
+        ]
+        if not hits:
+            continue
+        score = sum(len(item) for item in hits)
+        if best is None or score > best[0]:
+            best = (score, descriptor, hits)
+    if best is None:
+        return None
+    return best[1], best[2]
 
 
 def _ui_dispatchability(
@@ -237,6 +266,27 @@ class RuleBasedIntentClassifier:
             if _contains_term(message, term)
         ]
         has_annotations = bool(request.annotations)
+
+        # 企业 CustomAgent 关键词优先于内置 UI，但低于显式 scopeHint /
+        # targetAgent；只有消息没有命中 UI / 架构词时才走专属 Agent，
+        # 防止“把报表页面按钮改蓝”被误路由。
+        custom_match = _match_custom_agent(message, registry)
+        if custom_match is not None and not ui_signals and not arch_signals:
+            descriptor, custom_hits = custom_match
+            return IntentPrediction(
+                task_type=(
+                    descriptor.task_types[0] if descriptor.task_types else "custom"
+                ),
+                target=descriptor.agent_id,
+                confidence=0.86,
+                reason=f"命中企业专属 Agent「{descriptor.display_name}」关键词",
+                signals=[
+                    f"custom:{descriptor.agent_id}:{term}" for term in custom_hits
+                ],
+                dispatchable=False,
+                missing_inputs=["customAgentRuntime"],
+                strategy="custom_keyword",
+            )
 
         if ui_signals and arch_signals:
             return IntentPrediction(
