@@ -1,7 +1,7 @@
 # vibe-platform 技术栈全记录
 
 > **快照日期**：2026-11-05  
-> **覆盖范围**：M1 前端闭环 → M2 SSE / HITL → M3-A Diff 审批与取消 → M3-B `CodeEditor` 抽象 → M2.5 应用形态与全栈契约
+> **覆盖范围**：M1 前端闭环 → M2 SSE / HITL → M3-A Diff 审批与取消 → M3-B `CodeEditor` 抽象 → M2.5 应用形态与全栈契约 → Supervisor 多智能体路由
 > **统计口径**：以仓库当前源码、`pom.xml`、`package.json`、`requirements.txt`、Dockerfile 和实际运行容器为准。  
 > **重要说明**：设计文档中的目标技术栈与当前已落地技术栈并不完全一致，本文严格区分「当前已使用」「已接入但未启用」「设计预留 / 未落地」。
 
@@ -28,6 +28,13 @@ M2.5 另有一条**独立的 Architect 链路**，与局部 UI Run 解耦：
 3. 按应用形态动态追问，不强迫轻量工具提供后端 / 数据库；
 4. 检索 `knowledge/fullstack`（Markdown + BM25）生成带引用的《全栈实施契约》；
 5. 用户 `CONFIRM / REVISE / CANCEL`，确认结果保留在 Architect 状态中。
+
+顶层新增 **Supervisor 总调度**（M2.5）：
+
+1. `Supervisor Graph` 只做意图路由，不写代码；
+2. 根据自然语言、标注与关键词判断 `ui_graph` / `architect_graph` / `both`；
+3. `AgentRegistry` 声明内置 Agent、预留 Agent 与企业 CustomAgent Manifest；
+4. `route` 返回 Handoff 计划，`dispatch` 才启动子图并返回独立 SSE 路径。
 
 当前仍是**单前端应用（React/Vite）沙盒**。契约尚未驱动全栈代码生成；多服务沙盒、Redis checkpoint、真实鉴权与持久化尚未落地。
 
@@ -125,6 +132,7 @@ Docker Compose 使用自定义 bridge 网络 `vibe-platform-net`，三个平台�
 | AI 配置 | pydantic-settings | 2.7.1 | 环境变量与 `.env` 解析 | 已使用 |
 | AI 环境变量 | python-dotenv | 1.0.1 | `.env` 加载 | 已使用 |
 | Agent 编排 | LangGraph | 0.2.62 | StateGraph、checkpoint、interrupt | 已使用 |
+| 多 Agent 调度 | `SupervisorGraphRunner` + `AgentRegistry` | 自研，基于 LangGraph | 意图路由、能力注册、子图 Handoff | 已使用（路由层） |
 | LLM 框架 | LangChain | 0.3.14 | Prompt、消息与工具生态 | 已使用 |
 | LLM 接入 | langchain-openai | 0.3.0 | 通过 OpenAI 兼容协议调用 DeepSeek | 已使用 |
 | 模型 | DeepSeek `deepseek-chat` | 远端 API | 真实生成与规划 | 可选 |
@@ -331,7 +339,8 @@ START
 - 未使用 pytest；编辑器 / Architect 测试使用标准库 `unittest`。
 - 未使用 tree-sitter 依赖。
 - 未实现 `RedisSaver`、Redis Stream 事件总线、跨进程 checkpoint 恢复。
-- 多 Agent Supervisor、BackendCoder、DBA、Reviewer 仅存在于设计文档，当前是单图多节点，不是多 Agent 进程 / 多服务编排。
+- Supervisor 路由层已实现，但 BackendCoder / DBA / Reviewer / ScriptAgent 仍是预留能力，尚未接入代码生成 Runtime。
+- 当前 Agent 仍运行在同一 AI Core 进程内；没有独立 Agent 进程、消息总线或跨进程 Agent 隔离。
 
 ### 6.6 M2.5 Architect 模块
 
@@ -362,6 +371,35 @@ START
 
 前端 `useArchitect.js` 按项目持久化 Architect 状态到 `sessionStorage`，`architectStream.js`
 复用 `afterSeq` 重放；`ContractViewer.jsx` 用 React 节点渲染 Markdown，不使用 HTML 注入。
+
+### 6.7 Supervisor 多智能体总调度
+
+| 组件 | 文件 | 职责 |
+|---|---|---|
+| Graph | `ai_core/supervisor/graph.py` | LangGraph 顶层路由：分类 → Registry 解析 → Handoff → 终态 |
+| Classifier | `ai_core/supervisor/router.py` | 确定性规则；`targetAgent` / `scopeHint` 显式意图优先 |
+| Registry | `ai_core/supervisor/registry.py` | 内置 / 预留 Agent 注册，能力、版本、SSE 路径、可用性 |
+| CustomAgent | `ai_core/supervisor/custom.py` | 受限 JSON Manifest 加载；路径穿越与任意 import 防护 |
+| Service | `ai_core/supervisor/service.py` | `route` 计划与 `dispatch` 真实启动；子图 Dispatcher 注入 |
+| API | `ai_core/api/supervisor.py` | 内部 `/api/v1/internal/supervisor/**` |
+| BFF | `bff/supervisor/*` | 公开 `/api/v1/supervisor/**` 透传 |
+
+**内置能力**：
+
+| Agent | 能力 | 状态 |
+|---|---|---|
+| `ui_graph` | `ui_local_edit` | 可用 |
+| `architect_graph` | `global_architecture` | 可用 |
+| `backend_coder` | `backend_generation` | 预留 |
+| `script_agent` | `script_automation` | 预留 |
+
+**路由规则**：显式 `targetAgent` > 显式 `scopeHint` > UI + 架构关键词 = both >
+架构关键词 = Architect > 标注 / UI 关键词 = UI > 无信号 = rejected。
+
+**CustomAgent**：`SUPERVISOR_CUSTOM_AGENTS_DIR`（默认 `config/custom_agents`）
+只扫描 `*.json`；Manifest 声明 `taskTypes`、`keywords`、`systemPromptFile`、
+`ragKnowledgeDir`，禁止绝对路径与 `..`，不允许覆盖内置 Agent。当前只返回
+`handoff_custom` 路由计划，运行时尚待接入。
 
 ---
 
@@ -472,6 +510,10 @@ MinIO : http://127.0.0.1:9000  (admin/admin123，仅本地开发)
 | `POST` | `/api/v1/architect/runs/{runId}/contracts/{contractId}/decision` | 契约 `CONFIRM / REVISE / CANCEL` |
 | `POST` | `/api/v1/architect/runs/{runId}/cancel` | 取消 Architect Run |
 | `GET` | `/api/v1/architect/runs/{runId}` | Architect 快照 |
+| `POST` | `/api/v1/supervisor/route` | 只返回意图路由与 Handoff 计划 |
+| `POST` | `/api/v1/supervisor/dispatch` | 启动目标子图，返回子 Run ID 与 SSE 路径 |
+| `GET` | `/api/v1/supervisor/agents` | 查询 AgentRegistry |
+| `POST` | `/api/v1/supervisor/agents/reload` | 重新扫描 CustomAgent Manifest |
 
 ### 9.3 SSE 事件模型
 
@@ -497,7 +539,7 @@ MinIO : http://127.0.0.1:9000  (admin/admin123，仅本地开发)
 
 | 类别 | 工具 / 命令 | 说明 |
 |---|---|---|
-| Python 单元测试 | `python3 -m unittest discover -s services/orchestrator/tests` | 编辑器、Run 选项、RAG、Architect 等 46 个用例 |
+| Python 单元测试 | `python3 -m unittest discover -s services/orchestrator/tests` | 编辑器、Run 选项、RAG、Architect、Supervisor 等 62 个用例 |
 | Python 语法检查 | `python3 -m compileall services/orchestrator/ai_core` | 编译检查 |
 | Python 格式化 | `black .` | 当前环境 black 26.10.1 |
 | 浏览器 E2E | Playwright 1.64.1，Chromium | Python API，`/tmp/vibe-browser/bin/python` |
@@ -521,6 +563,7 @@ scripts/ui_copy_clean_e2e_test.py
 scripts/popover_equal_scale_e2e_test.py
 scripts/architect_m2_5_e2e_test.py
 scripts/architect_ui_e2e_test.py
+scripts/supervisor_e2e_test.py
 ```
 
 已知遗留：`rollback_e2e_test.py`、`annotation_delete_rollback_e2e_test.py` 仍按旧同步 `/runs` 响应编写，尚未适配 SSE 与审批暂停。
@@ -543,7 +586,7 @@ scripts/architect_ui_e2e_test.py
 | 多服务沙盒（web/api/db/edge） | 单 React/Vite 沙盒 | 全栈未实现 |
 | Qdrant / 向量 RAG | 已实现 Markdown + BM25 检索；无向量库 | `chroma.py` 仅占位 |
 | OpenAPI / JSON Schema 代码生成 | Pydantic / Jackson DTO 手写 | `packages/protocol` 仅 README |
-| Supervisor + 多 Agent 进程 | 单 LangGraph 图内多节点 | 无多 Agent 隔离与消息总线 |
+| Supervisor + 多 Agent 进程 | Supervisor 路由层已落地；UI / Architect 独立子图 | BackendCoder/DBA/Reviewer 未接入；无独立 Agent 进程与消息总线 |
 | Tree-sitter 结构化编辑 | 占位类 | 未安装依赖、未实现 |
 | 真实认证 / 多租户 | 前端 Mock 登录 | 无 Spring Security、无 JWT |
 | MinIO 源码 / 快照存储 | 客户端 Bean | 未写入对象 |
@@ -608,11 +651,13 @@ docker compose up -d
 | `docs/design/02.整体架构设计.md` | 目标架构、ADR、全栈演进 |
 | `docs/design/03.API接口设计.md` | 对外 API 契约 |
 | `docs/design/04.M2_Agent_ToolCalling_SSE_HITL.md` | SSE、HITL、CodeEditor 实际协议 |
+| `docs/design/05.Supervisor_Multi_Agent.md` | Supervisor 总调度、AgentRegistry、CustomAgent |
 | `docs/memory/00_project_brief.md` | 项目简报与里程碑 |
 | `docs/memory/2026-11-04_M2_SSE_HITL.md` | M2 阶段总结 |
 | `docs/memory/2026-11-05_M3A_diff_approval_cancel.md` | Diff 审批与取消 |
 | `docs/memory/2026-11-05_M3B_code_editor_abstraction.md` | CodeEditor 抽象 |
 | `docs/memory/2026-11-05_M2_5_app_shape_contract.md` | M2.5 应用形态与全栈契约 |
+| `docs/memory/2026-11-05_M2_5_supervisor_multi_agent.md` | Supervisor 总调度与 AgentRegistry |
 
 ---
 

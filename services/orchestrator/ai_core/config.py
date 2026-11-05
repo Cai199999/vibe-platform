@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     # LangGraph 单次执行的最大步数；3 次修复 + 7 个节点远低于该值。
     agent_graph_recursion_limit: int = 60
 
+    # Supervisor：企业 CustomAgent Manifest 目录。
+    # 只加载 JSON 声明，不执行代码；目录不存在时忽略。
+    supervisor_custom_agents_dir: str = "config/custom_agents"
+
     # HITL：Planner 置信度低于该阈值时触发澄清；请求可通过
     # options.confidenceThreshold 覆盖。
     agent_clarification_threshold: float = 0.7

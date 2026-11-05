@@ -20,6 +20,10 @@
   `script_automation` / `full_stack_system` 应用形态，再按形态动态追问与分级生成
   《全栈实施契约》；RAG 使用 Markdown + BM25；支持 `CONFIRM / REVISE / CANCEL`。
   细节见 `docs/memory/2026-11-05_M2_5_app_shape_contract.md`。
+- **M2.5 Supervisor 已落地（2026-11-05）**：新增只做意图路由的 Supervisor Graph，
+  通过 AgentRegistry 把请求分发到 UI Graph / Architect Graph / both；预留
+  BackendCoder、ScriptAgent 与企业 CustomAgent Manifest 扩展槽。
+  细节见 `docs/memory/2026-11-05_M2_5_supervisor_multi_agent.md`。
 
 ## 2. 核心技术栈
 
@@ -42,7 +46,8 @@
 - M18–M22：沙盒生命周期、Workspace Daemon、Preview Proxy、快照、资源治理
 - M23–M26：Model Router、Prompt/Context Packer、Policy/Guard、RAG（M2）
 - M27–M31：配额、审计、管理后台、legacy 兼容
-- M32–M37（M2 实现、M1 契约预留）：Supervisor、FrontendCoder、BackendCoder、DBA、Reviewer/IntegrationVerifier、多服务沙盒编排
+- M32–M37：Supervisor 路由 / AgentRegistry / CustomAgent Manifest 已落地（M2.5）；
+  FrontendCoder、BackendCoder、DBA、Reviewer/IntegrationVerifier、多服务沙盒编排仍按 M2 推进
 
 ## 4. 关键架构约束
 
@@ -62,6 +67,8 @@
 - `docs/design/01.功能模块梳理.md`：v1.1，已加入 M32–M37、澄清状态、全栈流程与 M1 预留验收。
 - `docs/design/02.整体架构设计.md`：v1.1，已加入多 Agent 拓扑、全栈多服务沙盒、澄清状态机、全栈数据表与演进路线。
 - `docs/design/03.API接口设计.md`：v1.1，已加入 `appType`、`services[]`、澄清接口、全栈标注契约、迁移/验证/事件/错误码。
+- `docs/design/04.M2_Agent_ToolCalling_SSE_HITL.md`：M2 执行层。
+- `docs/design/05.Supervisor_Multi_Agent.md`：Supervisor 总调度、AgentRegistry、Handoff 与 CustomAgent。
 - 本阶段只做设计，不写业务代码；实现按 M1 前端闭环优先推进。
 
 ## 6. 下一步

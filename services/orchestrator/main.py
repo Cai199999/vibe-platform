@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from ai_core.api.architect import router as architect_router
 from ai_core.api.runs import router as runs_router
 from ai_core.api.sandbox import router as sandbox_router
+from ai_core.api.supervisor import router as supervisor_router
 from ai_core.config import get_settings
 from ai_core.sandbox import get_sandbox_provider
 from ai_core.schemas import HealthResponse, PingResponse
@@ -43,6 +44,7 @@ app = FastAPI(
 app.include_router(sandbox_router)
 app.include_router(runs_router)
 app.include_router(architect_router)
+app.include_router(supervisor_router)
 
 
 @app.get("/api/v1/health", response_model=HealthResponse)

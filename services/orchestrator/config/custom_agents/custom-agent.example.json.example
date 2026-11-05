@@ -1,0 +1,15 @@
+{
+  "agentId": "custom_example",
+  "displayName": "企业专属专家（示例）",
+  "description": "示例 Manifest：复制为 .json 并修改后才会被加载。",
+  "version": "1.0.0",
+  "taskTypes": ["enterprise_example"],
+  "keywords": ["企业专属", "私有知识"],
+  "systemPromptFile": "prompts/example.md",
+  "ragKnowledgeDir": "knowledge/example",
+  "enabled": true,
+  "metadata": {
+    "tenantId": "tenant_demo",
+    "owner": "platform-team"
+  }
+}
