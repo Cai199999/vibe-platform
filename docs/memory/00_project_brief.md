@@ -58,6 +58,17 @@
   `./scripts/eval_suite.sh run` 复用 python-ai 镜像一次性容器执行。
   细节见 `docs/design/07.Eval_Suite.md` 与
   `docs/memory/2026-11-05_eval_suite.md`。
+- **Eval Suite v0.2 已落地（2026-11-05）**：新增 `scripts/run_eval.py`，
+  逐条调用真实 Supervisor 路由；代码用例通过 UI 子图启动 Docker 沙盒，
+  构建预览后从沙盒导出包读取 `src/App.jsx` 做正则断言；终端与
+  `docs/eval_report.md` 输出 10/10 PASS、总耗时与沙盒清理统计。
+  每条用例使用独立 `projectId + threadId` 防历史快照污染。细节见
+  `docs/memory/2026-11-05_eval_real_sandbox.md`。
+- **Admin Eval 契约预留（2026-11-05，设计）**：`POST /api/v1/admin/eval/run`
+  异步一键评测、评测详情与历史得分曲线；明确 Eval 与 Knowledge 解耦：
+  评测集是“考题”，知识库是“教材”。细节见
+  `docs/design/03.API接口设计.md` §14.4.2、`docs/design/06` §5.5、
+  `docs/design/07` §1.3 / §9。
 
 ## 2. 核心技术栈
 
@@ -87,8 +98,9 @@
 - M38–M41（M3）：Knowledge Service（数据中台）、Feedback Collector、
   Prompt Registry / 自优化、Admin Console；M3.1 已完成 Admin Console 入口与
   指标看板（含 Mock RBAC），其余仍为契约
-- M42（M3 质量基建）：Eval Suite 离线跑批已完成 v0.1（10 条核心用例、
-  路由 / 代码断言、JSON / Markdown / JUnit 报告）；HTTP / 真模型 / 沙盒引擎待扩展
+- M42（M3 质量基建）：Eval Suite 已完成 v0.2（离线引擎 + 真实沙盒引擎、
+  10 条核心用例、路由 / 代码断言、终端与 Markdown 报告）；DeepSeek 评测与
+  Admin 一键评测 / 历史曲线仍待扩展
 
 ## 4. 关键架构约束
 

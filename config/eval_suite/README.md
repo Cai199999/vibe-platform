@@ -1,8 +1,14 @@
 # Eval Suite 评测集
 
-`core_cases.yaml` 是 vibe-platform 的核心回归评测集。它不启动前端、不启动
-FastAPI、不创建沙盒容器，默认用 AI Core 的确定性 Mock 模型完成
-“Supervisor 路由 + UI 代码生成”断言，适合每次提交与 CI 跑批。
+`core_cases.yaml` 是 vibe-platform 的核心回归评测集。同一份 YAML 支持两种
+执行方式：
+
+- **离线引擎**：不启动前端、不启动 FastAPI、不创建沙盒，用确定性 Mock
+  完成“Supervisor 路由 + UI 代码生成”断言，秒级完成，适合每次提交与 CI；
+- **真实沙盒引擎**：经 BFF / AI Core 启动 Docker 沙盒，验证构建、预览与
+  真实源码落盘，适合合并前或夜间跑批。
+
+评测集是“考题”，RAG 知识库是“教材”：考题不写入知识库，也不作为检索语料。
 
 ## 目录
 
@@ -30,7 +36,14 @@ config/eval_suite/
 
 # 只跑 smoke 标签
 ./scripts/eval_suite.sh run --tag smoke
+
+# 真实沙盒引擎（需 BFF :8080 / AI Core :8100 / Docker 已启动）
+python scripts/run_eval.py
+python scripts/run_eval.py --filter case_001 --verbose
 ```
+
+离线报告写入 `reports/eval/`；真实沙盒报告写入 `docs/eval_report.md`，
+终端同时输出成功数、失败数、通过率与总耗时，结束后自动清理沙盒。
 
 报告默认写入 `reports/eval/`（已加入 `.gitignore`）：
 

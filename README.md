@@ -430,6 +430,17 @@ Architect、both、CustomAgent 与缺标注守卫；使用真实路由 + 确定�
 生成，不启动业务服务与沙盒。报告写入 `reports/eval/`（JSON / Markdown /
 JUnit）。详见 `config/eval_suite/README.md` 与 `docs/design/07.Eval_Suite.md`。
 
+### 0.1 Eval Suite 真实沙盒跑批（需三服务已启动）
+
+```bash
+python scripts/run_eval.py                    # 10/10 PASS，约 35 s
+python scripts/run_eval.py --filter case_001  # 单条冒烟
+```
+
+逐条走真实 Supervisor 路由；有代码断言的用例启动 Docker 沙盒、构建、预览，
+再从沙盒导出包读取 `src/App.jsx` 做正则断言。终端输出成功 / 失败 / 耗时，
+报告写入 `docs/eval_report.md`，结束后自动清理沙盒。
+
 ### 1. 全链路 E2E（推荐）
 
 ```bash
