@@ -99,26 +99,19 @@ def assert_no_drift(before: dict, after: dict, label: str) -> None:
 
 
 def send_in_popover(page, active, popover, text: str, label: str) -> dict:
-    """发送一条指令，审批后返回等价于旧同步响应的摘要。
+    """发送一条指令，等待 SSE 成功终态后返回摘要。
 
-    M2 起 Run 走 SSE，且产品前端默认 approvalMode=required：
-    发送 -> 等待审批 -> 批准 -> 等待“已完成”，再从 RuntimePanel 读取 sandboxId。
+    设置默认关闭人工审批：验证通过后直接 SUCCEEDED，不再停留于审批。
     """
     popover.locator("input").fill(text, force=True)
     popover.locator(".popover-send").click(force=True)
 
-    pause_cta = active.locator(".view-result-cta.is-pending")
-    expect(pause_cta).to_be_visible(timeout=180_000)
-    pause_cta.click()
-    approval = active.locator(".loading-state.is-approval")
-    expect(approval).to_be_visible(timeout=30_000)
-    approval.get_by_role("button", name="批准并应用").click()
     expect(active.locator(".runtime-result-overlay .status-pill")).to_contain_text(
         "已完成", timeout=180_000
     )
     # sandboxId 在 run.succeeded 后才写入 RuntimePanel。
     sandbox_id = active.locator(".runtime-panel").get_attribute("data-sandbox-id") or ""
-    # 审批暂停会自动切到预览；切回画布才能继续编辑对话气泡与下一轮指令。
+    # 免审批路径不切换视口；若测试中曾手动切到预览，则回到画布继续下一轮。
     active.get_by_role("button", name="画布", exact=True).click()
     expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
 

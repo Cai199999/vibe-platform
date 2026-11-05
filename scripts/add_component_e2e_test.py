@@ -95,14 +95,7 @@ def main() -> int:
             print("\n== 4. 发送并等待沙盒构建完成 ==")
             popover.locator(".popover-send").click()
             expect(active.locator(".seg-status-running")).to_be_visible(timeout=10_000)
-            # 产品前端默认 approvalMode=required：构建通过后先审批再落盘。
-            # 画布侧出现“查看审批差异”入口，点击后切到预览侧审批面板。
-            pause_cta = active.locator(".view-result-cta.is-pending")
-            expect(pause_cta).to_be_visible(timeout=180_000)
-            pause_cta.click()
-            approval = active.locator(".loading-state.is-approval")
-            expect(approval).to_be_visible(timeout=30_000)
-            approval.get_by_role("button", name="批准并应用").click()
+            # 设置默认关闭人工审批：构建验证通过后直接 SUCCEEDED。
             expect(
                 active.locator(".runtime-result-overlay .status-pill")
             ).to_contain_text("已完成", timeout=180_000)
@@ -116,8 +109,7 @@ def main() -> int:
             print(f"   状态: {status_text.strip()} / 沙盒: {sandbox_id}")
 
             print("\n== 5. 预览中出现红色提交按钮，原有 CTA 未被覆盖 ==")
-            # 审批暂停会自动切到预览；若仍停在画布（例如以后关闭自动切换），
-            # 则点击“查看效果”进入预览。
+            # 免审批路径完成后仍停留在画布，点击“查看效果”进入预览。
             view_result = active.locator(".view-result-cta")
             if view_result.is_visible():
                 view_result.click()

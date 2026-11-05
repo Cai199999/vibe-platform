@@ -151,13 +151,7 @@ def main() -> int:
 
             print("\n== 4. 一键提交 AnnotationEnvelope[] ==")
             active.locator(".submit-annotations").click()
-            # 产品前端默认 approvalMode=required：构建通过后先审批再落盘。
-            pause_cta = active.locator(".view-result-cta.is-pending")
-            expect(pause_cta).to_be_visible(timeout=180_000)
-            pause_cta.click()
-            approval = active.locator(".loading-state.is-approval")
-            expect(approval).to_be_visible(timeout=30_000)
-            approval.get_by_role("button", name="批准并应用").click()
+            # 设置默认关闭人工审批：构建验证通过后直接 SUCCEEDED。
             expect(
                 active.locator(".runtime-result-overlay .status-pill")
             ).to_contain_text("已完成", timeout=180_000)
@@ -177,7 +171,7 @@ def main() -> int:
             print(f"   沙盒: {sandbox_id}")
 
             print("\n== 5. 预览中 3 处修改同时生效 ==")
-            # 审批暂停会自动切到预览；兼容仍停留在画布的情况。
+            # 免审批完成时停留在画布，点击“查看效果”进入预览。
             view_result = active.locator(".view-result-cta")
             if view_result.is_visible():
                 view_result.click()

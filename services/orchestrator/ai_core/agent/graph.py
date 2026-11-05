@@ -6,7 +6,8 @@
                 ▲              │           ▲                              │
                 │              │(澄清)     └──── repair (<= 3 次) ◄───────┤
                 │              ▼                                          │
-                └──── replan / interrupt()                                ├─ success -> awaiting_approval
+                └──── replan / interrupt()                                ├─ success + 审批 -> approval_gate -> awaiting_approval
+                                                                          ├─ success + 免审批 -> succeeded (SUCCEEDED)
                                                                           └─ exhausted -> failed
 
 节点内部通过 ``EventSink`` 推送 node.* 事件；执行与 SSE 连接解耦。
@@ -51,6 +52,7 @@ NODE_LABELS = {
     "evaluator": "整理结果",
     "approval_gate": "等待人工审批",
     "awaiting_approval": "确认结果",
+    "succeeded": "完成",
     "rejected": "用户拒绝",
     "failed": "执行失败",
 }
@@ -187,6 +189,10 @@ class AgentGraphRunner:
             ),
         )
         builder.add_node("awaiting_approval", self._awaiting_approval)
+        builder.add_node(
+            "succeeded",
+            self._instrument("succeeded", NODE_LABELS["succeeded"], self._succeeded),
+        )
         builder.add_node("rejected", self._rejected)
         builder.add_node("failed", self._failed)
 
@@ -215,6 +221,7 @@ class AgentGraphRunner:
                 "coder": "coder",
                 "approval_gate": "approval_gate",
                 "awaiting_approval": "awaiting_approval",
+                "succeeded": "succeeded",
                 "failed": "failed",
             },
         )
@@ -227,6 +234,7 @@ class AgentGraphRunner:
             },
         )
         builder.add_edge("awaiting_approval", END)
+        builder.add_edge("succeeded", END)
         builder.add_edge("rejected", END)
         builder.add_edge("failed", END)
         return builder.compile(checkpointer=self._checkpointer_provider.get())
@@ -652,14 +660,31 @@ class AgentGraphRunner:
         max_retries = int(state.get("max_retries", self._max_retries))
 
         if verify.get("success"):
+            # 构建通过。是否暂停完全由调用方开关决定：
+            #   true  -> approval_gate 等待逐文件审批；
+            #   false -> 直接结束图，由 Service 提交 Git 并发送 run.succeeded。
+            # 重试耗尽后的 FAILED 分支不受该开关影响。
+            if state.get("approval_required"):
+                return {
+                    "next_action": "approve",
+                    "status": "AWAITING_APPROVAL",
+                    "error": None,
+                    "messages": [
+                        _message(
+                            "evaluator",
+                            f"验证通过（重试 {retry_count} 次），" "等待人工审批",
+                        )
+                    ],
+                }
             return {
-                "next_action": "approve",
-                "status": "AWAITING_APPROVAL",
+                "next_action": "succeed",
+                "status": "SUCCEEDED",
                 "error": None,
                 "messages": [
                     _message(
                         "evaluator",
-                        f"验证通过（重试 {retry_count} 次），流转 AWAITING_APPROVAL",
+                        f"验证通过（重试 {retry_count} 次），"
+                        "未开启人工审批，直接完成",
                     )
                 ],
             }
@@ -770,6 +795,18 @@ class AgentGraphRunner:
             "messages": [_message("awaiting_approval", content)],
         }
 
+    def _succeeded(self, state: AgentState) -> dict[str, Any]:
+        """免审批成功终态。
+
+        Git checkpoint 与 ``run.succeeded`` 由 Service 统一提交 / 发送；
+        这里只负责把最终状态收敛为 SUCCEEDED。
+        """
+        return {
+            "status": "SUCCEEDED",
+            "error": None,
+            "error_code": None,
+        }
+
     def _rejected(self, state: AgentState) -> dict[str, Any]:
         return {
             "status": "REJECTED",
@@ -812,12 +849,10 @@ class AgentGraphRunner:
     def _route_after_evaluator(self, state: AgentState) -> str:
         action = state.get("next_action")
         if action == "approve":
-            # 产品前端显式开启审批；旧客户端 / 回归直接进入确认节点。
-            return (
-                "approval_gate"
-                if state.get("approval_required")
-                else "awaiting_approval"
-            )
+            return "approval_gate"
+        if action == "succeed":
+            # 开关关闭：验证通过即终态，不经过审批 / 确认节点。
+            return "succeeded"
         if action == "retry":
             return "coder"
         return "failed"

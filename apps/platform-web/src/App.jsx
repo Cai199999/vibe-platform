@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './auth/AuthContext.jsx'
+import { SettingsProvider } from './settings/SettingsContext.jsx'
 import LoginPage from './pages/LoginPage.jsx'
 import WorkspacePage from './pages/WorkspacePage.jsx'
 
@@ -19,19 +20,21 @@ export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route
-            path="/workspace"
-            element={
-              <ProtectedRoute>
-                <WorkspacePage />
-              </ProtectedRoute>
-            }
-          />
-          <Route path="/" element={<Navigate to="/workspace" replace />} />
-          <Route path="*" element={<Navigate to="/workspace" replace />} />
-        </Routes>
+        <SettingsProvider>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route
+              path="/workspace"
+              element={
+                <ProtectedRoute>
+                  <WorkspacePage />
+                </ProtectedRoute>
+              }
+            />
+            <Route path="/" element={<Navigate to="/workspace" replace />} />
+            <Route path="*" element={<Navigate to="/workspace" replace />} />
+          </Routes>
+        </SettingsProvider>
       </AuthProvider>
     </BrowserRouter>
   )

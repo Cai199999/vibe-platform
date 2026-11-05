@@ -7,7 +7,7 @@ const initials = (name = 'V') => name.trim().slice(0, 1).toUpperCase()
 /**
  * 工作台顶栏：品牌、运行状态、用户头像与账户菜单。
  */
-export default function AppHeader({ busy, onOpenAccount }) {
+export default function AppHeader({ busy, onOpenAccount, onOpenSettings }) {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
   const [menuOpen, setMenuOpen] = useState(false)
@@ -85,7 +85,17 @@ export default function AppHeader({ busy, onOpenAccount }) {
                   onOpenAccount()
                 }}
               >
-                账户设置
+                账户
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false)
+                  onOpenSettings()
+                }}
+              >
+                设置
               </button>
               <button type="button" role="menuitem" className="is-danger" onClick={handleLogout}>
                 退出登录

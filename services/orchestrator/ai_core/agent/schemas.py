@@ -129,9 +129,16 @@ class RunOptions(CamelModel):
       - always: 即使高置信度也先确认范围（调试用）；
       - off   : 禁用 HITL，按当前最佳计划执行（降级 / 回归用）。
 
+    require_manual_approval：
+      - true : 构建通过后暂停，等待用户逐文件查看 Diff 后批准/拒绝；
+      - false: 构建通过后直接提交 checkpoint 并返回 SUCCEEDED（默认）。
+
     approval_mode：
-      - required: 构建通过后暂停，等待用户逐文件查看 Diff 后批准/拒绝；
-      - off     : 兼容旧客户端与回归脚本，构建通过后直接提交 checkpoint。
+      - required: 旧协议，等同于 requireManualApproval=true；
+      - off     : 旧协议默认值，等同于 requireManualApproval=false。
+
+    两者同时出现时 ``require_manual_approval`` 优先；新客户端只发送
+    ``requireManualApproval``。
     """
 
     llm_provider: Literal["auto", "mock", "deepseek"] = "auto"
@@ -144,8 +151,22 @@ class RunOptions(CamelModel):
     max_clarification_rounds: int = Field(default=3, ge=1, le=3)
     # None 时使用服务端配置 AGENT_CLARIFICATION_THRESHOLD。
     confidence_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
-    # 默认 off 保持 M2 同步 / 回归接口行为；产品前端显式传 required。
+    # 产品前端开关：代码生成并验证通过后是否暂停等待人工审批。
+    # None 表示未显式传值，此时回退到旧字段 approval_mode。
+    require_manual_approval: bool | None = None
+    # 旧字段：required / off。保留以兼容既有 E2E 与外部调用方。
     approval_mode: Literal["required", "off"] = "off"
+
+    @property
+    def manual_approval_required(self) -> bool:
+        """解析出本次 Run 是否需要在构建通过后暂停。
+
+        新字段优先；旧字段仅在调用方没有发送 ``requireManualApproval``
+        时生效，保证前后端灰度期间两套协议可以并存。
+        """
+        if self.require_manual_approval is not None:
+            return self.require_manual_approval
+        return self.approval_mode == "required"
 
 
 class ExecuteRunRequest(CamelModel):

@@ -10,7 +10,7 @@ const maskToken = (token = '') => {
 const initials = (name = 'V') => name.trim().slice(0, 1).toUpperCase()
 
 /**
- * 账户设置弹窗（M1：只读展示 Mock 会话与退出登录）。
+ * 账户弹窗（M1：只读展示 Mock 会话与退出登录）。
  */
 export default function AccountDialog({ open, onClose }) {
   const { session, user, logout } = useAuth()
@@ -45,7 +45,7 @@ export default function AccountDialog({ open, onClose }) {
         <div className="dialog-head">
           <div>
             <span className="eyebrow">Account</span>
-            <h2 id="account-dialog-title">账户设置</h2>
+            <h2 id="account-dialog-title">账户</h2>
           </div>
           <button className="icon-button" type="button" onClick={onClose} aria-label="关闭">
             ×

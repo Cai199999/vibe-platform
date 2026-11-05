@@ -849,8 +849,9 @@ class RunExecutionService:
                 "clarification_round": 0,
                 "clarification_answers": [],
                 "clarification": None,
-                # HITL Diff 审批
-                "approval_required": request.options.approval_mode == "required",
+                # HITL Diff 审批：新字段 requireManualApproval 优先，
+                # 旧 approvalMode 仅作为兼容回退。
+                "approval_required": request.options.manual_approval_required,
                 "approval": None,
                 "approval_id": None,
                 "approval_decision": None,
@@ -1024,8 +1025,9 @@ class RunExecutionService:
         baseline_commit: str | None = None
         commits: list[RunCommitRecord] = []
 
-        if status == "AWAITING_APPROVAL":
-            # 审批通过或无审批模式：此时才允许形成可回滚 checkpoint。
+        if status in {"AWAITING_APPROVAL", "SUCCEEDED"}:
+            # 审批通过（AWAITING_APPROVAL）或免审批直接成功（SUCCEEDED）：
+            # 此时才允许形成可回滚 checkpoint，并统一收敛为 SUCCEEDED。
             try:
                 commit_hash = self._sandbox.git_commit(
                     prepared.handle.sandbox_id,

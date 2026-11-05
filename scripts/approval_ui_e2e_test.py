@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """M3-A Diff 审批 / 取消 Run 的浏览器级 E2E。
 
-覆盖产品前端（approvalMode=required）的三条主路径：
+覆盖产品前端（设置中开启「代码生成后需人工审批」）的三条主路径：
   1. 提交修改 -> 预览面板出现逐文件 Diff -> 批准并应用 -> 预览变蓝；
   2. 审批暂停时画布输入框冻结；
   3. 再次提交 -> 取消执行 -> 状态「已取消」，预览保持上一轮结果；
@@ -29,6 +29,17 @@ BLUE = "rgb(0, 0, 255)"
 def fail(message: str) -> None:
     print(f"\nFAIL: {message}")
     raise SystemExit(1)
+
+
+def enable_manual_approval(page) -> None:
+    """产品默认关闭审批；本用例显式打开设置开关后再刷新。"""
+    page.evaluate(
+        "window.localStorage.setItem("
+        "'vibe.settings.v1',"
+        "JSON.stringify({requireManualApproval:true})"
+        ")"
+    )
+    page.reload(wait_until="networkidle")
 
 
 def draw_around(page, locator) -> None:
@@ -91,6 +102,9 @@ def main() -> int:
         page.goto(f"{WEB_URL}workspace", wait_until="networkidle")
         page.get_by_role("button", name="一键体验（推荐）").click()
         expect(page.locator(".workspace-tab")).to_have_count(1)
+        active = page.locator(".tab-window.is-active")
+        active.locator(".model-picker select").select_option("mock")
+        enable_manual_approval(page)
         active = page.locator(".tab-window.is-active")
         active.locator(".model-picker select").select_option("mock")
         active.get_by_role("button", name="展示模式").click()

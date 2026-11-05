@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import AppHeader from '../components/AppHeader.jsx'
 import AccountDialog from '../components/AccountDialog.jsx'
+import SettingsDialog from '../components/SettingsDialog.jsx'
 import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
 import ProjectWorkspace from '../components/ProjectWorkspace.jsx'
 import WorkspaceTabs from '../components/WorkspaceTabs.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
+import { useSettings } from '../settings/SettingsContext.jsx'
 import { useWorkspace } from '../workspace/useWorkspace.js'
 import { streamRun } from '../workspace/runStream.js'
 import { INITIAL_APP } from '../mockProject.js'
@@ -596,6 +598,7 @@ function EmptyWorkspace({ onNewProject }) {
 
 export default function WorkspacePage() {
   const { user, session } = useAuth()
+  const { requireManualApproval } = useSettings()
   const {
     projects,
     openTabs,
@@ -620,6 +623,7 @@ export default function WorkspacePage() {
     return MODEL_PROVIDERS.has(saved) ? saved : 'auto'
   })
   const [accountOpen, setAccountOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   // 导出状态只保留一个：同时下载多个项目没有意义，且提示条全局唯一。
   const [exportingProjectId, setExportingProjectId] = useState(null)
   const [exportNotice, setExportNotice] = useState(null)
@@ -1261,8 +1265,9 @@ export default function WorkspacePage() {
         mockScenario: 'none',
         maxRetries: 3,
         keepSandbox: true,
-        // 构建通过后先暂停，等待用户查看 Diff 再写入 Git。
-        approvalMode: 'required',
+        // 用户设置：开启后构建通过会暂停等待人工审批；默认关闭，
+        // 验证通过直接提交 checkpoint 并返回 SUCCEEDED。
+        requireManualApproval,
       },
     }
 
@@ -1335,8 +1340,8 @@ export default function WorkspacePage() {
         mockScenario: 'fail_first',
         maxRetries: 3,
         keepSandbox: true,
-        // 批量提交同样需要人工确认，批准后才提交 Git checkpoint。
-        approvalMode: 'required',
+        // 与单标注发送读取同一个全局设置。
+        requireManualApproval,
       },
     }
 
@@ -1572,7 +1577,11 @@ export default function WorkspacePage() {
 
   return (
     <div className="app-shell app-shell-wide">
-      <AppHeader busy={anyRunning} onOpenAccount={() => setAccountOpen(true)} />
+      <AppHeader
+        busy={anyRunning}
+        onOpenAccount={() => setAccountOpen(true)}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
 
       <main className="workspace">
         <div className="workspace-toolbar">
@@ -1682,6 +1691,7 @@ export default function WorkspacePage() {
       )}
 
       <AccountDialog open={accountOpen} onClose={() => setAccountOpen(false)} />
+      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   )
 }

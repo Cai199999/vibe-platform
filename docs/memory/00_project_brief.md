@@ -12,6 +12,10 @@
 - **M3-B 已落地（2026-11-05）**：`CheckpointerProvider`、`CodeEditor` / `AnchorCodeEditor` /
   `FileCreator` / `TreeSitterEditor` 占位与 `EditorRegistry`；Mock 与 Coder files 模式已接入。
   细节见 `docs/memory/2026-11-05_M3B_code_editor_abstraction.md`。
+- **M3-C 已落地（2026-11-05）**：右上角「设置」弹窗提供「代码生成后需人工审批」开关，
+  默认关闭并持久化到 localStorage；请求携带 `options.requireManualApproval`，
+  关闭时验证通过直接成功，开启时才进入 Diff 审批。
+  细节见 `docs/memory/2026-11-05_manual_approval_setting.md`。
 
 ## 2. 核心技术栈
 
@@ -40,7 +44,8 @@
 
 1. 禁止物理外键；所有业务表带 `tenant_id`，关联一致性由业务代码、唯一索引与对账保证。
 2. Java 是业务系统 of record；Python 是 Agent 执行状态 of record；通过事件、`seq` 与幂等最终一致。
-3. 沙盒是唯一写入口；所有项目快照写入必须用户审批。
+3. 沙盒是唯一写入口；代码写入默认在构建验证通过后自动提交 checkpoint，
+   用户可在「设置」中开启人工 Diff 审批，开启后必须批准才提交。
 4. 自动修复最多 3 次；同一错误指纹重复/无进展/预算耗尽即停止。
 5. 全栈沙盒数据库为临时实例：随机口令、无宿主端口、不连接生产库；迁移 up/down 成对验证。
 6. 多 Agent 只有 Supervisor 写共享 State；契约先行（ApiContract + DataModel），子 Agent 返回结构化 `AgentResult`。

@@ -71,7 +71,8 @@ class AgentState(TypedDict, total=False):
     clarification_ttl_hours: int
 
     # ---- HITL Diff 审批 ----
-    # 是否在构建通过后暂停等待人工审批；由 options.approvalMode 决定。
+    # 是否在构建通过后暂停等待人工审批；由 options.requireManualApproval
+    # 决定（旧协议 approvalMode 作为兼容回退）。
     approval_required: bool
     # 当前待决策审批（暂停时由 checkpoint 保留）。
     approval: dict[str, Any] | None

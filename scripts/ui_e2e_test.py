@@ -482,17 +482,10 @@ def main() -> None:
         page.wait_for_timeout(900)
         page.screenshot(path=str(SCREENSHOT_DIR / "phase4-loading.png"), full_page=True)
 
-        # 默认审批：构建通过后画布侧出现“查看审批差异”，批准后回到画布。
-        pause_cta = active.locator(".view-result-cta.is-pending")
-        expect(pause_cta).to_be_visible(timeout=180_000)
-        pause_cta.click()
-        approval = active.locator(".loading-state.is-approval")
-        expect(approval).to_be_visible(timeout=30_000)
-        approval.get_by_role("button", name="批准并应用").click()
+        # 设置默认关闭人工审批：构建验证通过后直接完成，仍停留在画布。
         expect(active.locator(".runtime-result-overlay .status-pill")).to_contain_text(
             "已完成", timeout=180_000
         )
-        active.get_by_role("button", name="画布", exact=True).click()
         expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
 
         expect(active.locator(".view-result-cta")).to_be_visible(timeout=120_000)
@@ -919,10 +912,10 @@ def main() -> None:
         )
 
         retry.click()
-        # retry 从预览侧发起，审批面板直接出现在当前视口。
-        approval = active.locator(".loading-state.is-approval")
-        expect(approval).to_be_visible(timeout=180_000)
-        approval.get_by_role("button", name="批准并应用").click()
+        # 免审批路径：retry 从预览侧发起，验证通过后直接 SUCCEEDED。
+        expect(active.locator(".runtime-result-overlay .status-pill")).to_contain_text(
+            "已完成", timeout=180_000
+        )
         expect(active.locator(".runtime-result-overlay")).to_be_visible(timeout=120_000)
         recreated_sandbox_id = active.locator(".runtime-panel").get_attribute(
             "data-sandbox-id"
@@ -988,9 +981,10 @@ def main() -> None:
             fail(f"项目名称出现重复: {names}")
         print("   关闭项目 2 后，新项目按存活数递增为「未命名项目 7」")
 
-        print("\n== 15. 账户设置、退出与账号密码登录 ==")
+        print("\n== 15. 账户、设置菜单、退出与账号密码登录 ==")
         page.locator(".avatar-button").click()
-        page.get_by_role("menuitem", name="账户设置").click()
+        expect(page.get_by_role("menuitem", name="设置", exact=True)).to_be_visible()
+        page.get_by_role("menuitem", name="账户", exact=True).click()
         expect(page.locator(".account-dialog")).to_be_visible()
         expect(page.get_by_text("demo@vibe.local")).to_be_visible()
         page.screenshot(path=str(SCREENSHOT_DIR / "phase4-account.png"), full_page=True)
