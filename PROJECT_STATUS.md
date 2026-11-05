@@ -43,6 +43,7 @@ UI 修改在 Docker 沙盒中自动编码、构建、验证并生成 Git checkpo
 | M3 管理中台契约 | 📐 设计完成 | `/admin`、Agent 指标、Prompt Registry 版本/灰度/回滚、审计 |
 | M3 反馈自优化契约 | 📐 设计完成 | `REVISE` 采集、聚类、候选 Prompt、离线评估、人工审批；**不做微调** |
 | M3.1 管理中台骨架 | ✅ 已完成 | `/admin` 入口与路由守卫、`@IsAdmin` Mock RBAC、`GET /admin/metrics` 内存聚合、四卡 + Agent 占比 + 最近 10 次 Run |
+| Eval Suite v0.1 | ✅ 已完成 | 10 条核心 YAML 用例、Supervisor 路由断言、Mock 代码断言、JSON / Markdown / JUnit 报告、Docker 包装 CLI |
 | M3.2-M3.4 中台实现 | ⏳ 未开始 | 知识中台 → Prompt Registry → 反馈自优化 |
 | 全栈代码生成 | ⏳ 未开始 | 契约尚未驱动 Spring Boot / MySQL / 脚本生成 |
 | 多服务沙盒 | ⏳ 未开始 | 当前只有单 React/Vite 沙盒 |
@@ -220,6 +221,16 @@ flowchart LR
 - 项目导出为可运行 React/Vite 工程。
 - 预览 iframe、构建产物与 Git 提交状态可查看。
 
+### 4.9 自动化评测（Eval Suite）
+
+- `config/eval_suite/core_cases.yaml`：10 条核心用例，覆盖 UI 改色 / 文案 /
+  缩放 / 新增、双标注批量、Architect、both、CustomAgent、缺标注守卫与未知意图。
+- `services/orchestrator/eval_suite/`：Loader 严格校验 → 真实 `SupervisorService`
+  路由 → `MockAgentLLM` 确定性代码生成 → 断言 → 报告；不启动业务服务与沙盒。
+- `./scripts/eval_suite.sh run`：复用 `python-ai` 镜像一次性容器执行，输出
+  `reports/eval/` 下的 JSON / Markdown / JUnit；失败时逐条打印期望值与实际值。
+- 单测覆盖加载器错误、断言失败、报告写出；与真实沙盒 / DeepSeek E2E 互补。
+
 ---
 
 ## 5. 对外 API 概览
@@ -262,7 +273,8 @@ flowchart LR
 
 | 类型 | 结果 |
 |---|---|
-| Python 单元测试 | **66 passed** |
+| Python 单元测试 | **81 passed**（含 Eval Suite 9 项） |
+| Eval Suite 离线跑批 | **PASS**（10/10，约 40 ms） |
 | Supervisor API E2E（直连 AI Core） | **PASS** |
 | Supervisor API E2E（经 Java BFF） | **PASS** |
 | both 混合 API E2E（直连 / BFF） | **PASS** |
@@ -311,6 +323,7 @@ API 级 both E2E 还覆盖：
 | Tree-sitter 编辑 | 占位类 | 未安装依赖、未实现结构化替换 |
 | OpenAPI / Schema 代码生成 | 手写 DTO | `packages/protocol` 仅 README |
 | 配额 / 审计 / 管理后台 | 无 | 未实现 |
+| Eval Suite 覆盖边界 | 路由 + Mock 生成 | 尚未接入 HTTP / DeepSeek / 真实沙盒引擎，未做历史趋势基线 |
 | 沙盒隔离强度 | 普通 Docker | 未使用 gVisor / Firecracker / K8s |
 | 门控多副本 | 单进程内存 | 需 Redis / MySQL 分布式锁 |
 
@@ -341,6 +354,7 @@ API 级 both E2E 还覆盖：
 2. 真实认证、租户隔离、审计与配额。
 3. Tree-sitter 结构化编辑、OpenAPI 代码生成。
 4. Agent 市场。
+5. Eval Suite 扩展到 HTTP / DeepSeek / 真实沙盒引擎，并沉淀通过率与耗时基线。
 
 ### P3：Agent OS 中台（M3，M3.1 已落地）
 
@@ -364,6 +378,8 @@ API 级 both E2E 还覆盖：
 | `docs/design/04.M2_Agent_ToolCalling_SSE_HITL.md` | SSE、HITL、执行层 |
 | `docs/design/05.Supervisor_Multi_Agent.md` | Supervisor、声明式 Manifest、SkillRegistry、Memory / MCP 边界、both 强门控、CustomAgent 沙盒隔离 |
 | `docs/design/06.Agent_OS_Data_Management.md` | M3 数据中台 / 管理中台 / 反馈自优化契约（设计） |
+| `docs/design/07.Eval_Suite.md` | Eval Suite 评测集契约、离线执行器、断言、报告与 CI 接入 |
+| `config/eval_suite/README.md` | 核心评测集使用说明与新增用例流程 |
 | `docs/memory/00_project_brief.md` | 项目简报与里程碑 |
 | `docs/memory/2026-11-05_M2_5_supervisor_frontend_gate.md` | 前端统一调度与 both 强门控实现记录 |
 | `docs/memory/2026-11-05_M2_5_agent_manifest_skill.md` | 声明式 Manifest、Skill 预留与边界 |
@@ -377,6 +393,10 @@ API 级 both E2E 还覆盖：
 ```bash
 # 启动平台三服务（中间件已在 ~/Workspace/infra 运行）
 docker compose up -d
+
+# Eval Suite 离线跑批（不需要启动任何业务服务）
+./scripts/eval_suite.sh run
+./scripts/eval_suite.sh list
 
 # Python 单元测试（在 AI 镜像内运行，挂载当前仓库）
 docker run --rm -v "$PWD":/repo -w /repo/services/orchestrator \

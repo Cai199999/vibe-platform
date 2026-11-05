@@ -43,3 +43,6 @@ Thumbs.db
 # 运行时
 node_modules/
 coverage/
+
+# 评测报告（本地 / CI 生成）
+reports/

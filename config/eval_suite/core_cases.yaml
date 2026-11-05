@@ -1,0 +1,243 @@
+# ============================================================
+# vibe-platform 核心评测集（Eval Suite）
+#
+# 设计原则：
+#   1. 离线、确定性、零密钥：默认使用 AI Core 的 MockAgentLLM，
+#      不启动 Docker 沙盒、不访问网络，适合本地与 CI 每次提交运行。
+#   2. 一条用例只验证一个明确契约：路由（Supervisor）+ 代码结果（Mock 生成）。
+#   3. expected_code_contains 是“生成代码中必须出现的稳定片段”，
+#      不是整段代码快照，避免无关格式变化导致误报。
+#
+# 运行：
+#   ./scripts/eval_suite.sh run
+#   ./scripts/eval_suite.sh list
+#   ./scripts/eval_suite.sh validate
+# ============================================================
+
+- id: "case_001"
+  name: "UI 修改：将按钮变红"
+  tags: ["ui", "style", "smoke"]
+  input:
+    target_agent: "auto"
+    fixture: "react_dashboard"
+    text: "改成红色"
+    annotation:
+      annotationId: "ann_eval_001"
+      type: "note"
+      action: "MODIFY"
+      target:
+        mode: "source"
+        selector: "[data-source='primary-action']"
+        source:
+          file: "src/App.jsx"
+          component: "PrimaryButton"
+      payload:
+        text: "改成红色"
+  assertions:
+    expected_handoff: "handoff_ui"
+    expected_agent: "ui_graph"
+    expected_task_type: "ui_local_edit"
+    expected_dispatchable: true
+    expected_handoffs: ["ui_graph"]
+    expected_code_contains: ["background-color:red"]
+
+- id: "case_002"
+  name: "UI 修改：替换标题文案"
+  tags: ["ui", "copy", "smoke"]
+  input:
+    target_agent: "auto"
+    fixture: "react_dashboard"
+    text: "标题改成欢迎回来"
+    annotation:
+      annotationId: "ann_eval_002"
+      type: "note"
+      action: "MODIFY"
+      target:
+        mode: "source"
+        selector: "[data-source='hero-title']"
+        source:
+          file: "src/App.jsx"
+          component: "HeroTitle"
+      payload:
+        text: "标题改成欢迎回来"
+  assertions:
+    expected_handoff: "handoff_ui"
+    expected_agent: "ui_graph"
+    expected_task_type: "ui_local_edit"
+    expected_dispatchable: true
+    expected_handoffs: ["ui_graph"]
+    expected_code_contains: ["欢迎回来"]
+
+- id: "case_003"
+  name: "UI 修改：卡片放大一倍"
+  tags: ["ui", "layout"]
+  input:
+    target_agent: "auto"
+    fixture: "react_dashboard"
+    text: "卡片放大一倍"
+    annotation:
+      annotationId: "ann_eval_003"
+      type: "note"
+      action: "MODIFY"
+      target:
+        mode: "source"
+        selector: ".pricing-card"
+        source:
+          file: "src/App.jsx"
+          component: "PricingCard"
+      payload:
+        text: "卡片放大一倍"
+  assertions:
+    expected_handoff: "handoff_ui"
+    expected_agent: "ui_graph"
+    expected_task_type: "ui_local_edit"
+    expected_dispatchable: true
+    expected_handoffs: ["ui_graph"]
+    expected_code_contains: ["transform:scale(2)"]
+
+- id: "case_004"
+  name: "UI 新增：添加红色提交按钮"
+  tags: ["ui", "add-component"]
+  input:
+    target_agent: "auto"
+    fixture: "react_dashboard"
+    text: "添加一个红色的提交按钮"
+    annotation:
+      annotationId: "ann_eval_004"
+      type: "note"
+      action: "ADD"
+      worldTarget:
+        x: 0
+        y: 0
+        width: 320
+        height: 120
+      payload:
+        text: "添加一个红色的提交按钮"
+  assertions:
+    expected_handoff: "handoff_ui"
+    expected_agent: "ui_graph"
+    expected_task_type: "ui_local_edit"
+    expected_dispatchable: true
+    expected_handoffs: ["ui_graph"]
+    expected_code_contains: ["backgroundColor: 'red'", ">提交</button>"]
+
+- id: "case_005"
+  name: "UI 批量修改：颜色 + 文案一次提交"
+  tags: ["ui", "multi-annotation", "smoke"]
+  input:
+    target_agent: "auto"
+    fixture: "react_dashboard"
+    text: "把按钮改成蓝色，标题改成限时优惠"
+    annotations:
+      - annotationId: "ann_eval_005a"
+        type: "note"
+        action: "MODIFY"
+        target:
+          mode: "source"
+          selector: "[data-source='primary-action']"
+          source:
+            file: "src/App.jsx"
+            component: "PrimaryButton"
+        payload:
+          text: "改成蓝色"
+      - annotationId: "ann_eval_005b"
+        type: "note"
+        action: "MODIFY"
+        target:
+          mode: "source"
+          selector: "[data-source='hero-title']"
+          source:
+            file: "src/App.jsx"
+            component: "HeroTitle"
+        payload:
+          text: "标题改成限时优惠"
+  assertions:
+    expected_handoff: "handoff_ui"
+    expected_agent: "ui_graph"
+    expected_task_type: "ui_local_edit"
+    expected_dispatchable: true
+    expected_handoffs: ["ui_graph"]
+    expected_code_contains: ["background-color:blue", "限时优惠"]
+
+- id: "case_006"
+  name: "Architect：全栈电商系统设计"
+  tags: ["architect", "fullstack", "smoke"]
+  input:
+    target_agent: "auto"
+    text: "帮我设计一个全栈电商系统，后端用 Spring Boot，数据库用 MySQL"
+  assertions:
+    expected_handoff: "handoff_architect"
+    expected_agent: "architect_graph"
+    expected_task_type: "global_architecture"
+    expected_dispatchable: true
+    expected_handoffs: ["architect_graph"]
+
+- id: "case_007"
+  name: "Both：UI 改色 + 全栈架构同时规划"
+  tags: ["supervisor", "both", "smoke"]
+  input:
+    target_agent: "auto"
+    fixture: "react_dashboard"
+    text: "把按钮改成蓝色，同时规划全栈后端和数据库"
+    annotation:
+      annotationId: "ann_eval_007"
+      type: "note"
+      action: "MODIFY"
+      target:
+        mode: "source"
+        selector: "[data-source='primary-action']"
+        source:
+          file: "src/App.jsx"
+          component: "PrimaryButton"
+      payload:
+        text: "改成蓝色"
+  assertions:
+    expected_handoff: "handoff_both"
+    expected_agent: "both"
+    expected_task_type: "combined"
+    expected_dispatchable: true
+    # both 必须先 Architect 冻结契约，再启动 UI。
+    expected_handoffs: ["architect_graph", "ui_graph"]
+    expected_code_contains: ["background-color:blue"]
+
+- id: "case_008"
+  name: "CustomAgent：销售数据 Excel 报表"
+  tags: ["custom-agent", "routing"]
+  input:
+    target_agent: "auto"
+    text: "帮我导出一份本月的销售数据"
+  assertions:
+    expected_handoff: "handoff_custom"
+    expected_agent: "excel_report_agent"
+    expected_task_type: "excel_report_generation"
+    expected_dispatchable: false
+    expected_handoffs: ["excel_report_agent"]
+    expected_missing_inputs: ["customAgentRuntime"]
+
+- id: "case_009"
+  name: "UI 守卫：缺少画布标注不可派发"
+  tags: ["guard", "ui", "negative"]
+  input:
+    target_agent: "auto"
+    text: "把按钮改成红色"
+  assertions:
+    expected_handoff: "handoff_ui"
+    expected_agent: "ui_graph"
+    expected_task_type: "ui_local_edit"
+    expected_dispatchable: false
+    expected_handoffs: ["ui_graph"]
+    expected_missing_inputs: ["annotations"]
+
+- id: "case_010"
+  name: "兜底：无法识别意图时拒绝路由"
+  tags: ["guard", "negative"]
+  input:
+    target_agent: "auto"
+    text: "今天天气怎么样"
+  assertions:
+    expected_handoff: "rejected"
+    expected_agent: "none"
+    expected_task_type: "unknown"
+    expected_dispatchable: false
+    expected_handoffs: []
+    expected_missing_inputs: ["明确意图", "annotations"]

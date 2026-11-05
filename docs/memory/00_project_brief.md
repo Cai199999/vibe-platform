@@ -52,6 +52,12 @@
   `/admin` 路由、管理员菜单入口、KPI 卡 + Agent 占比图 + 执行表，并由路由守卫
   对非管理员整页 403。指标尚未持久化，`ADMIN_METRICS_DEMO_SEED=true` 可注入
   演示数据。细节见 `docs/memory/2026-11-05_M3_1_admin_console_metrics.md`。
+- **Eval Suite v0.1 已落地（2026-11-05）**：`config/eval_suite/core_cases.yaml`
+  提供 10 条 YAML 用例；`services/orchestrator/eval_suite/` 用真实 Supervisor
+  路由 + `MockAgentLLM` 做离线断言，输出 console / JSON / Markdown / JUnit；
+  `./scripts/eval_suite.sh run` 复用 python-ai 镜像一次性容器执行。
+  细节见 `docs/design/07.Eval_Suite.md` 与
+  `docs/memory/2026-11-05_eval_suite.md`。
 
 ## 2. 核心技术栈
 
@@ -81,6 +87,8 @@
 - M38–M41（M3）：Knowledge Service（数据中台）、Feedback Collector、
   Prompt Registry / 自优化、Admin Console；M3.1 已完成 Admin Console 入口与
   指标看板（含 Mock RBAC），其余仍为契约
+- M42（M3 质量基建）：Eval Suite 离线跑批已完成 v0.1（10 条核心用例、
+  路由 / 代码断言、JSON / Markdown / JUnit 报告）；HTTP / 真模型 / 沙盒引擎待扩展
 
 ## 4. 关键架构约束
 

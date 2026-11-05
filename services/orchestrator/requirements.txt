@@ -5,6 +5,8 @@ uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 pydantic-settings==2.7.1
 python-dotenv==1.0.1
+# Eval Suite：YAML 评测集加载（CLI 离线跑批）。
+PyYAML==6.0.3
 
 # LangGraph 编排（M2 实现具体 Graph；M1 仅引入依赖与运行时）
 langgraph==0.2.62

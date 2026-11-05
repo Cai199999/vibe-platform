@@ -417,6 +417,19 @@ CPU 会短时冲高，但每个容器受 1 CPU 限额约束。沙盒镜像
 
 ## 验证
 
+### 0. Eval Suite 离线跑批（最快）
+
+```bash
+./scripts/eval_suite.sh validate   # 校验 YAML 契约
+./scripts/eval_suite.sh list       # 查看 10 条核心用例
+./scripts/eval_suite.sh run        # 10/10 PASS，约 40 ms
+```
+
+覆盖 Supervisor 五类 Handoff、UI 改色 / 文案 / 缩放 / 新增、双标注批量、
+Architect、both、CustomAgent 与缺标注守卫；使用真实路由 + 确定性 Mock 代码
+生成，不启动业务服务与沙盒。报告写入 `reports/eval/`（JSON / Markdown /
+JUnit）。详见 `config/eval_suite/README.md` 与 `docs/design/07.Eval_Suite.md`。
+
 ### 1. 全链路 E2E（推荐）
 
 ```bash
