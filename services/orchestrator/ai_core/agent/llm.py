@@ -25,6 +25,12 @@ from langchain_openai import ChatOpenAI
 
 from ai_core.agent.schemas import ExecuteRunRequest, RunOptions
 from ai_core.config import Settings, get_settings
+from ai_core.editor import (
+    CodeEdit,
+    EditKind,
+    EditLayout,
+    default_editor_registry,
+)
 
 
 class AgentLLMError(Exception):
@@ -243,7 +249,7 @@ class MockAgentLLM(AgentLLM):
         for index, annotation in enumerate(annotations, start=1):
             target_file = _annotation_target_file(annotation, fixed, primary_file)
             before = fixed.get(target_file, "")
-            after = self._apply_instruction(before, annotation)
+            after = self._apply_instruction(before, annotation, target_file)
             fixed[target_file] = after
             if after != before:
                 applied.append(f"标注 {index} -> {target_file}")
@@ -271,12 +277,21 @@ class MockAgentLLM(AgentLLM):
         cleaned = "\n".join(lines)
         return cleaned + "\n" if code.endswith("\n") else cleaned
 
-    def _apply_instruction(self, code: str, annotation: dict[str, Any]) -> str:
+    def _apply_instruction(
+        self,
+        code: str,
+        annotation: dict[str, Any],
+        path: str = "src/App.jsx",
+    ) -> str:
         """把单条自然语言指令映射为确定性 Mock 修改。
 
         ADD 分支优先于 MODIFY：action=ADD、mock_scenario=add_button 或
         指令包含“添加 / 新建 / 插入”时，直接向最合适的容器末尾插入一个
         完整 JSX 按钮，而不是覆盖原有元素。
+
+        除 ``_replace_element_text`` 外，所有写入都经过 ``CodeEditor`` 抽象
+        （``default_editor_registry()``）；Mock 只是把自然语言映射成
+        ``CodeEdit``，不直接依赖字符串拼接实现。
         """
         instruction = _annotation_text(annotation)
         if not instruction:
@@ -287,7 +302,7 @@ class MockAgentLLM(AgentLLM):
             or _annotation_action(annotation) == "ADD"
             or _is_add_intent(instruction)
         ):
-            return _insert_button(code, annotation, instruction)
+            return _insert_button(code, annotation, instruction, path)
 
         selector = _annotation_selector(annotation)
         if not selector:
@@ -298,7 +313,9 @@ class MockAgentLLM(AgentLLM):
             # “文字 / 字体颜色”作用在 color；其余（按钮 / 卡片）默认背景色。
             textual = _is_textual_target(selector) or _is_text_color(instruction)
             prop = "color" if textual else "background-color"
-            return _append_css_rule(code, f"{selector}{{{prop}:{color} !important;}}")
+            return _append_css_rule(
+                code, f"{selector}{{{prop}:{color} !important;}}", path
+            )
 
         factor = _detect_scale(instruction)
         if factor is not None:
@@ -310,7 +327,7 @@ class MockAgentLLM(AgentLLM):
                     f"transform:scale({factor:g}) !important;"
                     "transform-origin:center;"
                 )
-            return _append_css_rule(code, f"{selector}{{{declaration}}}")
+            return _append_css_rule(code, f"{selector}{{{declaration}}}", path)
 
         new_text = _detect_text(instruction)
         if new_text:
@@ -877,7 +894,36 @@ def _line_indent(code: str, index: int) -> str:
     return match.group(0) if match else ""
 
 
-def _insert_button(code: str, annotation: dict[str, Any], instruction: str) -> str:
+def _edit_source(
+    code: str,
+    path: str,
+    kind: EditKind,
+    anchor: str,
+    content: str,
+    **kwargs: Any,
+) -> str:
+    """把一次 ``CodeEdit`` 交给默认注册表执行。
+
+    Mock 只负责“指令 -> 编辑描述”的映射；锚点定位、缩进、重复锚点校验
+    全部由 ``CodeEditor`` 实现负责，保证 Mock 与真实 Coder 走同一条编辑通路。
+    """
+    edit = CodeEdit(
+        kind=kind,
+        path=path,
+        anchor=anchor,
+        content=content,
+        **kwargs,
+    )
+    result = default_editor_registry().apply(edit, {path: code})
+    return result.files.get(path, code)
+
+
+def _insert_button(
+    code: str,
+    annotation: dict[str, Any],
+    instruction: str,
+    path: str = "src/App.jsx",
+) -> str:
     """向目标容器末尾（无法确定容器时插到目标元素之后）插入完整 JSX 按钮。
 
     插入点选择原则：
@@ -903,17 +949,22 @@ def _insert_button(code: str, annotation: dict[str, Any], instruction: str) -> s
 
     # 1) 内容容器：优先插入到容器内部末尾。
     if marker in {"card", ""}:
-        closing = code.rfind("</section>")
-        if closing >= 0:
+        for closing_tag in ("</section>", "</main>"):
+            closing = code.rfind(closing_tag)
+            if closing < 0:
+                continue
             indent = _line_indent(code, closing) + "  "
-            line_start = code.rfind("\n", 0, closing) + 1
-            return code[:line_start] + f"{indent}{button}\n" + code[line_start:]
-        # 没有 section（例如导出后被简化）时退到 main 内部。
-        closing_main = code.rfind("</main>")
-        if closing_main >= 0:
-            indent = _line_indent(code, closing_main) + "  "
-            line_start = code.rfind("\n", 0, closing_main) + 1
-            return code[:line_start] + f"{indent}{button}\n" + code[line_start:]
+            return _edit_source(
+                code,
+                path,
+                EditKind.INSERT_BEFORE,
+                closing_tag,
+                button,
+                occurrence=-1,
+                layout=EditLayout.BLOCK,
+                indent=indent,
+                label="插入按钮到容器末尾",
+            )
 
     # 2) 叶子元素：插到目标闭合标签之后，成为兄弟节点。
     if marker:
@@ -925,19 +976,38 @@ def _insert_button(code: str, annotation: dict[str, Any], instruction: str) -> s
         )
         if opening:
             tag = opening.group(1)
-            close_index = code.find(f"</{tag}>", opening.end())
+            closing_tag = f"</{tag}>"
+            close_index = code.find(closing_tag, opening.end())
             if close_index >= 0:
-                insert_at = close_index + len(f"</{tag}>")
+                # 目标闭合标签在全文中的序号（1-based），确保插到同一元素之后。
+                occurrence = code.count(closing_tag, 0, close_index) + 1
                 indent = _line_indent(code, opening.start())
-                return code[:insert_at] + f"\n{indent}{button}" + code[insert_at:]
+                return _edit_source(
+                    code,
+                    path,
+                    EditKind.INSERT_AFTER,
+                    closing_tag,
+                    f"\n{indent}{button}",
+                    occurrence=occurrence,
+                    label="插入按钮到叶子元素之后",
+                )
 
     # 3) 最终兜底：插到最后一个 </section> 或 </main> 之前。
     for closing_tag in ("</section>", "</main>"):
         closing = code.rfind(closing_tag)
         if closing >= 0:
             indent = _line_indent(code, closing) + "  "
-            line_start = code.rfind("\n", 0, closing) + 1
-            return code[:line_start] + f"{indent}{button}\n" + code[line_start:]
+            return _edit_source(
+                code,
+                path,
+                EditKind.INSERT_BEFORE,
+                closing_tag,
+                button,
+                occurrence=-1,
+                layout=EditLayout.BLOCK,
+                indent=indent,
+                label="插入按钮到主容器末尾",
+            )
     return code
 
 
@@ -984,22 +1054,46 @@ def _detect_text(text: str) -> str | None:
     return None
 
 
-def _append_css_rule(code: str, rule: str) -> str:
-    """把 CSS 规则追加到 JSX 的 <style> 字符串中。"""
-    marker = '"}</style>'
-    if marker in code:
-        return code.replace(marker, f"{rule}{marker}", 1)
-    if "</style>" in code:
-        return code.replace("</style>", f"{rule}</style>", 1)
+def _append_css_rule(code: str, rule: str, path: str = "src/App.jsx") -> str:
+    """把 CSS 规则追加到 JSX 的 <style> 字符串中。
+
+    通过 ``AnchorCodeEditor`` 实现，锚点优先级：
+      1. 模板字符串 ``"}</style>"``：规则直接拼进现有样式串；
+      2. 普通 ``</style>``：兼容非模板写法；
+      3. 没有 style 块：在页面主容器末尾新建一个 ``<style>`` 块。
+    """
+    for marker in ('"}</style>', "</style>"):
+        if marker in code:
+            return _edit_source(
+                code,
+                path,
+                EditKind.INSERT_BEFORE,
+                marker,
+                rule,
+                label="追加 CSS 规则",
+            )
     style_block = f"<style>{{`{rule}`}}</style>"
-    for closing in ("</section>", "</main>"):
-        if closing in code:
-            return code.replace(closing, f"{style_block}\n{closing}", 1)
+    for closing_tag in ("</section>", "</main>"):
+        if closing_tag in code:
+            return _edit_source(
+                code,
+                path,
+                EditKind.INSERT_BEFORE,
+                closing_tag,
+                style_block,
+                layout=EditLayout.BLOCK,
+                label="新建 style 块",
+            )
     return code
 
 
 def _replace_element_text(code: str, selector: str, new_text: str) -> str:
-    """把带 data-vibe-target 的元素内部文本替换为 new_text。"""
+    """把带 data-vibe-target 的元素内部文本替换为 new_text。
+
+    这是 Mock 的选择器启发式（正则匹配标签范围），暂不走 ``CodeEditor``：
+    真实 Coder 输出的是锚点 / 结构化编辑；跨文件、跨标签的文本替换应由
+    ``TreeSitterEditor`` 基于 AST 完成。保留此函数只服务于零依赖 E2E。
+    """
     marker_match = re.search(r"data-vibe-target\s*=\s*['\"]([^'\"]+)['\"]", selector)
     if marker_match:
         marker = re.escape(marker_match.group(1))

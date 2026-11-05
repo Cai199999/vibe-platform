@@ -2893,6 +2893,18 @@ body.is-viewport-panning * {
   box-shadow: 0 18px 40px rgba(56, 189, 248, 0.4);
 }
 
+/* 审批 / 澄清暂停：画布侧提供醒目的处理入口，但不强制切换视图。 */
+.view-result-cta.is-pending {
+  border-color: rgba(251, 191, 36, 0.5);
+  background: linear-gradient(135deg, #fbbf24, #f59e0b);
+  color: #1f1300;
+  box-shadow: 0 14px 34px rgba(245, 158, 11, 0.3);
+}
+
+.view-result-cta.is-pending:hover {
+  box-shadow: 0 18px 40px rgba(245, 158, 11, 0.38);
+}
+
 @keyframes cta-in {
   from {
     opacity: 0;

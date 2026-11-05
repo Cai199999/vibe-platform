@@ -33,6 +33,11 @@ from ai_core.agent.checkpoint import (
 from ai_core.agent.events import EventSink, NullEventSink
 from ai_core.agent.llm import AgentLLM
 from ai_core.agent.state import AgentState
+from ai_core.editor import (
+    CodeEdit,
+    EditKind,
+    default_editor_registry,
+)
 from ai_core.sandbox.base import SandboxError, SandboxProvider
 
 logger = logging.getLogger(__name__)
@@ -472,6 +477,9 @@ class AgentGraphRunner:
                 verify_result=verify_result,
                 retry_count=retry_count,
             )
+            # files 模式必须经过 FileCreator 落地：已有文件 REWRITE_FILE，
+            # 新文件 CREATE_FILE。路径校验 / 覆盖保护由 CodeEditor 负责。
+            generated_files = _materialize_generated_files(current_files, result.files)
         except Exception as exc:  # noqa: BLE001 - 模型错误转入失败/重试
             logger.warning("coder failed: %s", exc)
             return {
@@ -485,10 +493,10 @@ class AgentGraphRunner:
 
         # files 模式：用修改前后的完整内容合成展示用 diff（一次性展示全部改动）。
         patch = result.patch or ""
-        if not patch and result.files:
-            patch = _combined_diff(current_files, result.files)
+        if not patch and generated_files:
+            patch = _combined_diff(current_files, generated_files)
 
-        changed_files = sorted(result.files) or _diff_paths(patch)
+        changed_files = sorted(generated_files) or _diff_paths(patch)
         round_no = int(state.get("clarification_round", 0))
         patch_id = f"pat_{state.get('run_id')}_{round_no}_{retry_count}"
         insertions, deletions = _diff_stat(patch)
@@ -506,7 +514,7 @@ class AgentGraphRunner:
         )
         return {
             "generated_patch": patch,
-            "generated_files": result.files,
+            "generated_files": generated_files,
             "patch_id": patch_id,
             "apply_failed": False,
             "status": "CODING",
@@ -1183,6 +1191,35 @@ def _unified_diff(old: str, new: str, target_file: str) -> str:
             tofile=f"b/{target_file}",
         )
     )
+
+
+def _materialize_generated_files(
+    current_files: dict[str, str],
+    generated: dict[str, str],
+) -> dict[str, str]:
+    """把 Coder 输出的完整文件经 ``CodeEditor`` 落地为变更集合。
+
+    - 已存在文件：``REWRITE_FILE``，避免模型拼错路径却新建孤儿文件；
+    - 新文件：``CREATE_FILE``，为全栈阶段的 Java / SQL / 配置生成预留；
+    - 路径穿越、绝对路径、非法盘符由 ``FileCreator`` 统一拒绝。
+
+    返回相对 ``current_files`` 的净变化，``apply_all`` 会丢弃内容未变的文件。
+    """
+    if not generated:
+        return {}
+    edits = [
+        CodeEdit(
+            kind=(
+                EditKind.REWRITE_FILE if path in current_files else EditKind.CREATE_FILE
+            ),
+            path=path,
+            content=content,
+            label=f"{'重写' if path in current_files else '新建'} {path}",
+        )
+        for path, content in generated.items()
+    ]
+    result = default_editor_registry().apply_all(edits, current_files)
+    return dict(result.files)
 
 
 def _combined_diff(

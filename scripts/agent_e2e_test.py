@@ -203,7 +203,10 @@ def main() -> int:
         trace = message_text(result)
         print("--- agent messages ---")
         print(trace)
-        assert result["status"] in ("SUCCEEDED", "AWAITING_APPROVAL"), "最终状态应为 SUCCEEDED（旧版本为 AWAITING_APPROVAL）"
+        assert result["status"] in (
+            "SUCCEEDED",
+            "AWAITING_APPROVAL",
+        ), "最终状态应为 SUCCEEDED（旧版本为 AWAITING_APPROVAL）"
         assert result["retryCount"] == 1, "应恰好发生 1 次自动修复"
         assert result["verifyResult"]["success"] is True, "最终构建应成功"
         assert "构建失败" in trace, "messages 中应记录首次构建失败"

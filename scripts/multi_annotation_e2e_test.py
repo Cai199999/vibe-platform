@@ -102,7 +102,9 @@ def main() -> int:
             page = context.new_page()
 
             def on_request(request) -> None:
-                if request.method == "POST" and request.url.endswith("/api/v1/runs"):
+                if request.method == "POST" and request.url.endswith(
+                    "/api/v1/runs/stream"
+                ):
                     try:
                         captured["body"] = json.loads(request.post_data or "{}")
                     except json.JSONDecodeError:
@@ -149,7 +151,16 @@ def main() -> int:
 
             print("\n== 4. 一键提交 AnnotationEnvelope[] ==")
             active.locator(".submit-annotations").click()
-            expect(active.locator(".view-result-cta")).to_be_visible(timeout=120_000)
+            # 产品前端默认 approvalMode=required：构建通过后先审批再落盘。
+            pause_cta = active.locator(".view-result-cta.is-pending")
+            expect(pause_cta).to_be_visible(timeout=180_000)
+            pause_cta.click()
+            approval = active.locator(".loading-state.is-approval")
+            expect(approval).to_be_visible(timeout=30_000)
+            approval.get_by_role("button", name="批准并应用").click()
+            expect(
+                active.locator(".runtime-result-overlay .status-pill")
+            ).to_contain_text("已完成", timeout=180_000)
             body = captured.get("body") or {}
             annotations = body.get("annotations") or []
             if len(annotations) != 3:
@@ -166,7 +177,10 @@ def main() -> int:
             print(f"   沙盒: {sandbox_id}")
 
             print("\n== 5. 预览中 3 处修改同时生效 ==")
-            active.locator(".view-result-cta").click()
+            # 审批暂停会自动切到预览；兼容仍停留在画布的情况。
+            view_result = active.locator(".view-result-cta")
+            if view_result.is_visible():
+                view_result.click()
             expect(active.locator(".runtime-preview-frame")).to_be_visible()
             frame = page.frame_locator(".tab-window.is-active .runtime-preview-frame")
             cta = frame.locator("[data-vibe-target='cta-button']")

@@ -9,6 +9,9 @@
 - **M2 目标**：启用 Supervisor + Planner/FrontendCoder/BackendCoder/DBA/Reviewer 多 Agent、`AWAITING_CLARIFICATION` 多轮澄清、多服务沙盒与数据库迁移验证。
 - **M3-A 已落地（2026-11-05）**：SSE 时间轴、HITL 澄清、Diff 审批闸门与协作式取消 Run；
   细节见 `docs/memory/2026-11-04_M2_SSE_HITL.md` 与 `docs/memory/2026-11-05_M3A_diff_approval_cancel.md`。
+- **M3-B 已落地（2026-11-05）**：`CheckpointerProvider`、`CodeEditor` / `AnchorCodeEditor` /
+  `FileCreator` / `TreeSitterEditor` 占位与 `EditorRegistry`；Mock 与 Coder files 模式已接入。
+  细节见 `docs/memory/2026-11-05_M3B_code_editor_abstraction.md`。
 
 ## 2. 核心技术栈
 

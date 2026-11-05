@@ -98,23 +98,32 @@ def assert_no_drift(before: dict, after: dict, label: str) -> None:
     )
 
 
-def send_in_popover(page, popover, text: str, label: str) -> dict:
-    """在同一个标注浮层内发送一条指令，返回 BFF 的 Run 响应 JSON。"""
+def send_in_popover(page, active, popover, text: str, label: str) -> dict:
+    """发送一条指令，审批后返回等价于旧同步响应的摘要。
+
+    M2 起 Run 走 SSE，且产品前端默认 approvalMode=required：
+    发送 -> 等待审批 -> 批准 -> 等待“已完成”，再从 RuntimePanel 读取 sandboxId。
+    """
     popover.locator("input").fill(text, force=True)
-    with page.expect_response(
-        lambda response: response.request.method == "POST"
-        and response.url.endswith("/api/v1/runs"),
-        timeout=180_000,
-    ) as response_info:
-        popover.locator(".popover-send").click(force=True)
-    response = response_info.value
-    if not response.ok:
-        fail(f"{label} Run 请求失败: HTTP {response.status} {response.text()}")
-    payload = response.json()
-    print(
-        f"   {label}: status={payload.get('status')} "
-        f"sandbox={payload.get('sandboxId')} reused={payload.get('reusedSandbox')}"
+    popover.locator(".popover-send").click(force=True)
+
+    pause_cta = active.locator(".view-result-cta.is-pending")
+    expect(pause_cta).to_be_visible(timeout=180_000)
+    pause_cta.click()
+    approval = active.locator(".loading-state.is-approval")
+    expect(approval).to_be_visible(timeout=30_000)
+    approval.get_by_role("button", name="批准并应用").click()
+    expect(active.locator(".runtime-result-overlay .status-pill")).to_contain_text(
+        "已完成", timeout=180_000
     )
+    # sandboxId 在 run.succeeded 后才写入 RuntimePanel。
+    sandbox_id = active.locator(".runtime-panel").get_attribute("data-sandbox-id") or ""
+    # 审批暂停会自动切到预览；切回画布才能继续编辑对话气泡与下一轮指令。
+    active.get_by_role("button", name="画布", exact=True).click()
+    expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
+
+    payload = {"status": "SUCCEEDED", "sandboxId": sandbox_id}
+    print(f"   {label}: status={payload['status']} sandbox={sandbox_id}")
     return payload
 
 
@@ -128,7 +137,9 @@ def main() -> int:
             requests: list[dict] = []
 
             def on_request(request) -> None:
-                if request.method == "POST" and request.url.endswith("/api/v1/runs"):
+                if request.method == "POST" and request.url.endswith(
+                    "/api/v1/runs/stream"
+                ):
                     requests.append(json.loads(request.post_data or "{}"))
 
             page.on("request", on_request)
@@ -219,22 +230,24 @@ def main() -> int:
             popover.locator("input").focus()
 
             print("\n== 5. 第一轮：改成红色 ==")
-            first_payload = send_in_popover(page, popover, "改成红色", "第一轮")
+            first_payload = send_in_popover(page, active, popover, "改成红色", "第一轮")
             expect(popover.locator(".chat-bubble.is-user")).to_contain_text("改成红色")
             expect(popover.locator(".chat-bubble.is-assistant")).to_be_visible(
                 timeout=120_000
             )
-            if first_payload.get("status") not in ("SUCCEEDED", "AWAITING_APPROVAL"):
+            if first_payload.get("status") != "SUCCEEDED":
                 fail(f"第一轮执行失败: {first_payload}")
             sandbox_id = first_payload.get("sandboxId") or ""
             if not sandbox_id:
                 fail("第一轮未返回 sandboxId")
-            if first_payload.get("reusedSandbox") is not False:
-                fail(f"第一轮不应复用沙盒: {first_payload.get('reusedSandbox')}")
+            if requests and requests[0].get("sandboxId"):
+                fail(f"第一轮不应复用沙盒: {requests[0].get('sandboxId')}")
 
             print("\n== 6. 第二轮：不，我要蓝色（同一个圈 / 同一个沙盒）==")
             expect(popover.locator(".chat-bubble")).to_have_count(2)
-            second_payload = send_in_popover(page, popover, "不，我要蓝色", "第二轮")
+            second_payload = send_in_popover(
+                page, active, popover, "不，我要蓝色", "第二轮"
+            )
             expect(popover.locator(".chat-bubble.is-user")).to_have_count(2)
             expect(popover.locator(".chat-bubble.is-assistant")).to_have_count(
                 2, timeout=120_000
@@ -242,15 +255,10 @@ def main() -> int:
             expect(popover.locator(".chat-bubble.is-user").last).to_contain_text(
                 "不，我要蓝色"
             )
-            if second_payload.get("status") not in ("SUCCEEDED", "AWAITING_APPROVAL"):
+            if second_payload.get("status") != "SUCCEEDED":
                 fail(f"第二轮执行失败: {second_payload}")
             if second_payload.get("sandboxId") != sandbox_id:
                 fail("第二轮没有复用同一沙盒")
-            if second_payload.get("reusedSandbox") is not True:
-                fail(
-                    "第二轮 reusedSandbox 不是 true: "
-                    f"{second_payload.get('reusedSandbox')}"
-                )
 
             print("\n== 7. 校验两轮请求的 threadId / chatHistory / sandboxId ==")
             if len(requests) != 2:

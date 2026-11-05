@@ -49,6 +49,13 @@ function ProjectWorkspaceInner({
   const previewReady = Boolean(run.result?.previewUrl)
   const canvasVisible = viewMode === 'dual' || mode === 'canvas'
   const previewVisible = viewMode === 'dual' || mode === 'preview'
+  // 审批 / 澄清面板在预览侧。对比模式停留在画布时提供一个显式入口，
+  // 避免输入被冻结却找不到处理位置；不强制切换视图，保留用户的画布上下文。
+  const pauseCta = run.approval
+    ? '查看审批差异'
+    : run.clarification
+      ? '回答澄清问题'
+      : null
   // 只有每个标注都写了指令才允许提交，避免静默丢标注。
   const submitReady =
     annotations.length > 0 &&
@@ -227,16 +234,30 @@ function ProjectWorkspaceInner({
             blocked={approvalPending}
           />
 
-          {previewReady && viewMode === 'compare' && mode === 'canvas' && (
+          {pauseCta && viewMode === 'compare' && mode === 'canvas' && (
             <button
-              className="view-result-cta"
+              className="view-result-cta is-pending"
               type="button"
               onClick={() => setMode('preview')}
             >
-              查看效果
+              {pauseCta}
               <span aria-hidden="true">→</span>
             </button>
           )}
+
+          {!pauseCta &&
+            previewReady &&
+            viewMode === 'compare' &&
+            mode === 'canvas' && (
+              <button
+                className="view-result-cta"
+                type="button"
+                onClick={() => setMode('preview')}
+              >
+                查看效果
+                <span aria-hidden="true">→</span>
+              </button>
+            )}
         </div>
 
         <div
