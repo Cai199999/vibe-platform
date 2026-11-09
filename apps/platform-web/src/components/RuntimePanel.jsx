@@ -549,6 +549,7 @@ export default function RuntimePanel({
   onInspectDraftChange,
   onInspectDraftCancel,
   onInspectDraftSubmit,
+  refreshNonce = 0,
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false)
   const {
@@ -644,6 +645,9 @@ export default function RuntimePanel({
         {/* iframe 一旦挂载就保留到下一次 Run 或关闭 Tab，切换视图只改 display。 */}
         {previewUrl && (
           <ScaledPreview
+            // 快照回滚后工作区文件已变化，但 URL 不变；用 nonce 重建 iframe，
+            // 强制浏览器重新加载沙盒的最新构建结果。
+            key={`${previewUrl}:${refreshNonce}`}
             src={previewUrl}
             title={`${projectName} 沙盒预览`}
             visible={visible && !submitting}

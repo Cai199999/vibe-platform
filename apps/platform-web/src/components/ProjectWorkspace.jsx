@@ -47,6 +47,9 @@ function ProjectWorkspaceInner({
   onExport,
   canExport = false,
   exporting = false,
+  onSaveSnapshot,
+  canSaveSnapshot = false,
+  previewRefreshNonce = 0,
   architectState,
   supervisorGate,
   agentCatalog,
@@ -409,6 +412,22 @@ function ProjectWorkspaceInner({
 
           <button
             type="button"
+            className="snapshot-save-button"
+            data-snapshot-save
+            disabled={!canSaveSnapshot || submitting}
+            title={
+              canSaveSnapshot
+                ? '把当前沙盒代码保存为一个可回滚的快照'
+                : '请先执行一次 Agent，生成可快照的沙盒项目'
+            }
+            onClick={onSaveSnapshot}
+          >
+            <span aria-hidden="true">💾</span>
+            保存快照
+          </button>
+
+          <button
+            type="button"
             className={`export-button ${exporting ? 'is-busy' : ''}`}
             disabled={!canExport || exporting}
             title={
@@ -508,6 +527,7 @@ function ProjectWorkspaceInner({
               onInspectDraftChange={handleInspectDraftChange}
               onInspectDraftCancel={() => setInspectDraft(null)}
               onInspectDraftSubmit={handleInspectDraftSubmit}
+              refreshNonce={previewRefreshNonce}
             />
           </ErrorBoundary>
         </div>

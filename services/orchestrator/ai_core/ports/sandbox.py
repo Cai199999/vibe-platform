@@ -53,6 +53,22 @@ class SandboxHandle:
 
 
 @dataclass(frozen=True)
+class SandboxCommit:
+    """沙盒 Git 历史中的一条 commit（快照）。
+
+    快照直接复用沙盒内的 Git 仓库，不引入额外数据库：
+      - ``commit_hash`` 为完整 40 位 SHA-1，恢复时必须使用完整值；
+      - ``short_hash`` 仅用于 UI 展示。
+    """
+
+    commit_hash: str
+    short_hash: str
+    message: str
+    author: str
+    committed_at: datetime
+
+
+@dataclass(frozen=True)
 class VerifyResult:
     """构建 / 测试结果。"""
 
@@ -122,6 +138,24 @@ class SandboxProvider(ABC):
         避免未批准的代码残留在多轮会话中。
         """
         raise SandboxGitError(f"当前 Provider 不支持读取 HEAD: {sandbox_id}")
+
+    def git_log(self, sandbox_id: str, limit: int = 50) -> list[SandboxCommit]:
+        """按时间倒序返回沙盒的提交历史（即用户可见的快照列表）。"""
+        raise SandboxGitError(f"当前 Provider 不支持读取提交历史: {sandbox_id}")
+
+    def git_diff(
+        self,
+        sandbox_id: str,
+        commit_hash: str,
+        mode: str = "commit",
+    ) -> str:
+        """返回快照相关的 unified diff 文本。
+
+        ``mode="commit"``：该快照自身引入的改动（``git show``）；
+        ``mode="current"``：当前 HEAD 与该快照之间的差异；
+        ``mode="baseline"``：相对沙盒初始版本的累积代码 Diff。
+        """
+        raise SandboxGitError(f"当前 Provider 不支持生成快照 Diff: {sandbox_id}")
 
     @abstractmethod
     def apply_patch(

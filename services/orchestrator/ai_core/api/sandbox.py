@@ -32,9 +32,15 @@ from ai_core.schemas import (
     ApplyPatchRequest,
     ApplyPatchResponse,
     CreateSandboxRequest,
+    CreateSnapshotRequest,
+    CreateSnapshotResponse,
     DestroySandboxResponse,
     ImportSandboxResponse,
+    RestoreSnapshotResponse,
     SandboxInfo,
+    SnapshotDiffResponse,
+    SnapshotInfo,
+    SnapshotListResponse,
     VerifyResponse,
 )
 
@@ -43,6 +49,8 @@ router = APIRouter(prefix="/api/v1/internal/sandbox", tags=["sandbox"])
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _ZIP_SUFFIXES = (".zip",)
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
+# 快照 Diff 体积上限：避免单个巨型提交把 BFF / 浏览器内存打满。
+_SNAPSHOT_DIFF_MAX_CHARS = 200_000
 
 
 @router.post("/create", response_model=SandboxInfo, status_code=201)
@@ -213,6 +221,128 @@ async def import_project(
         warnings=imported.warnings,
         source_name=filename,
         created_at=datetime.now(timezone.utc),
+    )
+
+
+@router.post(
+    "/{sandbox_id}/snapshots",
+    response_model=CreateSnapshotResponse,
+    status_code=201,
+)
+def create_snapshot(
+    sandbox_id: str,
+    request: CreateSnapshotRequest,
+) -> CreateSnapshotResponse:
+    """把沙盒当前工作区提交为一次快照（git commit）。"""
+    provider = get_sandbox_provider()
+    try:
+        commit_hash = provider.git_commit(sandbox_id, request.message)
+    except SandboxError as exc:
+        raise sandbox_error_to_http(exc) from exc
+
+    return CreateSnapshotResponse(
+        sandbox_id=sandbox_id,
+        commit_hash=commit_hash,
+        short_hash=commit_hash[:7],
+        message=request.message,
+        committed_at=datetime.now(timezone.utc),
+    )
+
+
+@router.get("/{sandbox_id}/snapshots", response_model=SnapshotListResponse)
+def list_snapshots(
+    sandbox_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> SnapshotListResponse:
+    """按时间倒序列出沙盒全部快照，并标记当前 HEAD。"""
+    provider = get_sandbox_provider()
+    try:
+        commits = provider.git_log(sandbox_id, limit=limit)
+        head_commit = provider.git_head(sandbox_id)
+    except SandboxError as exc:
+        raise sandbox_error_to_http(exc) from exc
+
+    return SnapshotListResponse(
+        sandbox_id=sandbox_id,
+        head_commit=head_commit,
+        snapshots=[
+            SnapshotInfo(
+                commit_hash=item.commit_hash,
+                short_hash=item.short_hash,
+                message=item.message,
+                author=item.author,
+                committed_at=item.committed_at,
+            )
+            for item in commits
+        ],
+    )
+
+
+@router.post(
+    "/{sandbox_id}/snapshots/{commit_hash}/restore",
+    response_model=RestoreSnapshotResponse,
+)
+def restore_snapshot(sandbox_id: str, commit_hash: str) -> RestoreSnapshotResponse:
+    """``git reset --hard`` 到指定快照。
+
+    注意：这是硬回滚语义，目标之后产生的 commit 将不再出现在历史中，
+    与用户确认弹窗中「未保存的修改将丢失」的提示一致。
+    """
+    provider = get_sandbox_provider()
+    try:
+        provider.git_reset_hard(sandbox_id, commit_hash)
+        # 回滚成功后从历史中反查备注；找不到时允许返回空字符串。
+        message = ""
+        for item in provider.git_log(sandbox_id, limit=200):
+            if item.commit_hash == commit_hash.strip().lower():
+                message = item.message
+                break
+    except SandboxError as exc:
+        raise sandbox_error_to_http(exc) from exc
+
+    return RestoreSnapshotResponse(
+        sandbox_id=sandbox_id,
+        commit_hash=commit_hash.strip().lower(),
+        message=message,
+        restored_at=datetime.now(timezone.utc),
+    )
+
+
+@router.get(
+    "/{sandbox_id}/snapshots/{commit_hash}/diff",
+    response_model=SnapshotDiffResponse,
+)
+def snapshot_diff(
+    sandbox_id: str,
+    commit_hash: str,
+    mode: Literal["commit", "current", "baseline"] = "baseline",
+) -> SnapshotDiffResponse:
+    """返回快照只读视图的 unified diff。
+
+    默认 ``baseline``：该版本相对沙盒初始代码的累积 Diff，适合展示
+    “这个版本长什么样”；``commit`` 只看该提交自身改动，``current``
+    对比当前 HEAD。
+    """
+    provider = get_sandbox_provider()
+    try:
+        raw = provider.git_diff(sandbox_id, commit_hash, mode=mode)
+    except SandboxError as exc:
+        raise sandbox_error_to_http(exc) from exc
+
+    truncated = len(raw) > _SNAPSHOT_DIFF_MAX_CHARS
+    diff = raw
+    if truncated:
+        diff = (
+            raw[:_SNAPSHOT_DIFF_MAX_CHARS]
+            + f"\n... [diff 已截断，共 {len(raw)} 字符] ...\n"
+        )
+
+    return SnapshotDiffResponse(
+        sandbox_id=sandbox_id,
+        commit_hash=commit_hash.strip().lower(),
+        mode=mode,
+        diff=diff,
+        truncated=truncated,
     )
 
 

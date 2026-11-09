@@ -29,6 +29,7 @@ from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 
 from ai_core.config import Settings, get_settings
 from ai_core.ports.sandbox import (
+    SandboxCommit,
     SandboxError,
     SandboxGitError,
     SandboxHandle,
@@ -408,6 +409,144 @@ class LocalDockerSandbox(SandboxProvider):
                     f"读取 baseline commit 失败: {self._decode(output)}"
                 )
             return value
+
+    def git_log(self, sandbox_id: str, limit: int = 50) -> list[SandboxCommit]:
+        """读取沙盒提交历史，按时间倒序返回。
+
+        使用 ``%x1f``（字段分隔）与 ``%x1e``（记录分隔）作为不可见分隔符，
+        避免 commit message 中的空格 / 换行破坏解析；不依赖语言环境日期。
+        """
+        safe_limit = max(1, min(int(limit or 50), 200))
+        container = self._get_container(sandbox_id)
+        with self._git_lock:
+            self._ensure_git_repo(container)
+            code, output = self._exec(
+                container,
+                [
+                    "git",
+                    "log",
+                    f"-n{safe_limit}",
+                    "--format=%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1e",
+                    "HEAD",
+                    "--",
+                ],
+                workdir=self.settings.sandbox_workdir,
+            )
+            if code != 0:
+                raise SandboxGitError(f"git log 失败: {self._decode(output)}")
+            return self._parse_git_log(self._decode(output))
+
+    def git_diff(
+        self,
+        sandbox_id: str,
+        commit_hash: str,
+        mode: str = "commit",
+    ) -> str:
+        """生成快照 Diff。
+
+        只以参数数组调用 git，且对 hash 做 40 位十六进制白名单校验，
+        不存在 shell 注入面。
+        """
+        normalized = commit_hash.strip().lower()
+        if not FULL_COMMIT_RE.fullmatch(normalized):
+            raise SandboxValidationError("非法 commit hash")
+        if mode not in {"commit", "current", "baseline"}:
+            raise SandboxValidationError("mode 只能是 commit / current / baseline")
+
+        container = self._get_container(sandbox_id)
+        with self._git_lock:
+            self._ensure_git_repo(container)
+            code, output = self._exec(
+                container,
+                ["git", "cat-file", "-e", f"{normalized}^{{commit}}"],
+                workdir=self.settings.sandbox_workdir,
+            )
+            if code != 0:
+                raise SandboxGitError(f"commit 不存在: {normalized}")
+
+            if mode == "commit":
+                # 该快照自身引入的改动（根提交会展示完整文件新增）。
+                command = [
+                    "git",
+                    "show",
+                    "--format=",
+                    "--no-color",
+                    "--find-renames",
+                    normalized,
+                    "--",
+                ]
+            elif mode == "baseline":
+                # 快照标签的默认视图：该版本相对初始基线的累积代码，
+                # 即使快照本身是空提交（仅打标记）也能看到完整实现。
+                code, root_output = self._exec(
+                    container,
+                    ["git", "rev-list", "--max-parents=0", "HEAD"],
+                    workdir=self.settings.sandbox_workdir,
+                )
+                root_commit = self._extract_commit_hash(self._decode(root_output))
+                if code != 0 or root_commit is None:
+                    raise SandboxGitError(
+                        f"读取 baseline commit 失败: {self._decode(root_output)}"
+                    )
+                command = [
+                    "git",
+                    "diff",
+                    "--no-color",
+                    "--find-renames",
+                    root_commit,
+                    normalized,
+                    "--",
+                ]
+            else:
+                # 当前工作区 HEAD 与目标快照之间的差异。
+                command = [
+                    "git",
+                    "diff",
+                    "--no-color",
+                    "--find-renames",
+                    normalized,
+                    "HEAD",
+                    "--",
+                ]
+
+            code, output = self._exec(
+                container,
+                command,
+                workdir=self.settings.sandbox_workdir,
+            )
+            if code != 0:
+                raise SandboxGitError(f"生成快照 Diff 失败: {self._decode(output)}")
+            return self._decode(output)
+
+    @staticmethod
+    def _parse_git_log(output: str) -> list[SandboxCommit]:
+        """把自定义格式的 git log 输出解析为 SandboxCommit 列表。"""
+        commits: list[SandboxCommit] = []
+        for record in output.split("\x1e"):
+            record = record.strip()
+            if not record:
+                continue
+            parts = record.split("\x1f", 4)
+            if len(parts) < 5:
+                continue
+            full_hash, short_hash, author, committed_iso, message = parts
+            full_hash = full_hash.strip().lower()
+            if not FULL_COMMIT_RE.fullmatch(full_hash):
+                continue
+            try:
+                committed_at = datetime.fromisoformat(committed_iso.strip())
+            except ValueError:
+                committed_at = datetime.now(timezone.utc)
+            commits.append(
+                SandboxCommit(
+                    commit_hash=full_hash,
+                    short_hash=short_hash.strip() or full_hash[:7],
+                    message=message.strip(),
+                    author=author.strip() or "vibe",
+                    committed_at=committed_at,
+                )
+            )
+        return commits
 
     def _git_add_all(self, container: Any, context: str) -> None:
         """``git add -A``，并对 Vite 临时文件竞态做有限重试。

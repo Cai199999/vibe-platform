@@ -30,7 +30,11 @@ React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.1
   widthPx/heightPx、parentW/H），Prompt 按 flex/grid/absolute 精确落位；
   澄清期间主输入栏常驻 + 自定义 textarea + comment 入上下文；预览底部
   状态栏与抽屉展示模型/沙盒/AST 路径/Diff/LangGraph 时间轴
-- Eval 10/10；单测 159 passed（含隔离 10 + 序列化 4 + 相对坐标 4 + 澄清 3）
+- 项目快照：沙盒 Git checkpoint（💾 保存 / 版本历史抽屉 / 只读快照标签 +
+  累积 Diff / 二次确认 `reset --hard`）；恢复后版本列表刷新、iframe 以
+  nonce 重建加载回滚版本；不引入额外数据库
+- Eval 10/10；单测 164 passed（含隔离 10 + 序列化 4 + 相对坐标 4 +
+  澄清 3 + 快照 5）
 
 ## 真 / 假边界
 

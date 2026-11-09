@@ -5,7 +5,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 def _to_camel(name: str) -> str:
@@ -120,6 +126,70 @@ class DestroySandboxResponse(BaseModel):
     sandbox_id: str
     destroyed: bool
     destroyed_at: datetime
+
+
+class CreateSnapshotRequest(BaseModel):
+    """创建快照：把沙盒当前工作区提交为一个 Git checkpoint。
+
+    备注必填且 ≤200 字，去除首尾空白后再校验，避免只有空格的无意义快照。
+    """
+
+    message: str = Field(min_length=1, max_length=200)
+
+    @field_validator("message")
+    @classmethod
+    def _strip_message(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("快照备注不能为空")
+        return cleaned
+
+
+class SnapshotInfo(CamelResponse):
+    """单条快照元信息。"""
+
+    commit_hash: str
+    short_hash: str
+    message: str
+    author: str
+    committed_at: datetime
+
+
+class SnapshotListResponse(CamelResponse):
+    """快照列表；headCommit 为当前 HEAD，便于 UI 标记“当前版本”。"""
+
+    sandbox_id: str
+    head_commit: str | None = None
+    snapshots: list[SnapshotInfo] = Field(default_factory=list)
+
+
+class CreateSnapshotResponse(CamelResponse):
+    """快照创建结果。"""
+
+    sandbox_id: str
+    commit_hash: str
+    short_hash: str
+    message: str
+    committed_at: datetime
+
+
+class RestoreSnapshotResponse(CamelResponse):
+    """快照恢复结果。"""
+
+    sandbox_id: str
+    commit_hash: str
+    message: str
+    restored_at: datetime
+
+
+class SnapshotDiffResponse(CamelResponse):
+    """快照只读视图使用的 unified diff。"""
+
+    sandbox_id: str
+    commit_hash: str
+    mode: Literal["commit", "current", "baseline"]
+    diff: str
+    truncated: bool
 
 
 class ImportSandboxResponse(CamelResponse):

@@ -4,6 +4,7 @@ import AccountDialog from '../components/AccountDialog.jsx'
 import SettingsDialog from '../components/SettingsDialog.jsx'
 import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
 import ProjectWorkspace from '../components/ProjectWorkspace.jsx'
+import SnapshotWorkspace from '../components/SnapshotWorkspace.jsx'
 import WorkspaceTabs from '../components/WorkspaceTabs.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { useSettings } from '../settings/SettingsContext.jsx'
@@ -11,6 +12,12 @@ import { useWorkspace } from '../workspace/useWorkspace.js'
 import { EMPTY_ARCHITECT, useArchitect } from '../workspace/useArchitect.js'
 import { streamRun } from '../workspace/runStream.js'
 import { importProjectFile } from '../workspace/importClient.js'
+import {
+  createSnapshot,
+  fetchSnapshotDiff,
+  listSnapshots,
+  restoreSnapshot,
+} from '../workspace/snapshotClient.js'
 import {
   dispatchSupervisor,
   fetchSupervisorAgents,
@@ -181,6 +188,25 @@ async function destroySandbox(sandboxId, token) {
     console.warn(`销毁沙盒失败 ${sandboxId}: ${cause?.message || cause}`)
   }
 }
+
+/**
+ * 快照时间展示：本地化到分钟，避免抽屉里出现冗长的 ISO 字符串。
+ */
+function formatSnapshotTime(value) {
+  if (!value) return '未知时间'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+/** 同一 commit 只保留一个虚拟快照标签。 */
+const snapshotTabId = (projectId, commitHash) => `snapshot:${projectId}:${commitHash}`
 
 /**
  * 可中止的等待。
@@ -813,6 +839,33 @@ export default function WorkspacePage() {
   const [toast, setToast] = useState(null)
   // 递增后 ProjectWorkspace 自动切到预览 Tab，露出局部的执行时间轴。
   const [previewFocus, setPreviewFocus] = useState({})
+  // 快照回滚后递增：RuntimePanel 用它作为 iframe key，强制重载最新构建。
+  const [previewRefresh, setPreviewRefresh] = useState({})
+  // 右侧“版本历史”抽屉。
+  const [snapshotDrawer, setSnapshotDrawer] = useState({
+    open: false,
+    projectId: null,
+    loading: false,
+    error: null,
+    snapshots: [],
+    headCommit: null,
+    restoring: null,
+    confirmHash: null,
+    confirmError: null,
+  })
+  // “保存快照”Modal。
+  const [snapshotSave, setSnapshotSave] = useState({
+    open: false,
+    projectId: null,
+    message: '',
+    saving: false,
+    error: null,
+  })
+  // 虚拟只读快照标签。
+  const [snapshotTabs, setSnapshotTabs] = useState([])
+  const [activeSnapshotId, setActiveSnapshotId] = useState(null)
+  const snapshotDrawerRequestRef = useRef(0)
+  const snapshotDiffAbortRef = useRef(new Map())
   // 默认 auto：配置了 DEEPSEEK_API_KEY 时自动走真实模型；没有 Key 时回退 Mock。
   // 旧版本可能持久化过显式 deepseek，这里统一归一到 auto，UI 不再暴露内部
   // provider 名称（测试仍可通过 mock 进入离线模式）。
@@ -862,6 +915,8 @@ export default function WorkspacePage() {
       streamControllersRef.current.clear()
       annotationAbortRef.current.forEach((controller) => controller.abort())
       annotationAbortRef.current.clear()
+      snapshotDiffAbortRef.current.forEach((controller) => controller.abort())
+      snapshotDiffAbortRef.current.clear()
     }
   }, [])
 
@@ -2455,6 +2510,351 @@ export default function WorkspacePage() {
     void handleSubmit(projectId)
   }
 
+  // ------------------------------------------------------------------
+  // 项目快照（沙盒 Git checkpoint）
+  // ------------------------------------------------------------------
+  const sandboxIdOf = (projectId) =>
+    runStatesRef.current[projectId]?.result?.sandboxId || null
+
+  const showSnapshotToast = (kind, text) => {
+    setToast({ id: Date.now(), kind, text })
+  }
+
+  /** 拉取版本历史；requestId 丢弃过期响应，避免快速切换项目时串数据。 */
+  const refreshSnapshotList = async (projectId, sandboxId) => {
+    const requestId = snapshotDrawerRequestRef.current + 1
+    snapshotDrawerRequestRef.current = requestId
+    setSnapshotDrawer((previous) =>
+      previous.projectId === projectId
+        ? { ...previous, loading: true, error: null }
+        : previous,
+    )
+    try {
+      const payload = await listSnapshots(sandboxId, session?.token)
+      if (
+        !workspaceMountedRef.current ||
+        snapshotDrawerRequestRef.current !== requestId
+      ) {
+        return
+      }
+      setSnapshotDrawer((previous) =>
+        previous.projectId === projectId
+          ? {
+              ...previous,
+              loading: false,
+              error: null,
+              snapshots: Array.isArray(payload?.snapshots) ? payload.snapshots : [],
+              headCommit: payload?.headCommit ?? null,
+            }
+          : previous,
+      )
+    } catch (cause) {
+      if (
+        !workspaceMountedRef.current ||
+        snapshotDrawerRequestRef.current !== requestId
+      ) {
+        return
+      }
+      setSnapshotDrawer((previous) =>
+        previous.projectId === projectId
+          ? { ...previous, loading: false, error: cause?.message || String(cause) }
+          : previous,
+      )
+    }
+  }
+
+  const openSnapshotDrawer = () => {
+    if (!activeTabId) return
+    const sandboxId = sandboxIdOf(activeTabId)
+    setSnapshotDrawer({
+      open: true,
+      projectId: activeTabId,
+      loading: Boolean(sandboxId),
+      error: sandboxId
+        ? null
+        : '当前项目还没有沙盒，请先执行一次 Agent 生成页面。',
+      snapshots: [],
+      headCommit: null,
+      restoring: null,
+      confirmHash: null,
+      confirmError: null,
+    })
+    if (sandboxId) void refreshSnapshotList(activeTabId, sandboxId)
+  }
+
+  const closeSnapshotDrawer = () => {
+    snapshotDrawerRequestRef.current += 1
+    setSnapshotDrawer((previous) => ({
+      ...previous,
+      open: false,
+      loading: false,
+      restoring: null,
+      confirmHash: null,
+      confirmError: null,
+    }))
+  }
+
+  const openSnapshotSave = (projectId) => {
+    if (!sandboxIdOf(projectId)) {
+      showSnapshotToast('error', '请先执行一次 Agent 生成沙盒，再保存快照。')
+      return
+    }
+    setSnapshotSave({
+      open: true,
+      projectId,
+      message: '',
+      saving: false,
+      error: null,
+    })
+  }
+
+  const closeSnapshotSave = () => {
+    setSnapshotSave((previous) =>
+      previous.saving ? previous : { ...previous, open: false },
+    )
+  }
+
+  const submitSnapshotSave = async (event) => {
+    event.preventDefault()
+    if (snapshotSave.saving) return
+    const message = snapshotSave.message.trim()
+    if (!message) {
+      setSnapshotSave((previous) => ({
+        ...previous,
+        error: '请输入快照备注，例如“完成了登录页的样式”',
+      }))
+      return
+    }
+    const projectId = snapshotSave.projectId
+    const sandboxId = sandboxIdOf(projectId)
+    if (!sandboxId) {
+      setSnapshotSave((previous) => ({
+        ...previous,
+        error: '沙盒已失效，请重新执行一次 Agent。',
+      }))
+      return
+    }
+
+    setSnapshotSave((previous) => ({ ...previous, saving: true, error: null }))
+    try {
+      const payload = await createSnapshot(sandboxId, message, session?.token)
+      if (!workspaceMountedRef.current) return
+      setSnapshotSave((previous) => ({ ...previous, saving: false, open: false }))
+      showSnapshotToast(
+        'success',
+        `快照已保存：${message}（${payload?.shortHash ?? ''}）`,
+      )
+      if (snapshotDrawer.open && snapshotDrawer.projectId === projectId) {
+        void refreshSnapshotList(projectId, sandboxId)
+      }
+    } catch (cause) {
+      if (!workspaceMountedRef.current) return
+      setSnapshotSave((previous) => ({
+        ...previous,
+        saving: false,
+        error: cause?.message || String(cause),
+      }))
+    }
+  }
+
+  /**
+   * 执行硬回滚。抽屉与快照标签页共用：
+   *  - 成功后刷新版本历史；
+   *  - 递增 previewRefresh，iframe 以新 key 重建并加载回滚后的构建；
+   *  - 同步 run.result.commitHash，开发者详情里的锚点不指回旧版本。
+   */
+  const performRestoreSnapshot = async (projectId, commitHash) => {
+    const sandboxId = sandboxIdOf(projectId)
+    if (!sandboxId) {
+      showSnapshotToast('error', '沙盒已失效，无法恢复快照。')
+      return
+    }
+    setSnapshotDrawer((previous) =>
+      previous.projectId === projectId
+        ? { ...previous, restoring: commitHash, confirmError: null }
+        : previous,
+    )
+    try {
+      const payload = await restoreSnapshot(sandboxId, commitHash, session?.token)
+      if (!workspaceMountedRef.current) return
+      const label =
+        payload?.message ||
+        snapshotDrawer.snapshots.find((item) => item.commitHash === commitHash)
+          ?.message ||
+        commitHash.slice(0, 7)
+      setSnapshotDrawer((previous) =>
+        previous.projectId === projectId
+          ? {
+              ...previous,
+              restoring: null,
+              confirmHash: null,
+              confirmError: null,
+            }
+          : previous,
+      )
+      showSnapshotToast('success', `已恢复到快照：${label}`)
+      setPreviewRefresh((previous) => ({
+        ...previous,
+        [projectId]: (previous[projectId] ?? 0) + 1,
+      }))
+      setPreviewFocus((previous) => ({
+        ...previous,
+        [projectId]: (previous[projectId] ?? 0) + 1,
+      }))
+      setRunStates((previous) => {
+        const run = previous[projectId]
+        if (!run?.result) return previous
+        return {
+          ...previous,
+          [projectId]: {
+            ...run,
+            result: { ...run.result, commitHash },
+          },
+        }
+      })
+      if (snapshotDrawer.projectId === projectId) {
+        void refreshSnapshotList(projectId, sandboxId)
+      }
+    } catch (cause) {
+      if (!workspaceMountedRef.current) return
+      setSnapshotDrawer((previous) =>
+        previous.projectId === projectId
+          ? {
+              ...previous,
+              restoring: null,
+              confirmError: cause?.message || String(cause),
+            }
+          : previous,
+      )
+    }
+  }
+
+  const requestRestoreSnapshot = (commitHash) => {
+    setSnapshotDrawer((previous) => ({
+      ...previous,
+      confirmHash: commitHash,
+      confirmError: null,
+    }))
+  }
+
+  const cancelRestoreSnapshot = () => {
+    setSnapshotDrawer((previous) =>
+      previous.restoring
+        ? previous
+        : { ...previous, confirmHash: null, confirmError: null },
+    )
+  }
+
+  const confirmRestoreSnapshot = () => {
+    if (!snapshotDrawer.projectId || !snapshotDrawer.confirmHash) return
+    void performRestoreSnapshot(
+      snapshotDrawer.projectId,
+      snapshotDrawer.confirmHash,
+    )
+  }
+
+  /** 新建 / 激活一个只读快照标签，并按需加载该 commit 的 Diff。 */
+  const handleViewSnapshot = (projectId, snapshot) => {
+    const sandboxId = sandboxIdOf(projectId)
+    if (!sandboxId) {
+      showSnapshotToast('error', '沙盒已失效，无法查看该快照。')
+      return
+    }
+    const id = snapshotTabId(projectId, snapshot.commitHash)
+    const projectName =
+      projects.find((project) => project.id === projectId)?.name ?? ''
+    setSnapshotTabs((previous) => {
+      const existing = previous.find((tab) => tab.id === id)
+      if (existing) {
+        return previous.map((tab) =>
+          tab.id === id ? { ...tab, loading: !tab.diff, error: null } : tab,
+        )
+      }
+      return [
+        ...previous,
+        {
+          id,
+          projectId,
+          projectName,
+          commitHash: snapshot.commitHash,
+          shortHash: snapshot.shortHash,
+          message: snapshot.message,
+          committedAt: snapshot.committedAt,
+          diff: '',
+          truncated: false,
+          loading: true,
+          error: null,
+        },
+      ]
+    })
+    setActiveSnapshotId(id)
+    closeSnapshotDrawer()
+
+    snapshotDiffAbortRef.current.get(id)?.abort()
+    const controller = new AbortController()
+    snapshotDiffAbortRef.current.set(id, controller)
+    fetchSnapshotDiff(
+      sandboxId,
+      snapshot.commitHash,
+      session?.token,
+      controller.signal,
+    )
+      .then((payload) => {
+        if (!workspaceMountedRef.current) return
+        setSnapshotTabs((previous) =>
+          previous.map((tab) =>
+            tab.id === id
+              ? {
+                  ...tab,
+                  loading: false,
+                  error: null,
+                  diff: payload?.diff ?? '',
+                  truncated: Boolean(payload?.truncated),
+                }
+              : tab,
+          ),
+        )
+      })
+      .catch((cause) => {
+        if (cause?.name === 'AbortError' || !workspaceMountedRef.current) return
+        setSnapshotTabs((previous) =>
+          previous.map((tab) =>
+            tab.id === id
+              ? {
+                  ...tab,
+                  loading: false,
+                  error: cause?.message || String(cause),
+                }
+              : tab,
+          ),
+        )
+      })
+      .finally(() => {
+        snapshotDiffAbortRef.current.delete(id)
+      })
+  }
+
+  const handleSelectSnapshotTab = (id) => {
+    setActiveSnapshotId(id)
+  }
+
+  const handleSelectProjectTab = (projectId) => {
+    setActiveSnapshotId(null)
+    setActiveTab(projectId)
+  }
+
+  const handleCloseSnapshotTab = (id) => {
+    snapshotDiffAbortRef.current.get(id)?.abort()
+    snapshotDiffAbortRef.current.delete(id)
+    setSnapshotTabs((previous) => previous.filter((tab) => tab.id !== id))
+    setActiveSnapshotId((previous) => (previous === id ? null : previous))
+  }
+
+  const handleSnapshotTabRestore = (snapshot) => {
+    if (!window.confirm('当前未保存的修改将丢失，是否继续？')) return
+    void performRestoreSnapshot(snapshot.projectId, snapshot.commitHash)
+  }
+
   /**
    * 关闭项目 = 彻底销毁：
    * 1. 标记 closed，阻止在途 Run 回写；
@@ -2478,6 +2878,32 @@ export default function WorkspacePage() {
     closedAnnotationsRef.current.delete(projectId)
     runEpochRef.current.delete(projectId)
     void architect.dispose(projectId)
+    // 项目被彻底销毁后，其虚拟快照标签也必须移除，避免指向已销毁的沙盒。
+    const closingSnapshotTabs = snapshotTabs.filter(
+      (tab) => tab.projectId === projectId,
+    )
+    if (closingSnapshotTabs.length > 0) {
+      closingSnapshotTabs.forEach((tab) => {
+        snapshotDiffAbortRef.current.get(tab.id)?.abort()
+        snapshotDiffAbortRef.current.delete(tab.id)
+      })
+      setSnapshotTabs((previous) =>
+        previous.filter((tab) => tab.projectId !== projectId),
+      )
+      setActiveSnapshotId((current) =>
+        closingSnapshotTabs.some((tab) => tab.id === current) ? null : current,
+      )
+    }
+    if (snapshotDrawer.open && snapshotDrawer.projectId === projectId) {
+      snapshotDrawerRequestRef.current += 1
+      setSnapshotDrawer((previous) => ({
+        ...previous,
+        open: false,
+        loading: false,
+        restoring: null,
+        confirmHash: null,
+      }))
+    }
     closeTab(projectId)
     setRunStates((previous) => {
       if (!(projectId in previous)) return previous
@@ -2521,6 +2947,9 @@ export default function WorkspacePage() {
   const openProjects = openTabs
     .map((projectId) => projects.find((project) => project.id === projectId))
     .filter(Boolean)
+
+  const activeSnapshotTab =
+    snapshotTabs.find((tab) => tab.id === activeSnapshotId) ?? null
 
   return (
     <div className="app-shell app-shell-wide">
@@ -2568,11 +2997,19 @@ export default function WorkspacePage() {
           openTabs={openTabs}
           activeTabId={activeTabId}
           statuses={statuses}
+          snapshotTabs={snapshotTabs}
+          activeSnapshotId={activeSnapshotId}
           limitReached={limitReached}
-          onSelect={setActiveTab}
+          onSelect={handleSelectProjectTab}
+          onSelectSnapshot={handleSelectSnapshotTab}
+          onCloseSnapshot={handleCloseSnapshotTab}
           onClose={handleCloseTab}
           onReorder={reorderTabs}
           onNewProject={createProject}
+          onOpenHistory={openSnapshotDrawer}
+          historyAvailable={Boolean(
+            activeProject && runStates[activeProject.id]?.result?.sandboxId,
+          )}
         />
 
         <div className="workspace-body">
@@ -2583,7 +3020,7 @@ export default function WorkspacePage() {
                 key={project.id}
                 project={project}
                 run={run}
-                active={project.id === activeTabId}
+                active={activeSnapshotId == null && project.id === activeTabId}
                 modelProvider={modelProvider}
                 onModelProviderChange={setModelProvider}
                 onAnnotationAdd={(payload) => handleAnnotationAdd(project.id, payload)}
@@ -2631,6 +3068,9 @@ export default function WorkspacePage() {
                 canExport={Boolean(run.result?.sandboxId)}
                 exporting={exportingProjectId === project.id}
                 onExport={() => handleExport(project.id)}
+                canSaveSnapshot={Boolean(run.result?.sandboxId)}
+                onSaveSnapshot={() => openSnapshotSave(project.id)}
+                previewRefreshNonce={previewRefresh[project.id] ?? 0}
                 architectState={
                   architectStates[project.id] ?? EMPTY_ARCHITECT
                 }
@@ -2653,7 +3093,17 @@ export default function WorkspacePage() {
             )
           })}
 
-          {openProjects.length === 0 && <EmptyWorkspace onNewProject={createProject} />}
+          {activeSnapshotTab && (
+            <SnapshotWorkspace
+              key={activeSnapshotTab.id}
+              snapshot={activeSnapshotTab}
+              onClose={() => handleCloseSnapshotTab(activeSnapshotTab.id)}
+              onRestore={handleSnapshotTabRestore}
+            />
+          )}
+
+          {openProjects.length === 0 &&
+            !activeSnapshotTab && <EmptyWorkspace onNewProject={createProject} />}
         </div>
       </main>
 
@@ -2683,6 +3133,229 @@ export default function WorkspacePage() {
                 : '◈'}
           </span>
           {toast.text}
+        </div>
+      )}
+
+      {snapshotDrawer.open && (
+        <div
+          className="snapshot-drawer-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeSnapshotDrawer()
+          }}
+        >
+          <aside
+            className="snapshot-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-label="版本历史"
+            data-snapshot-drawer
+          >
+            <header className="snapshot-drawer-head">
+              <div>
+                <h2>版本历史</h2>
+                <p className="muted">
+                  {projects.find(
+                    (project) => project.id === snapshotDrawer.projectId,
+                  )?.name ?? ''}
+                </p>
+              </div>
+              <button
+                className="snapshot-drawer-close"
+                type="button"
+                aria-label="关闭版本历史"
+                onClick={closeSnapshotDrawer}
+              >
+                ×
+              </button>
+            </header>
+
+            <div className="snapshot-drawer-body">
+              {snapshotDrawer.loading && (
+                <p className="muted">正在读取快照历史…</p>
+              )}
+              {snapshotDrawer.error && (
+                <p className="snapshot-error" role="alert">
+                  {snapshotDrawer.error}
+                </p>
+              )}
+              {!snapshotDrawer.loading &&
+                !snapshotDrawer.error &&
+                snapshotDrawer.snapshots.length === 0 && (
+                  <p className="muted">
+                    还没有快照。点击顶部 💾 保存快照，为当前版本存档。
+                  </p>
+                )}
+
+              <ol className="snapshot-list">
+                {snapshotDrawer.snapshots.map((item) => {
+                  const isHead =
+                    item.commitHash === snapshotDrawer.headCommit
+                  const confirming =
+                    snapshotDrawer.confirmHash === item.commitHash
+                  const restoring =
+                    snapshotDrawer.restoring === item.commitHash
+                  return (
+                    <li
+                      key={item.commitHash}
+                      className={`snapshot-item ${isHead ? 'is-head' : ''}`}
+                      data-snapshot-item
+                      data-commit-hash={item.commitHash}
+                    >
+                      <div className="snapshot-item-head">
+                        <span className="snapshot-item-message">
+                          {item.message || '（无备注）'}
+                        </span>
+                        {isHead && (
+                          <span className="snapshot-head-tag">当前版本</span>
+                        )}
+                      </div>
+                      <div className="snapshot-item-meta">
+                        <code>{item.shortHash}</code>
+                        <span>{formatSnapshotTime(item.committedAt)}</span>
+                        {item.author && <span>{item.author}</span>}
+                      </div>
+                      <div className="snapshot-item-actions">
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={() =>
+                            handleViewSnapshot(
+                              snapshotDrawer.projectId,
+                              item,
+                            )
+                          }
+                        >
+                          查看
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button is-danger"
+                          disabled={isHead || restoring}
+                          onClick={() => requestRestoreSnapshot(item.commitHash)}
+                        >
+                          {restoring
+                            ? '恢复中…'
+                            : isHead
+                              ? '已是当前版本'
+                              : '恢复'}
+                        </button>
+                      </div>
+                      {confirming && (
+                        <div
+                          className="snapshot-confirm"
+                          role="alertdialog"
+                          aria-label="确认恢复快照"
+                        >
+                          <p>当前未保存的修改将丢失，是否继续？</p>
+                          <div className="snapshot-confirm-actions">
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              disabled={restoring}
+                              onClick={cancelRestoreSnapshot}
+                            >
+                              取消
+                            </button>
+                            <button
+                              type="button"
+                              className="danger-button"
+                              disabled={restoring}
+                              onClick={confirmRestoreSnapshot}
+                            >
+                              {restoring ? '恢复中…' : '继续恢复'}
+                            </button>
+                          </div>
+                          {snapshotDrawer.confirmError && (
+                            <p className="snapshot-error" role="alert">
+                              {snapshotDrawer.confirmError}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  )
+                })}
+              </ol>
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {snapshotSave.open && (
+        <div
+          className="snapshot-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeSnapshotSave()
+          }}
+        >
+          <form
+            className="snapshot-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="保存快照"
+            onSubmit={submitSnapshotSave}
+          >
+            <header className="snapshot-modal-head">
+              <h2>💾 保存快照</h2>
+              <button
+                className="snapshot-drawer-close"
+                type="button"
+                aria-label="关闭保存快照"
+                onClick={closeSnapshotSave}
+              >
+                ×
+              </button>
+            </header>
+            <p className="muted">
+              把当前沙盒代码提交为一个可随时回滚的版本。
+            </p>
+            <label className="snapshot-modal-label" htmlFor="snapshot-note">
+              快照备注
+            </label>
+            <input
+              id="snapshot-note"
+              className="snapshot-note-input"
+              autoFocus
+              maxLength={200}
+              placeholder="例如：完成了登录页的样式"
+              value={snapshotSave.message}
+              disabled={snapshotSave.saving}
+              onChange={(event) =>
+                setSnapshotSave((previous) => ({
+                  ...previous,
+                  message: event.target.value,
+                  error: null,
+                }))
+              }
+            />
+            <div className="snapshot-modal-hint">
+              {snapshotSave.message.trim().length}/200
+            </div>
+            {snapshotSave.error && (
+              <p className="snapshot-error" role="alert">
+                {snapshotSave.error}
+              </p>
+            )}
+            <div className="snapshot-modal-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={snapshotSave.saving}
+                onClick={closeSnapshotSave}
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                className="primary-button"
+                disabled={
+                  snapshotSave.saving || !snapshotSave.message.trim()
+                }
+              >
+                {snapshotSave.saving ? '保存中…' : '保存快照'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
 
