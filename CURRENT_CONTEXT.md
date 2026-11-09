@@ -38,7 +38,10 @@ React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.1
   `local_summary.md`，快照刷新 `global_summary.md` + `user_profile.md` 并注入
   system；Architect `response_format` + 校验错误回传重试；前端 VirtualList +
   rAF 合帧
-- Eval 10/10；Python 178 passed（新增上下文 14），Java BFF 6 passed；
+- Architect 置信度：必需槽位才算封顶，可选 auth/api 不再扣分；
+  assumptions 齐全时封顶 0.90；问题按必需槽位优先；自由文本确定性回填
+  框架/数据库/实体/业务流；诊断脚本 `scripts/architect_confidence_debug_test.py`
+- Eval 10/10；Python 182 passed（上下文 14 + 置信度 4），Java BFF 6 passed；
   快照/Architect/空白 ADD/澄清/开发者面板 E2E 全 PASS
 
 ## 真 / 假边界

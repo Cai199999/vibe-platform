@@ -21,6 +21,7 @@ from pydantic import ValidationError
 from ai_core.adapters.model.deepseek import DeepSeekClient
 from ai_core.agent.memory import fallback_summary
 from ai_core.architect.confidence import is_known_shape, missing_slots_for
+from ai_core.architect.slots import merge_inferred_slots
 from ai_core.architect.source import format_source
 from ai_core.config import Settings, get_settings
 from ai_core.domain.architect import (
@@ -115,6 +116,11 @@ class MockArchitectLLM(ArchitectLLM):
 
     def analyze(self, context: ArchitectContext) -> ArchitectAnalysis:
         slots = dict(context.slots)
+        # Mock 也必须“听懂”用户自由输入：从历史对话中确定性回填框架、
+        # 数据库、实体与业务流程。否则用户每轮补充都会被无视。
+        for message in context.ui_history:
+            content = str((message or {}).get("content") or "")
+            slots = merge_inferred_slots(slots, content)
         shape = slots.get("app.shape")
         if not is_known_shape(shape):
             return ArchitectAnalysis(
@@ -613,6 +619,21 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "- 如果源码与对话仍不足以判断形态，app_shape 必须为 null，"
             "confidence_score 不得高于 0.42，并首先询问："
             f"“{_shape_question()}”\n\n"
+            "槽位填充与完成度规则（最高优先级）：\n"
+            "- 用户用自然语言给出技术栈、数据库、业务动作或实体名时，必须"
+            "写入对应 slots；不要因为字段不完整就拒绝或重复追问；\n"
+            "- data.entities：用户列出实体名（如“订单和商品表”）即视为已填，"
+            "缺失字段写入 assumptions 并使用合理默认值（id、createdAt 等）；\n"
+            "- business.key_flows：用户描述“点击 -> 扣库存 -> 跳转”等动作即"
+            "视为已填，不要要求用户再写成正式流程文档；\n"
+            "- auth.required / api.style 是可选槽位：用户明确“不需要登录”时"
+            "写入 auth.required=no，之后不得再作为缺失项或追问理由；\n"
+            "- 不要重复追问已出现在 slots 或 ui_history 中的槽位；每轮问题必须"
+            "优先覆盖仍缺失的必需槽位，最多 3 个；\n"
+            "- 当所有必需槽位都有合理值或可采用默认值时，confidence_score 必须"
+            "不低于 0.86；不要为了追求完美细节而压低分数；\n"
+            "- 可采用合理默认值（Spring Boot / MySQL / RESTful 等），但必须写入"
+            " assumptions，禁止编造用户未提供的业务实体。\n\n"
             "只输出一个 JSON 对象，不要 Markdown 围栏。格式：\n"
             '{"app_shape":null或"lightweight_web|script_automation|'
             'full_stack_system","confidence_score":0.0到1.0,'
@@ -823,7 +844,8 @@ def _analysis_human(context: ArchitectContext) -> str:
         f"项目：{context.project_name}（{context.project_id}）\n"
         f"当前澄清轮次：{context.round}\n"
         f"已确认槽位：{json.dumps(context.slots, ensure_ascii=False, default=str)}\n"
-        f"用户历史对话：{json.dumps(context.ui_history[-12:], ensure_ascii=False, default=str)}\n\n"
+        "用户历史对话（结构化回答与“补充说明”同等有效，已提供的信息不得"
+        f"再次追问）：{json.dumps(context.ui_history[-12:], ensure_ascii=False, default=str)}\n\n"
         f"RAG 规范片段：\n{_format_chunks(context.retrieved_chunks)}\n\n"
         f"当前源码：\n{format_source(context.source_files, 42000)}"
     )

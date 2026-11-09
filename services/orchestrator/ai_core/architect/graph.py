@@ -62,6 +62,7 @@ from ai_core.architect.llm import (
     ArchitectLLM,
     ContractDraft,
 )
+from ai_core.architect.slots import merge_inferred_slots
 from ai_core.domain.architect import (
     APP_SHAPE_LABELS,
     ArchitectCitation,
@@ -444,6 +445,11 @@ class ArchitectGraphRunner:
                 resolved = _answer_value(value, text)
                 if resolved not in (None, ""):
                     slots[slot] = resolved
+            # 结构化回答里常混入其它槽位信息（例如后端问题里同时写了
+            # “数据库用 MySQL”）。只在槽位为空时回填，绝不覆盖已确认值。
+            resolved = _answer_value(value, text)
+            if isinstance(resolved, (str, int, float)):
+                slots = merge_inferred_slots(slots, str(resolved))
             if slot and slot not in asked:
                 asked.append(slot)
             content = _answer_content(question, value, text)
@@ -460,6 +466,9 @@ class ArchitectGraphRunner:
 
         comment = str(answers.get("comment") or "").strip()
         if comment:
+            # “补充说明”是自由文本，同样做确定性槽位回填。这样即使 LLM
+            # 没有把用户回答写入 slots，系统也不会反复追问同一问题。
+            slots = merge_inferred_slots(slots, comment)
             messages.append(
                 {
                     "role": "user",

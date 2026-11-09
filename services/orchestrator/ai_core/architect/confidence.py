@@ -90,21 +90,23 @@ def required_slots(shape: str | None) -> list[str]:
     return list(REQUIRED_SLOTS.get(shape, []))
 
 
+def slot_is_filled(value: Any) -> bool:
+    """槽位是否有可用值：None / 空白字符串 / 空集合都视为未填写。"""
+    if value is None:
+        return False
+    if isinstance(value, str) and not value.strip():
+        return False
+    if isinstance(value, (list, tuple, dict)) and len(value) == 0:
+        return False
+    return True
+
+
 def missing_slots_for(shape: str | None, slots: dict[str, Any]) -> list[str]:
-    missing: list[str] = []
     if not is_known_shape(shape):
         return ["app.shape"]
-    for slot in required_slots(shape):
-        value = slots.get(slot)
-        if value is None:
-            missing.append(slot)
-            continue
-        if isinstance(value, str) and not value.strip():
-            missing.append(slot)
-            continue
-        if isinstance(value, (list, tuple, dict)) and len(value) == 0:
-            missing.append(slot)
-    return missing
+    return [
+        slot for slot in required_slots(shape) if not slot_is_filled(slots.get(slot))
+    ]
 
 
 def apply_confidence_guard(
@@ -112,25 +114,38 @@ def apply_confidence_guard(
     slots: dict[str, Any],
     threshold: float,
 ) -> tuple[ArchitectAnalysis, ConfidenceGuardResult]:
-    """用动态槽位封顶 LLM 置信度，并补齐需要追问的槽位。"""
+    """用动态槽位封顶 LLM 置信度，并补齐需要追问的槽位。
+
+    只有当前应用形态的「必需槽位」才参与封顶与阻塞。LLM 自报的
+    ``auth.required`` / ``api.style`` 等可选槽位可以出现在问题里，但绝不能
+    把置信度压到 0.78 并导致 CONFIDENCE_EXHAUSTED——用户明确说“不需要
+    登录”时，系统不应继续扣分。
+    """
     shape = analysis.app_shape if is_known_shape(analysis.app_shape) else None
     merged_slots = {**slots, **analysis.slots}
+    required = set(required_slots(shape))
     missing = missing_slots_for(shape, merged_slots)
-    # LLM 自己报告的缺失槽位也要保留，但去重。
+    # LLM 自报的缺失槽位只保留必需项；可选槽位不参与封顶和路由。
     for slot in analysis.missing_slots:
-        if slot and slot not in missing:
+        if slot in required and slot not in missing:
             missing.append(slot)
 
     cap = 1.0
     reasons: list[str] = []
     for slot in missing:
-        slot_cap = SLOT_CAPS.get(slot, 0.78)
+        # 必需槽位都有明确上限；未知槽位不应出现，兜底也保持可完成。
+        slot_cap = SLOT_CAPS.get(slot, 0.80)
         if slot_cap < cap:
             cap = slot_cap
             reasons.append(f"缺少 {slot}，置信度封顶 {slot_cap:.2f}")
-    if analysis.assumptions and cap > 0.84:
-        cap = 0.84
-        reasons.append("存在未确认假设，置信度封顶 0.84")
+    # 假设（assumptions）是正常交付的一部分：用户给出默认技术栈后，LLM
+    # 会把默认字段写进 assumptions。此时不应把分数压到阈值以下，否则
+    # 槽位已齐却仍被迫继续澄清。只在“仍有必需槽位缺失”时保留 0.84 上限，
+    # 其余情况用 0.90 上限提示“可交付但仍有假设”。
+    assumption_cap = 0.84 if missing else 0.90
+    if analysis.assumptions and cap > assumption_cap:
+        cap = assumption_cap
+        reasons.append(f"存在未确认假设，置信度封顶 {assumption_cap:.2f}")
 
     raw = max(0.0, min(1.0, float(analysis.confidence_score)))
     effective = min(raw, cap)
@@ -142,7 +157,13 @@ def apply_confidence_guard(
         reasons=reasons,
     )
 
-    questions = _normalize_questions(analysis.questions, missing, shape)
+    # 必需槽位优先：LLM 的“锦上添花”问题不能挤掉真正阻塞的必需槽位。
+    questions = _normalize_questions(
+        analysis.questions,
+        missing,
+        shape,
+        filled=merged_slots,
+    )
     if effective < threshold and not questions:
         questions = fallback_questions(missing, shape, round_no=1)
     if effective < threshold and not questions:
@@ -172,38 +193,67 @@ def _normalize_questions(
     raw_questions: list[ArchitectQuestion],
     missing: list[str],
     shape: str | None,
+    *,
+    filled: dict[str, Any] | None = None,
 ) -> list[ArchitectQuestion]:
-    """保留 LLM 问题并补齐未覆盖的关键槽位。"""
-    questions: list[ArchitectQuestion] = []
-    covered: set[str] = set()
-    for index, question in enumerate(raw_questions[:3], start=1):
+    """优先补齐必需槽位，再补充 LLM 的可选问题。
+
+    旧实现先塞满 LLM 的 3 个问题，导致 ``data.entities`` 这类必需槽位
+    永远排不进去；用户连续几轮都在回答“登录 / API 风格”等可选问题，
+    必需槽位却一直缺失，最终 CONFIDENCE_EXHAUSTED。
+    """
+    filled = filled or {}
+    # 已填写的必需槽位不再重复追问；空字符串 / 空集合视为未填写。
+    filled_required = {
+        slot for slot in required_slots(shape) if slot_is_filled(filled.get(slot))
+    }
+
+    # 先把 LLM 问题按槽位归一化，避免同一槽位重复提问。
+    llm_questions: dict[str, ArchitectQuestion] = {}
+    extras: list[ArchitectQuestion] = []
+    for index, question in enumerate(raw_questions, start=1):
         slot = (question.slot or "").strip()
         prompt = (question.prompt or "").strip()
         if not prompt:
             continue
         if not slot:
             slot = missing[0] if missing else "general.context"
-        if slot in covered:
-            continue
-        covered.add(slot)
-        questions.append(
-            question.model_copy(
-                update={
-                    "question_id": question.question_id or f"q_llm_{index}",
-                    "slot": slot,
-                    "prompt": prompt[:400],
-                }
-            )
+        normalized = question.model_copy(
+            update={
+                "question_id": question.question_id or f"q_llm_{index}",
+                "slot": slot,
+                "prompt": prompt[:400],
+            }
         )
+        if slot in missing:
+            llm_questions.setdefault(slot, normalized)
+        elif slot not in required_slots(shape) and slot not in {
+            item.slot for item in extras
+        }:
+            # 必需槽位要么已填、要么在 missing 中；不再作为“可选问题”重复问。
+            extras.append(normalized)
+
+    questions: list[ArchitectQuestion] = []
+    covered: set[str] = set()
+    # 1) 必需槽位：优先使用 LLM 的定制问题，否则用模板兜底。
     for slot in missing:
         if len(questions) >= 3:
             break
-        if slot in covered:
+        if slot in filled_required or slot in covered:
             continue
-        template = question_for_slot(slot, shape)
-        if template is not None:
-            questions.append(template)
-            covered.add(slot)
+        question = llm_questions.get(slot) or question_for_slot(slot, shape)
+        if question is None:
+            continue
+        questions.append(question)
+        covered.add(slot)
+    # 2) 仍有空位时，允许 LLM 追问可选信息（最多 3 个问题）。
+    for question in extras:
+        if len(questions) >= 3:
+            break
+        if question.slot in covered:
+            continue
+        questions.append(question)
+        covered.add(question.slot)
     return questions
 
 

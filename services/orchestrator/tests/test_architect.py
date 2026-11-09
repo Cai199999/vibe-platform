@@ -35,6 +35,7 @@ from ai_core.architect.schemas import (
     ArchitectImplementationPhase,
 )
 from ai_core.config import Settings
+from ai_core.domain.architect import ArchitectQuestion
 
 SHAPES = ("lightweight_web", "script_automation", "full_stack_system")
 
@@ -251,6 +252,18 @@ class ArchitectFlowTest(unittest.TestCase):
         harness.decide("CONFIRM")
         self.assertEqual(harness.outcome.state["status"], "CONFIRMED")
 
+    def test_comment_answer_backfills_slots_deterministically(self) -> None:
+        harness = ArchitectHarness()
+        harness.answer(harness.outcome.interrupt or {}, "full_stack_system")
+        outcome = harness.runner.run(
+            {},
+            run_id=harness.run_id,
+            resume={"comment": "后端用 Java Spring Boot，数据库用 MySQL。"},
+        )
+        slots = outcome.state["slots"]
+        self.assertEqual(slots["backend.framework"], "java_spring_boot")
+        self.assertEqual(slots["database.engine"], "mysql")
+
     def test_round_limit_exhausts_confidence(self) -> None:
         harness = ArchitectHarness(max_rounds=1)
         first = harness.outcome.interrupt or {}
@@ -305,6 +318,33 @@ class ArchitectJsonRepairTest(unittest.TestCase):
             round=0,
             threshold=0.85,
         )
+
+    def test_mock_extracts_slots_from_free_text_history(self) -> None:
+        # 用户自由输入“Java + MySQL”“订单和商品表”时，Mock 也必须动态
+        # 填槽并提升分数，而不是永远停在 0.90 / 0.70。
+        context = ArchitectContext(
+            project_id="p1",
+            project_name="秒杀",
+            source_files={},
+            ui_history=[
+                {"role": "user", "content": "点击后扣除库存并跳转"},
+                {
+                    "role": "user",
+                    "content": "后端用 Java Spring Boot，数据库用 MySQL。",
+                },
+                {"role": "user", "content": "核心实体是订单和商品表。"},
+            ],
+            slots={"app.shape": "full_stack_system"},
+            app_shape="full_stack_system",
+            round=2,
+            threshold=0.85,
+        )
+        analysis = MockArchitectLLM().analyze(context)
+        self.assertEqual(analysis.missing_slots, [])
+        self.assertGreaterEqual(analysis.confidence_score, 0.85)
+        self.assertEqual(analysis.slots["backend.framework"], "java_spring_boot")
+        self.assertEqual(analysis.slots["database.engine"], "mysql")
+        self.assertIn("订单", analysis.slots["data.entities"])
 
     def test_business_flows_accepts_string_and_mixed_list(self) -> None:
         analysis = ArchitectAnalysis.model_validate(
@@ -421,7 +461,9 @@ class ConfidenceGuardTest(unittest.TestCase):
         self.assertLess(guarded.confidence_score, 0.85)
         self.assertEqual(guarded.confidence_score, 0.60)
 
-    def test_assumptions_cap_complete_analysis(self) -> None:
+    def test_assumptions_do_not_block_complete_analysis(self) -> None:
+        # 用户给出默认技术栈后，LLM 会把默认字段写入 assumptions；
+        # 只要必需槽位齐全，就应允许进入契约，而不是卡在 0.84。
         guarded, _ = apply_confidence_guard(
             ArchitectAnalysis(
                 app_shape="lightweight_web",
@@ -432,9 +474,66 @@ class ConfidenceGuardTest(unittest.TestCase):
             {},
             0.85,
         )
-        self.assertEqual(guarded.confidence_score, 0.84)
-        self.assertTrue(guarded.questions)
-        self.assertLess(guarded.confidence_score, 0.85)
+        self.assertEqual(guarded.confidence_score, 0.90)
+        self.assertFalse(guarded.questions)
+
+    def test_optional_slots_never_block_completion(self) -> None:
+        # LLM 自报 auth.required / api.style 缺失时，不能把它们当成必需槽位。
+        guarded, result = apply_confidence_guard(
+            ArchitectAnalysis(
+                app_shape="full_stack_system",
+                confidence_score=0.93,
+                missing_slots=["auth.required", "api.style"],
+                slots={
+                    "backend.framework": "java_spring_boot",
+                    "database.engine": "mysql",
+                    "business.key_flows": "点击 -> 扣库存 -> 跳转",
+                    "data.entities": "Order, Product",
+                },
+            ),
+            {},
+            0.85,
+        )
+        self.assertEqual(result.missing_slots, [])
+        self.assertEqual(guarded.confidence_score, 0.93)
+        self.assertFalse(guarded.questions)
+
+    def test_required_question_is_not_crowded_out_by_optional_ones(self) -> None:
+        # LLM 一次返回 3 个可选问题，但 data.entities 仍缺失；必须优先问它。
+        raw = ArchitectAnalysis(
+            app_shape="full_stack_system",
+            confidence_score=0.90,
+            missing_slots=["data.entities"],
+            slots={
+                "backend.framework": "java_spring_boot",
+                "database.engine": "mysql",
+                "business.key_flows": "点击 -> 扣库存 -> 跳转",
+            },
+            questions=[
+                ArchitectQuestion(
+                    question_id="q_auth",
+                    slot="auth.required",
+                    type="single_choice",
+                    prompt="是否需要登录？",
+                ),
+                ArchitectQuestion(
+                    question_id="q_api",
+                    slot="api.style",
+                    type="free_text",
+                    prompt="API 风格？",
+                ),
+                ArchitectQuestion(
+                    question_id="q_deploy",
+                    slot="deployment.target",
+                    type="free_text",
+                    prompt="部署目标？",
+                ),
+            ],
+        )
+        guarded, _ = apply_confidence_guard(raw, {}, 0.85)
+        slots = [question.slot for question in guarded.questions]
+        self.assertIn("data.entities", slots)
+        self.assertLessEqual(len(slots), 3)
 
 
 class ContractTierValidationTest(unittest.TestCase):
