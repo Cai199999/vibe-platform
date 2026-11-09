@@ -4,8 +4,8 @@
  * 该脚本由 vite 插件注入到沙盒 index.html 中。平台预览 iframe 与沙盒
  * 跨域，父页面无法直接访问 DOM，因此双方通过 postMessage 通信：
  *
- *   parent -> iframe: { channel:'vibe-inspect', type:'enable'|'move'|'pick'|'clear' }
- *   iframe -> parent: { channel:'vibe-inspect', type:'ready'|'hover'|'picked' }
+ *   parent -> iframe: { channel:'vibe-inspect', type:'enable'|'move'|'pick'|'clear'|'measure' }
+ *   iframe -> parent: { channel:'vibe-inspect', type:'ready'|'hover'|'picked'|'measured' }
  *
  * 坐标全部使用 iframe 内部视口 CSS 像素（1280×720 设计视口），
  * 由父页面根据 iframe 的 transform scale 反算后传入。
@@ -174,6 +174,61 @@
     return null
   }
 
+  /**
+   * 按 CSS selector 安全查找节点。
+   *
+   * selector 由平台根据 annotationId 生成（[data-vibe-created="..."]），
+   * 但仍要用 try/catch 防御非法选择器，不能让一条坏消息打断 inspect。
+   */
+  function queryNode(selector) {
+    if (!selector) return null
+    try {
+      return document.querySelector(selector)
+    } catch (error) {
+      return null
+    }
+  }
+
+  /**
+   * 测量新增组件与父容器的位置。
+   *
+   * CREATE_NEW 的组件由 Coder 生成后带有 data-vibe-created 标记；平台
+   * 通过 measure 拿到它在 iframe 内的真实 rect，再叠加用户拖拽位移，
+   * 最终把“相对父容器左上角”的 x/y 回写给 Coder。
+   */
+  function measureElement(selector, parentSelector) {
+    var node = queryNode(selector)
+    if (!node) {
+      return {
+        ok: false,
+        reason: 'NOT_FOUND',
+        selector: selector || '',
+      }
+    }
+    var rect = rectOf(node)
+    var parentNode = parentSelector ? queryNode(parentSelector) : null
+    if (!parentNode) {
+      parentNode = findContainer(node) || node.parentElement
+    }
+    var parentRect = parentNode ? rectOf(parentNode) : null
+    return {
+      ok: true,
+      selector: selector,
+      parentSelector: parentSelector || '',
+      rect: rect,
+      parentRect: parentRect,
+      relativeRect: relativeRect(rect, parentRect),
+      source: readSource(node),
+      parentSource: parentNode ? readSource(parentNode) : null,
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        scrollX: window.scrollX || 0,
+        scrollY: window.scrollY || 0,
+      },
+    }
+  }
+
   /** 向上收集 data-source 祖先链，帮助模型理解 DOM 层级。 */
   function readChain(node, limit) {
     var chain = []
@@ -309,6 +364,12 @@
       if (!enabled) return
       var payload = inspectAt(Number(data.x), Number(data.y))
       reply(event.source, event.origin, 'picked', payload)
+    }
+    if (data.type === 'measure') {
+      // 测量不依赖 inspect 模式，HMR 刷新后平台可随时请求。
+      var measured = measureElement(data.selector, data.parentSelector)
+      measured.requestId = data.requestId || ''
+      reply(event.source, event.origin, 'measured', measured)
     }
   })
 

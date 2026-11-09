@@ -14,6 +14,13 @@ import { EMPTY_ARCHITECT, useArchitect } from '../workspace/useArchitect.js'
 import { createFrameBatcher, streamRun } from '../workspace/runStream.js'
 import { importProjectFile } from '../workspace/importClient.js'
 import {
+  CREATE_NEW,
+  MODIFY_EXISTING,
+  isCreateAction,
+  isModifyAction,
+  normalizeAction,
+} from '../workspace/annotationActions.js'
+import {
   createSnapshot,
   fetchSnapshotDiff,
   listSnapshots,
@@ -86,6 +93,16 @@ const EMPTY_RUN = {
   supervisorPhase: null,
   // route 返回的完整决策 + handoff 展示名，用于顶部轨迹与专属 Agent 卡片。
   supervisorDecision: null,
+  // 保存门控：生成 / 拖拽 / 改样式后置 true，保存快照成功后置 false。
+  // dirty=true 时【下一步：构建全栈方案】置灰，必须先保存。
+  dirty: false,
+  // CREATE_NEW 的拖拽定位层：组件 marker + 父容器 selector + 用户落点。
+  // 结构：{ annotationId, selector, parentSelector, x, y, width, height,
+  //        confirmed, error }
+  placement: null,
+  // 保存快照后缓存的项目全局摘要 / 本次快照改动说明，随 Architect 请求发送。
+  projectSummary: '',
+  latestChanges: '',
 }
 
 // 成功终态：M2 的旧快照仍可能是 AWAITING_APPROVAL，统一按成功渲染。
@@ -125,6 +142,10 @@ function loadRunStates(projects) {
       // 老快照没有 threadId / chatHistory：补齐，保证每个圈都能继续对话。
       const annotations = rawAnnotations.map((annotation) => ({
         ...annotation,
+        // 旧会话里是 ADD / MODIFY，统一升级为 CREATE_NEW / MODIFY_EXISTING。
+        ...(annotation.action
+          ? { action: normalizeAction(annotation.action) }
+          : {}),
         threadId: annotation.threadId || newId('thread'),
         chatHistory: Array.isArray(annotation.chatHistory)
           ? annotation.chatHistory
@@ -137,6 +158,10 @@ function loadRunStates(projects) {
         error: saved.error ?? null,
         lastInstruction: saved.lastInstruction ?? '',
         sandboxIds,
+        dirty: Boolean(saved.dirty),
+        placement: saved.placement ?? null,
+        projectSummary: saved.projectSummary ?? '',
+        latestChanges: saved.latestChanges ?? '',
       }
     })
     return restored
@@ -275,23 +300,21 @@ function findTargetLine(source, marker) {
 }
 
 // “添加 / 新建 / 插入 / add” 等动词优先于圈选命中结果：即使用户圈到了
-// 卡片本身，只要指令是在新增内容，就按 ADD 处理，避免模型去改卡片颜色。
+// 卡片本身，只要指令是在新增内容，就按 CREATE_NEW 处理，避免模型去改卡片颜色。
 const ADD_INTENT_PATTERN = /添加|新增|新建|插入|加一个|加个|(?:^|\s)add\s/i
 
 /**
  * 自动推断操作类型：
- *  - 圈中没有命中任何 data-source（空白区域）→ ADD；
- *  - 圈的展示面积远大于命中的节点 → ADD（由 CanvasStage 的几何判定给出）；
- *  - 指令包含新增语义 → ADD；
- *  - 其余命中已有元素 → MODIFY。
+ *  - 圈中没有命中任何 data-source（空白区域）→ CREATE_NEW；
+ *  - 圈的展示面积远大于命中的节点 → CREATE_NEW（CanvasStage 几何判定）；
+ *  - 指令包含新增语义 → CREATE_NEW；
+ *  - 其余命中已有元素 → MODIFY_EXISTING。
  * 用户手动点选浮层内的“修改 / 新增”后 actionSource=manual，不再自动覆盖。
  */
 function inferAnnotationAction(target, intent, geometryAction) {
-  if (ADD_INTENT_PATTERN.test(intent ?? '')) return 'ADD'
-  if (geometryAction === 'ADD' || geometryAction === 'MODIFY') {
-    return geometryAction
-  }
-  return target ? 'MODIFY' : 'ADD'
+  if (ADD_INTENT_PATTERN.test(intent ?? '')) return CREATE_NEW
+  if (geometryAction) return normalizeAction(geometryAction)
+  return target ? MODIFY_EXISTING : CREATE_NEW
 }
 
 /**
@@ -303,30 +326,25 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
   const rect = entry.rect
   const instruction = entry.intent.trim()
   // 旧 localStorage 里的标注没有 action：按指令与几何判定即时推断。
-  const action =
-    entry.action === 'ADD' || entry.action === 'MODIFY'
-      ? entry.action
-      : inferAnnotationAction(
-          entry.target,
-          instruction,
-          entry.geometryAction,
-        )
-  // ADD 的目标必须是“最近 data-source 父容器”，由 CanvasStage 在圈选时
-  // 计算；只命中叶子时不能把新增 JSX 塞进 button / p / h1。
-  // MODIFY 没有命中元素时才回退到默认 CTA，保持旧行为。
+  // 有 action 时统一归一化，旧 ADD / MODIFY 也在这里升级。
+  const action = entry.action
+    ? normalizeAction(entry.action)
+    : inferAnnotationAction(entry.target, instruction, entry.geometryAction)
+  // CREATE_NEW 的目标必须是“最近 data-source 父容器”，由 CanvasStage 在
+  // 圈选时计算；只命中叶子时不能把新增 JSX 塞进 button / p / h1。
+  // MODIFY_EXISTING 没有命中元素时才回退到默认 CTA，保持旧行为。
   const addTarget = entry.addTarget ?? null
-  const target =
-    action === 'ADD'
-      ? addTarget
-      : (entry.target ??
-        {
-          marker: 'cta-button',
-          selector: "[data-source='cta-button']",
-          label: '按钮',
-          role: 'button',
-          component: 'App',
-          tag: 'button',
-        })
+  const target = isCreateAction(action)
+    ? addTarget
+    : (entry.target ??
+      {
+        marker: 'cta-button',
+        selector: "[data-source='cta-button']",
+        label: '按钮',
+        role: 'button',
+        component: 'App',
+        tag: 'button',
+      })
   // Inspect 模式由 SDK 回传真实文件 / 行号 / 列号；圈选模式继续使用
   // data-source 标记反查行号。两者最终都收敛到同一个 AnnotationEnvelope。
   const precise = entry.inspectSource ?? entry.source ?? null
@@ -342,21 +360,19 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
   const snippetContent = precise
     ? sourceLines.slice(startLine - 1, endLine).join('\n')
     : sourceText
-  const acceptance =
-    action === 'ADD'
-      ? [
-          `在${target?.label || '圈选区域'}（${target?.selector || '父容器'}）内部新增组件：${instruction}`,
-          '按圈相对父容器的坐标决定插入顺序，原有 DOM 结构、布局、文案与交互保持不变',
-        ]
-      : [
-          `按指令修改${target?.label || '目标组件'}：${instruction}`,
-          '其余布局、文案与交互保持不变',
-        ]
-  // relativeTarget 只在 ADD 时有意义：
-  //  - x/y/width/height 为兼容字段（相对父容器的归一化坐标 0~1）；
-  //  - relativeX/Y 与 widthPx/heightPx/parentWidth/parentHeight 为开发者级
-  //    像素坐标，模型据此用 flex/grid/absolute/margin 精确落位。
-  const relative = action === 'ADD' ? entry.relativeRect : null
+  const acceptance = isCreateAction(action)
+    ? [
+        `在${target?.label || '圈选区域'}（${target?.selector || '父容器'}）内部新增组件：${instruction}`,
+        '先只生成组件主体与 data-vibe-created 标记，不写死绝对坐标；用户在前端拖拽确认后，再由系统回写 left/top',
+        '原有 DOM 结构、布局、文案与交互保持不变',
+      ]
+    : [
+        `按指令修改${target?.label || '目标组件'}：${instruction}`,
+        '其余布局、文案与交互保持不变',
+      ]
+  // relativeTarget 只在 CREATE_NEW 时有意义：作为初始落位参考，最终位置
+  // 以用户拖拽松手后的 payload.position 为准。
+  const relative = isCreateAction(action) ? entry.relativeRect : null
   return {
     version: 1,
     annotationId: entry.id,
@@ -372,7 +388,7 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
       coordinateSpace: 'normalized',
     },
     relativeTarget:
-      action === 'ADD'
+      isCreateAction(action)
         ? {
             x: relative?.x ?? 0,
             y: relative?.y ?? 0,
@@ -436,6 +452,21 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
       from: null,
       to: null,
       strokes: [],
+      // CREATE_NEW 确认拖拽后的坐标 Patch：Coder 据此写
+      // position:absolute; left/top，并给父容器补 position:relative。
+      // 未拖拽时保持 null，模型不得自行写死绝对坐标。
+      ...(entry.position
+        ? {
+            position: {
+              x: Number(entry.position.x) || 0,
+              y: Number(entry.position.y) || 0,
+              width: entry.position.width ?? null,
+              height: entry.position.height ?? null,
+              selector: entry.position.selector || null,
+              parentSelector: entry.position.parentSelector || null,
+            },
+          }
+        : {}),
     },
     createdAt: entry.createdAt ?? new Date().toISOString(),
     threadId: entry.threadId,
@@ -663,11 +694,26 @@ function resultFromTerminalEvent(run, event) {
   }
 }
 
+/** 合并“本次保存前”的改动说明，去重并限制在 4000 字内。 */
+function mergeLatestChanges(previous, next) {
+  const before = String(previous || '').trim()
+  const after = String(next || '').trim()
+  if (!after) return before
+  if (!before) return after.slice(-4000)
+  if (before.includes(after)) return before
+  return `${before}\n${after}`.slice(-4000)
+}
+
 /**
  * 终态事件落地：更新标注的 Git 坐标、追加助手消息、记录沙盒。
  * annotationId 为空表示批量提交，所有参与标注都收到同一条 run 级回复。
+ *
+ * 保存门控：
+ *  - 成功 Run 一律把 dirty 置 true，等待用户保存快照；
+ *  - CREATE_NEW 成功后生成 placement 拖拽层，用户确认坐标后再回写代码。
  */
 function finalizeFromResult(run, result, annotationId) {
+  const success = isSuccessStatus(result.status)
   const annotations = run.annotations.map((annotation) => {
     if (annotationId && annotation.id !== annotationId) return annotation
     const commit = result.commits?.find(
@@ -685,8 +731,42 @@ function finalizeFromResult(run, result, annotationId) {
       lastTurnCount:
         commit?.turnCount || result.turnCount || annotation.lastTurnCount,
       chatHistory: appendAssistantMessage(annotation, result),
+      // 只有“首次创建且尚未定位”的标注才需要用户拖拽；
+      // placementDone 由拖拽确认时写入，避免后续每次 Run 都重新浮出。
+      placementPending:
+        success && isCreateAction(annotation.action) && !annotation.placementDone
+          ? true
+          : annotation.placementPending,
     }
   })
+
+  // CREATE_NEW 成功：把新组件 marker 交给预览层测量 + 拖拽。
+  const placementCandidate = success
+    ? annotations.find((annotation) => annotation.placementPending)
+    : null
+  const placement = placementCandidate
+    ? {
+        annotationId: placementCandidate.id,
+        // 后端 Coder / Mock 统一给新增组件打这个标记。
+        selector: `[data-vibe-created="${placementCandidate.id}"]`,
+        // 父容器来自标注目标（CREATE_NEW 的目标就是插入父级）。
+        parentSelector: placementCandidate.target?.selector || '',
+        x: null,
+        y: null,
+        width: null,
+        height: null,
+        confirmed: false,
+        error: null,
+      }
+    : run.placement
+
+  const changeText =
+    result.assistantMessage ||
+    (success
+      ? `完成一次界面修改${
+          result.commitHash ? `（${result.commitHash.slice(0, 7)}）` : ''
+        }`
+      : '')
   return {
     ...run,
     result,
@@ -699,6 +779,15 @@ function finalizeFromResult(run, result, annotationId) {
       result.sandboxId && !run.sandboxIds.includes(result.sandboxId)
         ? [...run.sandboxIds, result.sandboxId]
         : run.sandboxIds,
+    // 任何成功的界面改动都进入“未保存”状态。
+    dirty: success ? true : run.dirty,
+    // 上一次保存后已经有了改动：累加；已保存干净时替换为本次改动。
+    latestChanges: success
+      ? run.dirty
+        ? mergeLatestChanges(run.latestChanges, changeText)
+        : changeText
+      : run.latestChanges,
+    placement,
     submitting: false,
     pendingAnnotationId: null,
     pendingAction: null,
@@ -932,6 +1021,11 @@ export default function WorkspacePage() {
         error: run.error,
         lastInstruction: run.lastInstruction,
         sandboxIds: run.sandboxIds,
+        // 保存门控与拖拽定位必须跨刷新保留，否则刷新后按钮误解锁。
+        dirty: run.dirty,
+        placement: run.placement,
+        projectSummary: run.projectSummary,
+        latestChanges: run.latestChanges,
       }
     })
     try {
@@ -1246,10 +1340,9 @@ export default function WorkspacePage() {
 
     patchRun(projectId, (previous) => {
       if (previous.annotations.length >= MAX_ANNOTATIONS) return previous
-      const autoAction =
-        geometryAction === 'ADD' || geometryAction === 'MODIFY'
-          ? geometryAction
-          : inferAnnotationAction(target, '')
+      const autoAction = geometryAction
+        ? normalizeAction(geometryAction)
+        : inferAnnotationAction(target, '')
       return {
         ...previous,
         annotations: [
@@ -1318,7 +1411,96 @@ export default function WorkspacePage() {
       ...previous,
       annotations: previous.annotations.map((annotation) =>
         annotation.id === annotationId
-          ? { ...annotation, action, actionSource: 'manual' }
+          ? {
+              ...annotation,
+              action: normalizeAction(action),
+              actionSource: 'manual',
+            }
+          : annotation,
+      ),
+    }))
+  }
+
+  /**
+   * CREATE_NEW 拖拽确认：把用户松手时的父子相对坐标作为一次
+   * MODIFY_EXISTING Patch 交给 Coder 回写代码。
+   *
+   * 这里不新开专用接口：复用 Supervisor → UI Graph → Coder 全链路，
+   * 沙盒 HMR 刷新后用户就能看到自己拖出来的位置。
+   */
+  const handlePlacementConfirm = (projectId, placement, position) => {
+    if (!placement || !position) return
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const original = run.annotations.find(
+      (annotation) => annotation.id === placement.annotationId,
+    )
+    const x = Number(position.x)
+    const y = Number(position.y)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return
+
+    const selector =
+      placement.selector || `[data-vibe-created="${placement.annotationId}"]`
+    const entry = {
+      ...(original ?? {}),
+      id: placement.annotationId,
+      rect: original?.rect ?? { x: 0, y: 0, width: 0, height: 0 },
+      // 回写坐标的目标是“新增组件的 marker 本身”，不是父容器。
+      target: {
+        marker: '',
+        selector,
+        label: '新增组件',
+        role: 'element',
+        component: 'App',
+        tag: 'div',
+      },
+      addTarget: null,
+      action: MODIFY_EXISTING,
+      actionSource: 'manual',
+      intent: `将新增组件定位到 left:${Math.round(x)}px / top:${Math.round(y)}px`,
+      position: {
+        x,
+        y,
+        width: position.width ?? null,
+        height: position.height ?? null,
+        selector,
+        parentSelector: placement.parentSelector || null,
+      },
+    }
+
+    // 拖拽已经是“未保存修改”；先落 UI 状态，再走异步 Patch。
+    patchRun(projectId, (previous) => ({
+      ...previous,
+      dirty: true,
+      placement: null,
+      latestChanges: mergeLatestChanges(
+        previous.dirty ? previous.latestChanges : '',
+        `拖拽定位新增组件：left:${Math.round(x)}px; top:${Math.round(y)}px`,
+      ),
+      annotations: previous.annotations.map((annotation) =>
+        annotation.id === placement.annotationId
+          ? { ...annotation, placementPending: false, placementDone: true }
+          : annotation,
+      ),
+    }))
+
+    void submitViaSupervisor(projectId, {
+      message: entry.intent,
+      annotations: [entry],
+      annotationId: null,
+      sendEntries: [],
+      commitOnSuccess: false,
+    })
+  }
+
+  /** 放弃拖拽：不写代码，但记录已处理，避免每次 Run 都重新浮出定位层。 */
+  const handlePlacementDismiss = (projectId, placement) => {
+    if (!placement) return
+    patchRun(projectId, (previous) => ({
+      ...previous,
+      placement: null,
+      annotations: previous.annotations.map((annotation) =>
+        annotation.id === placement.annotationId
+          ? { ...annotation, placementPending: false, placementDone: true }
           : annotation,
       ),
     }))
@@ -1548,6 +1730,10 @@ export default function WorkspacePage() {
       files,
       source,
       architectHistory,
+      // 全栈澄清上下文：项目全局摘要 + 本次快照改动。Architect 据此
+      // 复用已确认的技术选型，不再重复询问。
+      projectSummary: run.projectSummary || '',
+      latestChanges: run.latestChanges || '',
       options: {
         scopeHint,
         ui: {
@@ -1950,6 +2136,11 @@ export default function WorkspacePage() {
    */
   const handleStartArchitect = (projectId) => {
     const run = runStates[projectId] ?? EMPTY_RUN
+    // 保存门控：未保存的生成 / 拖拽 / 样式修改绝不能进入全栈澄清。
+    if (run.dirty) {
+      showToast('info', '请先保存当前修改')
+      return
+    }
     const annotations = run.annotations.filter((item) => item.intent.trim())
     const message = [
       '下一步：构建全栈方案',
@@ -1965,6 +2156,10 @@ export default function WorkspacePage() {
   }
 
   const handleOpenArchitect = (projectId) => {
+    if ((runStates[projectId] ?? EMPTY_RUN).dirty) {
+      showToast('info', '请先保存当前修改')
+      return
+    }
     if (architectStates[projectId]?.runId) {
       architect.openPanel(projectId)
       return
@@ -2606,12 +2801,17 @@ export default function WorkspacePage() {
       showSnapshotToast('error', '请先执行一次 Agent 生成沙盒，再保存快照。')
       return
     }
+    // 自动带一条可读备注，用户只改不改都可以直接保存；保存后自动提交
+    // Git checkpoint 并刷新 global_summary.md。
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const project = projects.find((item) => item.id === projectId)
     setSnapshotSave({
       open: true,
       projectId,
-      message: '',
+      message: `保存当前版本：${project?.name ?? projectId}`,
       saving: false,
       error: null,
+      latestChanges: run.latestChanges || '',
     })
   }
 
@@ -2644,12 +2844,23 @@ export default function WorkspacePage() {
 
     setSnapshotSave((previous) => ({ ...previous, saving: true, error: null }))
     try {
+      const run = runStates[projectId] ?? EMPTY_RUN
+      // latestChanges 是本次快照涵盖的改动说明；为空时退化为快照备注，
+      // 保证第一次保存也能生成 global_summary.md。
+      const latestChanges = run.latestChanges || message
       const payload = await createSnapshot(sandboxId, message, session?.token, {
         projectId,
         tenantId: user?.tenantId || 'tenant_local',
+        latestChanges,
       })
       if (!workspaceMountedRef.current) return
       setSnapshotSave((previous) => ({ ...previous, saving: false, open: false }))
+      // 保存成功 = 已落盘：解除下一步门控，并缓存全局摘要供 Architect 使用。
+      patchRun(projectId, {
+        dirty: false,
+        projectSummary: payload?.projectSummary || run.projectSummary || '',
+        latestChanges: payload?.latestChanges || latestChanges,
+      })
       showSnapshotToast(
         'success',
         `快照已保存：${message}（${payload?.shortHash ?? ''}）`,
@@ -2719,6 +2930,10 @@ export default function WorkspacePage() {
           [projectId]: {
             ...run,
             result: { ...run.result, commitHash },
+            // 回滚后工作区与该 commit 一致，视为已保存；拖拽定位层失效。
+            dirty: false,
+            placement: null,
+            latestChanges: `恢复到快照：${label}`,
           },
         }
       })
@@ -3147,6 +3362,12 @@ export default function WorkspacePage() {
                 }
                 onAnnotationRollback={(annotationId, message) =>
                   handleAnnotationRollback(project.id, annotationId, message)
+                }
+                onPlacementConfirm={(placement, position) =>
+                  handlePlacementConfirm(project.id, placement, position)
+                }
+                onPlacementDismiss={(placement) =>
+                  handlePlacementDismiss(project.id, placement)
                 }
                 onClearAnnotations={() => handleClearAnnotations(project.id)}
                 onApprovalDecision={(decision, comment) =>

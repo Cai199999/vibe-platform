@@ -45,10 +45,13 @@ const snapshotsPath = (sandboxId) =>
   `/api/v1/sandboxes/${encodeURIComponent(sandboxId)}/snapshots`
 
 /**
- * 创建快照，返回 { sandboxId, commitHash, shortHash, message, committedAt }。
+ * 创建快照，返回
+ * { sandboxId, commitHash, shortHash, message, committedAt,
+ *   projectSummary, latestChanges }。
  *
  * projectId / tenantId 让 Python 侧在保存快照时刷新项目上下文记忆
- * （global_summary.md + user_profile.md）；不传时回退到 sandbox 作用域。
+ * （global_summary.md + user_profile.md）；latestChanges 是本次快照
+ * 涵盖的改动说明，用于生成第一份全局摘要。不传时回退到 sandbox 作用域。
  */
 export function createSnapshot(
   sandboxId,
@@ -60,6 +63,7 @@ export function createSnapshot(
   const body = { message }
   if (scope.projectId) body.projectId = scope.projectId
   if (scope.tenantId) body.tenantId = scope.tenantId
+  if (scope.latestChanges) body.latestChanges = scope.latestChanges
   return request(snapshotsPath(sandboxId), {
     token,
     method: 'POST',

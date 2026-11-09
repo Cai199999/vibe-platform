@@ -138,6 +138,9 @@ class ArchitectState(TypedDict, total=False):
     source_files: dict[str, str]
     source_hash: str
     ui_history: list[dict[str, Any]]
+    # 快照保存生成的项目全局摘要 + 本次快照改动说明。
+    project_summary: str
+    latest_changes: str
     # 历史压缩后的核心需求与约束；超过阈值才写入。
     history_summary: str
     history_tokens_before: int

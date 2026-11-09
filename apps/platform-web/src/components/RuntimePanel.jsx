@@ -3,6 +3,12 @@ import DiffView from './DiffView.jsx'
 import InspectDraftCard from './InspectDraftCard.jsx'
 import ScaledPreview from './ScaledPreview.jsx'
 import VirtualList from './VirtualList.jsx'
+import {
+  CREATE_NEW,
+  MODIFY_EXISTING,
+  isCreateAction,
+  normalizeAction,
+} from '../workspace/annotationActions.js'
 
 /**
  * 时间轴：直接渲染后端 SSE 的 node.started / node.finished 事件。
@@ -328,7 +334,9 @@ function annotationAstPath(annotation, index) {
   if (source?.file) {
     return `${source.file}:${source.line ?? 1}:${source.column ?? 1}`
   }
-  const target = annotation.action === 'ADD' ? annotation.addTarget : annotation.target
+  const target = isCreateAction(annotation.action)
+    ? annotation.addTarget
+    : annotation.target
   return target?.selector ? `${target.selector}（行号未解析）` : `标注 ${index + 1}`
 }
 
@@ -399,8 +407,12 @@ function RunDetails({
                 const intent = annotation.intent?.trim()
                 return (
                   <li key={annotation.id}>
-                    <span className={`ast-action is-${annotation.action || 'MODIFY'}`}>
-                      {annotation.action === 'ADD' ? 'ADD' : 'MODIFY'}
+                    <span
+                      className={`ast-action is-${
+                        annotation.action ? normalizeAction(annotation.action) : MODIFY_EXISTING
+                      }`}
+                    >
+                      {isCreateAction(annotation.action) ? CREATE_NEW : MODIFY_EXISTING}
                     </span>
                     <button
                       className="ast-path"
@@ -570,6 +582,9 @@ export default function RuntimePanel({
   onInspectDraftChange,
   onInspectDraftCancel,
   onInspectDraftSubmit,
+  placement = null,
+  onPlacementConfirm,
+  onPlacementDismiss,
   refreshNonce = 0,
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false)
@@ -674,6 +689,9 @@ export default function RuntimePanel({
             visible={visible && !submitting}
             inspectMode={inspectMode}
             onInspectPick={onInspectPick}
+            placement={placement}
+            onPlacementConfirm={onPlacementConfirm}
+            onPlacementDismiss={onPlacementDismiss}
           />
         )}
 

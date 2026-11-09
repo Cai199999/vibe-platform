@@ -2,7 +2,7 @@
 """E2E：在画布上圈选大卡片内部，要求“添加一个红色的提交按钮”。
 
 覆盖链路：
-  1. 输入“添加…”后 action 自动切换为 ADD；
+  1. 输入“添加…”后 action 自动切换为 CREATE_NEW；
   2. 浮层支持手动切换 修改 / 新增（手动选择优先于自动推断）；
   3. AnnotationEnvelope.action=ADD 传到 python-ai，Mock Agent 在卡片内部
      插入完整 <button> JSX，而不是覆盖已有元素；
@@ -49,6 +49,11 @@ def main() -> int:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1600, "height": 1000})
+        # 该用例校验的是确定性 Mock 输出（红色按钮 + vibe-added-button），
+        # 必须显式固定模型，避免本机保存的 DeepSeek 选择污染断言。
+        context.add_init_script(
+            "window.localStorage.setItem('vibe.llmProvider', 'mock')"
+        )
         page = context.new_page()
         sandbox_id: str | None = None
 
@@ -80,17 +85,19 @@ def main() -> int:
             popover = active.locator(".canvas-popover")
             expect(popover).to_have_count(1)
 
-            print("\n== 3. 输入新增意图，action 自动切换为 ADD ==")
+            print("\n== 3. 输入新增意图，action 自动切换为 CREATE_NEW ==")
             popover.locator("input").fill("添加一个红色的提交按钮")
-            expect(popover).to_have_attribute("data-action", "ADD")
+            expect(popover).to_have_attribute("data-action", "CREATE_NEW")
 
             # 手动切换：修改 -> 新增，验证用户可覆盖自动推断。
             mode_group = popover.locator(".popover-action button")
             mode_group.filter(has_text="修改").click()
-            expect(popover).to_have_attribute("data-action", "MODIFY")
+            expect(popover).to_have_attribute("data-action", "MODIFY_EXISTING")
             mode_group.filter(has_text="新增").click()
-            expect(popover).to_have_attribute("data-action", "ADD")
-            print("   action: 自动 ADD，手动 修改/MODIFY ↔ 新增/ADD 正常")
+            expect(popover).to_have_attribute("data-action", "CREATE_NEW")
+            print(
+                "   action: 自动 ADD，手动 修改/MODIFY_EXISTING ↔ 新增/CREATE_NEW 正常"
+            )
 
             print("\n== 4. 发送并等待沙盒构建完成 ==")
             popover.locator(".popover-send").click()

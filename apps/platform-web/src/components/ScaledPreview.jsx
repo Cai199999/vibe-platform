@@ -23,6 +23,14 @@ import usePanZoom from '../workspace/usePanZoom.js'
  *  - 父页面收到 rect 后按当前 scale / translate 映射回屏幕坐标，绘制蓝色
  *    高亮框（Chrome DevTools 审查元素风格）；
  *  - 左键点击不执行页面内控件，而是把命中的源码信息交给上层生成标注。
+ *
+ * CREATE_NEW 拖拽定位：
+ *  - Agent 生成的新组件带 data-vibe-created="<annotationId>"，父页面
+ *    通过 measure 消息拿到它在 iframe 内的真实 rect / 父容器 rect；
+ *  - 在该位置绘制一个绝对定位的拖拽浮层，用户拖动后记录相对父容器
+ *    左上角的 x/y 像素；
+ *  - 点击“确认位置”后，把坐标交给上层触发一次 MODIFY_EXISTING Patch，
+ *    由 Coder 写回 position:absolute; left/top。
  */
 export default function ScaledPreview({
   src,
@@ -30,12 +38,23 @@ export default function ScaledPreview({
   visible = true,
   inspectMode = false,
   onInspectPick,
+  placement = null,
+  onPlacementConfirm,
+  onPlacementDismiss,
 }) {
   const screenRef = useRef(null)
   const iframeRef = useRef(null)
   const onPickRef = useRef(onInspectPick)
   const inspectModeRef = useRef(inspectMode)
   const [hover, setHover] = useState(null)
+  // 新组件测量结果 + 用户拖拽产生的 iframe 坐标偏移。
+  const [measurement, setMeasurement] = useState(null)
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 })
+  const [measureFailed, setMeasureFailed] = useState(false)
+  const [measureNonce, setMeasureNonce] = useState(0)
+  const dragRef = useRef(null)
+  const placementKeyRef = useRef(null)
+  const measurementRef = useRef(null)
   const {
     scale: baseScale,
     offsetX: baseOffsetX,
@@ -59,6 +78,19 @@ export default function ScaledPreview({
     if (!inspectMode) setHover(null)
   }, [inspectMode])
 
+  // 拖拽层换了目标 / 消失时，重置测量与位移，避免把上一个组件的坐标
+  // 误套到新组件上。
+  useEffect(() => {
+    const key = placement?.annotationId ?? null
+    if (placementKeyRef.current === key) return
+    placementKeyRef.current = key
+    setMeasurement(null)
+    measurementRef.current = null
+    setDragOffset({ x: 0, y: 0 })
+    setMeasureFailed(false)
+    dragRef.current = null
+  }, [placement?.annotationId])
+
   // visibility / display 切换后补一帧，确保拿到舞台的最终尺寸。
   useLayoutEffect(() => {
     if (!visible) return undefined
@@ -75,6 +107,22 @@ export default function ScaledPreview({
       if (!data || data.channel !== 'vibe-inspect') return
       if (data.type === 'ready') {
         sendInspect(message('enable', { enabled: inspectModeRef.current }))
+        // iframe 重载（HMR / 首次加载）后重新测量拖拽目标。
+        setMeasurement(null)
+        measurementRef.current = null
+        setMeasureFailed(false)
+        return
+      }
+      if (data.type === 'measured') {
+        const payload = data.payload
+        if (!payload) return
+        if (payload.ok) {
+          measurementRef.current = payload
+          setMeasurement(payload)
+          setMeasureFailed(false)
+        } else {
+          setMeasureFailed(true)
+        }
         return
       }
       if (data.type === 'hover') {
@@ -128,6 +176,86 @@ export default function ScaledPreview({
       { channel: 'vibe-inspect', ...payload },
       '*',
     )
+  }
+
+  // 新组件刚生成时 HMR 可能还没完成，短轮询 measure 直到 marker 出现。
+  // 失败 16 次（约 8 秒）后提示用户检查生成结果，而不是无限静默。
+  useEffect(() => {
+    if (!placement?.selector) return undefined
+    let cancelled = false
+    let attempts = 0
+    let timer = null
+    const tick = () => {
+      if (cancelled || measurementRef.current) return
+      sendInspect(
+        message('measure', {
+          selector: placement.selector,
+          parentSelector: placement.parentSelector || '',
+          requestId: placement.annotationId,
+        }),
+      )
+      attempts += 1
+      if (attempts < 16) timer = window.setTimeout(tick, 500)
+    }
+    tick()
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
+    }
+    // sendInspect 只做 postMessage，不参与依赖；按目标 / src 重新测量即可。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    placement?.annotationId,
+    placement?.selector,
+    placement?.parentSelector,
+    src,
+    measureNonce,
+  ])
+
+  /** 拖拽开始：记录起点与当前位移，使用 pointer capture 跟随鼠标。 */
+  const beginPlacementDrag = (event) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      baseX: dragOffset.x,
+      baseY: dragOffset.y,
+    }
+  }
+
+  const movePlacementDrag = (event) => {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    event.preventDefault()
+    event.stopPropagation()
+    const scale = viewport.scale > 0 ? viewport.scale : 1
+    setDragOffset({
+      x: drag.baseX + (event.clientX - drag.startX) / scale,
+      y: drag.baseY + (event.clientY - drag.startY) / scale,
+    })
+  }
+
+  const endPlacementDrag = (event) => {
+    if (dragRef.current?.pointerId !== event.pointerId) return
+    event.preventDefault()
+    event.stopPropagation()
+    dragRef.current = null
+  }
+
+  /** 确认位置：把“父容器相对坐标”回传给上层触发 Coder Patch。 */
+  const confirmPlacement = () => {
+    if (!placement || !measurement?.relativeRect) return
+    const relative = measurement.relativeRect
+    onPlacementConfirm?.(placement, {
+      x: relative.relativeX + dragOffset.x,
+      y: relative.relativeY + dragOffset.y,
+      width: relative.widthPx ?? measurement.rect?.width ?? null,
+      height: relative.heightPx ?? measurement.rect?.height ?? null,
+    })
   }
 
   const handleInspectPointerMove = (event) => {
@@ -229,6 +357,76 @@ export default function ScaledPreview({
               {hover.source?.line ? `:${hover.source.line}` : ''}
             </em>
           </span>
+        </div>
+      )}
+
+      {/* CREATE_NEW：新组件上覆盖可拖拽定位框。松手位置以 iframe 内部
+          父容器左上角为原点，确认后交给 Coder 回写绝对定位。 */}
+      {placement && measurement?.rect && (
+        <div
+          className={`placement-frame ${dragRef.current ? 'is-dragging' : ''}`}
+          data-placement-frame
+          style={{
+            left: `${
+              viewport.translateX +
+              (measurement.rect.x + dragOffset.x) * viewport.scale
+            }px`,
+            top: `${
+              viewport.translateY +
+              (measurement.rect.y + dragOffset.y) * viewport.scale
+            }px`,
+            width: `${Math.max(24, measurement.rect.width * viewport.scale)}px`,
+            height: `${Math.max(24, measurement.rect.height * viewport.scale)}px`,
+          }}
+          onPointerDown={beginPlacementDrag}
+          onPointerMove={movePlacementDrag}
+          onPointerUp={endPlacementDrag}
+          onPointerCancel={endPlacementDrag}
+        >
+          <span className="placement-handle" aria-hidden="true">
+            ✥
+          </span>
+          <span className="placement-label">拖动到目标位置</span>
+          <div
+            className="placement-actions"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="placement-confirm"
+              data-placement-confirm
+              onClick={confirmPlacement}
+            >
+              确认位置
+            </button>
+            <button
+              type="button"
+              className="placement-cancel"
+              onClick={() => onPlacementDismiss?.(placement)}
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
+      {placement && !measurement && measureFailed && (
+        <div className="placement-warning" role="status">
+          <span>未找到刚生成的新组件，HMR 可能仍在刷新。</span>
+          <button
+            type="button"
+            onClick={() => {
+              measurementRef.current = null
+              setMeasurement(null)
+              setMeasureFailed(false)
+              setMeasureNonce((value) => value + 1)
+            }}
+          >
+            重试
+          </button>
+          <button type="button" onClick={() => onPlacementDismiss?.(placement)}>
+            关闭
+          </button>
         </div>
       )}
 

@@ -13,6 +13,11 @@ import {
   VIEWPORT_BASE_HEIGHT,
   VIEWPORT_BASE_WIDTH,
 } from '../workspace/useFillViewport.js'
+import {
+  CREATE_NEW,
+  MODIFY_EXISTING,
+  isCreateAction,
+} from '../workspace/annotationActions.js'
 
 /**
  * 单个项目窗口：支持「对比模式」与「展示模式」两种布局。
@@ -39,6 +44,8 @@ function ProjectWorkspaceInner({
   onAnnotationSend,
   onClarificationAnswer,
   onAnnotationRollback,
+  onPlacementConfirm,
+  onPlacementDismiss,
   onClearAnnotations,
   onApprovalDecision,
   onCancelRun,
@@ -160,7 +167,8 @@ function ProjectWorkspaceInner({
       role: payload.role || source.tag || 'element',
       label: payload.label || source.component || source.tag || '组件',
       intent: '',
-      action: payload.source.kind === 'container' ? 'ADD' : 'MODIFY',
+      action:
+        payload.source.kind === 'container' ? CREATE_NEW : MODIFY_EXISTING,
       createdAt: new Date().toISOString(),
     })
   }
@@ -171,13 +179,16 @@ function ProjectWorkspaceInner({
 
   const handleInspectDraftSubmit = () => {
     if (!inspectDraft || !inspectDraft.intent?.trim()) return
-    const action = inspectDraft.action === 'ADD' ? 'ADD' : 'MODIFY'
+    const action = isCreateAction(inspectDraft.action)
+      ? CREATE_NEW
+      : MODIFY_EXISTING
     const clicked = inspectDraft.source
     const container = inspectDraft.container?.source
-    // ADD 的落点是父容器；MODIFY 的落点就是点击元素。源码出处必须同步切换，
-    // 否则 AnnotationEnvelope 指向的仍是叶子节点，模型会插错位置。
+    // CREATE_NEW 的落点是父容器；MODIFY_EXISTING 的落点就是点击元素。
+    // 源码出处必须同步切换，否则 AnnotationEnvelope 指向的仍是叶子节点，
+    // 模型会插错位置。
     const effective =
-      action === 'ADD' && container ? container : clicked
+      isCreateAction(action) && container ? container : clicked
     const targetView = (sourceItem, fallback = {}) => ({
       marker: sourceItem.marker || '',
       selector: sourceItem.selector || '',
@@ -186,7 +197,10 @@ function ProjectWorkspaceInner({
         fallback.role ||
         (sourceItem.kind === 'container' ? 'container' : 'element'),
       component: sourceItem.component || 'Component',
-      tag: sourceItem.tag || fallback.tag || (action === 'ADD' ? 'div' : 'button'),
+      tag:
+        sourceItem.tag ||
+        fallback.tag ||
+        (isCreateAction(action) ? 'div' : 'button'),
       kind: sourceItem.kind || 'element',
     })
     onAnnotationAdd?.({
@@ -194,7 +208,7 @@ function ProjectWorkspaceInner({
       target: targetView(clicked, inspectDraft),
       addTarget: targetView(effective, inspectDraft),
       relativeRect:
-        action === 'ADD'
+        isCreateAction(action)
           ? (inspectDraft.container?.relativeRect ?? {
               x: 0,
               y: 0,
@@ -298,9 +312,17 @@ function ProjectWorkspaceInner({
           <button
             className={`architect-launch ${
               architectState?.contract ? 'has-contract' : ''
-            } ${architectState?.status === 'AWAITING_CLARIFICATION' ? 'needs-answer' : ''}`}
+            } ${architectState?.status === 'AWAITING_CLARIFICATION' ? 'needs-answer' : ''} ${
+              run.dirty ? 'is-locked' : ''
+            }`}
             type="button"
-            title="基于当前沙盒源码，澄清应用形态并生成可实施的全栈契约"
+            aria-disabled={Boolean(run.dirty)}
+            title={
+              run.dirty
+                ? '请先保存当前修改，再进入全栈方案'
+                : '基于当前沙盒源码，澄清应用形态并生成可实施的全栈契约'
+            }
+            // 不做原生 disabled：需要保留点击事件来 Toast 解释为什么不能用。
             onClick={onArchitectOpen}
           >
             <span className="architect-launch-mark" aria-hidden="true">
@@ -527,6 +549,9 @@ function ProjectWorkspaceInner({
               onInspectDraftChange={handleInspectDraftChange}
               onInspectDraftCancel={() => setInspectDraft(null)}
               onInspectDraftSubmit={handleInspectDraftSubmit}
+              placement={run.placement}
+              onPlacementConfirm={onPlacementConfirm}
+              onPlacementDismiss={onPlacementDismiss}
               refreshNonce={previewRefreshNonce}
             />
           </ErrorBoundary>

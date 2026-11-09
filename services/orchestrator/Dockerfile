@@ -25,9 +25,17 @@ COPY config ./config
 # 沙盒构建上下文：镜像不存在时由 LocalDockerSandbox 自动构建。
 COPY sandbox_template ./sandbox_template
 
-# 以非 root 运行；通过 compose 的 group_add 加入宿主 docker 组以访问 socket。
-USER app
+# 上下文记忆目录：镜像内先建好并归属 app，named volume / bind mount
+# 首次初始化时才能保留可写权限。
+RUN mkdir -p /app/data/project_memory \
+    && chown -R app:app /app/data
+
+# 入口脚本以 root 修正 bind mount 属主后立即降权到 app；
+# 通过 compose 的 group_add 加入宿主 docker 组以访问 socket。
+COPY entrypoint.sh /usr/local/bin/vibe-entrypoint
+RUN chmod +x /usr/local/bin/vibe-entrypoint
 
 EXPOSE 8100
 
+ENTRYPOINT ["/usr/local/bin/vibe-entrypoint"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8100", "--proxy-headers"]

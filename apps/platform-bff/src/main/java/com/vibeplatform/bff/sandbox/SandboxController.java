@@ -68,7 +68,8 @@ public class SandboxController {
                 sandboxId,
                 request.message().trim(),
                 trimToNull(request.projectId()),
-                trimToNull(request.tenantId())
+                trimToNull(request.tenantId()),
+                trimToNull(request.latestChanges())
         );
     }
 

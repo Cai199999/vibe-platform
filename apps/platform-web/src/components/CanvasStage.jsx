@@ -4,6 +4,11 @@ import useFillViewport, {
   VIEWPORT_BASE_WIDTH,
 } from '../workspace/useFillViewport.js'
 import usePanZoom from '../workspace/usePanZoom.js'
+import {
+  CREATE_NEW,
+  MODIFY_EXISTING,
+  normalizeAction,
+} from '../workspace/annotationActions.js'
 
 const clamp01 = (value) => Math.min(1, Math.max(0, value))
 
@@ -144,7 +149,7 @@ function analyzeSelection(pageRoot, selectionRect, centerPoint, scale = 1) {
     best.coverage >= MODIFY_MIN_COVERAGE &&
     selectionArea <= best.area * ADD_AREA_RATIO &&
     best.share >= MODIFY_MIN_SELECTION_SHARE
-  const action = coversEnough ? 'MODIFY' : 'ADD'
+  const action = coversEnough ? MODIFY_EXISTING : CREATE_NEW
 
   // ADD 的父容器：优先从圈中心向上找容器；中心落在页边距时再退回到
   // “与圈重叠面积最大的容器”，最后兜底页面根容器。
@@ -224,7 +229,7 @@ function analyzeSelection(pageRoot, selectionRect, centerPoint, scale = 1) {
   return {
     action,
     target: best?.target ?? null,
-    addTarget: action === 'ADD' ? parentTarget : parentTarget ?? null,
+    addTarget: action === CREATE_NEW ? parentTarget : parentTarget ?? null,
     relativeRect,
     measured: {
       selectionArea: Math.round(selectionArea),
@@ -399,7 +404,11 @@ function AnnotationPopover({
 
   const rollingBack = sending && pendingAction === 'rollback'
   // 兼容旧项目状态：没有显式 action 时按是否命中元素推断。
-  const action = annotation.action ?? (annotation.target ? 'MODIFY' : 'ADD')
+  const action = annotation.action
+    ? normalizeAction(annotation.action)
+    : annotation.target
+      ? MODIFY_EXISTING
+      : CREATE_NEW
 
   const setAnswer = (questionId, value) => {
     setAnswers((previous) => ({ ...previous, [questionId]: value }))
@@ -545,8 +554,16 @@ function AnnotationPopover({
             默认根据圈选是否命中元素与文案自动推断，用户可手动覆盖。 */}
         <div className="popover-action" role="group" aria-label="操作类型">
           {[
-            { value: 'MODIFY', label: '修改', title: '修改圈选到的已有元素' },
-            { value: 'ADD', label: '新增', title: '在圈选区域新增一个组件' },
+            {
+              value: MODIFY_EXISTING,
+              label: '修改',
+              title: '修改圈选到的已有元素',
+            },
+            {
+              value: CREATE_NEW,
+              label: '新增',
+              title: '在圈选区域新增一个组件（位置稍后拖拽确认）',
+            },
           ].map((option) => (
             <button
               key={option.value}

@@ -64,5 +64,6 @@ compose 将 `services/orchestrator/data` 挂载到容器 `/app/data`，容器重
 
 ## 注意
 
-- 全局摘要依赖至少一条局部摘要；不足 10 轮的快照不会生成空文件。
+- 全局摘要优先使用局部摘要；不足 10 轮时使用快照请求的
+  `latestChanges` 生成第一份摘要（见 `2026-11-09_drag_placement_save_gate.md`）。
 - `tiktoken` 已加入 `requirements.txt`，离线环境自动回退字符密度估算。

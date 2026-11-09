@@ -48,13 +48,19 @@ class SandboxControllerSnapshotTest {
         mockMvc.perform(post("/api/v1/sandboxes/sbx_1/snapshots")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"message":" 完成登录 ","projectId":" proj_1 ","tenantId":"tenant_local"}
+                                {"message":" 完成登录 ","projectId":" proj_1 ","tenantId":"tenant_local","latestChanges":" 新增登录按钮 "}
                                 """))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.commitHash").value("a".repeat(40)));
 
         assertThat(snapshotService.calls)
-                .containsExactly(new Call("sbx_1", "完成登录", "proj_1", "tenant_local"));
+                .containsExactly(new Call(
+                        "sbx_1",
+                        "完成登录",
+                        "proj_1",
+                        "tenant_local",
+                        "新增登录按钮"
+                ));
     }
 
     @Test
@@ -70,7 +76,13 @@ class SandboxControllerSnapshotTest {
         assertThat(snapshotService.calls).isEmpty();
     }
 
-    record Call(String sandboxId, String message, String projectId, String tenantId) {
+    record Call(
+            String sandboxId,
+            String message,
+            String projectId,
+            String tenantId,
+            String latestChanges
+    ) {
     }
 
     static class CapturingSnapshotService extends SandboxSnapshotService {
@@ -88,9 +100,10 @@ class SandboxControllerSnapshotTest {
                 String sandboxId,
                 String message,
                 String projectId,
-                String tenantId
+                String tenantId,
+                String latestChanges
         ) {
-            calls.add(new Call(sandboxId, message, projectId, tenantId));
+            calls.add(new Call(sandboxId, message, projectId, tenantId, latestChanges));
             ObjectNode body = mapper.createObjectNode();
             body.put("commitHash", "a".repeat(40));
             return ResponseEntity.ok(body);

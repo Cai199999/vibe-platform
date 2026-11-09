@@ -23,6 +23,11 @@ from typing import Any
 from ai_core.adapters.model.deepseek import DeepSeekClient
 from ai_core.agent.memory import fallback_summary
 from ai_core.config import Settings, get_settings
+from ai_core.domain.actions import (
+    CREATE_NEW,
+    MODIFY_EXISTING,
+    is_create_action,
+)
 from ai_core.domain.agent import ExecuteRunRequest, RunOptions
 from ai_core.ports.model import ModelClient, ModelClientError
 from ai_core.skill_loader import skill_prompts_to_system
@@ -182,7 +187,9 @@ class MockAgentLLM(AgentLLM):
         ]
         for index, annotation in enumerate(annotations, start=1):
             action = _annotation_action(annotation)
-            action_label = "新增组件" if action == "ADD" else "修改已有元素"
+            action_label = (
+                "新增组件（位置后置）" if is_create_action(action) else "修改已有元素"
+            )
             lines.append(
                 f"   - 标注 {index}（{action_label} · "
                 f"{_annotation_selector(annotation) or '画布空白区域'}）："
@@ -330,9 +337,15 @@ class MockAgentLLM(AgentLLM):
         if not instruction:
             return code
 
+        # 坐标回写：用户在预览中拖拽生成的组件后，前端发送 MODIFY_EXISTING
+        # + payload.position。这里只改定位 CSS，绝不重新生成组件主体。
+        position = _annotation_position(annotation)
+        if position:
+            return _apply_position(code, annotation, position, path)
+
         if (
             self.scenario == "add_button"
-            or _annotation_action(annotation) == "ADD"
+            or is_create_action(_annotation_action(annotation))
             or _is_add_intent(instruction)
         ):
             return _insert_button(code, annotation, instruction, path)
@@ -429,14 +442,22 @@ class DeepSeekAgentLLM(AgentLLM):
             "要求：\n"
             "- 逐条列出每个标注的目标组件、要修改的属性（颜色 / 文案 / 字号 /"
             " 间距 / 布局 / 结构等）与验收标准；\n"
-            "- 每个标注带 action：MODIFY 表示修改已有元素；ADD 表示在圈选"
-            "区域新增组件。ADD 时会提供 relativeTarget：x/y/width/height 是"
-            "相对最近 data-source 父容器的归一化坐标（0~1），relativeX/"
-            "relativeY 是圈选左上角相对父容器左上角的 CSS 像素偏移，"
-            "widthPx/heightPx 是圈选尺寸，parentWidth/parentHeight 是父容器"
-            "尺寸；target.selector 指向该父容器。必须在计划中根据这些数值"
-            "给出精确插入位置（靠左 / 居中 / 靠右、第几行、是否 absolute"
-            "定位），禁止把新增内容伪造成“修改某个已有元素”；\n"
+            "- 每个标注必须区分两种动作：\n"
+            "  · CREATE_NEW（旧协议别名 ADD）：新增组件。只规划组件主体、"
+            "插入父容器与可辨识的 data-vibe-created 标记；不要依赖 absolute "
+            "坐标，也不要要求 Coder 把圈选坐标写死。插入到父容器自然文档流"
+            "即可，位置将由用户在预览中拖拽后通过独立 Patch 精确回写。\n"
+            "  · MODIFY_EXISTING（旧协议别名 MODIFY）：修改、移动或重新定位"
+            "已有元素；若 payload.position 存在，表示用户已拖拽确认，必须"
+            "按该坐标精确落位。\n"
+            "- CREATE_NEW 仍可能带 relativeTarget（旧客户端）：归一化 x/y 与"
+            "像素 relativeX/relativeY/widthPx/heightPx/parentWidth/"
+            "parentHeight 只用于判断应插入哪个父容器 / 相对顺序，不得据此"
+            "生成绝对定位；target.selector 指向父容器。禁止把新增内容伪装"
+            "成“修改某个已有元素”；\n"
+            "- 坐标回写 Patch 的 action 固定为 MODIFY_EXISTING，payload."
+            "position 包含 x/y（相对父容器左上角 CSS 像素）、parentSelector "
+            "与 selector；只调整定位，不得重建组件或删除内容；\n"
             "- 每个标注可能带 threadContext.chatHistory（同一圈的多轮对话）和"
             " previousRuns（上一轮修改记录）。必须理解上下文，例如用户先说"
             "“改成红色”，再说“不，我要蓝色”，最终结果只能是蓝色；不要同时保留"
@@ -450,7 +471,7 @@ class DeepSeekAgentLLM(AgentLLM):
             "只有 < 0.7 或缺少关键槽位时才 needs_clarification=true；\n"
             "- 用户只说“改好看点 / 优化一下 / 大气一点”而没有颜色、字号、"
             "间距、布局、文案等可执行属性时，必须询问具体视觉维度；\n"
-            "- ADD 只说“加点东西”而没说明组件类型或文案时，必须询问；\n"
+            "- CREATE_NEW 只说“加点东西”而没说明组件类型或文案时，必须询问；\n"
             "- 每轮 1~3 个问题；问题字段固定为 questionId/type/prompt/"
             "required/options/defaultValue；type 只允许 single_choice / "
             "multi_choice / free_text。\n\n"
@@ -512,30 +533,29 @@ class DeepSeekAgentLLM(AgentLLM):
             "基于历史对话与当前源码做增量修改，以最新用户指令为准；用户否定"
             "上一轮方案时（如“不，我要蓝色”），最终代码只能体现新方案，同时"
             "保留其它未被否定的属性；\n"
-            "- 标注的 action 字段决定操作类型：MODIFY 修改已有元素；ADD 新增"
-            "组件。ADD 时必须保留原有 DOM 结构，不得删除或覆盖已有节点；"
-            "ADD 的 target.selector 指向前端计算出的“最近 data-source 父容"
-            "器”，relativeTarget 同时给出归一化坐标（x/y/width/height）与"
-            "像素坐标（relativeX/relativeY、widthPx/heightPx、parentWidth/"
-            "parentHeight）。必须在该容器内部插入完整、可编译的 JSX，并按"
-            "以下优先级精确落位：\n"
-            "  1) 优先复用父容器现有 flex/grid 布局，通过 justify/align/"
-            "order 或插入到对应兄弟节点之前/之后来匹配 relativeX/relativeY；\n"
-            "  2) 若需要像素级偏移，给父容器加 position:relative，子元素用"
-            " position:absolute 加 left: relativeX px、top: relativeY px；\n"
-            "  3) 也可用 margin-left/margin-top 按 relativeX/relativeY 做"
-            "相对偏移，但不能因此挤压或覆盖已有内容；\n"
-            "  4) 若 relativeX 接近 0 且 widthPx < parentWidth/2，按靠左处理；"
-            "若 relativeX + widthPx 接近 parentWidth，按靠右处理；居中区域"
-            "使用 flex/grid 居中；\n"
-            "  5) 只有像素字段缺失时，才退化为按归一化 y 比例判断插入到哪个"
-            "兄弟节点之前/之后。\n"
-            "  不得为了定位破坏父容器原有布局；绝不能把新增内容塞进 button /"
-            " p / h1 等叶子元素内部。target 为空时，从源码中页面主容器"
-            "（main / 根 section）末尾插入；\n"
-            "- ADD 生成的新元素必须有可辨识的文本与样式（如 className / style"
-            " / 已有 CSS 类），新增按钮需保证点击区域可见；同一 thread 多轮"
-            " ADD 时不要重复插入完全相同的组件，除非用户明确要求再来一个；\n"
+            "- 标注的 action 字段决定操作类型：\n"
+            "  · CREATE_NEW（旧协议别名 ADD）：新增组件。必须保留原有 DOM "
+            "结构，不得删除或覆盖已有节点；在 target.selector 指向的父容器"
+            "内部插入完整、可编译的 JSX。**只生成组件主体，不要写 position:"
+            "absolute / left / top，也不要根据旧 relativeTarget 写死坐标**；"
+            "按父容器现有 flex/grid 自然流插入即可。每个新增节点必须带 "
+            'data-vibe-created="<annotationId>"，供前端拖拽层测量与回写位置。'
+            "绝不能把新增内容塞进 button / p / h1 等叶子元素内部；target 为空"
+            "时，从页面主容器（main / 根 section）末尾插入；\n"
+            "  · MODIFY_EXISTING（旧协议别名 MODIFY）：修改、移动或重新定位"
+            "已有元素。若 payload.position 存在，说明用户已在预览中拖拽确认，"
+            "必须把组件移动到父容器内 (x, y) 像素位置：给父容器加 "
+            "position:relative，组件用 position:absolute + left/top，或追加"
+            "等价 CSS 规则；只改定位，不得重建组件、改文案或删除内容。\n"
+            "- CREATE_NEW 生成的新元素必须有可辨识的文本与样式（如 className /"
+            " style / 已有 CSS 类），新增按钮需保证点击区域可见；同一 thread "
+            "多轮 CREATE_NEW 时不要重复插入完全相同的组件，除非用户明确要求"
+            "再来一个；\n"
+            "- 兼容旧客户端：若尚未升级到拖拽流程，标注意图仍可能带 relativeX/"
+            "relativeY 等像素字段。它们只能用于判断 flex/grid 插入顺序或 "
+            "margin-left 粗调，不得覆盖 CREATE_NEW 的“位置后置”规则；"
+            "真正的位置以用户拖拽后的 payload.position + position:absolute "
+            "Patch 为准。\n"
             "- 如果上一轮构建失败，必须针对错误日志修复，同时保证全部标注仍然"
             "生效，而不是重复原方案。"
             f"{self._skill_system}"
@@ -741,7 +761,9 @@ def _mock_clarification(
                     },
                 ],
             }
-        if _annotation_action(annotation) == "ADD" and not _has_component_type(text):
+        if is_create_action(_annotation_action(annotation)) and not _has_component_type(
+            text
+        ):
             return {
                 "reason": "missing_component_type",
                 "annotationId": annotation_id,
@@ -910,8 +932,62 @@ def _annotation_target_file(
 
 
 def _annotation_action(annotation: dict[str, Any]) -> str:
-    """读取操作类型，兼容旧客户端（缺省 MODIFY）与大小写差异。"""
+    """读取操作类型；保留原始值，统一由 domain.actions 判断语义。"""
     return str(annotation.get("action") or "MODIFY").upper()
+
+
+def _annotation_position(annotation: dict[str, Any]) -> dict[str, Any] | None:
+    """读取 Drag 松手后回写的坐标 Patch。
+
+    只有前端确认拖拽结果后才携带 ``payload.position``：
+      - x / y：相对父容器左上角的 CSS 像素；
+      - parentSelector：父容器选择器；
+      - selector：需要移动的已生成节点选择器。
+    """
+    payload = annotation.get("payload") or {}
+    position = payload.get("position") or annotation.get("position")
+    if not isinstance(position, dict):
+        return None
+    if position.get("x") is None or position.get("y") is None:
+        return None
+    return position
+
+
+def _apply_position(
+    code: str,
+    annotation: dict[str, Any],
+    position: dict[str, Any],
+    path: str = "src/App.jsx",
+) -> str:
+    """把“拖拽后的绝对坐标”写成 CSS，而不是重新生成组件。
+
+    采用 CSS 规则而不是直接重写 JSX 的 style 属性：
+      - 生成的组件可能来自 DeepSeek，inline style 结构不可预测；
+      - 追加 ``position:absolute; left/top`` 与父容器
+        ``position:relative`` 即可稳定复现用户落点；
+      - 不触碰组件内容与其它样式，保留多轮对话的增量语义。
+    """
+    selector = str(position.get("selector") or "").strip() or (
+        _annotation_selector(annotation)
+    )
+    if not selector:
+        return code
+    parent_selector = (
+        str(position.get("parentSelector") or "").strip()
+        or str(
+            (annotation.get("relativeTarget") or {}).get("parentSelector") or ""
+        ).strip()
+        or '[data-source="page"]'
+    )
+    left = float(position.get("x") or 0)
+    top = float(position.get("y") or 0)
+    rules = (
+        f"{parent_selector}{{position:relative !important;}}"
+        f"{selector}{{position:absolute !important;"
+        f"left:{left:.2f}px !important;top:{top:.2f}px !important;"
+        "margin:0 !important;z-index:20;}"
+    )
+    return _append_css_rule(code, rules, path)
 
 
 _ADD_INTENT_TOKENS = ("添加", "新增", "新建", "插入", "加一个", "加个", "add ")
@@ -1016,8 +1092,13 @@ def _insert_button(
     label = _detect_button_label(instruction)
     color = _detect_color(instruction) or "#2563eb"
     button_id = _next_added_button_id(code)
+    annotation_id = _annotation_id(annotation) or button_id
+    # data-vibe-created 是前端拖拽悬浮层的定位锚点：生成完成后，父页面
+    # 通过 inspect SDK 按该属性测量真实 rect，再把拖拽坐标回写成 CSS。
+    # 未经用户拖拽前不写任何 position / left / top。
     button = (
         f'<button className="vibe-added-button" data-vibe-target="{button_id}" '
+        f'data-vibe-created="{annotation_id}" '
         f"type=\"button\" style={{{{ backgroundColor: '{color}', color: '#fff', "
         "border: 0, borderRadius: '999px', padding: '12px 24px', "
         "marginTop: '16px', fontSize: '14px', fontWeight: 600, "

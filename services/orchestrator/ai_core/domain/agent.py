@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from pydantic import Field, field_serializer, model_validator
 
+from ai_core.domain.actions import CREATE_NEW, MODIFY_EXISTING, normalize_action
 from ai_core.domain.common import CamelModel, iso_datetime
 
 
@@ -88,11 +89,13 @@ class AnnotationEnvelope(CamelModel):
     version: int = 1
     annotation_id: str = Field(min_length=1, max_length=128)
     type: Literal["note", "draw", "drag", "visual-draw"] = "note"
-    # 操作类型：MODIFY 修改已有元素；ADD 在圈选区域新增组件。
-    # 前端可在浮层内切换，也会根据“圈中没有命中元素”与“添加/新建”等
-    # 指令自动推断。ADD 时 target 可以为空，模型需依据 worldTarget 选区
-    # 与源码结构自行选择父级 / 兄弟级插入点。
-    action: Literal["MODIFY", "ADD"] = "MODIFY"
+    # 操作类型：
+    #   - CREATE_NEW：新增组件。Agent 只负责生成组件主体，不得强制写死
+    #     绝对坐标；前端会把它作为可拖拽悬浮层，用户松手后再发送坐标 Patch。
+    #   - MODIFY_EXISTING：修改、移动或重新定位已有元素。
+    # 旧客户端仍发送 MODIFY / ADD，领域层通过 actions.normalize_action()
+    # 统一语义，避免历史数据失效。
+    action: Literal["MODIFY", "ADD", "CREATE_NEW", "MODIFY_EXISTING"] = "MODIFY"
     world_target: dict[str, Any] = Field(default_factory=dict)
     # ADD 专用：圈选区域相对“最近 data-source 父容器”的位置。
     # 契约同时包含两套坐标：
@@ -117,6 +120,19 @@ class AnnotationEnvelope(CamelModel):
     def _serialize_created_at(self, value: datetime | None) -> str | None:
         """AnnotationEnvelope 会整体进入 Planner / Coder Prompt 的 JSON。"""
         return iso_datetime(value)
+
+    @property
+    def intent_action(self) -> str:
+        """新版动作语义：ADD → CREATE_NEW，其余 → MODIFY_EXISTING。"""
+        return normalize_action(self.action)
+
+    @property
+    def is_create_new(self) -> bool:
+        return self.intent_action == CREATE_NEW
+
+    @property
+    def is_modify_existing(self) -> bool:
+        return self.intent_action == MODIFY_EXISTING
 
 
 # ------------------------------------------------------------

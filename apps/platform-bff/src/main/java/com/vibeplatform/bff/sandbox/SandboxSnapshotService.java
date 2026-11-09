@@ -48,7 +48,8 @@ public class SandboxSnapshotService {
             String sandboxId,
             String message,
             String projectId,
-            String tenantId
+            String tenantId,
+            String latestChanges
     ) {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("message", message);
@@ -58,6 +59,10 @@ public class SandboxSnapshotService {
         }
         if (tenantId != null && !tenantId.isBlank()) {
             body.put("tenantId", tenantId.trim());
+        }
+        // 本次快照的改动说明：即使尚无 local_summary，也能据此生成全局摘要。
+        if (latestChanges != null && !latestChanges.isBlank()) {
+            body.put("latestChanges", latestChanges.trim());
         }
         return proxy("create", sandboxId, () -> aiCoreRunRestClient.post()
                 .uri(SNAPSHOTS_PATH, sandboxId)

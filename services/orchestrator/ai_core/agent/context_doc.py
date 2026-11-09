@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+from ai_core.domain.actions import CREATE_NEW, MODIFY_EXISTING
 from ai_core.domain.agent import AnnotationEnvelope, ExecuteRunRequest
 
 VIBE_CONTEXT_FILENAME = "VIBE_CONTEXT.md"
@@ -77,7 +78,7 @@ def render_vibe_context(
         intent = annotation.intent
         ui = intent.ui if intent else None
         summary = _instruction(annotation)
-        action_label = "新增组件" if annotation.action == "ADD" else "修改"
+        action_label = "新增组件" if annotation.is_create_new else "修改已有元素"
         lines.append(
             f"{index}. **标注 {index}** · {action_label}"
             f" · `{_target_file(annotation, fallback_file)}`"
@@ -101,7 +102,8 @@ def render_vibe_context(
             [
                 f"### 标注 {index} · `{annotation.annotation_id}`",
                 "",
-                f"- 操作类型：`{'ADD（新增组件）' if annotation.action == 'ADD' else 'MODIFY（修改已有元素）'}`",
+                f"- 操作类型：`{CREATE_NEW if annotation.is_create_new else MODIFY_EXISTING}"
+                f"（{'新增组件' if annotation.is_create_new else '修改已有元素'}）`",
                 f"- 目标文件：`{_target_file(annotation, fallback_file)}`",
                 f"- 组件：`{source.component if source and source.component else '未知'}`",
                 f"- 选择器：`{target.selector if target and target.selector else '未提供'}`",
@@ -140,8 +142,8 @@ def render_vibe_context(
             lines.append("- （未提供）")
 
         relative = annotation.relative_target or {}
-        if annotation.action == "ADD":
-            lines.extend(["", "**新节点相对父容器的位置（ADD）**", ""])
+        if annotation.is_create_new:
+            lines.extend(["", "**新节点生成位置（CREATE_NEW）**", ""])
             if relative:
                 # 归一化字段用于判断“上/中/下、左/中/右”这类粗粒度位置；
                 # 像素字段用于 absolute / margin 精确落位。两者都提供给

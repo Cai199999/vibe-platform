@@ -669,6 +669,10 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         "source_origin": bundle.origin,
         "source_warnings": bundle.warnings,
         "ui_history": list(request.ui_history),
+        # 项目摘要 + 本次快照改动：Architect 分析 / 契约草稿必须复用其中
+        # 已确认的技术选型，不再重复做选型问卷。
+        "project_summary": request.project_summary,
+        "latest_changes": request.latest_changes,
         # Token 优化：START 节点据此决定是否压缩历史
         "history_summary": "",
         "history_tokens_before": 0,

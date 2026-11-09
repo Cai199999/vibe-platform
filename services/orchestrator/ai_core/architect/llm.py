@@ -59,6 +59,9 @@ class ArchitectContext:
     threshold: float
     retrieved_chunks: list[dict[str, Any]] = field(default_factory=list)
     source_hash: str = ""
+    # 快照保存时生成的项目摘要 + 本次改动说明；两者可为空（首次启动）。
+    project_summary: str = ""
+    latest_changes: str = ""
 
 
 @dataclass(frozen=True)
@@ -619,6 +622,13 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "- 如果源码与对话仍不足以判断形态，app_shape 必须为 null，"
             "confidence_score 不得高于 0.42，并首先询问："
             f"“{_shape_question()}”\n\n"
+            "项目摘要规则（最高优先级）：\n"
+            "- 输入中的 Project Summary 是已经确认的长期上下文；其中的技术栈、"
+            "架构、实体与约束必须直接视为已确认，禁止重复询问；\n"
+            "- latestChanges 描述本次快照实际改了什么。你的问题必须结合本次"
+            "改动，确认“这些改动对应的全栈需求”（接口 / 数据 / 鉴权等），"
+            "而不是重新做一遍技术选型问卷；\n"
+            "- 如果摘要与用户最新回答冲突，以用户最新回答为准，并更新 slots。\n\n"
             "槽位填充与完成度规则（最高优先级）：\n"
             "- 用户用自然语言给出技术栈、数据库、业务动作或实体名时，必须"
             "写入对应 slots；不要因为字段不完整就拒绝或重复追问；\n"
@@ -687,6 +697,8 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "- full_stack_system：必须给出 REST API、数据库 DDL（禁止物理"
             "外键）、组件交互、前后端联调；\n"
             "- 所有形态都必须给 implementation_path 与可验证验收标准；\n"
+            "- 必须复用 Project Summary 中已确认的技术栈与架构决策，不要另起"
+            "一套；latestChanges 涉及的前后端能力必须进入契约；\n"
             "- 不要编造用户未提供的业务实体；不确定处写入 assumptions。"
         )
         human = _contract_human(context)
@@ -839,6 +851,18 @@ def _shape_question() -> str:
     return APP_SHAPE_PROMPT
 
 
+def _summary_block(context: ArchitectContext) -> str:
+    """项目摘要与本次改动：已确认的技术选型必须复用，不得重复追问。"""
+    summary = str(context.project_summary or "").strip() or "（暂无项目摘要）"
+    latest = str(context.latest_changes or "").strip() or "（暂无快照改动说明）"
+    return (
+        "## 项目全局摘要（Project Summary，已确认的长期上下文）\n"
+        f"{summary}\n\n"
+        "## 本次快照改动（latestChanges）\n"
+        f"{latest}\n"
+    )
+
+
 def _analysis_human(context: ArchitectContext) -> str:
     return (
         f"项目：{context.project_name}（{context.project_id}）\n"
@@ -846,6 +870,7 @@ def _analysis_human(context: ArchitectContext) -> str:
         f"已确认槽位：{json.dumps(context.slots, ensure_ascii=False, default=str)}\n"
         "用户历史对话（结构化回答与“补充说明”同等有效，已提供的信息不得"
         f"再次追问）：{json.dumps(context.ui_history[-12:], ensure_ascii=False, default=str)}\n\n"
+        f"{_summary_block(context)}\n"
         f"RAG 规范片段：\n{_format_chunks(context.retrieved_chunks)}\n\n"
         f"当前源码：\n{format_source(context.source_files, 42000)}"
     )
@@ -858,6 +883,7 @@ def _contract_human(context: ArchitectContext) -> str:
         f"置信度阈值：{context.threshold}\n"
         f"已确认槽位：{json.dumps(context.slots, ensure_ascii=False, default=str)}\n"
         f"历史对话：{json.dumps(context.ui_history[-12:], ensure_ascii=False, default=str)}\n\n"
+        f"{_summary_block(context)}\n"
         f"RAG 规范片段：\n{_format_chunks(context.retrieved_chunks)}\n\n"
         f"当前源码：\n{format_source(context.source_files, 36000)}"
     )

@@ -206,6 +206,18 @@ class ProjectMemoryTest(unittest.TestCase):
         )
         self.assertFalse(self.memory.global_summary_path.exists())
 
+    def test_refresh_uses_latest_changes_before_first_local_summary(self) -> None:
+        """首次保存快照没有 local_summary 时，也必须能生成全局摘要。"""
+        changed = refresh_global_memory(
+            self.memory,
+            summarizer=_FakeSummarizer(),
+            settings=self.settings,
+            latest_changes="新增登录按钮，并拖拽到卡片右上角",
+        )
+        self.assertTrue(changed)
+        self.assertIn("全局", self.memory.read_global_summary())
+        self.assertTrue(self.memory.user_profile_path.exists())
+
     def test_tool_output_preview_and_hash(self) -> None:
         payload = "搜索结果" * 500
         ref = self.memory.save_tool_output("search_web", payload, preview_chars=20)

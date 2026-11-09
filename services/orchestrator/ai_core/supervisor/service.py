@@ -136,6 +136,10 @@ class ArchitectSubGraphDispatcher:
             # 对话 / 沙盒代码快照，避免上下文污染与 Token 膨胀。
             source=source,
             ui_history=_architect_only_history(request.architect_history),
+            # 摘要只进入 Architect；UI Graph 的 Coder 不需要也不可能利用
+            # 这些全局文档，传进去只会增加 Token 与指令漂移风险。
+            project_summary=request.project_summary,
+            latest_changes=request.latest_changes,
             options=request.options.architect,
         )
         active = self._new_service().start_stream(architect_request)

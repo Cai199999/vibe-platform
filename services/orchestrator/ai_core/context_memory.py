@@ -368,25 +368,37 @@ def refresh_global_memory(
     summarizer: ContextSummarizer | None = None,
     *,
     settings: Settings | None = None,
+    latest_changes: str | None = None,
 ) -> bool:
     """快照保存后刷新全局摘要与用户画像。
 
-    返回是否真正写入；没有局部摘要时保持现状（不生成空文件）。
+    材料优先级：
+      1. 已有 local_summary.md（每 N 轮自动生成的局部摘要）；
+      2. 本次快照备注 / 最近一轮改动说明（latest_changes）。
+
+    这样即使用户尚未累积到摘要周期，第一次保存快照也会生成
+    global_summary.md，Architect 从第一轮全栈澄清就能拿到项目上下文。
+    返回是否真正写入；没有任何材料时不生成空文件。
     调用方负责 try/except，快照本身绝不能因为记忆生成失败而失败。
     """
     local = memory.read_local_summary().strip()
-    if not local:
+    change_note = str(latest_changes or "").strip()
+    material = local
+    if change_note:
+        block = f"## 本次快照改动\n{change_note}"
+        material = f"{local}\n\n{block}".strip() if local else block
+    if not material:
         return False
     resolved = settings or get_settings()
     generator = summarizer or ContextSummarizer(resolved)
     summary = generator.global_summary(
-        local,
+        material,
         resolved.context_global_summary_max_chars,
     )
     if summary:
         memory.write_global_summary(summary)
     profile = generator.user_profile(
-        f"{local}\n\n{summary}",
+        f"{material}\n\n{summary}",
         resolved.context_user_profile_max_chars,
     )
     if profile:

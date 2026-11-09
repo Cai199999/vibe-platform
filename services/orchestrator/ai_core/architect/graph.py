@@ -821,6 +821,8 @@ def _context_from_state(state: ArchitectState) -> ArchitectContext:
         threshold=float(state.get("threshold") or 0.85),
         retrieved_chunks=list(state.get("retrieved_chunks") or []),
         source_hash=str(state.get("source_hash") or ""),
+        project_summary=str(state.get("project_summary") or ""),
+        latest_changes=str(state.get("latest_changes") or ""),
     )
 
 

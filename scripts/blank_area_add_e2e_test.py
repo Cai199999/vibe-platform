@@ -105,8 +105,8 @@ def main() -> int:
 
             popover = active.locator(".canvas-popover")
             expect(popover).to_have_count(1)
-            expect(popover).to_have_attribute("data-action", "ADD")
-            print("   popover data-action = ADD")
+            expect(popover).to_have_attribute("data-action", "CREATE_NEW")
+            print("   popover data-action = CREATE_NEW")
 
             print("\n== 4. 输入“加个按钮”并发送 ==")
             popover.locator(".popover-row input").fill("加个按钮")
@@ -119,7 +119,7 @@ def main() -> int:
                 fail("没有捕获到 /api/v1/supervisor/route 请求")
             annotation = annotation_payload(route_payloads[-1])
 
-            if annotation.get("action") != "ADD":
+            if annotation.get("action") not in {"ADD", "CREATE_NEW"}:
                 fail(f"action 不是 ADD: {annotation.get('action')}")
             target = annotation.get("target") or {}
             selector = target.get("selector")

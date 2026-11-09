@@ -33,6 +33,12 @@ React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.1
 - 项目快照：沙盒 Git checkpoint（💾 保存 / 版本历史抽屉 / 只读快照标签 +
   累积 Diff / 二次确认 `reset --hard`）；恢复后版本列表刷新、iframe 以
   nonce 重建加载回滚版本；不引入额外数据库
+- 生成流重构：`CREATE_NEW` 只生成组件主体 + `data-vibe-created`，预览层
+  拖拽定位；确认后以 `MODIFY_EXISTING + payload.position` 回写 absolute。
+  `run.dirty` 保存门控：【下一步】置灰 + Toast；保存快照刷新
+  `global_summary.md`，Architect 请求携带 `projectSummary/latestChanges`
+- 记忆落盘：BFF camelCase 请求字段改用 Pydantic alias 解析；python-ai
+  entrypoint 启动时修正 bind mount 属主后降权到 app，修复摘要静默失败
 - 上下文分层：tiktoken 预算 + FAST 意图分级（高优逐字/低优合并）+ 最近
   10 轮原文；工具结果落 `tool_outputs/<sha256>` 只传预览；每 10 轮写
   `local_summary.md`，快照刷新 `global_summary.md` + `user_profile.md` 并注入
@@ -41,8 +47,9 @@ React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.1
 - Architect 置信度：必需槽位才算封顶，可选 auth/api 不再扣分；
   assumptions 齐全时封顶 0.90；问题按必需槽位优先；自由文本确定性回填
   框架/数据库/实体/业务流；诊断脚本 `scripts/architect_confidence_debug_test.py`
-- Eval 10/10；Python 182 passed（上下文 14 + 置信度 4），Java BFF 6 passed；
-  快照/Architect/空白 ADD/澄清/开发者面板 E2E 全 PASS
+- Eval 10/10；Python 189 passed（含拖拽定位/上下文 4 + 快照 alias 2），
+  Java BFF 快照测试 PASS；拖拽定位→保存门控→Architect 澄清 E2E PASS，
+  快照/Architect/空白 ADD/新增组件回归全 PASS
 
 ## 真 / 假边界
 

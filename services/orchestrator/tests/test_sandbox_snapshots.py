@@ -65,6 +65,34 @@ class SnapshotSchemaTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             CreateSnapshotRequest(message="   ")
 
+    def test_accepts_camel_case_context_fields(self) -> None:
+        """BFF 透传 camelCase；字段必须真正落库到上下文记忆作用域。"""
+        request = CreateSnapshotRequest.model_validate(
+            {
+                "message": "保存当前版本",
+                "projectId": "proj_demo",
+                "tenantId": "tenant_demo",
+                "latestChanges": "新增登录按钮，并拖拽到卡片右上角",
+            }
+        )
+
+        self.assertEqual(request.project_id, "proj_demo")
+        self.assertEqual(request.tenant_id, "tenant_demo")
+        self.assertEqual(request.latest_changes, "新增登录按钮，并拖拽到卡片右上角")
+
+    def test_still_accepts_snake_case(self) -> None:
+        """内部脚本 / 旧客户端使用 snake_case 时保持兼容。"""
+        request = CreateSnapshotRequest.model_validate(
+            {
+                "message": "保存当前版本",
+                "project_id": "proj_demo",
+                "latest_changes": "调整按钮颜色",
+            }
+        )
+
+        self.assertEqual(request.project_id, "proj_demo")
+        self.assertEqual(request.latest_changes, "调整按钮颜色")
+
     def test_list_response_serializes_camel_case(self) -> None:
         response = SnapshotListResponse(
             sandbox_id="sbx_demo",

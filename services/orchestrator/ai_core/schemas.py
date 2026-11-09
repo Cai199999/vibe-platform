@@ -25,6 +25,17 @@ class CamelResponse(BaseModel):
     model_config = ConfigDict(alias_generator=_to_camel, populate_by_name=True)
 
 
+class CamelRequest(BaseModel):
+    """对外请求：接受 BFF / 前端使用的 camelCase，同时兼容内部 snake_case。
+
+    Java BFF 是纯 JSON 透传层，前端发送 projectId / latestChanges 等
+    camelCase 字段；请求模型若只声明 snake_case，Pydantic 会静默忽略
+    这些字段，导致上下文记忆失效。
+    """
+
+    model_config = ConfigDict(alias_generator=_to_camel, populate_by_name=True)
+
+
 # ------------------------------------------------------------
 # 健康检查
 # ------------------------------------------------------------
@@ -128,7 +139,7 @@ class DestroySandboxResponse(BaseModel):
     destroyed_at: datetime
 
 
-class CreateSnapshotRequest(BaseModel):
+class CreateSnapshotRequest(CamelRequest):
     """创建快照：把沙盒当前工作区提交为一个 Git checkpoint。
 
     备注必填且 ≤200 字，去除首尾空白后再校验，避免只有空格的无意义快照。
@@ -140,6 +151,9 @@ class CreateSnapshotRequest(BaseModel):
     message: str = Field(min_length=1, max_length=200)
     project_id: str | None = Field(default=None, max_length=64)
     tenant_id: str | None = Field(default=None, max_length=64)
+    # 本次保存涵盖的改动说明（可以是最近一轮 Run 的 summary）。
+    # 即使尚未产出 local_summary，也能据此生成第一份 global_summary.md。
+    latest_changes: str | None = Field(default=None, max_length=4000)
 
     @field_validator("message")
     @classmethod
@@ -182,6 +196,9 @@ class CreateSnapshotResponse(CamelResponse):
     short_hash: str
     message: str
     committed_at: datetime
+    # 保存后刷新出的项目摘要；前端缓存后随下一次 Architect 请求发送。
+    project_summary: str = ""
+    latest_changes: str = ""
 
 
 class RestoreSnapshotResponse(CamelResponse):

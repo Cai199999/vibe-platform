@@ -1940,7 +1940,12 @@ class RunExecutionService:
                     "index": index,
                     "annotation_id": annotation.annotation_id,
                     "thread_id": thread_id,
-                    "action": annotation.action,
+                    # 新协议语义：CREATE_NEW / MODIFY_EXISTING。
+                    # annotation.action 可能是旧别名 ADD / MODIFY，Planner
+                    # 与 Coder 统一读取 intent_action，避免两条分支漂移。
+                    "action": annotation.intent_action,
+                    "intent_action": annotation.intent_action,
+                    "legacy_action": annotation.action,
                     "annotation": annotation_payload,
                     "intent_kind": intent.kind if intent else "UI_ONLY",
                     "instruction": str(annotation.payload.get("text") or "").strip(),

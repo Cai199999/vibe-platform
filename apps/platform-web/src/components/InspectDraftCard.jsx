@@ -1,3 +1,9 @@
+import {
+  CREATE_NEW,
+  MODIFY_EXISTING,
+  isCreateAction,
+} from '../workspace/annotationActions.js'
+
 /**
  * Inspect 模式命中组件后的标注输入卡片。
  *
@@ -21,9 +27,10 @@ export default function InspectDraftCard({
         source.column ? `:${source.column}` : ''
       }`
     : ''
-  // ADD 时插入父级可能与点击元素不同，卡片必须显式展示真正的落点。
+  // CREATE_NEW 时插入父级可能与点击元素不同，卡片必须显式展示真正的落点。
+  const creating = isCreateAction(draft.action)
   const addTargetFile =
-    draft.action === 'ADD' && container?.file
+    creating && container?.file
       ? `${container.file}:${container.line || 1}`
       : location
 
@@ -55,23 +62,23 @@ export default function InspectDraftCard({
       <div className="inspect-draft-actions" role="group" aria-label="操作类型">
         <button
           type="button"
-          className={draft.action === 'MODIFY' ? 'is-active' : ''}
-          aria-pressed={draft.action === 'MODIFY'}
-          onClick={() => onChange?.({ action: 'MODIFY' })}
+          className={!creating ? 'is-active' : ''}
+          aria-pressed={!creating}
+          onClick={() => onChange?.({ action: MODIFY_EXISTING })}
         >
           修改此组件
         </button>
         <button
           type="button"
-          className={draft.action === 'ADD' ? 'is-active' : ''}
-          aria-pressed={draft.action === 'ADD'}
-          onClick={() => onChange?.({ action: 'ADD' })}
+          className={creating ? 'is-active' : ''}
+          aria-pressed={creating}
+          onClick={() => onChange?.({ action: CREATE_NEW })}
         >
           在容器内新增
         </button>
       </div>
 
-      {draft.action === 'ADD' && (
+      {creating && (
         <p className="inspect-draft-hint">
           插入父级：<code>{addTargetFile}</code>
         </p>
@@ -84,7 +91,7 @@ export default function InspectDraftCard({
         maxLength={500}
         value={draft.intent || ''}
         placeholder={
-          draft.action === 'ADD'
+          creating
             ? '描述要在这个容器里新增什么，例如：加一个蓝色“立即购买”按钮'
             : '描述要改什么，例如：把按钮背景改成绿色，文字改为立即体验'
         }

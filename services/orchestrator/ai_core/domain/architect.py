@@ -62,6 +62,12 @@ class ArchitectRunRequest(CamelModel):
     project_name: str = Field(default="未命名项目", max_length=128)
     source: ArchitectSource = Field(default_factory=ArchitectSource)
     ui_history: list[dict[str, Any]] = Field(default_factory=list, max_length=30)
+    # 全栈澄清的上下文增强：
+    #  - projectSummary：最近一次保存快照后生成的项目全局摘要；
+    #  - latestChanges：本次快照（或最近一轮 UI Run）的改动说明。
+    # Architect 必须基于摘要理解既定技术选型，不得重复询问已确认内容。
+    project_summary: str = Field(default="", max_length=12000)
+    latest_changes: str = Field(default="", max_length=4000)
     options: ArchitectRunOptions = Field(default_factory=ArchitectRunOptions)
 
 

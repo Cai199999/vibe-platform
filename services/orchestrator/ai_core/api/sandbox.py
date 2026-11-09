@@ -243,8 +243,10 @@ def create_snapshot(
     except SandboxError as exc:
         raise sandbox_error_to_http(exc) from exc
 
-    # 快照 = 项目里程碑：基于所有局部摘要刷新全局摘要与用户画像。
-    # 记忆生成属于增强能力，失败只记录日志，绝不能让快照本身失败。
+    # 快照 = 项目里程碑：基于所有局部摘要 + 本次改动说明刷新全局摘要与
+    # 用户画像。前端保存成功后会把 projectSummary 缓存起来，下一次进入
+    # Architect 时作为 projectSummary 发送，避免重复询问已确认的技术选型。
+    project_summary = ""
     try:
         settings = get_settings()
         memory = get_project_memory(
@@ -253,7 +255,12 @@ def create_snapshot(
             request.project_id,
             sandbox_id=sandbox_id,
         )
-        refresh_global_memory(memory, settings=settings)
+        refresh_global_memory(
+            memory,
+            settings=settings,
+            latest_changes=request.latest_changes,
+        )
+        project_summary = memory.read_global_summary().strip()
     except Exception:  # noqa: BLE001 - 记忆生成失败不影响快照
         logger.warning(
             "refresh global memory failed sandbox_id=%s",
@@ -267,6 +274,8 @@ def create_snapshot(
         short_hash=commit_hash[:7],
         message=request.message,
         committed_at=datetime.now(timezone.utc),
+        project_summary=project_summary,
+        latest_changes=request.latest_changes or "",
     )
 
 

@@ -3563,7 +3563,8 @@ body.is-viewport-panning * {
   letter-spacing: 0.04em;
 }
 
-.ast-action.is-ADD {
+.ast-action.is-ADD,
+.ast-action.is-CREATE_NEW {
   background: rgba(74, 222, 128, 0.12);
   color: #86efac;
 }
@@ -7982,4 +7983,138 @@ body.is-viewport-panning * {
   .snapshot-item-actions .ghost-button {
     flex: 1;
   }
+}
+
+/* 保存门控：未保存时【下一步】置灰，但仍保留点击事件用于 Toast 提示。 */
+.architect-launch.is-locked {
+  border-color: rgba(100, 116, 139, 0.45);
+  background: rgba(30, 41, 59, 0.55);
+  color: #94a3b8;
+  box-shadow: none;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.architect-launch.is-locked:hover {
+  border-color: rgba(100, 116, 139, 0.45);
+  box-shadow: none;
+  transform: none;
+}
+
+/* CREATE_NEW 拖拽定位层：覆盖在新增组件上，支持自由拖动。 */
+.placement-frame {
+  position: absolute;
+  z-index: 8;
+  box-sizing: border-box;
+  border: 2px dashed #4ade80;
+  border-radius: 4px;
+  background: rgba(74, 222, 128, 0.12);
+  box-shadow: 0 0 0 1px rgba(2, 6, 23, 0.5),
+    0 0 22px rgba(74, 222, 128, 0.35);
+  cursor: move;
+  touch-action: none;
+  user-select: none;
+}
+
+.placement-frame.is-dragging {
+  border-style: solid;
+  background: rgba(74, 222, 128, 0.2);
+  cursor: grabbing;
+}
+
+.placement-handle {
+  position: absolute;
+  top: -11px;
+  left: -11px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #16a34a;
+  color: #f0fdf4;
+  font-size: 12px;
+  box-shadow: 0 2px 8px rgba(2, 6, 23, 0.45);
+}
+
+.placement-label {
+  position: absolute;
+  left: 12px;
+  bottom: 100%;
+  padding: 3px 8px;
+  border-radius: 4px 4px 4px 0;
+  background: #15803d;
+  color: #f0fdf4;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.placement-actions {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  display: flex;
+  gap: 6px;
+  padding: 5px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(74, 222, 128, 0.35);
+  box-shadow: 0 10px 24px rgba(2, 6, 23, 0.55);
+  cursor: default;
+}
+
+.placement-actions button {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.placement-confirm {
+  background: #16a34a;
+  color: #f0fdf4;
+}
+
+.placement-confirm:hover {
+  background: #22c55e;
+}
+
+.placement-cancel {
+  background: rgba(51, 65, 85, 0.8);
+  color: #cbd5e1;
+}
+
+.placement-cancel:hover {
+  background: rgba(71, 85, 105, 0.9);
+}
+
+.placement-warning {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  background: rgba(30, 41, 59, 0.95);
+  color: #fde68a;
+  font-size: 11.5px;
+  transform: translateX(-50%);
+  box-shadow: 0 10px 24px rgba(2, 6, 23, 0.5);
+}
+
+.placement-warning button {
+  padding: 3px 8px;
+  border-radius: 5px;
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  background: transparent;
+  color: #fde68a;
+  font-size: 11px;
+  cursor: pointer;
 }

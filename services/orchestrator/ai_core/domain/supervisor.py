@@ -69,6 +69,10 @@ class SupervisorRequest(CamelModel):
     # 旧字段：历史上前端把 UI 标注聊天拼进来。为兼容旧客户端保留反序列化，
     # 但 Supervisor 不再把它转发给任何子图，避免跨 Agent 上下文污染。
     ui_history: list[dict[str, Any]] = Field(default_factory=list, max_length=30)
+    # 全栈澄清上下文：项目全局摘要 + 本次快照改动说明。只投影给
+    # Architect，不进入 UI Graph，避免把长文档塞进 Coder Prompt。
+    project_summary: str = Field(default="", max_length=12000)
+    latest_changes: str = Field(default="", max_length=4000)
     options: SupervisorOptions = Field(default_factory=SupervisorOptions)
 
 
