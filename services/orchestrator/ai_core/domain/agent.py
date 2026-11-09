@@ -12,9 +12,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_serializer, model_validator
 
-from ai_core.domain.common import CamelModel
+from ai_core.domain.common import CamelModel, iso_datetime
 
 
 # ------------------------------------------------------------
@@ -76,6 +76,11 @@ class AnnotationChatMessage(CamelModel):
     turn_count: int | None = Field(default=None, ge=1)
     created_at: datetime | None = None
 
+    @field_serializer("created_at")
+    def _serialize_created_at(self, value: datetime | None) -> str | None:
+        """即使调用方使用 mode=python 的 model_dump，也输出 ISO 字符串。"""
+        return iso_datetime(value)
+
 
 class AnnotationEnvelope(CamelModel):
     """画布标注信封。M1 接受 UI_ONLY / UI_AND_BUSINESS，拒绝 FULLSTACK。"""
@@ -103,6 +108,11 @@ class AnnotationEnvelope(CamelModel):
     chat_history: list[AnnotationChatMessage] = Field(
         default_factory=list, max_length=40
     )
+
+    @field_serializer("created_at")
+    def _serialize_created_at(self, value: datetime | None) -> str | None:
+        """AnnotationEnvelope 会整体进入 Planner / Coder Prompt 的 JSON。"""
+        return iso_datetime(value)
 
 
 # ------------------------------------------------------------

@@ -675,7 +675,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
         )
         human = (
             f"{_contract_human(context)}\n\n"
-            f"上一版契约:\n{json.dumps(_draft_to_payload(previous), ensure_ascii=False)}\n\n"
+            f"上一版契约:\n{json.dumps(_draft_to_payload(previous), ensure_ascii=False, default=str)}\n\n"
             f"校验反馈:\n{feedback[:3000]}"
         )
         raw = self._invoke("architect_contract", system, human)
@@ -735,8 +735,8 @@ def _analysis_human(context: ArchitectContext) -> str:
     return (
         f"项目：{context.project_name}（{context.project_id}）\n"
         f"当前澄清轮次：{context.round}\n"
-        f"已确认槽位：{json.dumps(context.slots, ensure_ascii=False)}\n"
-        f"用户历史对话：{json.dumps(context.ui_history[-12:], ensure_ascii=False)}\n\n"
+        f"已确认槽位：{json.dumps(context.slots, ensure_ascii=False, default=str)}\n"
+        f"用户历史对话：{json.dumps(context.ui_history[-12:], ensure_ascii=False, default=str)}\n\n"
         f"RAG 规范片段：\n{_format_chunks(context.retrieved_chunks)}\n\n"
         f"当前源码：\n{format_source(context.source_files, 42000)}"
     )
@@ -747,8 +747,8 @@ def _contract_human(context: ArchitectContext) -> str:
         f"项目：{context.project_name}（{context.project_id}）\n"
         f"应用形态：{context.app_shape}\n"
         f"置信度阈值：{context.threshold}\n"
-        f"已确认槽位：{json.dumps(context.slots, ensure_ascii=False)}\n"
-        f"历史对话：{json.dumps(context.ui_history[-12:], ensure_ascii=False)}\n\n"
+        f"已确认槽位：{json.dumps(context.slots, ensure_ascii=False, default=str)}\n"
+        f"历史对话：{json.dumps(context.ui_history[-12:], ensure_ascii=False, default=str)}\n\n"
         f"RAG 规范片段：\n{_format_chunks(context.retrieved_chunks)}\n\n"
         f"当前源码：\n{format_source(context.source_files, 36000)}"
     )

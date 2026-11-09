@@ -86,7 +86,7 @@ def collect_annotation_history(context: dict[str, Any]) -> str:
                 parts.append(f"{role}: {content}")
         for run in thread.get("previousRuns") or []:
             if isinstance(run, dict):
-                payload = json.dumps(run, ensure_ascii=False)
+                payload = json.dumps(run, ensure_ascii=False, default=str)
             else:
                 payload = str(run)
             parts.append(f"run: {payload[:500]}")

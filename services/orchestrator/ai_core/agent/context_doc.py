@@ -173,7 +173,7 @@ def render_vibe_context(
 
     envelope_json = json.dumps(
         [
-            annotation.model_dump(by_alias=True, exclude_none=True)
+            annotation.model_dump(mode="json", by_alias=True, exclude_none=True)
             for annotation in annotations
         ],
         ensure_ascii=False,

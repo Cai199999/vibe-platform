@@ -814,7 +814,11 @@ def _context_from_state(state: ArchitectState) -> ArchitectContext:
 
 def _rag_query(state: ArchitectState) -> str:
     shape = state.get("app_shape") or "未知形态"
-    slots = json.dumps(state.get("slots") or {}, ensure_ascii=False)
+    slots = json.dumps(
+        state.get("slots") or {},
+        ensure_ascii=False,
+        default=str,
+    )
     history = " ".join(
         str(item.get("content") or "")
         for item in (state.get("ui_history") or [])[-6:]

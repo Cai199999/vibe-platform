@@ -439,13 +439,13 @@ class DeepSeekAgentLLM(AgentLLM):
         )
         files_block = _format_files(current_files, 16000)
         answers_block = (
-            json.dumps(clarification_answers, ensure_ascii=False)
+            json.dumps(clarification_answers, ensure_ascii=False, default=str)
             if clarification_answers
             else "无"
         )
         human = (
             f"画布标注（AnnotationEnvelope[]）:\n"
-            f"{json.dumps(annotations, ensure_ascii=False)}\n\n"
+            f"{json.dumps(annotations, ensure_ascii=False, default=str)}\n\n"
             f"目标文件当前内容:\n{files_block}\n\n"
             f"用户已澄清的回答:\n{answers_block}\n\n"
             f"上一轮错误（如有）:\n{_truncate(previous_errors or '无', 4000)}"
@@ -500,12 +500,12 @@ class DeepSeekAgentLLM(AgentLLM):
             f"{self._skill_system}"
         )
         human = (
-            f"目标文件列表: {json.dumps(target_files, ensure_ascii=False)}\n\n"
+            f"目标文件列表: {json.dumps(target_files, ensure_ascii=False, default=str)}\n\n"
             f"画布标注（AnnotationEnvelope[]）:\n"
-            f"{json.dumps(annotations, ensure_ascii=False)}\n\n"
+            f"{json.dumps(annotations, ensure_ascii=False, default=str)}\n\n"
             f"修改计划:\n{plan}\n\n"
             f"当前文件内容:\n{_format_files(current_files, 24000)}\n\n"
-            f"上一轮验证结果:\n{json.dumps(verify_result, ensure_ascii=False)}\n\n"
+            f"上一轮验证结果:\n{json.dumps(verify_result, ensure_ascii=False, default=str)}\n\n"
             f"当前重试次数: {retry_count}"
         )
         content = self._invoke("coder", system, human)

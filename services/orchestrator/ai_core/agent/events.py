@@ -83,7 +83,14 @@ class RunEvent:
 
     def to_sse(self) -> str:
         # data 必须是单行 JSON，避免不同客户端对多行 data 的拼接行为不一致。
-        data = json.dumps(self.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        # default=str 是最后一道防线：任何未来新增的 datetime / Decimal /
+        # Enum 字段都不会让整条 SSE 连接 500，最坏只是该字段降级为字符串。
+        data = json.dumps(
+            self.to_dict(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
         return f"id: {self.seq}\nevent: {SSE_EVENT_NAME}\ndata: {data}\n\n"
 
 

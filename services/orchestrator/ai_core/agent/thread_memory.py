@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from ai_core.domain.common import iso_datetime
 from ai_core.domain.scope import memory_scope
 
 MAX_HISTORY = 60
@@ -47,7 +48,9 @@ def _message_key(message: dict[str, Any]) -> tuple[str, ...]:
 def _normalize_message(message: Any) -> dict[str, Any] | None:
     """兼容 Pydantic 模型与前端 JSON，统一成 camelCase 字典。"""
     if hasattr(message, "model_dump"):
-        raw = message.model_dump(by_alias=True, exclude_none=True)
+        # mode="json" 让 createdAt 直接变成 ISO 字符串；否则这里会拿到
+        # datetime，再被 str() 成非标准格式，最终污染 Prompt 与回滚元数据。
+        raw = message.model_dump(mode="json", by_alias=True, exclude_none=True)
     elif isinstance(message, dict):
         raw = dict(message)
     else:
@@ -59,7 +62,11 @@ def _normalize_message(message: Any) -> dict[str, Any] | None:
         return None
 
     created_at = raw.get("createdAt") or raw.get("created_at") or _now()
-    if not isinstance(created_at, str):
+    if isinstance(created_at, datetime):
+        # 前端 JSON 通常是字符串；直接调用 Store 的测试 / 脚本可能传
+        # datetime，必须转成标准 ISO，禁止 str(datetime) 的带空格格式。
+        created_at = iso_datetime(created_at) or _now()
+    elif not isinstance(created_at, str):
         created_at = str(created_at)
     normalized = {
         "role": role,

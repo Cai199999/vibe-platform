@@ -24,7 +24,9 @@ React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.1
 - 记忆隔离：`ThreadMemoryStore` 按 tenant+project 作用域键；LangGraph
   checkpoint 按 `ui_run`/`architect_run` + 项目作用域物理隔离；Supervisor
   只向 Architect 投影 `architectHistory`，UI 只收画布标注；State 字段边界测试固化
-- Eval 10/10；单测 148 passed（含 `test_memory_isolation.py` 10 项）
+- 序列化：Annotation / chatHistory 的 `createdAt` 统一 ISO 8601；Prompt 与 SSE
+  `json.dumps` 加 `default=str` 兜底，修复 datetime 导致的后端 500
+- Eval 10/10；单测 152 passed（含隔离 10 项 + 序列化 4 项）
 
 ## 真 / 假边界
 

@@ -1817,7 +1817,14 @@ class RunExecutionService:
                 or annotation.annotation_id
                 or f"thread_annotation_{index}"
             )
-            annotation_payload = annotation.model_dump(by_alias=True, exclude_none=True)
+            # mode="json" 必须显式指定：默认 python mode 会保留 datetime
+            # 对象，后续进入 Prompt 的 json.dumps / SSE 时会直接抛
+            # “Object of type datetime is not JSON serializable”。
+            annotation_payload = annotation.model_dump(
+                mode="json",
+                by_alias=True,
+                exclude_none=True,
+            )
             # 前端 target.snippet 是圈选时的初始源码；多轮对话必须用沙盒当前
             # 源码覆盖，避免模型同时看到“旧片段 + 新文件”后回滚上一轮修改。
             target_file = source.file if source and source.file else fallback_file

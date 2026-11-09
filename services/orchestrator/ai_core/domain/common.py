@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -16,6 +18,24 @@ def to_camel(name: str) -> str:
     """把 snake_case 字段名转为 camelCase。"""
     head, *tail = name.split("_")
     return head + "".join(part.capitalize() for part in tail)
+
+
+def iso_datetime(value: datetime | None) -> str | None:
+    """把 ``datetime`` 统一序列化为 UTC ISO 8601（毫秒 + ``Z``）。
+
+    领域模型可能同时接收前端 ``Z`` 字符串与 Python ``datetime``；任何
+    要进入 ``json.dumps`` / SSE / Prompt 的字段都必须先经过本函数，
+    避免 ``Object of type datetime is not JSON serializable``。
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return (
+        value.astimezone(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 class CamelModel(BaseModel):
