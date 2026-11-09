@@ -12,10 +12,11 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒（Node 22
 - SSE 重放、HITL 澄清、Diff 审批、取消、Git 回滚/快照
 - Supervisor 路由、Architect 动态澄清、8 Agent Manifest、Tool/Skill/MCP
 - 记忆隔离、上下文压缩
-- 生产级全栈：六节点 FullstackGraph（DBA→Backend→Frontend→Infra→Verifier→Restart）；Sequelize+`DATABASE_URL` 连 MySQL/PostgreSQL，沙盒回退 node:sqlite；契约 `databaseEngine` 三选一
-- 生成 IaC：Dockerfile/.dockerignore/render.yaml/.env.example/DEPLOY.md
-- 预览【🚀 部署上线】Mock 指引（Render/Vercel/Railway）
-- 验证：Python 203、四套 E2E、前端构建、MySQL/SQLite 冒烟 PASS
+- **对话前置建项（新）**：新建项目=空白画布+【✨ 开始创建】；纯自然语言驱动 Architect 多轮敲定契约（前后端路由/布局/组件/API/实体）；形态由 `infer_app_shape` 识别，已移除“全栈/轻量/脚本”三选一
+- **自动前端接力（新）**：契约 CONFIRMED → 自动跑 FrontendCoder→BuildVerifier→SandboxRestart（`mode=frontend`）；`frontendEntry` 回写项目源码，画布从 blank→live 实时预览；失败可重试/重开架构
+- 项目态：pending → architecting → confirmed → bootstrapping → ready/failed
+- 生产级全栈：六节点 FullstackGraph；Sequelize+`DATABASE_URL`，沙盒回退 node:sqlite；IaC（Dockerfile/render.yaml/DEPLOY.md）
+- 验证：Python 207、对话前置/架构面板/全栈门控/全栈生成/混合/双侧 E2E、前端构建 PASS
 
 ## 真假边界
 

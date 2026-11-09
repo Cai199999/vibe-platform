@@ -49,6 +49,13 @@ SLOT_VALUES = {
     "data.entities": "Order(id, userId, total, status)；User(id, name)",
 }
 
+# 对话前置：形态由自然语言目标推断，不再依赖三选一答案。
+SHAPE_GOALS = {
+    "lightweight_web": "做一个个人待办清单，纯前端保存到 localStorage，不需要登录。",
+    "script_automation": "写一个每天定时运行的 Python 脚本，读取 CSV 并输出汇总 JSON。",
+    "full_stack_system": "做一个团队任务看板，成员登录后创建任务并保存到数据库。",
+}
+
 
 class E2EFailure(AssertionError):
     pass
@@ -166,6 +173,7 @@ def event_types(events: list[dict[str, Any]]) -> list[str]:
 
 def start_run(
     shape_label: str,
+    goal: str = "先做一个能运行的界面",
 ) -> tuple[str, str, dict[str, Any], list[dict[str, Any]]]:
     run_id = f"e2e_arch_{uuid.uuid4().hex[:12]}"
     payload = {
@@ -174,7 +182,7 @@ def start_run(
         "projectId": f"project_{run_id}",
         "projectName": f"M2.5 E2E - {shape_label}",
         "source": {"files": {"src/App.jsx": SOURCE_APP}},
-        "uiHistory": [{"role": "user", "content": "先做一个能运行的界面"}],
+        "uiHistory": [{"role": "user", "content": goal}],
         "options": {
             "llmProvider": "mock",
             "confidenceThreshold": 0.85,
@@ -189,17 +197,22 @@ def start_run(
         f"首轮应暂停在 clarification.required，实际 {terminal.get('type')}",
     )
     clarification = terminal["payload"]
-    question = clarification["questions"][0]
-    check(question["slot"] == "app.shape", "首轮必须先询问 app.shape")
-    expected_prompt = (
-        "您是希望做一个只有网页特效的轻量工具，还是需要能保存数据的全栈系统，"
-        "或者是一个后台自动运行的脚本？"
-    )
+    # 对话前置：允许首轮直接追问缺失槽位；若仍问形态，必须是自由文本，
+    # 且绝不能再带“全栈 / 轻量 / 脚本”三选一 options。
+    for question in clarification["questions"]:
+        if question["slot"] == "app.shape":
+            check(
+                question["type"] == "free_text",
+                "应用形态问题必须改为自由文本",
+            )
+            check(
+                not question.get("options"),
+                "应用形态问题不允许携带三选一选项",
+            )
     check(
-        question["prompt"] == expected_prompt,
-        f"应用形态问题文案不符合产品约定: {question['prompt']!r}",
+        clarification["confidenceScore"] < 0.85,
+        "存在缺失槽位时不能在首轮直接给出可确认契约",
     )
-    check(clarification["confidenceScore"] <= 0.42, "未知形态置信度必须封顶")
     return run_id, clarification["clarificationId"], terminal, events
 
 
@@ -231,7 +244,7 @@ def drive_to_contract(
     shape: str,
     label: str,
 ) -> tuple[str, dict[str, Any], int, list[dict[str, Any]]]:
-    run_id, _, terminal, events = start_run(label)
+    run_id, _, terminal, events = start_run(label, SHAPE_GOALS.get(shape, ""))
     last_seq = int(terminal["seq"])
     all_events = list(events)
     for _ in range(8):

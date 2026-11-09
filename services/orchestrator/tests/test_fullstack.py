@@ -21,7 +21,7 @@ from ai_core.domain.architect import (
     ArchitectComponentInteraction,
     ArchitectContract,
 )
-from ai_core.domain.fullstack import FullstackRunRequest
+from ai_core.domain.fullstack import FullstackRunOptions, FullstackRunRequest
 from ai_core.fullstack.coders import (
     collection_path,
     contract_database_engine,
@@ -31,6 +31,7 @@ from ai_core.fullstack.coders import (
     generate_backend_bundle,
     generate_dba_bundle,
     generate_frontend_bundle,
+    generate_frontend_skeleton_bundle,
     generate_infra_bundle,
 )
 from ai_core.fullstack.graph import FullstackGraphRunner
@@ -107,6 +108,31 @@ def _contract(**overrides) -> ArchitectContract:
     }
     payload.update(overrides)
     return ArchitectContract.model_validate(payload)
+
+
+def _frontend_contract(**overrides) -> ArchitectContract:
+    """对话前置模式的轻量前端契约：没有后端与 DDL，但有页面结构。"""
+    return _contract(
+        appShape="lightweight_web",
+        techStack={"frontend": "react"},
+        apiRoutes=[],
+        databaseDdl="",
+        componentInteractions=[],
+        frontendRoutes=[
+            {"path": "/", "name": "任务总览", "description": "展示全部任务"},
+            {"path": "/board", "name": "看板", "description": "按状态分组"},
+        ],
+        pageLayout=[
+            {"region": "header", "description": "品牌与导航"},
+            {"region": "main", "description": "任务看板工作区"},
+        ],
+        components=[
+            {"name": "TaskBoard", "description": "任务看板容器"},
+            {"name": "TaskCard", "description": "单条任务卡片"},
+            {"name": "StatusSummary", "description": "状态统计"},
+        ],
+        **overrides,
+    )
 
 
 class _MemorySandbox(SandboxProvider):
@@ -315,6 +341,23 @@ class CoderTests(unittest.TestCase):
                 existing_package="{}",
             )
 
+    def test_frontend_skeleton_renders_contract_routes_and_components(self) -> None:
+        """对话前置：契约中的路由 / 布局 / 组件必须落到真实 App.jsx。"""
+        bundle = generate_frontend_skeleton_bundle(_frontend_contract())
+        self.assertEqual(set(bundle.files), {"src/App.jsx"})
+        app = bundle.files["src/App.jsx"]
+        self.assertIn("任务总览", app)
+        self.assertIn("/board", app)
+        self.assertIn("TaskBoard", app)
+        self.assertIn("TaskCard", app)
+        self.assertIn("品牌与导航", app)
+        # 生成页面必须带 data-source 标记，供后续画布标注定位。
+        self.assertIn('data-source="app-header"', app)
+        self.assertIn("data-source-kind", app)
+        self.assertEqual(bundle.metadata["mode"], "frontend")
+        self.assertEqual(bundle.metadata["routes"], 2)
+        self.assertEqual(bundle.metadata["components"], 3)
+
     def test_infra_bundle_generates_production_deployment_files(self) -> None:
         bundle = generate_infra_bundle(_contract())
         self.assertEqual(
@@ -423,6 +466,45 @@ class GraphTests(unittest.TestCase):
         # 本次 graph 不发送终态事件，终态由 Service 统一 emit。
         self.assertNotIn("fullstack.completed", [event.type for event in events])
 
+    def test_frontend_mode_runs_three_nodes_and_probes_root(self) -> None:
+        """契约确认后的前端初始化只生成 App.jsx，不写后端 / 部署文件。"""
+        sandbox = _MemorySandbox()
+        buffer = RunEventBuffer("fsk_frontend_graph")
+        runner = FullstackGraphRunner(sandbox, event_sink=buffer)
+
+        outcome = runner.run(
+            {
+                "run_id": "fsk_frontend_graph",
+                "project_id": "proj_frontend",
+                "sandbox_id": sandbox.handle.sandbox_id,
+                "preview_url": sandbox.handle.preview_url,
+                "contract": _frontend_contract(),
+                "options": FullstackRunOptions(mode="frontend"),
+                "files": [],
+            }
+        )
+
+        self.assertIn("src/App.jsx", sandbox.files)
+        self.assertNotIn("server/index.js", sandbox.files)
+        self.assertNotIn("Dockerfile", sandbox.files)
+        self.assertIn("TaskBoard", outcome["frontend_entry"])
+        self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/")])
+        self.assertEqual(sandbox.verified, [(sandbox.handle.sandbox_id, "build")])
+        node_order = [
+            event.payload["node"]
+            for event in buffer.snapshot()
+            if event.type == "fullstack.node.started"
+        ]
+        self.assertEqual(
+            node_order, ["FrontendCoder", "BuildVerifier", "SandboxRestart"]
+        )
+        started = next(
+            event
+            for event in buffer.snapshot()
+            if event.type == "fullstack.node.started"
+        )
+        self.assertEqual(started.payload["total"], 3)
+
     def test_graph_output_is_truncated(self) -> None:
         sandbox = _MemorySandbox()
         sandbox.files = _base_files()
@@ -508,6 +590,43 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaises(Exception) as ctx:
             service.start_stream(request)
         self.assertEqual(ctx.exception.code, "FULLSTACK_CONTRACT_INVALID")
+
+    def test_frontend_bootstrap_accepts_empty_source_and_returns_entry(self) -> None:
+        """新项目没有源码：服务端必须能从空 files 建沙盒并回传真实 App.jsx。"""
+        sandbox = _MemorySandbox()
+        service = FullstackService(sandbox=sandbox)
+        run_id = f"fsk_{uuid.uuid4().hex[:12]}"
+        request = FullstackRunRequest.model_validate(
+            {
+                "runId": run_id,
+                "projectId": "proj_frontend",
+                "contractId": "ctr_fullstack_test",
+                "contract": _frontend_contract().model_dump(mode="json", by_alias=True),
+                "source": {"files": {}},
+                "options": {"mode": "frontend"},
+            }
+        )
+        active = service.start_stream(request)
+        self.assertEqual(active.request.options.mode, "frontend")
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            snapshot = service.snapshot(run_id)
+            if snapshot.status in {"SUCCEEDED", "FAILED"}:
+                break
+            time.sleep(0.02)
+
+        snapshot = service.snapshot(run_id)
+        self.assertEqual(snapshot.status, "SUCCEEDED", snapshot.error)
+        self.assertIn("src/App.jsx", snapshot.files)
+        completed = next(
+            event
+            for event in active.buffer.snapshot()
+            if event.type == "fullstack.completed"
+        )
+        self.assertEqual(completed.payload["mode"], "frontend")
+        self.assertIn("TaskBoard", completed.payload["frontendEntry"])
+        self.assertEqual(sandbox.restarts[-1][1], "/")
 
     def test_run_emits_terminal_completed_and_updates_snapshot(self) -> None:
         sandbox = _MemorySandbox()

@@ -33,6 +33,7 @@ from ai_core.fullstack.coders import (
     generate_backend_bundle,
     generate_dba_bundle,
     generate_frontend_bundle,
+    generate_frontend_skeleton_bundle,
     generate_infra_bundle,
 )
 from ai_core.ports.sandbox import SandboxProvider
@@ -41,6 +42,17 @@ logger = logging.getLogger(__name__)
 
 # 节点总数用于日志与 SSE 的 index/total；新增节点时只需改这一处。
 GRAPH_NODE_TOTAL = 6
+# 对话前置模式的初始前端骨架只执行三个节点。
+FRONTEND_GRAPH_NODE_TOTAL = 3
+FULLSTACK_NODE_ORDER = [
+    "DBACoder",
+    "BackendCoder",
+    "FrontendCoder",
+    "InfraCoder",
+    "BuildVerifier",
+    "SandboxRestart",
+]
+FRONTEND_NODE_ORDER = ["FrontendCoder", "BuildVerifier", "SandboxRestart"]
 
 NODE_LABELS = {
     "DBACoder": "数据库工程师",
@@ -85,6 +97,7 @@ class FullstackState(TypedDict, total=False):
     backend_files: list[str]
     frontend_files: list[str]
     infra_files: list[str]
+    frontend_entry: str
 
 
 class FullstackGraphRunner:
@@ -98,16 +111,25 @@ class FullstackGraphRunner:
     ) -> None:
         self._sandbox = sandbox
         self._event_sink = event_sink or NullEventSink()
-        self._graph = self._build()
+        # 两套拓扑共用节点实现：
+        #  - fullstack：契约确认后的完整生成；
+        #  - frontend：新建项目契约确认后的前端骨架初始化。
+        self._graphs = {
+            "fullstack": self._build("fullstack"),
+            "frontend": self._build("frontend"),
+        }
 
     def run(self, initial_state: FullstackState) -> FullstackState:
+        options = initial_state.get("options") or FullstackRunOptions()
+        mode = "frontend" if options.mode == "frontend" else "fullstack"
         logger.info(
-            "FullstackGraph 启动 run_id=%s project_id=%s sandbox_id=%s",
+            "FullstackGraph 启动 mode=%s run_id=%s project_id=%s sandbox_id=%s",
+            mode,
             initial_state.get("run_id"),
             initial_state.get("project_id"),
             initial_state.get("sandbox_id"),
         )
-        result = self._graph.invoke(dict(initial_state))
+        result = self._graphs[mode].invoke(dict(initial_state))
         logger.info(
             "FullstackGraph 结束 run_id=%s changed_files=%d table=%s preview=%s",
             initial_state.get("run_id"),
@@ -120,15 +142,23 @@ class FullstackGraphRunner:
     # --------------------------------------------------------
     # 图构建
     # --------------------------------------------------------
-    def _build(self):
+    def _build(self, mode: str):
         builder = StateGraph(FullstackState)
-        builder.add_node("DBACoder", self._dba_coder)
-        builder.add_node("BackendCoder", self._backend_coder)
         builder.add_node("FrontendCoder", self._frontend_coder)
-        builder.add_node("InfraCoder", self._infra_coder)
         builder.add_node("BuildVerifier", self._build_verifier)
         builder.add_node("SandboxRestart", self._sandbox_restart)
 
+        if mode == "frontend":
+            # 契约确认后的前端初始化：只生成真实页面骨架并完成构建 / 重启。
+            builder.add_edge(START, "FrontendCoder")
+            builder.add_edge("FrontendCoder", "BuildVerifier")
+            builder.add_edge("BuildVerifier", "SandboxRestart")
+            builder.add_edge("SandboxRestart", END)
+            return builder.compile()
+
+        builder.add_node("DBACoder", self._dba_coder)
+        builder.add_node("BackendCoder", self._backend_coder)
+        builder.add_node("InfraCoder", self._infra_coder)
         builder.add_edge(START, "DBACoder")
         builder.add_edge("DBACoder", "BackendCoder")
         builder.add_edge("BackendCoder", "FrontendCoder")
@@ -144,7 +174,7 @@ class FullstackGraphRunner:
     def _dba_coder(self, state: FullstackState) -> dict[str, Any]:
         contract = state["contract"]
         started = time.monotonic()
-        self._node_started("DBACoder", state, 1)
+        self._node_started("DBACoder", state)
         try:
             bundle = generate_dba_bundle(contract)
             files = self._write_bundle(state, bundle)
@@ -169,7 +199,7 @@ class FullstackGraphRunner:
     def _backend_coder(self, state: FullstackState) -> dict[str, Any]:
         contract = state["contract"]
         started = time.monotonic()
-        self._node_started("BackendCoder", state, 2)
+        self._node_started("BackendCoder", state)
         try:
             bundle = generate_backend_bundle(contract)
             files = self._write_bundle(state, bundle)
@@ -195,24 +225,35 @@ class FullstackGraphRunner:
     def _frontend_coder(self, state: FullstackState) -> dict[str, Any]:
         contract = state["contract"]
         sandbox_id = state["sandbox_id"]
+        options = state.get("options") or FullstackRunOptions()
         started = time.monotonic()
-        self._node_started("FrontendCoder", state, 3)
+        self._node_started("FrontendCoder", state)
         try:
-            bundle = generate_frontend_bundle(
-                contract,
-                existing_main=self._read_optional(sandbox_id, "src/main.jsx"),
-                existing_vite=self._read_optional(sandbox_id, "vite.config.js"),
-                existing_package=self._read_optional(sandbox_id, "package.json"),
-            )
+            if options.mode == "frontend":
+                # 初始骨架：按契约生成 src/App.jsx，不接后端 API。
+                bundle = generate_frontend_skeleton_bundle(contract)
+            else:
+                bundle = generate_frontend_bundle(
+                    contract,
+                    existing_main=self._read_optional(sandbox_id, "src/main.jsx"),
+                    existing_vite=self._read_optional(sandbox_id, "vite.config.js"),
+                    existing_package=self._read_optional(sandbox_id, "package.json"),
+                )
             files = self._write_bundle(state, bundle)
             self._emit_outputs("FrontendCoder", bundle, state)
             self._node_completed(
                 "FrontendCoder", state, bundle.summary, bundle.files, started
             )
-            return {
+            result: dict[str, Any] = {
                 "frontend_files": sorted(bundle.files),
                 "files": files,
             }
+            if options.mode == "frontend":
+                # 把完整入口源码随图状态返回，完成事件可直接带回前端。
+                # 事件里的 node.output 受 maxOutputChars 限制，若被截断，
+                # 工作区就无法保存可继续编辑的真实源码。
+                result["frontend_entry"] = bundle.files.get("src/App.jsx", "")
+            return result
         except Exception as exc:
             self._node_failed("FrontendCoder", state, exc)
             raise FullstackGenerationError(
@@ -225,7 +266,7 @@ class FullstackGraphRunner:
     def _infra_coder(self, state: FullstackState) -> dict[str, Any]:
         contract = state["contract"]
         started = time.monotonic()
-        self._node_started("InfraCoder", state, 4)
+        self._node_started("InfraCoder", state)
         try:
             bundle = generate_infra_bundle(contract)
             files = self._write_bundle(state, bundle)
@@ -249,7 +290,7 @@ class FullstackGraphRunner:
     def _build_verifier(self, state: FullstackState) -> dict[str, Any]:
         options = state.get("options") or FullstackRunOptions()
         started = time.monotonic()
-        self._node_started("BuildVerifier", state, 5)
+        self._node_started("BuildVerifier", state)
         if not options.verify_build:
             self._node_completed(
                 "BuildVerifier",
@@ -294,8 +335,11 @@ class FullstackGraphRunner:
     def _sandbox_restart(self, state: FullstackState) -> dict[str, Any]:
         options = state.get("options") or FullstackRunOptions()
         sandbox_id = state["sandbox_id"]
+        # 前端骨架没有 Node 后端，只能探测 Vite 根路径；完整全栈才探测
+        # /api/health，确认 Vite 代理与后端同时就绪。
+        ready_path = "/" if options.mode == "frontend" else "/api/health"
         started = time.monotonic()
-        self._node_started("SandboxRestart", state, 6)
+        self._node_started("SandboxRestart", state)
         if not options.restart_sandbox:
             self._node_completed(
                 "SandboxRestart",
@@ -310,11 +354,11 @@ class FullstackGraphRunner:
             {
                 "runId": state["run_id"],
                 "sandboxId": sandbox_id,
-                "healthPath": "/api/health",
+                "healthPath": ready_path,
             },
         )
         try:
-            self._sandbox.restart(sandbox_id, ready_path="/api/health")
+            self._sandbox.restart(sandbox_id, ready_path=ready_path)
             handle = self._sandbox.get(sandbox_id)
         except Exception as exc:
             self._node_failed("SandboxRestart", state, exc)
@@ -327,10 +371,13 @@ class FullstackGraphRunner:
                 "runId": state["run_id"],
                 "sandboxId": sandbox_id,
                 "previewUrl": handle.preview_url,
-                "healthPath": "/api/health",
+                "healthPath": ready_path,
             },
         )
-        self._node_completed("SandboxRestart", state, "前后端双服务已就绪", [], started)
+        summary = (
+            "前端开发服务已就绪" if options.mode == "frontend" else "前后端双服务已就绪"
+        )
+        self._node_completed("SandboxRestart", state, summary, [], started)
         return {"preview_url": handle.preview_url}
 
     # --------------------------------------------------------
@@ -352,11 +399,16 @@ class FullstackGraphRunner:
         except Exception:
             return None
 
-    def _node_started(self, node: str, state: FullstackState, index: int) -> None:
+    def _node_started(self, node: str, state: FullstackState) -> None:
+        options = state.get("options") or FullstackRunOptions()
+        frontend_only = options.mode == "frontend"
+        order = FRONTEND_NODE_ORDER if frontend_only else FULLSTACK_NODE_ORDER
+        total = FRONTEND_GRAPH_NODE_TOTAL if frontend_only else GRAPH_NODE_TOTAL
+        index = order.index(node) + 1 if node in order else 0
         logger.info(
             "FullstackGraph 节点开始 [%d/%d] %s run_id=%s sandbox_id=%s",
             index,
-            GRAPH_NODE_TOTAL,
+            total,
             node,
             state.get("run_id"),
             state.get("sandbox_id"),
@@ -368,7 +420,7 @@ class FullstackGraphRunner:
                 "node": node,
                 "label": NODE_LABELS.get(node, node),
                 "index": index,
-                "total": GRAPH_NODE_TOTAL,
+                "total": total,
             },
         )
 

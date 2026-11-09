@@ -294,6 +294,14 @@ class ArchitectContract(CamelModel):
     component_interactions: list[ArchitectComponentInteraction] = Field(
         default_factory=list
     )
+    # 对话前置模式要求契约显式给出前端可执行结构，FrontendCoder 不再
+    # 从 Markdown 里猜测页面。三个字段对所有 Web 形态都有效：
+    #  - frontendRoutes: [{path, name, description}]
+    #  - pageLayout:     [{region, title, description}]
+    #  - components:     [{name, role, section, description}]
+    frontend_routes: list[dict[str, Any]] = Field(default_factory=list)
+    page_layout: list[dict[str, Any]] = Field(default_factory=list)
+    components: list[dict[str, Any]] = Field(default_factory=list)
     ui_logic: list[dict[str, Any]] = Field(default_factory=list)
     frontend_data_model: list[dict[str, Any]] = Field(default_factory=list)
     script_spec: dict[str, Any] = Field(default_factory=dict)

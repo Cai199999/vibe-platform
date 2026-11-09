@@ -44,9 +44,21 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
     api_routes = list(draft.api_routes)
     database_ddl = draft.database_ddl.strip()
     interactions = list(draft.component_interactions)
+    frontend_routes = list(draft.frontend_routes)
+    page_layout = list(draft.page_layout)
+    components = list(draft.components)
     ui_logic = list(draft.ui_logic)
     frontend_data_model = list(draft.frontend_data_model)
     script_spec = dict(draft.script_spec)
+
+    # 前端骨架由 FrontendCoder 直接消费这三项，缺失时不允许进入确认。
+    if shape in {"lightweight_web", "full_stack_system"}:
+        if not frontend_routes:
+            issues.append("前端契约缺少 frontend_routes，无法生成页面路由")
+        if not page_layout:
+            issues.append("前端契约缺少 page_layout，无法生成页面布局")
+        if not components:
+            issues.append("前端契约缺少 components，无法生成组件骨架")
 
     if shape == "lightweight_web":
         if api_routes:
@@ -79,6 +91,9 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
         api_routes = []
         database_ddl = ""
         interactions = []
+        frontend_routes = []
+        page_layout = []
+        components = []
         ui_logic = []
         frontend_data_model = []
 
@@ -110,6 +125,9 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
         api_routes=api_routes,
         database_ddl=database_ddl,
         component_interactions=interactions,
+        frontend_routes=frontend_routes,
+        page_layout=page_layout,
+        components=components,
         ui_logic=ui_logic,
         frontend_data_model=frontend_data_model,
         script_spec=script_spec,
@@ -129,6 +147,9 @@ def draft_to_dict(draft: ContractDraft) -> dict:
         "componentInteractions": [
             item.model_dump(by_alias=True) for item in draft.component_interactions
         ],
+        "frontendRoutes": draft.frontend_routes,
+        "pageLayout": draft.page_layout,
+        "components": draft.components,
         "uiLogic": draft.ui_logic,
         "frontendDataModel": draft.frontend_data_model,
         "scriptSpec": draft.script_spec,
@@ -172,6 +193,21 @@ def draft_from_dict(payload: dict) -> ContractDraft:
         api_routes=routes,
         database_ddl=str(payload.get("databaseDdl") or ""),
         component_interactions=interactions,
+        frontend_routes=[
+            dict(item)
+            for item in payload.get("frontendRoutes") or []
+            if isinstance(item, dict)
+        ],
+        page_layout=[
+            dict(item)
+            for item in payload.get("pageLayout") or []
+            if isinstance(item, dict)
+        ],
+        components=[
+            dict(item)
+            for item in payload.get("components") or []
+            if isinstance(item, dict)
+        ],
         ui_logic=[
             dict(item)
             for item in payload.get("uiLogic") or []
@@ -242,6 +278,9 @@ def assemble_contract(
         api_routes=draft.api_routes,
         database_ddl=draft.database_ddl,
         component_interactions=draft.component_interactions,
+        frontend_routes=draft.frontend_routes,
+        page_layout=draft.page_layout,
+        components=draft.components,
         ui_logic=draft.ui_logic,
         frontend_data_model=draft.frontend_data_model,
         script_spec=draft.script_spec,

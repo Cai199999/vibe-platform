@@ -880,6 +880,7 @@ export default function WorkspacePage() {
     limitReached,
     createProject,
     importProject,
+    updateProject,
     openProject,
     closeTab,
     setActiveTab,
@@ -983,6 +984,9 @@ export default function WorkspacePage() {
   // 每个项目只处理一次 fullstack.completed：刷新预览 / 聚焦 / Toast 不能因
   // Architect 状态的其他字段更新而重复触发。
   const fullstackHandledRef = useRef(new Map())
+  // 前端骨架初始化只允许每个契约触发一次；失败重试时由 handler 清除。
+  const frontendBootstrapRef = useRef(new Map())
+  const frontendBootstrapFailureRef = useRef(new Map())
   // 页面级挂载标记：所有异步回调写状态前必须检查，避免卸载后 setState。
   const workspaceMountedRef = useRef(true)
   // 每个项目一个单调递增 epoch；新 Run / 强制关闭都会递增，旧请求的
@@ -1289,10 +1293,34 @@ export default function WorkspacePage() {
         ...previous,
         [projectId]: (previous[projectId] ?? 0) + 1,
       }))
-      focusPreview(projectId)
-      showToast('success', '全栈代码已生成，沙盒前后端已重启')
+
+      if (fullstack.mode === 'frontend') {
+        // 对话确认后的初始骨架：把真实 App.jsx 写回项目，并把画布从
+        // 空白 / 骨架屏切换为 live。后续标注修改都基于这份源码。
+        const entrySource = fullstack.result?.frontendEntry || ''
+        if (!entrySource) {
+          console.warn('[frontend-bootstrap] 完成事件缺少 frontendEntry', {
+            projectId,
+            runId: fullstack.runId,
+          })
+        }
+        updateProject(projectId, (project) => ({
+          ...project,
+          bootstrap: 'ready',
+          canvasMode: 'live',
+          generated: true,
+          entryFile: 'src/App.jsx',
+          files: entrySource
+            ? { ...project.files, 'src/App.jsx': entrySource }
+            : project.files,
+        }))
+        showToast('success', '初始前端页面已生成，画布已切换为实时预览')
+      } else {
+        focusPreview(projectId)
+        showToast('success', '全栈代码已生成，沙盒前后端已重启')
+      }
     })
-  }, [architectStates])
+  }, [architectStates, updateProject])
 
   /**
    * 导入项目：上传 zip / 截图 -> Python 解包并启动沙盒 -> 新建 Tab。
@@ -1739,7 +1767,12 @@ export default function WorkspacePage() {
   }
 
   const projectSource = (project) => {
-    // 内置模板始终以最新 INITIAL_APP 为准；导入项目使用真实入口文件。
+    // 新建项目在 Architect 契约确认前没有源码；生成后必须使用真实
+    // App.jsx，否则后续局部修改会把 Vibe Studio Mock 模板写回沙盒。
+    if (project.bootstrap === 'pending' || project.generated) {
+      return projectSourceFile(project)
+    }
+    // 演示项目 / 旧内置模板始终以最新 INITIAL_APP 为准。
     if (project.template === 'vibe-react') return INITIAL_APP
     return projectSourceFile(project)
   }
@@ -2208,13 +2241,46 @@ export default function WorkspacePage() {
    * 工具栏主 CTA：已有 Run 时恢复同一面板；否则也走 Supervisor，
    * 由后端决定是纯 Architect 还是 UI + Architect 的 both。
    */
-  const handleStartArchitect = (projectId) => {
+  const handleStartArchitect = (projectId, goal = '') => {
+    const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
     // 保存门控：未保存的生成 / 拖拽 / 样式修改绝不能进入全栈澄清。
     if (run.dirty) {
       showToast('info', '请先保存当前修改')
       return
     }
+
+    // 新建项目：纯自然语言驱动，不再要求先有画布标注。
+    // 直接把用户目标作为首条 user 消息交给 ArchitectGraph。
+    const needsConversationFirst =
+      project?.bootstrap === 'pending' || project?.bootstrap === 'failed'
+    if (needsConversationFirst || goal.trim()) {
+      const text = goal.trim()
+      if (!text) {
+        // 没有目标时只打开面板，让用户在 IDLE 表单里输入。
+        architect.openPanel(projectId)
+        return
+      }
+      const history = (architectStates[projectId]?.messages ?? [])
+        .map((item) => ({ role: item.role, content: item.content }))
+        .filter((item) => item.content)
+        .slice(-20)
+      architect.start(projectId, {
+        runId: newId('arc'),
+        tenantId: user?.tenantId || 'tenant_local',
+        projectId,
+        projectName: project?.name || '未命名项目',
+        // 新项目没有源码；Architect 仅依据自然语言目标推演架构。
+        source: run.result?.sandboxId
+          ? { sandboxId: run.result.sandboxId, files: {} }
+          : { files: {} },
+        uiHistory: [...history, { role: 'user', content: text }],
+        options: { llmProvider: modelProvider },
+      })
+      return
+    }
+
+    // 旧项目 / 演示项目：保留 Supervisor 统一入口，兼容既有画布标注流程。
     const annotations = run.annotations.filter((item) => item.intent.trim())
     const message = [
       '下一步：构建全栈方案',
@@ -2230,8 +2296,14 @@ export default function WorkspacePage() {
   }
 
   const handleOpenArchitect = (projectId) => {
+    const project = projects.find((item) => item.id === projectId)
     if ((runStates[projectId] ?? EMPTY_RUN).dirty) {
       showToast('info', '请先保存当前修改')
+      return
+    }
+    if (project?.bootstrap === 'pending' || project?.bootstrap === 'failed') {
+      // 空白项目：只打开对话面板，等待用户输入目标后再启动 Run。
+      architect.openPanel(projectId)
       return
     }
     if (architectStates[projectId]?.runId) {
@@ -2239,6 +2311,16 @@ export default function WorkspacePage() {
       return
     }
     handleStartArchitect(projectId)
+  }
+
+  /** 架构澄清失败后重新开始：清空旧 Run，回到 IDLE 目标输入框。 */
+  const handleRestartArchitect = (projectId) => {
+    const project = projects.find((item) => item.id === projectId)
+    if (project?.bootstrap === 'failed') {
+      // 重新设计架构视为放弃旧契约，画布回到空白等待状态。
+      updateProject(projectId, { bootstrap: 'pending', canvasMode: 'blank' })
+    }
+    architect.reset(projectId)
   }
 
   /**
@@ -2340,6 +2422,118 @@ export default function WorkspacePage() {
       showToast('info', '全栈代码正在生成中，请稍候')
     }
   }
+
+  /**
+   * 契约确认后的前端初始化。
+   *
+   * 只运行 FrontendCoder / BuildVerifier / SandboxRestart，把契约中的
+   * frontendRoutes / pageLayout / components 渲染为真实 React 骨架。
+   * 新项目没有源码和沙盒，服务端会用内置 React/Vite 模板新建沙盒。
+   */
+  const handleFrontendBootstrap = (projectId, { manual = false } = {}) => {
+    const project = projects.find((item) => item.id === projectId)
+    const architectState = architectStates[projectId]
+    const contract = architectState?.contract
+    const fullstack = architectState?.fullstack
+    const contractId = contract?.contractId
+
+    if (!project || !contractId) {
+      showToast('error', '架构契约缺失，无法初始化前端页面')
+      return
+    }
+    if (contract.status && contract.status !== 'CONFIRMED') {
+      showToast('error', '架构契约尚未确认，无法初始化前端页面')
+      return
+    }
+    if (contract.appShape === 'script_automation') {
+      // 脚本形态没有 UI；契约确认后直接结束初始化，不创建前端沙盒。
+      updateProject(projectId, {
+        bootstrap: 'ready',
+        canvasMode: 'blank',
+        generated: false,
+      })
+      showToast('info', '脚本类项目不包含前端页面，已跳过页面初始化')
+      return
+    }
+    const missing = [
+      !Array.isArray(contract.frontendRoutes) ||
+      contract.frontendRoutes.length === 0
+        ? '页面路由（frontendRoutes）'
+        : null,
+      !Array.isArray(contract.components) || contract.components.length === 0
+        ? '组件列表（components）'
+        : null,
+    ].filter(Boolean)
+    if (missing.length > 0) {
+      updateProject(projectId, { bootstrap: 'failed' })
+      showToast('error', `契约缺少${missing.join(' 与 ')}，无法初始化前端`)
+      return
+    }
+    if (
+      fullstack?.starting ||
+      fullstack?.status === 'RUNNING'
+    ) {
+      if (manual) showToast('info', '前端页面正在生成中，请稍候')
+      return
+    }
+
+    const run = runStates[projectId] ?? EMPTY_RUN
+    frontendBootstrapFailureRef.current.delete(projectId)
+    updateProject(projectId, {
+      bootstrap: 'bootstrapping',
+      canvasMode: 'bootstrapping',
+    })
+    const started = architect.generateFullstack(projectId, {
+      tenantId: user?.tenantId || 'tenant_local',
+      sandboxId: run.result?.sandboxId,
+      // 新项目 files 为空：服务端使用镜像内置的 React/Vite 模板建沙盒。
+      files: {},
+      contract,
+      contractId,
+      mode: 'frontend',
+      options: { maxOutputChars: 20000 },
+    })
+    if (!started) {
+      updateProject(projectId, { bootstrap: 'failed' })
+      showToast('error', '前端初始化启动失败，请重试')
+      return
+    }
+    if (manual) showToast('info', '正在根据契约生成初始前端页面…')
+  }
+
+  // 契约一旦 CONFIRMED，新建项目自动触发前端骨架生成。
+  // 每个 contractId 只触发一次，避免 Architect 状态更新造成重复 Run。
+  useEffect(() => {
+    Object.entries(architectStates).forEach(([projectId, state]) => {
+      if (state?.status !== 'CONFIRMED') return
+      const project = projects.find((item) => item.id === projectId)
+      if (!project || project.bootstrap !== 'pending') return
+      const key = state.contract?.contractId || state.runId
+      if (!key) return
+      if (frontendBootstrapRef.current.get(projectId) === key) return
+      frontendBootstrapRef.current.set(projectId, key)
+      handleFrontendBootstrap(projectId)
+    })
+  }, [architectStates, projects])
+
+  // 前端初始化失败：把画布置为失败态，展示重试入口（不重新跑架构对话）。
+  useEffect(() => {
+    Object.entries(architectStates).forEach(([projectId, state]) => {
+      const fullstack = state?.fullstack
+      if (!fullstack?.runId) return
+      if (fullstack.status !== 'FAILED' || fullstack.mode !== 'frontend') return
+      const project = projects.find((item) => item.id === projectId)
+      if (!project || project.bootstrap !== 'bootstrapping') return
+      if (frontendBootstrapFailureRef.current.get(projectId) === fullstack.runId)
+        return
+      frontendBootstrapFailureRef.current.set(projectId, fullstack.runId)
+      updateProject(projectId, { bootstrap: 'failed' })
+      showToast(
+        'error',
+        `初始前端页面生成失败：${fullstack.error || '请重试'}`,
+      )
+    })
+  }, [architectStates, projects, updateProject])
 
   /**
    * 启动 / 恢复 SSE 并持续把事件写入项目状态。
@@ -3564,7 +3758,16 @@ export default function WorkspacePage() {
                 onRefreshAgents={loadAgentCatalog}
                 previewFocusNonce={previewFocus[project.id] ?? 0}
                 onArchitectOpen={() => handleOpenArchitect(project.id)}
-                onArchitectStart={() => handleStartArchitect(project.id)}
+                onArchitectStart={(goal) =>
+                  handleStartArchitect(project.id, goal)
+                }
+                onArchitectRestart={() =>
+                  handleRestartArchitect(project.id)
+                }
+                onStartCreate={() => handleOpenArchitect(project.id)}
+                onFrontendBootstrap={() =>
+                  handleFrontendBootstrap(project.id, { manual: true })
+                }
                 onArchitectClose={() => architect.closePanel(project.id)}
                 onArchitectAnswer={(answers, comment) =>
                   architect.answer(project.id, answers, comment)

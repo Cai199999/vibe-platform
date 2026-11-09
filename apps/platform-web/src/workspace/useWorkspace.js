@@ -29,12 +29,20 @@ const templateFiles = () => ({ [TARGET_FILE]: INITIAL_APP })
  * 创建项目。Phase 2 只支持平台内置 React 模板；
  * Phase 3 导入项目会复用同一结构，替换 template / files。
  */
-const createProject = (name) => ({
+const createProject = (name, { blank = false } = {}) => ({
   id: newId('proj'),
   name,
   template: 'vibe-react',
   templateVersion: TEMPLATE_VERSION,
-  files: templateFiles(),
+  // 新建项目不再预置 Vibe Studio Mock 页面：
+  //  - files 为空，等待 Architect 契约确认后由 FrontendCoder 写入真实骨架；
+  //  - bootstrap=pending 让画布显示【✨ 开始创建】；
+  //  - canvasMode 在生成成功后切换为 live。
+  files: blank ? {} : templateFiles(),
+  entryFile: TARGET_FILE,
+  bootstrap: blank ? 'pending' : 'ready',
+  canvasMode: blank ? 'blank' : 'mock',
+  generated: false,
   createdAt: new Date().toISOString(),
 })
 
@@ -72,24 +80,36 @@ function normalizeState(raw) {
       (project) =>
         project?.id &&
         project?.name &&
-        // 内置项目必须有模板入口；导入项目只要记录 entryFile 即可，
-        // 完整源码在沙盒里，浏览器只保留有体积上限的文本快照。
-        (project?.files?.[TARGET_FILE] || project?.entryFile),
+        // 新建空白项目允许 files 为空，等待前端骨架生成；其他项目必须有
+        // 内置模板入口，导入项目只要记录 entryFile 即可。
+        (project?.files?.[TARGET_FILE] ||
+          project?.entryFile ||
+          project?.bootstrap === 'pending'),
     )
     .map((project) => {
-      // 内置模板升级：旧项目文件统一替换为当前 INITIAL_APP，避免旧样式造成
-      // 画布 Mock 与沙盒真实页面尺寸不一致。导入的外部项目后续走独立迁移。
+      // 旧工作区没有 bootstrap / canvasMode：统一视为已完成模板项目。
+      const normalized = {
+        ...project,
+        bootstrap: project.bootstrap ?? 'ready',
+        canvasMode:
+          project.canvasMode ??
+          (project.bootstrap === 'pending' ? 'blank' : 'mock'),
+      }
+      // 只有仍在使用内置 Mock 的项目才升级模板；新建空白 / 已生成项目
+      // 绝不能把 Vibe Studio 模板重新写回去。
       if (
-        project.template === 'vibe-react' &&
-        project.templateVersion !== TEMPLATE_VERSION
+        normalized.template === 'vibe-react' &&
+        normalized.templateVersion !== TEMPLATE_VERSION &&
+        !normalized.generated &&
+        normalized.bootstrap !== 'pending'
       ) {
         return {
-          ...project,
+          ...normalized,
           files: templateFiles(),
           templateVersion: TEMPLATE_VERSION,
         }
       }
-      return project
+      return normalized
     })
   if (projects.length === 0) {
     return createInitialState()
@@ -146,6 +166,7 @@ export function useWorkspace() {
       }
       const created = createProject(
         nextProjectName(previous.projects, previous.openTabs.length),
+        { blank: true },
       )
       return {
         ...previous,
@@ -183,6 +204,9 @@ export function useWorkspace() {
         files: payload?.files || {},
         sourceName: payload?.sourceName || '',
         imported: true,
+        bootstrap: 'ready',
+        canvasMode: 'mock',
+        generated: false,
         createdAt: new Date().toISOString(),
       }
       return {
@@ -244,6 +268,28 @@ export function useWorkspace() {
     )
   }, [])
 
+  /**
+   * 更新项目元数据（bootstrap / canvasMode / files 等）。
+   *
+   * FrontendCoder 完成后由 WorkspacePage 调用：写入真实 App.jsx 快照，
+   * 并把画布从 blank / bootstrapping 切换为 live。不存在项目时无操作。
+   */
+  const updateProject = useCallback((projectId, patch) => {
+    setState((previous) => {
+      const index = previous.projects.findIndex(
+        (project) => project.id === projectId,
+      )
+      if (index < 0) return previous
+      const current = previous.projects[index]
+      const next =
+        typeof patch === 'function' ? patch(current) : { ...current, ...patch }
+      if (next === current) return previous
+      const projects = [...previous.projects]
+      projects[index] = next
+      return { ...previous, projects }
+    })
+  }, [])
+
   const reorderTabs = useCallback((fromIndex, toIndex) => {
     setState((previous) => {
       if (
@@ -276,6 +322,7 @@ export function useWorkspace() {
     limitReached: state.openTabs.length >= MAX_OPEN_TABS,
     createProject: createNewProject,
     importProject,
+    updateProject,
     openProject,
     closeTab,
     setActiveTab,

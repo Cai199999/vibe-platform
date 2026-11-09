@@ -20,7 +20,7 @@ from typing import Any
 _BACKEND_RULES = (
     ("java_spring_boot", (r"spring\s*boot", r"java\s*后端", r"后端.*java")),
     ("python_fastapi", (r"fastapi", r"python\s*后端", r"后端.*python")),
-    ("node_nestjs", (r"nestjs", r"nest\.js", r"node\.?js\s*后端")),
+    ("node_nestjs", (r"nestjs", r"nest\.js", r"node\.?js\s*后端", r"后端.*node")),
 )
 
 _DATABASE_RULES = (
@@ -53,7 +53,11 @@ _FLOW_HINTS = (
     "跳转",
     "扣减",
     "扣除",
-    "创建订单",
+    "创建",
+    "编辑",
+    "删除",
+    "指派",
+    "拖拽",
     "下单",
     "支付",
     "结算",
@@ -73,6 +77,56 @@ _AUTH_NO_HINTS = (
 )
 _AUTH_YES_HINTS = ("需要登录", "需要鉴权", "需要权限", "租户隔离", "rbac")
 
+# 应用形态推断：对话前置模式不再向用户展示三选一，Architect 必须从目标
+# 描述里主动判断。规则保持保守：只有出现明确信号才推断，避免把普通
+# 单页工具误升级成全栈系统。
+_SCRIPT_HINTS = (
+    "脚本",
+    "定时任务",
+    "爬虫",
+    "命令行",
+    "批处理",
+    "无ui",
+    "无 ui",
+    "cron",
+)
+_LIGHTWEIGHT_HINTS = (
+    "纯前端",
+    "小工具",
+    "计算器",
+    "单页",
+    "浏览器存储",
+    "localstorage",
+    "local storage",
+    "无需登录",
+    "不需要登录",
+    "个人使用",
+)
+_FULLSTACK_HINTS = (
+    # 用户直接说“全栈 / 前后端”时同样是明确形态信号。
+    "全栈",
+    "前后端",
+    "团队",
+    "协作",
+    "多人",
+    "多用户",
+    "登录",
+    "权限",
+    "账号",
+    "角色",
+    "数据库",
+    "后端",
+    "服务端",
+    "持久化",
+    "管理系统",
+    "看板",
+    "订单",
+    "库存",
+    "客户",
+    "审批",
+    "预约",
+)
+
 
 def _first_match(
     text: str, rules: tuple[tuple[str, tuple[str, ...]], ...]
@@ -88,6 +142,26 @@ def _clip(text: str, limit: int = 240) -> str:
     return value[:limit]
 
 
+def infer_app_shape(text: str) -> str | None:
+    """从自然语言目标推断应用形态。
+
+    优先级：自动化脚本 → 明确的轻量前端 → 含协作/持久化信号的全栈。
+    没有明确信号时返回 ``None``，由 Architect 继续用自由文本追问，
+    而不是替用户做技术选型。
+    """
+    raw = _clip(text)
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if any(hint in lowered for hint in _SCRIPT_HINTS):
+        return "script_automation"
+    if any(hint in raw for hint in _LIGHTWEIGHT_HINTS):
+        return "lightweight_web"
+    if any(hint in raw for hint in _FULLSTACK_HINTS):
+        return "full_stack_system"
+    return None
+
+
 def infer_slots(text: str) -> dict[str, Any]:
     """从一段自然语言中抽取可确定的槽位。
 
@@ -99,6 +173,10 @@ def infer_slots(text: str) -> dict[str, Any]:
 
     lowered = raw.lower()
     inferred: dict[str, Any] = {}
+
+    shape = infer_app_shape(raw)
+    if shape:
+        inferred["app.shape"] = shape
 
     backend = _first_match(raw, _BACKEND_RULES)
     if backend:

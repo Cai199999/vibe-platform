@@ -41,8 +41,14 @@ class FullstackRunOptions(CamelModel):
 
     ``verify_build`` / ``restart_sandbox`` 允许测试关闭真实副作用；
     生产默认均为 true。
+
+    ``mode``：
+      - ``fullstack``：DBA → Backend → Frontend → Infra → Build → Restart；
+      - ``frontend``：契约确认后的前端骨架初始化，只执行
+        FrontendCoder → BuildVerifier → SandboxRestart。
     """
 
+    mode: Literal["fullstack", "frontend"] = "fullstack"
     verify_build: bool = True
     restart_sandbox: bool = True
     max_output_chars: int = Field(default=4000, ge=500, le=20_000)

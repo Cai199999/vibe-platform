@@ -29,6 +29,7 @@ from ai_core.architect.llm import (
     DeepSeekArchitectLLM,
     MockArchitectLLM,
 )
+from ai_core.architect.slots import infer_app_shape, infer_slots
 from ai_core.architect.schemas import (
     ArchitectAnalysis,
     ArchitectApiRoute,
@@ -164,10 +165,9 @@ class ArchitectFlowTest(unittest.TestCase):
         question = payload["questions"][0]
         self.assertEqual(question["slot"], "app.shape")
         self.assertEqual(question["prompt"], APP_SHAPE_PROMPT)
-        self.assertEqual(
-            {item["value"] for item in question["options"]},
-            set(SHAPES),
-        )
+        # 对话前置：形态不再用三选一卡片，而是让用户自然语言描述目标。
+        self.assertEqual(question["type"], "free_text")
+        self.assertFalse(question.get("options"))
         self.assertLessEqual(payload["confidenceScore"], 0.42)
         event_types = [event.type for event in harness.buffer.snapshot()]
         self.assertIn("architect.rag.retrieved", event_types)
@@ -345,6 +345,27 @@ class ArchitectJsonRepairTest(unittest.TestCase):
         self.assertEqual(analysis.slots["backend.framework"], "java_spring_boot")
         self.assertEqual(analysis.slots["database.engine"], "mysql")
         self.assertIn("订单", analysis.slots["data.entities"])
+
+    def test_natural_language_goal_infers_shape_without_three_choice(self) -> None:
+        """用户只描述目标时，Mock 应直接推断形态并继续追问缺失槽位。"""
+        goal = "我要做一个团队任务看板，成员可以登录、创建任务并拖拽状态。"
+        self.assertEqual(infer_app_shape(goal), "full_stack_system")
+        slots = infer_slots(goal)
+        self.assertEqual(slots.get("app.shape"), "full_stack_system")
+
+        context = ArchitectContext(
+            project_id="p1",
+            project_name="团队任务看板",
+            source_files={},
+            ui_history=[{"role": "user", "content": goal}],
+            slots={},
+            app_shape=None,
+            round=1,
+            threshold=0.85,
+        )
+        analysis = MockArchitectLLM().analyze(context)
+        self.assertEqual(analysis.app_shape, "full_stack_system")
+        self.assertNotIn("app.shape", analysis.missing_slots)
 
     def test_business_flows_accepts_string_and_mixed_list(self) -> None:
         analysis = ArchitectAnalysis.model_validate(

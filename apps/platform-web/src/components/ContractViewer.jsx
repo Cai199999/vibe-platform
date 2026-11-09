@@ -156,6 +156,10 @@ export default function ContractViewer({ contract, citations = [] }) {
   const interactions = contract.componentInteractions ?? []
   const uiLogic = contract.uiLogic ?? []
   const dataModel = contract.frontendDataModel ?? []
+  // 对话前置模式新增的前端落地字段：路由、布局、组件清单。
+  const frontendRoutes = contract.frontendRoutes ?? []
+  const pageLayout = contract.pageLayout ?? []
+  const components = contract.components ?? []
   const phases = contract.implementationPath ?? []
   const scriptSpec = contract.scriptSpec ?? {}
   const assumptions = contract.assumptions ?? []
@@ -166,7 +170,12 @@ export default function ContractViewer({ contract, citations = [] }) {
     { id: 'overview', label: '概览' },
     ...(routes.length > 0 ? [{ id: 'api', label: `接口 ${routes.length}` }] : []),
     ...(contract.databaseDdl ? [{ id: 'database', label: '数据库 DDL' }] : []),
-    ...(uiLogic.length > 0 || interactions.length > 0 || dataModel.length > 0
+    ...(uiLogic.length > 0 ||
+    interactions.length > 0 ||
+    dataModel.length > 0 ||
+    frontendRoutes.length > 0 ||
+    pageLayout.length > 0 ||
+    components.length > 0
       ? [{ id: 'frontend', label: '前端设计' }]
       : []),
     ...(Object.keys(scriptSpec).length > 0 ? [{ id: 'script', label: '脚本规格' }] : []),
@@ -286,6 +295,45 @@ export default function ContractViewer({ contract, citations = [] }) {
 
         {activeTab === 'frontend' && (
           <div className="contract-frontend">
+            <h4>页面路由</h4>
+            {frontendRoutes.length > 0 ? (
+              <div className="contract-card-list">
+                {frontendRoutes.map((route, index) => (
+                  <article key={index} className="contract-mini-card">
+                    <KeyValueGrid data={route} />
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <EmptyState>该契约没有声明前端路由。</EmptyState>
+            )}
+
+            <h4>页面布局</h4>
+            {pageLayout.length > 0 ? (
+              <div className="contract-card-list">
+                {pageLayout.map((region, index) => (
+                  <article key={index} className="contract-mini-card">
+                    <KeyValueGrid data={region} />
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <EmptyState>该契约没有声明页面布局。</EmptyState>
+            )}
+
+            <h4>组件清单</h4>
+            {components.length > 0 ? (
+              <div className="contract-card-list">
+                {components.map((component, index) => (
+                  <article key={index} className="contract-mini-card">
+                    <KeyValueGrid data={component} />
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <EmptyState>该契约没有声明组件清单。</EmptyState>
+            )}
+
             <h4>UI 交互逻辑</h4>
             {uiLogic.length > 0 ? (
               <div className="contract-card-list">

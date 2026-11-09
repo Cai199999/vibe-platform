@@ -3,8 +3,8 @@
 
 覆盖：
   1. 工具栏主 CTA 可直接发起全局架构澄清；
-  2. 首轮必须显式选择应用形态，轻量工具不出现后端 / 数据库问题；
-  3. 只追问 UI 主流程即可生成分级契约；
+  2. 首轮不再提供三选一卡片，自然语言目标直接推断轻量形态；
+  3. 轻量工具不出现后端 / 数据库问题，只追问 UI 主流程；
   4. 轻量契约不包含接口、DDL、脚本规格；
   5. 确认契约后状态收敛，关闭再打开仍能恢复已确认结果。
 
@@ -45,18 +45,19 @@ def main() -> int:
         expect(panel).to_be_visible(timeout=30_000)
         expect(panel).to_contain_text("全栈 Path 架构师")
 
-        print("\n== 3. 首轮：必须显式选择应用形态 ==")
+        print("\n== 3. 首轮：自然语言描述目标，不再三选一 ==")
         form = panel.locator(".architect-clarification")
         expect(form).to_be_visible(timeout=60_000)
-        expect(form).to_contain_text("先确认应用形态")
+        expect(form).to_contain_text("补齐实施所需信息")
         submit = form.get_by_role("button", name="提交回答并继续")
         expect(submit).to_be_disabled()
-        expect(form.locator(".shape-choice")).to_have_count(3)
+        expect(form.locator(".shape-choice")).to_have_count(0)
 
-        form.get_by_role("button", name=re.compile("轻量网页工具")).click()
+        goal = form.locator("textarea").first
+        goal.fill("做一个个人待办清单，纯前端保存到 localStorage，不需要登录。")
         expect(submit).to_be_enabled()
         submit.click()
-        print("   已选择 lightweight_web 并提交")
+        print("   已用自然语言描述 lightweight_web 并提交")
 
         print("\n== 4. 第二轮：只追问 UI 主流程 ==")
         form = panel.locator(".architect-clarification")

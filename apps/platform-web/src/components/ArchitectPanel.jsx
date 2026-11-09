@@ -7,12 +7,6 @@ const SHAPE_LABELS = {
   full_stack_system: '全栈系统',
 }
 
-const SHAPE_DESCRIPTIONS = {
-  lightweight_web: '纯前端、LocalStorage 或 Serverless，不引入后端与数据库。',
-  script_automation: '后台定时 / 命令行运行，无 UI，只定义输入、处理与输出。',
-  full_stack_system: '需要账号、持久化与 REST API 的完整业务系统。',
-}
-
 const STATUS_LABELS = {
   IDLE: '未开始',
   RUNNING: '读取源码',
@@ -78,46 +72,38 @@ function initialValue(question) {
 /**
  * 全局澄清表单。
  *
- * 应用形态是唯一一个必须“显式选择”的问题：不预选默认值，避免用户一路
- * 回车把全栈需求误判为轻量工具，或反之。
+ * 对话前置模式下不再提供“全栈 / 轻量 / 脚本”三选一卡片：
+ * 应用形态由架构师从自然语言目标中推断，这里统一渲染缺失槽位问题。
  */
 function ClarificationForm({ clarification, submitting, onSubmit, onCancel }) {
   const questions = clarification.questions ?? []
-  const shapeQuestion = questions.find((item) => item.slot === 'app.shape')
-  const otherQuestions = questions.filter((item) => item.slot !== 'app.shape')
 
   const [values, setValues] = useState(() => {
     const initial = {}
-    otherQuestions.forEach((question) => {
+    questions.forEach((question) => {
       initial[question.questionId] = initialValue(question)
     })
     return initial
   })
-  const [shape, setShape] = useState('')
   const [comment, setComment] = useState('')
 
   const setValue = (questionId, value) => {
     setValues((previous) => ({ ...previous, [questionId]: value }))
   }
 
-  const readyToSubmit = useMemo(() => {
-    if (shapeQuestion && !shape) return false
-    return otherQuestions.every(
-      (question) => !question.required || !isEmpty(values[question.questionId]),
-    )
-  }, [otherQuestions, shape, shapeQuestion, values])
+  const readyToSubmit = useMemo(
+    () =>
+      questions.every(
+        (question) => !question.required || !isEmpty(values[question.questionId]),
+      ),
+    [questions, values],
+  )
 
   const submit = (event) => {
     event.preventDefault()
     if (!readyToSubmit || submitting) return
     const answers = []
-    if (shapeQuestion && shape) {
-      answers.push({
-        questionId: shapeQuestion.questionId,
-        value: shape,
-      })
-    }
-    otherQuestions.forEach((question) => {
+    questions.forEach((question) => {
       const value = values[question.questionId]
       if (isEmpty(value)) return
       const answer = { questionId: question.questionId, value }
@@ -134,46 +120,14 @@ function ClarificationForm({ clarification, submitting, onSubmit, onCancel }) {
           <span className="architect-form-eyebrow">
             第 {clarification.round}/{clarification.maxRounds} 轮
           </span>
-          <h3>
-            {shapeQuestion ? '先确认应用形态' : '补齐实施所需信息'}
-          </h3>
+          <h3>补齐实施所需信息</h3>
         </div>
         <span className="architect-form-confidence">
           当前置信度 {clampPercent(clarification.confidenceScore)}%
         </span>
       </div>
 
-      {shapeQuestion && (
-        <fieldset className="shape-choice-group">
-          <legend>{shapeQuestion.prompt}</legend>
-          <div className="shape-choice-grid">
-            {(shapeQuestion.options ?? []).map((option) => {
-              const selected = shape === option.value
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={`shape-choice ${selected ? 'is-selected' : ''}`}
-                  aria-pressed={selected}
-                  onClick={() => setShape(option.value)}
-                >
-                  <span className="shape-choice-name">
-                    {SHAPE_LABELS[option.value] ?? option.label}
-                  </span>
-                  <span className="shape-choice-desc">
-                    {SHAPE_DESCRIPTIONS[option.value] ?? option.label}
-                  </span>
-                  <span className="shape-choice-check" aria-hidden="true">
-                    {selected ? '✓' : ''}
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        </fieldset>
-      )}
-
-      {otherQuestions.map((question) => {
+      {questions.map((question) => {
         const value = values[question.questionId]
         const label = question.prompt
         if (question.type === 'single_choice') {
@@ -320,7 +274,7 @@ function FullstackGeneration({ fullstack, contract, onGenerate }) {
   const disabledReason = !isFullstack
     ? `当前契约形态为「${
         SHAPE_LABELS[contract?.appShape] ?? contract?.appShape ?? '未知'
-      }」，无需生成后端代码。若判断有误，请重新发起澄清并选择“全栈系统”。`
+      }」，无需生成后端代码。若判断有误，请重新发起澄清并说明需要“全栈系统”。`
     : !contractConfirmed
       ? '契约尚未确认（contract.status 不是 CONFIRMED），暂时无法生成。'
       : apiRouteCount === 0
@@ -506,6 +460,127 @@ function FullstackGeneration({ fullstack, contract, onGenerate }) {
   )
 }
 
+/**
+ * 对话前置模式：契约确认后的前端骨架初始化状态卡。
+ *
+ * 不显示“代码生成完毕”这种终态文案：这里只负责把 FrontendCoder /
+ * BuildVerifier / SandboxRestart 三节点进度可视化，成功后画布自动切换。
+ */
+function FrontendBootstrap({ fullstack, contract, onRetry, onFullstackGenerate }) {
+  const state = fullstack ?? {}
+  const status = state.status ?? 'IDLE'
+  const mode = state.mode
+  const running = Boolean(state.starting) || status === 'RUNNING'
+  const steps = Array.isArray(state.steps) ? state.steps : []
+  const succeeded = status === 'SUCCEEDED'
+  const failed = status === 'FAILED'
+  const isFullstack = contract?.appShape === 'full_stack_system'
+
+  return (
+    <section
+      className="architect-fullstack architect-frontend-bootstrap"
+      data-frontend-bootstrap-status={status}
+      aria-label="前端骨架初始化"
+    >
+      <div className="architect-fullstack-head">
+        <div>
+          <span className="architect-form-eyebrow">CONTRACT → FRONTEND</span>
+          <h3>根据契约初始化前端页面</h3>
+          <p>
+            FrontendCoder 会读取契约中的页面路由、布局与组件列表，生成真实
+            的 React 骨架；构建校验通过后自动重启沙盒，画布随即切换为实时页面。
+          </p>
+        </div>
+      </div>
+
+      {(!mode || running) && (
+        <div className="architect-frontend-status is-running" role="status">
+          <span className="mini-spinner" aria-hidden="true" />
+          <div>
+            <strong>正在生成初始前端页面…</strong>
+            <p>这一步不需要再次点击，契约确认后会自动执行。</p>
+          </div>
+        </div>
+      )}
+
+      {failed && (
+        <div className="architect-fullstack-error" role="alert">
+          <strong>前端初始化失败</strong>
+          <span>{state.error || '未知错误，请重试。'}</span>
+          {state.errorCode && <code>{state.errorCode}</code>}
+          <button
+            type="button"
+            className="architect-secondary"
+            onClick={() => onRetry?.()}
+          >
+            重试初始化
+          </button>
+        </div>
+      )}
+
+      {succeeded && (
+        <div className="architect-outcome is-success" role="status">
+          <span aria-hidden="true">✓</span>
+          <div>
+            <strong>初始前端页面已生成</strong>
+            <p>
+              画布已切换为沙盒实时页面，可以直接圈选区域进行微调。
+              {isFullstack
+                ? ' 如需接入真实后端与数据库，可继续生成全栈代码。'
+                : ''}
+            </p>
+            {isFullstack && (
+              <button
+                type="button"
+                className="architect-secondary"
+                onClick={() => onFullstackGenerate?.()}
+              >
+                继续生成后端与数据库
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {steps.length > 0 && (
+        <ol className="fullstack-steps" data-fullstack-progress>
+          {steps.map((step) => (
+            <li
+              key={step.node}
+              className={`fullstack-step is-${String(step.status).toLowerCase()}`}
+              data-fullstack-step={step.node}
+              data-status={step.status}
+            >
+              <span className="fullstack-step-mark" aria-hidden="true">
+                {step.status === 'SUCCEEDED'
+                  ? '✓'
+                  : step.status === 'FAILED'
+                    ? '!'
+                    : step.status === 'RUNNING'
+                      ? '◌'
+                      : '·'}
+              </span>
+              <div className="fullstack-step-body">
+                <div className="fullstack-step-title">
+                  <strong>{step.label || step.node}</strong>
+                  <span>
+                    {step.summary || FULLSTACK_STEP_TEXT[step.status] || step.status}
+                  </span>
+                </div>
+                {Array.isArray(step.files) && step.files.length > 0 && (
+                  <code className="fullstack-step-files">
+                    {step.files.slice(0, 4).join(' · ')}
+                  </code>
+                )}
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  )
+}
+
 function ContractActions({ contract, submitting, onDecide }) {
   const [comment, setComment] = useState('')
   const [cancelConfirm, setCancelConfirm] = useState(false)
@@ -579,12 +654,16 @@ export default function ArchitectPanel({
   onCancel,
   onRestart,
   onFullstackGenerate,
+  onFrontendBootstrap,
+  autoBootstrap = false,
   gate,
   onReleaseGate,
 }) {
   const scrollRef = useRef(null)
   const contractRef = useRef(null)
   const [confirmCancel, setConfirmCancel] = useState(false)
+  // 新建项目的第一条输入：纯自然语言目标，不再要求先做形态选择。
+  const [goal, setGoal] = useState('')
   const status = state?.status ?? 'IDLE'
   const statusTone = STATUS_TONES[status] ?? 'idle'
   const shape = state?.appShape
@@ -782,19 +861,47 @@ export default function ArchitectPanel({
               <span className="architect-intro-mark" aria-hidden="true">
                 ✦
               </span>
-              <h3>从局部改 UI，升级为可实施的全栈方案</h3>
+              <h3>告诉我你要做什么，架构师来拆解</h3>
               <p>
-                架构师会读取当前沙盒源码，先判断应用形态，再逐步澄清技术栈、
-                业务流与数据实体，最后输出带置信度的《全栈实施契约》。
+                不需要先画原型或选择项目类型。用一句话描述目标，架构师会从
+                对话中识别应用形态，并逐步追问用户群体、核心功能、技术栈、
+                数据实体与页面结构。
               </p>
-              <ul>
-                <li>轻量网页：只确认 UI 流程与前端数据模型，不强迫上后端。</li>
-                <li>自动化脚本：只确认运行环境、输入输出与逻辑，不追问页面。</li>
-                <li>全栈系统：明确 REST API、数据库 DDL 与前后端交互。</li>
-              </ul>
-              <button type="button" className="architect-primary" onClick={onStart}>
-                开始全局架构澄清
-              </button>
+              <label className="architect-goal">
+                <span>你想创建什么？</span>
+                <textarea
+                  rows={5}
+                  value={goal}
+                  data-architect-goal
+                  placeholder="例如：我要做一个团队任务看板，成员可以登录、创建任务、拖拽状态，并给任务指派负责人。"
+                  onChange={(event) => setGoal(event.target.value)}
+                  onKeyDown={(event) => {
+                    // Cmd/Ctrl + Enter 直接提交，适合连续多轮对话。
+                    if (
+                      (event.metaKey || event.ctrlKey) &&
+                      event.key === 'Enter' &&
+                      goal.trim()
+                    ) {
+                      event.preventDefault()
+                      onStart?.(goal.trim())
+                    }
+                  }}
+                />
+              </label>
+              <div className="architect-goal-actions">
+                <button
+                  type="button"
+                  className="architect-primary"
+                  data-architect-start
+                  disabled={!goal.trim()}
+                  onClick={() => onStart?.(goal.trim())}
+                >
+                  开始架构设计
+                </button>
+                <span className="architect-goal-hint">
+                  架构师会连续追问，直到契约置信度达到阈值
+                </span>
+              </div>
             </div>
           )}
 
@@ -870,16 +977,26 @@ export default function ArchitectPanel({
                 <div>
                   <strong>实施契约已确认</strong>
                   <p>
-                    下一阶段可直接依据该契约生成前后端代码与数据库迁移。契约状态已
-                    持久化到本次 Architect Run。
+                    {autoBootstrap || state.fullstack?.mode === 'frontend'
+                      ? '系统正在依据契约初始化前端页面，完成后画布会自动刷新。'
+                      : '下一阶段可直接依据该契约生成前后端代码与数据库迁移。'}
                   </p>
                 </div>
               </div>
-              <FullstackGeneration
-                fullstack={state.fullstack}
-                contract={contract}
-                onGenerate={onFullstackGenerate}
-              />
+              {autoBootstrap || state.fullstack?.mode === 'frontend' ? (
+                <FrontendBootstrap
+                  fullstack={state.fullstack}
+                  contract={contract}
+                  onRetry={onFrontendBootstrap}
+                  onFullstackGenerate={onFullstackGenerate}
+                />
+              ) : (
+                <FullstackGeneration
+                  fullstack={state.fullstack}
+                  contract={contract}
+                  onGenerate={onFullstackGenerate}
+                />
+              )}
             </>
           )}
 

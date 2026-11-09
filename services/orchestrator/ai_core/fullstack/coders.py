@@ -738,6 +738,352 @@ export default function FullstackDataPanel() {
 """
 
 
+# 契约确认后的初始 React 骨架。
+# 不依赖后端 API，只把契约中的路由 / 布局 / 组件渲染成真实页面，
+# 让用户在沙盒里立刻看到可圈选、可 Inspect 的产品雏形。
+_FRONTEND_SKELETON_TEMPLATE = r"""// 由 FrontendCoder 根据《架构实施契约》生成。
+// 该文件是初始前端骨架：路由、页面布局与组件清单全部来自契约，
+// 后续用户可在真实页面上圈选 / Inspect 发起增量修改。
+import { useMemo, useState } from 'react'
+
+const APP_NAME = __APP_NAME__
+const ROUTES = __ROUTES__
+const LAYOUT = __LAYOUT__
+const COMPONENTS = __COMPONENTS__
+
+const SECTIONS = COMPONENTS.reduce((groups, component) => {
+  const name = component.section || '核心工作区'
+  const group = groups.find((item) => item.name === name)
+  if (group) group.components.push(component)
+  else groups.push({ name, components: [component] })
+  return groups
+}, [])
+
+const styles = {
+  page: {
+    minHeight: '100%',
+    background:
+      'radial-gradient(circle at top left, #1e293b 0%, #0f172a 42%, #020617 100%)',
+    color: '#e2e8f0',
+    fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
+    boxSizing: 'border-box',
+    padding: '0 0 48px',
+  },
+  header: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '24px',
+    padding: '20px 36px',
+    borderBottom: '1px solid rgba(148, 163, 184, 0.18)',
+    background: 'rgba(2, 6, 23, 0.55)',
+    backdropFilter: 'blur(14px)',
+    position: 'sticky',
+    top: 0,
+    zIndex: 5,
+  },
+  brand: { fontSize: '18px', fontWeight: 800, letterSpacing: '-0.02em' },
+  nav: { display: 'flex', gap: '8px', flexWrap: 'wrap' },
+  navButton: {
+    border: '1px solid transparent',
+    background: 'transparent',
+    color: '#94a3b8',
+    borderRadius: '999px',
+    padding: '8px 16px',
+    cursor: 'pointer',
+    fontSize: '13px',
+    fontWeight: 600,
+  },
+  navButtonActive: {
+    borderColor: 'rgba(56, 189, 248, 0.55)',
+    background: 'rgba(56, 189, 248, 0.14)',
+    color: '#e0f2fe',
+  },
+  main: { maxWidth: '1180px', margin: '0 auto', padding: '36px 28px 0' },
+  hero: {
+    padding: '32px',
+    borderRadius: '24px',
+    border: '1px solid rgba(148, 163, 184, 0.2)',
+    background:
+      'linear-gradient(135deg, rgba(30, 41, 59, 0.92), rgba(15, 23, 42, 0.82))',
+    boxShadow: '0 24px 80px rgba(2, 6, 23, 0.35)',
+  },
+  kicker: {
+    margin: 0,
+    color: '#38bdf8',
+    fontSize: '11px',
+    fontWeight: 800,
+    letterSpacing: '0.18em',
+  },
+  title: { margin: '10px 0 8px', fontSize: '34px', lineHeight: 1.15 },
+  copy: { margin: 0, color: '#94a3b8', fontSize: '15px', lineHeight: 1.7 },
+  section: { marginTop: '28px' },
+  sectionHead: {
+    display: 'flex',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    gap: '12px',
+    marginBottom: '14px',
+  },
+  sectionTitle: { margin: 0, fontSize: '18px' },
+  sectionHint: { color: '#64748b', fontSize: '12px' },
+  grid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))',
+    gap: '16px',
+  },
+  card: {
+    minHeight: '150px',
+    padding: '20px',
+    borderRadius: '18px',
+    border: '1px solid rgba(148, 163, 184, 0.18)',
+    background: 'rgba(15, 23, 42, 0.78)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+  },
+  cardRole: {
+    alignSelf: 'flex-start',
+    padding: '3px 8px',
+    borderRadius: '999px',
+    background: 'rgba(56, 189, 248, 0.12)',
+    color: '#7dd3fc',
+    fontSize: '10px',
+    fontWeight: 700,
+    letterSpacing: '0.08em',
+    textTransform: 'uppercase',
+  },
+  cardTitle: { margin: 0, fontSize: '16px' },
+  cardCopy: { margin: 0, color: '#94a3b8', fontSize: '13px', lineHeight: 1.65 },
+  placeholder: {
+    marginTop: 'auto',
+    height: '8px',
+    borderRadius: '999px',
+    background:
+      'linear-gradient(90deg, rgba(56, 189, 248, 0.35), rgba(148, 163, 184, 0.12))',
+  },
+  footer: {
+    maxWidth: '1180px',
+    margin: '32px auto 0',
+    padding: '0 28px',
+    color: '#475569',
+    fontSize: '12px',
+  },
+}
+
+export default function App() {
+  const [activePath, setActivePath] = useState(ROUTES[0]?.path || '/')
+  const activeRoute = useMemo(
+    () => ROUTES.find((route) => route.path === activePath) || ROUTES[0],
+    [activePath],
+  )
+  const headerLayout = LAYOUT.find((item) => item.region === 'header')
+
+  return (
+    <div style={styles.page}>
+      <header data-source="app-header" data-source-kind="container" style={styles.header}>
+        <div data-source="app-brand" style={styles.brand}>
+          {APP_NAME}
+        </div>
+        <nav data-source="app-nav" data-source-kind="container" style={styles.nav}>
+          {ROUTES.map((route, index) => (
+            <button
+              key={route.path}
+              type="button"
+              data-source={`nav-${index}`}
+              style={{
+                ...styles.navButton,
+                ...(route.path === activePath ? styles.navButtonActive : {}),
+              }}
+              onClick={() => setActivePath(route.path)}
+            >
+              {route.name}
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      <main data-source="app-main" data-source-kind="container" style={styles.main}>
+        <section data-source="page-hero" data-source-kind="container" style={styles.hero}>
+          <p data-source="page-kicker" style={styles.kicker}>
+            {headerLayout?.title || 'INITIAL SKELETON'}
+          </p>
+          <h1 data-source="page-title" style={styles.title}>
+            {activeRoute?.name || APP_NAME}
+          </h1>
+          <p data-source="page-copy" style={styles.copy}>
+            {activeRoute?.description || '根据架构契约生成的初始页面骨架。'}
+          </p>
+        </section>
+
+        {SECTIONS.map((section) => (
+          <section key={section.name} style={styles.section}>
+            <div style={styles.sectionHead}>
+              <h2 data-source={`section-${section.name}`} style={styles.sectionTitle}>
+                {section.name}
+              </h2>
+              <span style={styles.sectionHint}>契约组件 · 可圈选微调</span>
+            </div>
+            <div style={styles.grid}>
+              {section.components.map((component) => (
+                <article
+                  key={component.id}
+                  data-source={`component-${component.id}`}
+                  data-source-kind="container"
+                  style={styles.card}
+                >
+                  <span style={styles.cardRole}>{component.role || 'module'}</span>
+                  <h3 data-source={`component-title-${component.id}`} style={styles.cardTitle}>
+                    {component.name}
+                  </h3>
+                  <p data-source={`component-copy-${component.id}`} style={styles.cardCopy}>
+                    {component.description || '等待接入具体数据与交互。'}
+                  </p>
+                  <div style={styles.placeholder} />
+                </article>
+              ))}
+            </div>
+          </section>
+        ))}
+      </main>
+
+      <footer style={styles.footer}>
+        由 Vibe Platform Architect 契约生成 · 当前为可交互前端骨架
+      </footer>
+    </div>
+  )
+}
+"""
+
+
+def _slug(value: str, fallback: str) -> str:
+    """把契约中的中文组件名转换为稳定的 data-source 标识。"""
+    text = re.sub(r"[^a-zA-Z0-9]+", "-", str(value or "")).strip("-").lower()
+    return text or fallback
+
+
+def _skeleton_routes(contract: ArchitectContract) -> list[dict[str, str]]:
+    routes: list[dict[str, str]] = []
+    for index, raw in enumerate(contract.frontend_routes or [], start=1):
+        if not isinstance(raw, dict):
+            continue
+        path = str(raw.get("path") or "").strip() or f"/page-{index}"
+        name = str(raw.get("name") or raw.get("title") or f"页面 {index}").strip()
+        routes.append(
+            {
+                "path": path if path.startswith("/") else f"/{path}",
+                "name": name,
+                "description": str(raw.get("description") or "").strip(),
+            }
+        )
+    if not routes:
+        routes.append(
+            {
+                "path": "/",
+                "name": contract.tech_stack.get("frontendTitle") or "首页",
+                "description": "根据架构契约生成的初始页面。",
+            }
+        )
+    return routes
+
+
+def _skeleton_layout(contract: ArchitectContract) -> list[dict[str, str]]:
+    layout: list[dict[str, str]] = []
+    for raw in contract.page_layout or []:
+        if not isinstance(raw, dict):
+            continue
+        description = str(raw.get("description") or "").strip()
+        title = str(raw.get("title") or raw.get("name") or "").strip()
+        # 模型有时只给出 region + description（例如 {"region":"header",
+        # "description":"品牌与导航"}）。此时用描述兜底标题，避免丢弃布局。
+        if not title:
+            title = description
+        if not title:
+            continue
+        layout.append(
+            {
+                "region": str(raw.get("region") or "main").strip().lower(),
+                "title": title,
+                "description": description,
+            }
+        )
+    if not layout:
+        layout.append({"region": "header", "title": "初始骨架", "description": ""})
+        layout.append({"region": "main", "title": "核心工作区", "description": ""})
+    return layout
+
+
+def _skeleton_components(contract: ArchitectContract) -> list[dict[str, str]]:
+    components: list[dict[str, str]] = []
+    used: set[str] = set()
+    for index, raw in enumerate(contract.components or [], start=1):
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or raw.get("title") or f"Component{index}").strip()
+        if not name:
+            continue
+        identifier = _slug(name, f"component-{index}")
+        if identifier in used:
+            identifier = f"{identifier}-{index}"
+        used.add(identifier)
+        components.append(
+            {
+                "id": identifier,
+                "name": name,
+                "role": str(raw.get("role") or "module").strip(),
+                "section": str(raw.get("section") or "核心工作区").strip(),
+                "description": str(raw.get("description") or "").strip(),
+            }
+        )
+    if not components:
+        components.append(
+            {
+                "id": "primary-panel",
+                "name": "主面板",
+                "role": "module",
+                "section": "核心工作区",
+                "description": "等待补充契约组件。",
+            }
+        )
+    return components
+
+
+def generate_frontend_skeleton_bundle(contract: ArchitectContract) -> GeneratedBundle:
+    """根据契约生成初始 React 前端骨架（不依赖后端 API）。
+
+    输出只有 ``src/App.jsx``：沙盒模板已提供 main.jsx / vite.config.js /
+    package.json。所有导航、页面标题与组件卡片都来自契约的一级字段，
+    并写入 ``data-source`` 供 Inspect SDK 精确定位源码。
+    """
+    app_name = (
+        contract.tech_stack.get("frontendTitle")
+        or contract.tech_stack.get("appName")
+        or "我的应用"
+    )
+    routes = _skeleton_routes(contract)
+    layout = _skeleton_layout(contract)
+    components = _skeleton_components(contract)
+    content = (
+        _FRONTEND_SKELETON_TEMPLATE.replace(
+            "__APP_NAME__", json.dumps(str(app_name), ensure_ascii=False)
+        )
+        .replace("__ROUTES__", json.dumps(routes, ensure_ascii=False, indent=2))
+        .replace("__LAYOUT__", json.dumps(layout, ensure_ascii=False, indent=2))
+        .replace("__COMPONENTS__", json.dumps(components, ensure_ascii=False, indent=2))
+    )
+    return GeneratedBundle(
+        files={"src/App.jsx": content},
+        summary=(
+            f"按契约生成 React 骨架：{len(routes)} 个路由、" f"{len(components)} 个组件"
+        ),
+        metadata={
+            "routes": len(routes),
+            "components": len(components),
+            "mode": "frontend",
+        },
+    )
+
+
 def generate_frontend_bundle(
     contract: ArchitectContract,
     *,
@@ -888,6 +1234,7 @@ __all__ = [
     "generate_backend_bundle",
     "generate_dba_bundle",
     "generate_frontend_bundle",
+    "generate_frontend_skeleton_bundle",
     "generate_infra_bundle",
     "item_path",
     "sqlite_schema_sql",

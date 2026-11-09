@@ -29,6 +29,8 @@ export const EMPTY_FULLSTACK = {
   runId: null,
   // IDLE -> RUNNING -> SUCCEEDED | FAILED
   status: 'IDLE',
+  // fullstack | frontend。frontend 表示契约确认后的初始前端骨架生成。
+  mode: null,
   lastSeq: 0,
   sandboxId: null,
   previewUrl: null,
@@ -433,6 +435,7 @@ function reduceFullstack(state, event) {
         ...base,
         runId: payload.runId ?? current.runId,
         status: 'RUNNING',
+        mode: payload.mode ?? current.mode ?? 'fullstack',
         starting: false,
         sandboxId: payload.sandboxId ?? current.sandboxId,
         previewUrl: payload.previewUrl ?? current.previewUrl,
@@ -513,6 +516,7 @@ function reduceFullstack(state, event) {
       return {
         ...base,
         status: 'SUCCEEDED',
+        mode: payload.mode ?? current.mode ?? 'fullstack',
         starting: false,
         activeNode: null,
         sandboxId: payload.sandboxId ?? current.sandboxId,
@@ -531,6 +535,7 @@ function reduceFullstack(state, event) {
       return {
         ...base,
         status: 'FAILED',
+        mode: payload.mode ?? current.mode ?? 'fullstack',
         starting: false,
         activeNode: null,
         steps: payload.node
@@ -590,6 +595,7 @@ export function useArchitect({ token } = {}) {
           ? {
               runId: state.fullstack.runId,
               status: state.fullstack.status,
+              mode: state.fullstack.mode,
               lastSeq: state.fullstack.lastSeq,
               sandboxId: state.fullstack.sandboxId,
               previewUrl: state.fullstack.previewUrl,
@@ -779,6 +785,7 @@ export function useArchitect({ token } = {}) {
       console.info('[fullstack] generate accepted', {
         projectId,
         contractId,
+        mode: options.mode ?? 'fullstack',
         appShape: contract.appShape,
         apiRouteCount: Array.isArray(contract.apiRoutes)
           ? contract.apiRoutes.length
@@ -788,6 +795,7 @@ export function useArchitect({ token } = {}) {
       })
 
       const runId = options.runId || fullstackRunId()
+      const mode = options.mode === 'frontend' ? 'frontend' : 'fullstack'
       // 先占位再写状态，确保双击 / 门控释放期间的重复点击被同步拦截。
       fullstackStartingRef.current.add(projectId)
       patch(projectId, (previous) => ({
@@ -796,8 +804,13 @@ export function useArchitect({ token } = {}) {
           ...EMPTY_FULLSTACK,
           runId,
           status: 'RUNNING',
+          mode,
           starting: true,
-          steps: createFullstackSteps(),
+          steps: createFullstackSteps(
+            mode === 'frontend'
+              ? ['FrontendCoder', 'BuildVerifier', 'SandboxRestart']
+              : FULLSTACK_NODES,
+          ),
           updatedAt: new Date().toISOString(),
         },
       }))
@@ -814,6 +827,7 @@ export function useArchitect({ token } = {}) {
           files: options.files ?? {},
         },
         options: {
+          mode,
           verifyBuild: options.verifyBuild ?? true,
           restartSandbox: options.restartSandbox ?? true,
           ...(options.options ?? {}),
@@ -991,6 +1005,21 @@ export function useArchitect({ token } = {}) {
     })
   }, [abort])
 
+  /**
+   * 重置到 IDLE 对话入口：用于架构澄清失败 / 用户主动重新发起。
+   * 先中止所有 SSE，避免旧 Run 的迟到事件回写新状态。
+   */
+  const reset = useCallback(
+    (projectId) => {
+      abort(projectId)
+      setStates((previous) => ({
+        ...previous,
+        [projectId]: { ...EMPTY_ARCHITECT, open: true },
+      }))
+    },
+    [abort],
+  )
+
   const toggleOpen = useCallback(
     (projectId, open) => {
       if (open) openPanel(projectId)
@@ -1034,6 +1063,7 @@ export function useArchitect({ token } = {}) {
     cancel,
     generateFullstack,
     abort,
+    reset,
     remove,
     dispose,
   }

@@ -144,8 +144,10 @@ def fill_clarification(panel) -> None:
         area = areas.nth(index)
         if area.evaluate("el => !!el.closest('.architect-comment')"):
             continue
+        # 对话前置：形态由自然语言识别，明确要求数据库 / 团队协作。
         area.fill(
-            "点击提交后创建待办并刷新列表；"
+            "点击提交后创建待办并刷新列表，支持团队协作与登录，"
+            "数据保存到数据库；"
             "数据实体 Todo(id, tenantId, name, status, createdAt)"
         )
 

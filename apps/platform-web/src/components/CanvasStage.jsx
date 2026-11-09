@@ -870,7 +870,30 @@ function AnnotationPopover({
  *  - 页面与标注层使用同一 transform，平移 / 缩放后圈不会漂移；
  *  - 每个圈拥有独立多轮 Chatbox，可单独发送增量修改。
  */
+const LIVE_PAGE_TARGET = {
+  marker: 'page',
+  selector: '',
+  label: '页面',
+  role: 'container',
+  component: 'App',
+  tag: 'div',
+  kind: 'container',
+}
+
+/** 给沙盒预览 URL 加一个仅在画布内使用的 cache-busting 参数。 */
+function withRefresh(url, nonce) {
+  if (!url || !nonce) return url
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}vibe_canvas=${nonce}`
+}
+
 export default function CanvasStage({
+  mode = 'mock',
+  liveUrl = '',
+  refreshNonce = 0,
+  onStartCreate,
+  onRetryBootstrap,
+  onOpenArchitect,
   annotations = [],
   onAnnotationAdd,
   onAnnotationIntentChange,
@@ -935,6 +958,8 @@ export default function CanvasStage({
     [],
   )
 
+  // 只有 mock / live 画布允许圈选；空白、骨架屏、失败态不可绘制。
+  const interactive = mode === 'mock' || mode === 'live'
   const atLimit = annotations.length >= MAX_ANNOTATIONS
 
   const flashLimitNotice = () => {
@@ -977,7 +1002,7 @@ export default function CanvasStage({
     if (viewport.startPan(event)) {
       return
     }
-    if (disabled || event.button !== 0) {
+    if (disabled || !interactive || event.button !== 0) {
       return
     }
     // 点击标注标签 = 选中该圈；不开始新的圈选。
@@ -1042,16 +1067,30 @@ export default function CanvasStage({
         width: rect.width * VIEWPORT_BASE_WIDTH * viewport.scale,
         height: rect.height * VIEWPORT_BASE_HEIGHT * viewport.scale,
       }
-      const pageRoot = stageRef.current.querySelector('.mock-page')
-      const analysis = analyzeSelection(
-        pageRoot,
-        screenRect,
-        {
-          x: left + screenRect.width / 2,
-          y: top + screenRect.height / 2,
-        },
-        viewport.scale,
-      )
+      // live 模式的页面在 iframe 里，画布无法跨文档读取 data-source。
+      // 圈选仍然保留为“页面区域新增”，后续由 Inspect / 预览面板精确定位。
+      const pageRoot =
+        mode === 'mock'
+          ? stageRef.current.querySelector('.mock-page')
+          : null
+      const analysis =
+        mode === 'live'
+          ? {
+              action: CREATE_NEW,
+              target: LIVE_PAGE_TARGET,
+              addTarget: LIVE_PAGE_TARGET,
+              relativeRect: rect,
+              measured: { mode: 'canvas-live' },
+            }
+          : analyzeSelection(
+              pageRoot,
+              screenRect,
+              {
+                x: left + screenRect.width / 2,
+                y: top + screenRect.height / 2,
+              },
+              viewport.scale,
+            )
       onAnnotationAdd?.({ rect, ...analysis })
     }
     startTargetRef.current = null
@@ -1092,51 +1131,88 @@ export default function CanvasStage({
             transformOrigin: 'top left',
           }}
         >
-          <div
-            className="mock-page"
-            data-source="page"
-            data-source-kind="container"
-          >
-            <section
-              className="mock-card"
-              data-source="card"
+          {mode === 'mock' && (
+            <div
+              className="mock-page"
+              data-source="page"
               data-source-kind="container"
-              data-vibe-target="card"
             >
-              <p
-                className="mock-kicker"
-                data-source="kicker"
-                data-vibe-target="kicker"
+              <section
+                className="mock-card"
+                data-source="card"
+                data-source-kind="container"
+                data-vibe-target="card"
               >
-                Vibe Studio
-              </p>
-              <h1
-                className="mock-title"
-                data-source="title"
-                data-vibe-target="title"
-              >
-                把想法画出来。
-                <br />
-                剩下的交给 Agent。
-              </h1>
-              <p
-                className="mock-copy"
-                data-source="copy"
-                data-vibe-target="copy"
-              >
-                在画布上圈选任意组件，写下修改意图。Agent 会生成代码、运行构建，并自动修复错误。
-              </p>
-              <button
-                className="mock-cta"
-                data-source="cta-button"
-                data-vibe-target="cta-button"
-                type="button"
-              >
-                开始体验
-              </button>
-              <span className="cta-hint">圈选任意组件，写下你的修改意图</span>
-            </section>
-          </div>
+                <p
+                  className="mock-kicker"
+                  data-source="kicker"
+                  data-vibe-target="kicker"
+                >
+                  Vibe Studio
+                </p>
+                <h1
+                  className="mock-title"
+                  data-source="title"
+                  data-vibe-target="title"
+                >
+                  把想法画出来。
+                  <br />
+                  剩下的交给 Agent。
+                </h1>
+                <p
+                  className="mock-copy"
+                  data-source="copy"
+                  data-vibe-target="copy"
+                >
+                  在画布上圈选任意组件，写下修改意图。Agent 会生成代码、运行构建，并自动修复错误。
+                </p>
+                <button
+                  className="mock-cta"
+                  data-source="cta-button"
+                  data-vibe-target="cta-button"
+                  type="button"
+                >
+                  开始体验
+                </button>
+                <span className="cta-hint">圈选任意组件，写下你的修改意图</span>
+              </section>
+            </div>
+          )}
+
+          {mode === 'live' && (
+            <div className="canvas-live-page" data-canvas-live>
+              {liveUrl ? (
+                <iframe
+                  key={`${liveUrl}:${refreshNonce}`}
+                  className="canvas-live-frame"
+                  src={withRefresh(liveUrl, refreshNonce)}
+                  title="实时画布预览"
+                  // 指针交给画布覆盖层，保证圈选 / 平移 / 缩放不被 iframe 吞掉。
+                  style={{ pointerEvents: 'none' }}
+                />
+              ) : (
+                <div className="canvas-live-empty">
+                  <span className="mini-spinner" aria-hidden="true" />
+                  正在连接实时页面…
+                </div>
+              )}
+            </div>
+          )}
+
+          {(mode === 'blank' ||
+            mode === 'bootstrapping' ||
+            mode === 'failed') && (
+            <div className={`canvas-skeleton is-${mode}`} aria-hidden="true">
+              <div className="canvas-skeleton-bar is-title" />
+              <div className="canvas-skeleton-bar" />
+              <div className="canvas-skeleton-bar is-short" />
+              <div className="canvas-skeleton-grid">
+                <span />
+                <span />
+                <span />
+              </div>
+            </div>
+          )}
 
           <div className="annotation-layer">
             {annotations.map((annotation, index) => {
@@ -1213,6 +1289,82 @@ export default function CanvasStage({
           </div>
         </div>
 
+        {mode === 'blank' && (
+          <div
+            className="canvas-start-state"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <span className="canvas-start-kicker">ARCHITECT FIRST</span>
+            <h2>从一个想法开始</h2>
+            <p>
+              点击开始，Architect 会通过多轮对话确认用户群体、核心功能、
+              技术栈与数据实体，然后生成可运行的前端骨架。
+            </p>
+            <button
+              type="button"
+              className="canvas-start-button"
+              onClick={onStartCreate}
+            >
+              <span aria-hidden="true">✨</span>
+              开始创建
+            </button>
+            <span className="canvas-start-hint">
+              不需要提前画原型，说清楚你要做什么即可
+            </span>
+          </div>
+        )}
+
+        {mode === 'bootstrapping' && (
+          <div
+            className="canvas-start-state is-busy"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <span className="canvas-start-kicker">FRONTEND CODER</span>
+            <h2>
+              <span className="mini-spinner" aria-hidden="true" /> 等待架构设计完成
+            </h2>
+            <p>
+              架构契约已确认，正在根据页面布局与组件列表生成 React 骨架，
+              并执行构建与沙盒重启。
+            </p>
+            <div className="canvas-bootstrap-steps" role="status">
+              <span>生成页面骨架</span>
+              <span>校验构建</span>
+              <span>重启沙盒</span>
+            </div>
+          </div>
+        )}
+
+        {mode === 'failed' && (
+          <div
+            className="canvas-start-state is-error"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <span className="canvas-start-kicker">BOOTSTRAP FAILED</span>
+            <h2>初始前端页面生成失败</h2>
+            <p>
+              架构契约已确认，但代码生成或沙盒启动没有完成。可以直接重试，
+              也可以回到架构面板调整契约。
+            </p>
+            <div className="canvas-start-actions">
+              <button
+                type="button"
+                className="canvas-start-button"
+                onClick={onRetryBootstrap}
+              >
+                重试初始化
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={onOpenArchitect}
+              >
+                打开架构面板
+              </button>
+            </div>
+          </div>
+        )}
+
         {(atLimit || limitNotice) && (
           <div
             className={`annotation-limit ${limitNotice ? 'is-flashing' : ''}`}
@@ -1252,9 +1404,17 @@ export default function CanvasStage({
         </div>
 
         <div className="canvas-hint">
-          {drawing
-            ? '松开鼠标完成圈选'
-            : '圈选组件 · 空格/中键平移 · 滚轮缩放'}
+          {mode === 'blank'
+            ? '先完成架构对话，画布会在契约确认后自动生成'
+            : mode === 'bootstrapping'
+              ? '正在生成初始前端页面…'
+              : mode === 'failed'
+                ? '可重试初始化，或打开架构面板调整契约'
+                : drawing
+                  ? '松开鼠标完成圈选'
+                  : interactive
+                    ? '圈选页面区域 · 空格/中键平移 · 滚轮缩放'
+                    : ''}
         </div>
       </div>
     </div>

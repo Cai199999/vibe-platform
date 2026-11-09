@@ -50,24 +50,12 @@ SLOT_CAPS: dict[str, float] = {
     "data.entities": 0.70,
 }
 
-SHAPE_OPTIONS = [
-    {
-        "value": "lightweight_web",
-        "label": "轻量网页工具（纯前端 / LocalStorage / Serverless）",
-    },
-    {
-        "value": "script_automation",
-        "label": "后台自动化脚本（Python / Node，无 UI）",
-    },
-    {
-        "value": "full_stack_system",
-        "label": "完整全栈系统（前端 + 后端 + 数据库）",
-    },
-]
-
+# 对话前置模式不再提供「全栈 / 轻量 / 脚本」三选一。应用形态由
+# slots.infer_app_shape 从自然语言目标推断；只有完全无法判断时，才用
+# 自由文本询问用户群体与核心功能，由下一轮对话继续推断。
 APP_SHAPE_PROMPT = (
-    "您是希望做一个只有网页特效的轻量工具，还是需要能保存数据的全栈系统，"
-    "或者是一个后台自动运行的脚本？"
+    "请描述这个应用面向谁、核心要解决什么问题，以及是否需要多人协作、"
+    "登录或长期保存数据。"
 )
 
 
@@ -293,11 +281,9 @@ def question_for_slot(slot: str, shape: str | None = None) -> ArchitectQuestion 
         return ArchitectQuestion(
             question_id="q_app_shape",
             slot=slot,
-            type="single_choice",
+            type="free_text",
             prompt=APP_SHAPE_PROMPT,
             required=True,
-            options=SHAPE_OPTIONS,
-            default_value="lightweight_web",
         )
     if slot == "ui.primary_flow":
         return ArchitectQuestion(

@@ -105,6 +105,8 @@ class ActiveFullstackRun:
     steps: list[FullstackStep] = field(default_factory=list)
     error: str | None = None
     error_code: str | None = None
+    # 前端骨架模式下生成的完整 src/App.jsx，用于前端把真实源码写回项目。
+    frontend_entry: str = ""
     table: str = ""
     collection_path: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -195,6 +197,19 @@ class FullstackService:
                 return existing
             _ACTIVE_RUNS[run_id] = active
 
+        mode = request.options.mode
+        nodes = (
+            ["FrontendCoder", "BuildVerifier", "SandboxRestart"]
+            if mode == "frontend"
+            else [
+                "DBACoder",
+                "BackendCoder",
+                "FrontendCoder",
+                "InfraCoder",
+                "BuildVerifier",
+                "SandboxRestart",
+            ]
+        )
         active.buffer.emit(
             "fullstack.started",
             {
@@ -204,16 +219,10 @@ class FullstackService:
                 "sandboxId": sandbox_id,
                 "previewUrl": preview_url,
                 "appShape": contract.app_shape,
+                "mode": mode,
                 "databaseEngine": contract_database_engine(contract),
                 "orm": "sequelize",
-                "nodes": [
-                    "DBACoder",
-                    "BackendCoder",
-                    "FrontendCoder",
-                    "InfraCoder",
-                    "BuildVerifier",
-                    "SandboxRestart",
-                ],
+                "nodes": nodes,
             },
             dedupe_key=f"fullstack.started:{run_id}",
         )
@@ -241,6 +250,7 @@ class FullstackService:
             outcome = runner.run(initial)
             with _ACTIVE_LOCK:
                 active.files = list(outcome.get("files") or [])
+                active.frontend_entry = str(outcome.get("frontend_entry") or "")
                 active.table = str(outcome.get("table") or "")
                 active.collection_path = str(outcome.get("collection_path") or "")
                 active.preview_url = str(
@@ -257,6 +267,7 @@ class FullstackService:
                     "sandboxId": active.sandbox_id,
                     "previewUrl": active.preview_url,
                     "status": "SUCCEEDED",
+                    "mode": active.request.options.mode,
                     "table": active.table,
                     "collectionPath": active.collection_path,
                     "files": active.files,
@@ -265,6 +276,12 @@ class FullstackService:
                     "dbaFiles": list(outcome.get("dba_files") or []),
                     "backendFiles": list(outcome.get("backend_files") or []),
                     "frontendFiles": list(outcome.get("frontend_files") or []),
+                    # 仅前端骨架模式携带；完整源码不受 node.output 截断影响。
+                    "frontendEntry": (
+                        active.frontend_entry
+                        if active.request.options.mode == "frontend"
+                        else ""
+                    ),
                     "infraFiles": list(outcome.get("infra_files") or []),
                     "elapsedMs": int((time.monotonic() - started) * 1000),
                 },
@@ -302,6 +319,7 @@ class FullstackService:
             {
                 "runId": active.run_id,
                 "status": "FAILED",
+                "mode": active.request.options.mode,
                 "contractId": active.contract.contract_id,
                 "sandboxId": active.sandbox_id,
                 "node": node,
@@ -326,6 +344,17 @@ class FullstackService:
             raise FullstackContractNotConfirmedError(
                 f"契约当前状态为 {contract.status}，请先确认后再生成代码"
             )
+        if request.options.mode == "frontend":
+            # 前端骨架只要求 Web 形态；脚本契约没有可生成的 React 页面。
+            if contract.app_shape == "script_automation":
+                raise FullstackContractInvalidError(
+                    "脚本自动化契约不包含前端页面，无法初始化前端骨架"
+                )
+            if not contract.frontend_routes or not contract.components:
+                raise FullstackContractInvalidError(
+                    "契约缺少 frontendRoutes 或 components，无法生成前端骨架"
+                )
+            return contract
         if contract.app_shape != "full_stack_system":
             raise FullstackContractInvalidError(
                 f"当前契约形态为 {contract.app_shape}，只有 full_stack_system "
@@ -349,16 +378,18 @@ class FullstackService:
                 handle = self._sandbox.get(sandbox_id)
                 return sandbox_id, handle.preview_url, False
             except SandboxError:
-                if not request.source.files:
+                if not request.source.files and request.options.mode != "frontend":
                     raise FullstackSandboxRequiredError(
                         f"沙盒不存在: {sandbox_id}，且请求未携带源码"
                     ) from None
 
-        if not request.source.files:
+        if not request.source.files and request.options.mode != "frontend":
             raise FullstackSandboxRequiredError(
                 "全栈生成需要 sandboxId 或 source.files 中的项目源码"
             )
         try:
+            # 前端骨架允许空 files：沙盒镜像自带 React/Vite 模板，
+            # FrontendCoder 会立即写入按契约生成的 src/App.jsx。
             handle = self._sandbox.create(
                 request.project_id,
                 dict(request.source.files),

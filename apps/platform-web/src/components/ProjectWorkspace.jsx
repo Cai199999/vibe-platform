@@ -64,6 +64,9 @@ function ProjectWorkspaceInner({
   previewFocusNonce = 0,
   onArchitectOpen,
   onArchitectStart,
+  onArchitectRestart,
+  onStartCreate,
+  onFrontendBootstrap,
   onArchitectClose,
   onArchitectAnswer,
   onArchitectDecide,
@@ -88,6 +91,20 @@ function ProjectWorkspaceInner({
   const annotations = run.annotations
   const submitting = run.submitting
   const previewReady = Boolean(run.result?.previewUrl)
+  // 新建项目的画布阶段：
+  //   blank -> 只有【✨ 开始创建】；bootstrapping -> 等待骨架屏；
+  //   failed -> 失败重试；live -> 直接渲染真实前端沙盒；
+  //   旧演示 / 导入项目继续沿用 mock 画布。
+  const canvasMode =
+    project.bootstrap === 'pending'
+      ? 'blank'
+      : project.bootstrap === 'bootstrapping'
+        ? 'bootstrapping'
+        : project.bootstrap === 'failed'
+          ? 'failed'
+          : project.canvasMode === 'live'
+            ? 'live'
+            : 'mock'
   const canvasVisible = viewMode === 'dual' || mode === 'canvas'
   const previewVisible = viewMode === 'dual' || mode === 'preview'
   // 审批 / 澄清面板在预览侧。对比模式停留在画布时提供一个显式入口，
@@ -482,6 +499,12 @@ function ProjectWorkspaceInner({
             resetKey={project.id}
           >
             <CanvasStage
+              mode={canvasMode}
+              liveUrl={run.result?.previewUrl ?? ''}
+              refreshNonce={previewRefreshNonce}
+              onStartCreate={onStartCreate}
+              onRetryBootstrap={onFrontendBootstrap}
+              onOpenArchitect={onArchitectOpen}
               annotations={annotations}
               onAnnotationAdd={onAnnotationAdd}
               onAnnotationIntentChange={onAnnotationIntentChange}
@@ -565,11 +588,13 @@ function ProjectWorkspaceInner({
           state={architectState}
           onClose={onArchitectClose}
           onStart={onArchitectStart}
-          onRestart={onArchitectStart}
+          onRestart={onArchitectRestart}
           onAnswer={onArchitectAnswer}
           onDecide={onArchitectDecide}
           onCancel={onArchitectCancel}
           onFullstackGenerate={onFullstackGenerate}
+          onFrontendBootstrap={onFrontendBootstrap}
+          autoBootstrap={project.bootstrap !== 'ready'}
           gate={supervisorGate}
           onReleaseGate={onReleaseGate}
         />

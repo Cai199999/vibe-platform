@@ -76,6 +76,11 @@ class ContractDraft:
     component_interactions: list[ArchitectComponentInteraction] = field(
         default_factory=list
     )
+    # 前端实施结构：前端路由、页面布局与组件清单。
+    # FrontendCoder 只依赖这三项生成初始 React 骨架。
+    frontend_routes: list[dict[str, Any]] = field(default_factory=list)
+    page_layout: list[dict[str, Any]] = field(default_factory=list)
+    components: list[dict[str, Any]] = field(default_factory=list)
     ui_logic: list[dict[str, Any]] = field(default_factory=list)
     frontend_data_model: list[dict[str, Any]] = field(default_factory=list)
     script_spec: dict[str, Any] = field(default_factory=dict)
@@ -114,8 +119,9 @@ class ArchitectLLM:
 class MockArchitectLLM(ArchitectLLM):
     """无密钥、确定性的架构澄清流程。
 
-    第一轮永不猜测应用形态；只有用户明确选择后才填充对应槽位。
-    这保证 E2E 能验证“先问形态，再问动态槽位”的核心交互。
+    对话前置模式：先从用户自然语言目标中推断应用形态，再补齐该形态的
+    动态槽位；推断不出时用自由文本询问用户群体与核心功能，绝不展示
+    “全栈 / 轻量 / 脚本”三选一。
     """
 
     def analyze(self, context: ArchitectContext) -> ArchitectAnalysis:
@@ -188,6 +194,9 @@ class MockArchitectLLM(ArchitectLLM):
             api_routes=draft.api_routes,
             database_ddl=draft.database_ddl,
             component_interactions=draft.component_interactions,
+            frontend_routes=draft.frontend_routes,
+            page_layout=draft.page_layout,
+            components=draft.components,
             ui_logic=draft.ui_logic,
             frontend_data_model=draft.frontend_data_model,
             script_spec=draft.script_spec,
@@ -282,6 +291,35 @@ class MockArchitectLLM(ArchitectLLM):
             api_routes=[],
             database_ddl="",
             component_interactions=interactions,
+            frontend_routes=[
+                {
+                    "path": "/",
+                    "name": "主页面",
+                    "description": f"承载核心流程：{flow}",
+                }
+            ],
+            page_layout=[
+                {"region": "header", "title": "应用标题", "description": "品牌与状态"},
+                {
+                    "region": "main",
+                    "title": "核心工作区",
+                    "description": flow,
+                },
+            ],
+            components=[
+                {
+                    "name": "PrimaryAction",
+                    "role": "action",
+                    "section": "核心工作区",
+                    "description": "触发核心流程并展示成功 / 失败反馈",
+                },
+                {
+                    "name": "ItemList",
+                    "role": "list",
+                    "section": "核心工作区",
+                    "description": f"展示并持久化到 {storage} 的数据",
+                },
+            ],
             ui_logic=[
                 {
                     "flow": flow,
@@ -521,6 +559,46 @@ class MockArchitectLLM(ArchitectLLM):
             api_routes=api_routes,
             database_ddl=ddl,
             component_interactions=interactions,
+            frontend_routes=[
+                {
+                    "path": "/",
+                    "name": "总览",
+                    "description": f"{context.project_name} 的核心业务首页",
+                },
+                {
+                    "path": f"/{table}",
+                    "name": "数据管理",
+                    "description": "创建、查询与管理业务记录",
+                },
+            ],
+            page_layout=[
+                {
+                    "region": "header",
+                    "title": "顶部导航",
+                    "description": "品牌、页面切换与账号入口",
+                },
+                {"region": "main", "title": "业务工作区", "description": flows},
+            ],
+            components=[
+                {
+                    "name": "RecordList",
+                    "role": "list",
+                    "section": "业务工作区",
+                    "description": "分页展示记录，覆盖加载 / 空 / 错误状态",
+                },
+                {
+                    "name": "SubmitForm",
+                    "role": "form",
+                    "section": "业务工作区",
+                    "description": "创建记录，包含前端校验与防重复提交",
+                },
+                {
+                    "name": "StatusSummary",
+                    "role": "summary",
+                    "section": "业务工作区",
+                    "description": "展示数量、状态等关键指标",
+                },
+            ],
             ui_logic=ui_logic,
             frontend_data_model=data_model,
             script_spec={},
@@ -618,8 +696,9 @@ class DeepSeekArchitectLLM(ArchitectLLM):
 
     def analyze(self, context: ArchitectContext) -> ArchitectAnalysis:
         system = (
-            "你是平台级软件架构师。你的第一任务是判断应用形态，第二任务才是"
-            "补齐该形态真正需要的槽位。禁止默认所有需求都是全栈 ERP。\n"
+            "你是平台级软件架构师，处于“架构师对话前置”模式。用户会先用自然"
+            "语言描述目标，你必须主动从目标、用户群体与核心功能中判断应用形态，"
+            "禁止把“全栈 / 轻量 / 脚本”做成三选一问题丢回给用户。\n"
             "应用形态只有三种：\n"
             "- lightweight_web：纯前端网页工具，使用 LocalStorage / IndexedDB "
             "或 Serverless；不需要独立后端与数据库；\n"
@@ -636,8 +715,12 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "- full_stack_system 的 database.engine 必须区分使用场景：sqlite "
             "仅供本地测试；用户要部署上线时必须选 mysql 或 postgresql。"
             "用户没有明确指定时默认 mysql，禁止默认 sqlite；\n"
-            "- 如果源码与对话仍不足以判断形态，app_shape 必须为 null，"
-            "confidence_score 不得高于 0.42，并首先询问："
+            "- 优先根据用户目标推断形态：出现团队 / 协作 / 登录 / 权限 / "
+            "数据库 / 持久化等信号时按 full_stack_system 处理；明确“纯前端 / "
+            "小工具 / 浏览器存储”时按 lightweight_web；明确“脚本 / 定时 / "
+            "命令行”时按 script_automation；\n"
+            "- 只有在目标完全无法判断时 app_shape 才为 null，且不得让用户做"
+            "形态选择题；应询问用户群体与核心功能，例如："
             f"“{_shape_question()}”\n\n"
             "项目摘要规则（最高优先级）：\n"
             "- 输入中的 Project Summary 是已经确认的长期上下文；其中的技术栈、"
@@ -702,7 +785,11 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             '"request":"","response":"","description":"","auth_required":true}],'
             '"database_ddl":"SQL 字符串","component_interactions":'
             '[{"component":"","event":"","api_route":"","logic":""}],'
-            '"ui_logic":[{}],"frontend_data_model":[{}],"script_spec":{},'
+            '"frontend_routes":[{"path":"/","name":"页面名","description":""}],'
+            '"page_layout":[{"region":"header|main|sidebar","title":"",'
+            '"description":""}],"components":[{"name":"","role":"",'
+            '"section":"","description":""}],"ui_logic":[{}],'
+            '"frontend_data_model":[{}],"script_spec":{},'
             '"implementation_path":[{"phase":"","title":"","tasks":[]}],'
             '"assumptions":[]}\n\n'
             "分级规则：\n"
@@ -716,6 +803,9 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "mysql / postgresql / sqlite 之一；选择 mysql/postgresql 时必须"
             "在契约中写明后端通过 Sequelize ORM 与环境变量 DATABASE_URL "
             "连接云数据库，禁止把 SQLite 描述为生产数据库；\n"
+            "- 所有 Web 形态（lightweight_web / full_stack_system）都必须给出 "
+            "frontend_routes、page_layout 与 components：前端工程师将直接据此"
+            "生成 React 骨架，不能省略；脚本形态这三项为空；\n"
             "- 所有形态都必须给 implementation_path 与可验证验收标准；\n"
             "- 必须复用 Project Summary 中已确认的技术栈与架构决策，不要另起"
             "一套；latestChanges 涉及的前后端能力必须进入契约；\n"
@@ -1060,6 +1150,11 @@ def _parse_contract_draft(payload: dict[str, Any]) -> ContractDraft:
             payload.get("database_ddl") or payload.get("databaseDdl") or ""
         ).strip(),
         component_interactions=interactions,
+        frontend_routes=_as_list(
+            payload.get("frontend_routes") or payload.get("frontendRoutes")
+        ),
+        page_layout=_as_list(payload.get("page_layout") or payload.get("pageLayout")),
+        components=_as_list(payload.get("components")),
         ui_logic=_as_list(payload.get("ui_logic") or payload.get("uiLogic")),
         frontend_data_model=_as_list(
             payload.get("frontend_data_model") or payload.get("frontendDataModel")
@@ -1087,6 +1182,9 @@ def _draft_to_payload(draft: ContractDraft) -> dict[str, Any]:
         "componentInteractions": [
             item.model_dump(by_alias=True) for item in draft.component_interactions
         ],
+        "frontendRoutes": draft.frontend_routes,
+        "pageLayout": draft.page_layout,
+        "components": draft.components,
         "uiLogic": draft.ui_logic,
         "frontendDataModel": draft.frontend_data_model,
         "scriptSpec": draft.script_spec,
