@@ -24,8 +24,8 @@ from docker.errors import DockerException
 
 from ai_core.api.errors import sandbox_error_to_http
 from ai_core.config import get_settings
-from ai_core.sandbox import get_sandbox_provider
-from ai_core.sandbox.base import SandboxError
+from ai_core.adapters.sandbox import get_sandbox_provider
+from ai_core.ports.sandbox import SandboxError
 from ai_core.sandbox.importer import import_zip
 from ai_core.sandbox.vision_import import import_image
 from ai_core.schemas import (

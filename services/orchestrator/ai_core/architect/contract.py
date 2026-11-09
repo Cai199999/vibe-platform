@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ai_core.architect.llm import ContractDraft
-from ai_core.architect.schemas import (
+from ai_core.domain.architect import (
     ArchitectApiRoute,
     ArchitectCitation,
     ArchitectComponentInteraction,

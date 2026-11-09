@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ai_core.architect.schemas import (
+from ai_core.domain.architect import (
     AppShape,
     ArchitectAnalysis,
     ArchitectQuestion,

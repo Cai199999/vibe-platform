@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from ai_core.config import Settings
-from ai_core.sandbox.base import SandboxValidationError
+from ai_core.ports.sandbox import SandboxValidationError
 
 logger = logging.getLogger(__name__)
 

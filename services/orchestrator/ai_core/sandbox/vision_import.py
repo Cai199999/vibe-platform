@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ai_core.config import Settings
-from ai_core.sandbox.base import SandboxValidationError
+from ai_core.ports.sandbox import SandboxValidationError
 from ai_core.sandbox.importer import ImportedProject
 
 logger = logging.getLogger(__name__)

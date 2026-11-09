@@ -8,7 +8,7 @@ from docker.errors import DockerException
 
 from ai_core.agent.events import RunEventBuffer, peer_event_buffer
 from ai_core.agent.llm import AgentLLMConfigurationError
-from ai_core.agent.schemas import (
+from ai_core.domain.agent import (
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
     ApprovalListResponse,
@@ -29,7 +29,7 @@ from ai_core.agent.service import (
     TargetFileNotFoundError,
 )
 from ai_core.api.errors import sandbox_error_to_http
-from ai_core.sandbox.base import SandboxError
+from ai_core.ports.sandbox import SandboxError
 
 router = APIRouter(prefix="/api/v1/internal/runs", tags=["runs"])
 

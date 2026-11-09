@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
-from ai_core.agent.schemas import ExecuteRunRequest
-from ai_core.architect.schemas import ArchitectRunRequest
+from ai_core.domain.agent import ExecuteRunRequest
+from ai_core.domain.architect import ArchitectRunRequest
 from ai_core.supervisor.gates import (
     GateRecord,
     SupervisorGateRegistry,
@@ -27,7 +27,7 @@ from ai_core.supervisor.gates import (
 )
 from ai_core.supervisor.graph import SupervisorGraphRunner
 from ai_core.supervisor.registry import AgentDescriptor, AgentRegistry
-from ai_core.supervisor.schemas import (
+from ai_core.domain.supervisor import (
     AgentHandoff,
     AgentListResponse,
     SubGraphDispatch,
@@ -416,7 +416,7 @@ class SupervisorService:
     @staticmethod
     def _best_effort_cancel_architect(run_id: str) -> None:
         try:
-            from ai_core.architect.schemas import ArchitectCancelRequest
+            from ai_core.domain.architect import ArchitectCancelRequest
             from ai_core.architect.service import ArchitectService
 
             ArchitectService().cancel(

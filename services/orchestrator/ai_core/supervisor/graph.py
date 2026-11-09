@@ -26,7 +26,7 @@ from ai_core.supervisor.router import (
     IntentPrediction,
     build_default_classifier,
 )
-from ai_core.supervisor.schemas import (
+from ai_core.domain.supervisor import (
     AgentHandoff,
     SupervisorDecision,
     SupervisorRequest,

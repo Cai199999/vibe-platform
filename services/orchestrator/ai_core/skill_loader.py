@@ -29,6 +29,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ai_core.domain.skills import SkillDescriptor
+
 logger = logging.getLogger(__name__)
 
 MAX_SKILL_FILE_BYTES = 128 * 1024
@@ -133,8 +135,6 @@ def _descriptor_from_payload(
     *,
     source: str,
 ) -> SkillDescriptor:
-    from ai_core.supervisor.skills import SkillDescriptor
-
     if not payload.enabled:
         raise SkillFileError(f"Skill 已禁用: {payload.skill_id}")
 
@@ -160,9 +160,8 @@ def _descriptor_from_payload(
 def read_skill_file(path: Path) -> SkillDescriptor:
     """读取并校验单个 Skill 文件（JSON 或 Markdown），转为注册中心描述符。
 
-    说明：``SkillDescriptor`` 在函数内延迟导入。它定义于
-    ``supervisor.skills``，而 ``supervisor`` 包的 ``__init__`` 会加载
-    Graph/Registry，后者又依赖本模块；顶层导入会形成循环引用。
+    说明：``SkillDescriptor`` 是纯领域对象，定义于
+    ``ai_core.domain.skills``；本模块不再依赖 supervisor 包，避免循环引用。
     """
     try:
         if path.stat().st_size > MAX_SKILL_FILE_BYTES:

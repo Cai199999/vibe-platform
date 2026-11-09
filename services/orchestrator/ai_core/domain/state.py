@@ -1,0 +1,176 @@
+"""Agent / Architect 运行状态领域模型。
+
+这里的 TypedDict 是应用层 LangGraph 节点之间共享的“会话状态契约”。
+它们只描述字段与取值范围，不导入 LangGraph；具体合并策略（例如
+messages 使用 ``operator.add``）属于状态结构本身，因此仍保留在领域层。
+"""
+
+from __future__ import annotations
+
+import operator
+from typing import Annotated, Any, Literal, TypedDict
+
+
+class VerifyState(TypedDict, total=False):
+    """沙盒校验结果。"""
+
+    success: bool
+    error_logs: str
+    exit_code: int
+    duration_ms: int
+    # 精准截断后的错误上下文（Error Message + 报错行附近代码），
+    # 只把它注入 Planner / Coder，完整 error_logs 仅保留给 UI 与审计。
+    error_context: str
+    # 归一化错误指纹；同错连续出现时用于直接终止重试。
+    error_fingerprint: str
+
+
+class AgentState(TypedDict, total=False):
+    """单 Agent 闭环状态。
+
+    LangGraph 按字段合并节点返回值；messages 使用 operator.add 累加，
+    其余字段为“最后写入者胜出”，由节点显式覆盖。
+    """
+
+    # ---- 运行标识 ----
+    run_id: str
+    tenant_id: str
+    project_id: str
+    sandbox_id: str
+    preview_url: str
+    # 主目标文件（第一个标注），用于消息展示 / 兼容旧状态读取。
+    target_file: str
+    # 本次 Run 全部标注涉及的文件（去重，最多 3 个）。
+    target_files: list[str]
+
+    # ---- 输入上下文 ----
+    # 包含 AnnotationEnvelope[]、逐标注意图、目标文件 / 片段等。
+    annotation_context: dict[str, Any]
+    # 对话 / 节点执行轨迹：[{role, node, content}]
+    messages: Annotated[list[dict[str, Any]], operator.add]
+    # 主文件内容，兼容旧逻辑；真正读取请使用 current_files。
+    current_code: str
+    # 所有目标文件的最新完整内容：{path: source}
+    current_files: dict[str, str]
+    # 本轮 Run 开始前的文件快照；审批 Diff / 拒绝回滚都以它为基线。
+    # 节点不会更新该字段，始终保持“写沙盒之前”的内容。
+    initial_files: dict[str, str]
+    # 历史压缩后的“核心需求与约束”，由 summarize_history 节点写入。
+    history_summary: str
+    history_tokens_before: int
+    history_tokens_after: int
+    # 外部检索（search_web）结果与查询词；由 research 节点写入，
+    # planner 会把它追加到计划中，coder 据此引用外部事实。
+    research_query: str
+    research_context: str
+
+    # ---- 生成结果 ----
+    plan: str
+    generated_patch: str
+    generated_files: dict[str, str]
+    # 一次生成对应的补丁 ID，patch.proposed / patch.applied 共用。
+    patch_id: str
+
+    # ---- HITL 澄清 ----
+    # 当前计划置信度与是否需要澄清；由 Planner 写入、clarify_gate 读取。
+    plan_confidence: float
+    plan_needs_clarification: bool
+    # 当前待回答的问题（暂停后由 checkpoint 保留）。
+    clarification: dict[str, Any] | None
+    # 已经回答的轮次与结构化答案。
+    clarification_round: int
+    clarification_answers: list[dict[str, Any]]
+    clarification_outcome: Literal["proceed", "replan", "exhausted"]
+    clarification_mode: Literal["auto", "always", "off"]
+    max_clarification_rounds: int
+    confidence_threshold: float
+    # 澄清有效期（小时），由 Service 从 Settings 注入，供 clarify_gate
+    # 计算 expiresAt。
+    clarification_ttl_hours: int
+
+    # ---- HITL Diff 审批 ----
+    # 是否在构建通过后暂停等待人工审批；由 options.requireManualApproval
+    # 决定（旧协议 approvalMode 作为兼容回退）。
+    approval_required: bool
+    # 当前待决策审批（暂停时由 checkpoint 保留）。
+    approval: dict[str, Any] | None
+    approval_id: str | None
+    approval_decision: Literal["approve", "reject"] | None
+    approval_comment: str | None
+    # 审批有效期（小时），由 Service 注入。
+    approval_ttl_hours: int
+
+    # ---- 校验与修复 ----
+    verify_result: VerifyState
+    apply_failed: bool
+    retry_count: int
+    max_retries: int
+    # 上一次自愈时的错误指纹；本次失败指纹与之相同则直接 FAILED。
+    last_repair_error_fingerprint: str
+
+    # ---- 路由 / 终态 ----
+    next_action: Literal["applier", "retry", "approve", "fail"]
+    status: Literal[
+        "RUNNING",
+        "PLANNING",
+        "CODING",
+        "APPLYING",
+        "VERIFYING",
+        "REPAIRING",
+        "AWAITING_APPROVAL",
+        "AWAITING_CLARIFICATION",
+        "SUCCEEDED",
+        "REJECTED",
+        "CANCELLED",
+        "EXPIRED",
+        "FAILED",
+    ]
+    error: str | None
+    error_code: str | None
+
+
+class ArchitectState(TypedDict, total=False):
+    """Architect Graph 状态。"""
+
+    run_id: str
+    project_id: str
+    project_name: str
+    source_files: dict[str, str]
+    source_hash: str
+    ui_history: list[dict[str, Any]]
+    # 历史压缩后的核心需求与约束；超过阈值才写入。
+    history_summary: str
+    history_tokens_before: int
+    history_tokens_after: int
+    threshold: float
+    max_rounds: int
+    round: int
+    status: str
+    app_shape: str
+    slots: dict[str, Any]
+    confidence_score: float
+    missing_slots: list[str]
+    questions: list[dict[str, Any]]
+    analysis: dict[str, Any]
+    retrieved_chunks: list[dict[str, Any]]
+    clarification: dict[str, Any]
+    contract: dict[str, Any]
+    contract_draft: dict[str, Any]
+    contract_issues: list[str]
+    contract_id: str
+    contract_decision: str
+    contract_feedback: str
+    repair_count: int
+    repair_limit: int
+    contract_revision_count: int
+    asked_slots: list[str]
+    messages: list[dict[str, Any]]
+    source_origin: str
+    source_warnings: list[str]
+    rag_provider: str
+    rag_top_k: int
+    error: str
+    error_code: str
+
+
+__all__ = ["AgentState", "ArchitectState", "VerifyState"]

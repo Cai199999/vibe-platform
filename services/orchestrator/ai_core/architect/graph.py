@@ -46,10 +46,8 @@ from typing import Any, Callable
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from ai_core.agent.checkpoint import (
-    CheckpointerProvider,
-    get_checkpointer_provider,
-)
+from ai_core.adapters.checkpoint import get_checkpointer_provider
+from ai_core.ports.checkpoint import CheckpointerProvider
 from ai_core.agent.events import EventSink, NullEventSink
 from ai_core.agent.memory import compress_architect_history
 from ai_core.architect.confidence import apply_confidence_guard
@@ -64,16 +62,17 @@ from ai_core.architect.llm import (
     ArchitectLLM,
     ContractDraft,
 )
-from ai_core.architect.schemas import (
+from ai_core.domain.architect import (
     APP_SHAPE_LABELS,
     ArchitectCitation,
     ArchitectClarification,
     ArchitectContract,
     ArchitectQuestion,
 )
-from ai_core.architect.state import ArchitectState
+from ai_core.domain.state import ArchitectState
 from ai_core.config import get_settings
-from ai_core.rag import RAGProviderError, get_rag_provider
+from ai_core.adapters.rag import get_rag_provider
+from ai_core.ports.rag import RAGProvider, RAGProviderError
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +119,7 @@ class ArchitectGraphRunner:
         *,
         event_sink: EventSink | None = None,
         checkpointer_provider: CheckpointerProvider | None = None,
+        rag_provider_factory: Callable[[str | None], RAGProvider] | None = None,
         recursion_limit: int = 80,
         cancel_check: Callable[[], bool] | None = None,
         pause_hook: Callable[[str, dict[str, Any]], None] | None = None,
@@ -129,6 +129,8 @@ class ArchitectGraphRunner:
         self._checkpointer_provider = (
             checkpointer_provider or get_checkpointer_provider()
         )
+        # Graph 只依赖 RAGProvider 端口；默认工厂是组合根，测试可注入假实现。
+        self._rag_provider_factory = rag_provider_factory or get_rag_provider
         self._recursion_limit = max(20, recursion_limit)
         self._cancel_check = cancel_check
         # 暂停事件先于 graph.invoke 返回，服务层必须在该事件可见前拿到
@@ -291,7 +293,7 @@ class ArchitectGraphRunner:
         self._check_cancelled()
         query = _rag_query(state)
         try:
-            provider = get_rag_provider(state.get("rag_provider") or None)
+            provider = self._rag_provider_factory(state.get("rag_provider") or None)
             chunks = provider.retrieve(
                 query,
                 top_k=max(1, int(state.get("rag_top_k") or 5)),

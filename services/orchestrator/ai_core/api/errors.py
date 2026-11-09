@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-from ai_core.sandbox.base import (
+from ai_core.ports.sandbox import (
     SandboxError,
     SandboxGitError,
     SandboxNotFoundError,

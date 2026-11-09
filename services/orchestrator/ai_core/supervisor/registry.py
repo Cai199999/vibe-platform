@@ -27,7 +27,7 @@ from ai_core.supervisor.manifest import (
     AgentManifestError,
     discover_agent_manifests,
 )
-from ai_core.supervisor.schemas import AgentStatus, AgentView, SkillView
+from ai_core.domain.supervisor import AgentStatus, AgentView, SkillView
 from ai_core.supervisor.skills import SkillDescriptor, SkillRegistry
 
 logger = logging.getLogger(__name__)

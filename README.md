@@ -31,7 +31,12 @@ Chatbox 可逐轮回滚代码与 thread 上下文；删除标注则回到该圈�
 apps/platform-web/                    React 18 + Vite（登录 / 多 Tab 工作台 / 画布浮层 / 预览 / Diff）
 apps/platform-bff/                    Java 21 + Spring Boot 3.3 BFF
 services/orchestrator/                Python 3.12 + FastAPI + LangGraph AI Core
-services/orchestrator/ai_core/        Sandbox / Agent / API
+services/orchestrator/ai_core/domain/    纯领域层（标注 / 契约 / 会话状态 / Skill）
+services/orchestrator/ai_core/ports/     应用层端口（模型 / 沙盒 / RAG / Checkpoint / Editor）
+services/orchestrator/ai_core/adapters/  适配器（DeepSeek / Docker 沙盒 / Markdown·Chroma / Checkpoint）
+services/orchestrator/ai_core/agent/     应用层：ui_graph 编排
+services/orchestrator/ai_core/architect/ 应用层：architect_graph 编排
+services/orchestrator/ai_core/supervisor/ 应用层：Supervisor 路由与 Handoff
 services/orchestrator/ai_core/*/manifest.json 声明式 Agent 能力清单
 services/orchestrator/config/custom_agents/   企业专属 Agent Manifest（演示：Excel 报表专家）
 services/orchestrator/config/skills/          外部 Skill（tailwind_magic.skill.json / accessibility.skill.md）
@@ -159,6 +164,103 @@ CustomAgent 在本阶段只完成声明与路由，运行时将在 M3 进入独�
 
 > 面试现场如何按顺序点击、每步该讲什么：见
 > **[3 分钟演示脚本](docs/DEMO_3_MIN.md)**。
+
+## 六边形架构（Ports & Adapters）
+
+M3.1 完成一次“只调结构、不改业务”的架构提纯：`ui_graph` /
+`architect_graph` / `supervisor` 保留为应用层，只负责编排；领域模型、端口与
+具体实现分层存放，依赖方向始终由外向内。
+
+```mermaid
+flowchart LR
+    subgraph DRIVING["驱动方 / Driving"]
+        WEB["platform-web"]
+        BFF["Java BFF"]
+        API["FastAPI API<br/>ai_core/api"]
+    end
+
+    subgraph APP["应用层 / Application"]
+        SUP["Supervisor<br/>路由与 Handoff"]
+        UI["ui_graph<br/>Plan → Code → Apply → Verify"]
+        ARCH["architect_graph<br/>澄清 → 分级契约"]
+        SVC["Run / Architect Services<br/>组合根与事务边界"]
+    end
+
+    subgraph DOMAIN["领域层 / Domain（纯模型）"]
+        D1["AnnotationEnvelope"]
+        D2["ArchitectContract"]
+        D3["AgentState / ArchitectState"]
+        D4["SkillDescriptor"]
+    end
+
+    subgraph PORTS["端口层 / Ports（抽象）"]
+        P1["ModelClient.generate()"]
+        P2["SandboxProvider"]
+        P3["RAGProvider"]
+        P4["CheckpointerProvider"]
+        P5["CodeEditor"]
+    end
+
+    subgraph ADAPTERS["适配器层 / Adapters（实现）"]
+        A1["DeepSeekClient<br/>ModelRouter + ChatOpenAI"]
+        A2["LocalDockerSandbox"]
+        A3["MarkdownRAG / ChromaRAG"]
+        A4["Memory / Redis Checkpointer"]
+        A5["Anchor / TreeSitter Editor"]
+    end
+
+    subgraph EXT["外部系统"]
+        LLM["DeepSeek / OpenAI 兼容 API"]
+        DOCKER["Docker Daemon<br/>沙盒容器"]
+        KB["Markdown / Chroma 知识库"]
+        REDIS["Redis（预留）"]
+    end
+
+    WEB --> BFF --> API --> SVC
+    SVC --> SUP
+    SUP --> UI
+    SUP --> ARCH
+    UI --> DOMAIN
+    ARCH --> DOMAIN
+    UI --> PORTS
+    ARCH --> PORTS
+    SVC --> PORTS
+
+    ADAPTERS -.->|"实现"| PORTS
+    A1 -.-> LLM
+    A2 -.-> DOCKER
+    A3 -.-> KB
+    A4 -.-> REDIS
+    A5 -.-> P5
+
+    classDef domain fill:#eef6ff,stroke:#2563eb,stroke-width:2px;
+    classDef port fill:#f5f3ff,stroke:#7c3aed,stroke-width:2px;
+    classDef adapter fill:#f0fdf4,stroke:#16a34a;
+    class D1,D2,D3,D4 domain;
+    class P1,P2,P3,P4,P5 port;
+    class A1,A2,A3,A4,A5 adapter;
+```
+
+**依赖规则**
+
+| 层 | 目录 | 允许依赖 | 禁止依赖 |
+|---|---|---|---|
+| 领域层 | `ai_core/domain/` | 标准库、Pydantic | LangGraph、FastAPI、Docker、LangChain、模型 SDK |
+| 端口层 | `ai_core/ports/` | 标准库、领域层 | 任何具体适配器 |
+| 应用层 | `agent/`、`architect/`、`supervisor/`、`api/` | 领域层、端口层 | 直接构造 Docker 客户端 / 模型 SDK |
+| 适配器层 | `ai_core/adapters/` | 领域层、端口层、第三方 SDK | 反向依赖应用层 |
+
+- `AnnotationEnvelope`、`ArchitectContract`、`AgentState` 等已成为全系统
+  共享的“通用语言”，不再散落在各 Agent 包中。
+- `ModelClient` 只规定 `generate(task, system, human)`；`DeepSeekClient`
+  把任务分级、ChatOpenAI 与消息结构封装在适配器内，Planner / Coder 只依赖端口。
+- `LocalDockerSandbox`、`MarkdownRAGProvider`、`ChromaRAGProvider` 分别实现
+  `SandboxProvider` / `RAGProvider`；Architect Graph 可注入
+  `rag_provider_factory`，测试无需启动真实知识库。
+- 旧 import 路径保留为**兼容 shim**（如 `ai_core.agent.schemas` →
+  `ai_core.domain.agent`），确保既有 API、脚本与测试平滑迁移。
+- 架构边界由 `tests/test_hexagonal_architecture.py` 自动校验（AST 扫描
+  禁止依赖 + 适配器继承检查 + 兼容路径恒等检查）。
 
 ## 画布全链路（M1）
 

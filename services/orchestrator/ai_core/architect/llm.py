@@ -15,11 +15,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
-
+from ai_core.adapters.model.deepseek import DeepSeekClient
 from ai_core.agent.memory import fallback_summary
 from ai_core.architect.confidence import is_known_shape, missing_slots_for
-from ai_core.architect.schemas import (
+from ai_core.architect.source import format_source
+from ai_core.config import Settings, get_settings
+from ai_core.domain.architect import (
     APP_SHAPE_LABELS,
     ArchitectAnalysis,
     ArchitectApiRoute,
@@ -27,9 +28,7 @@ from ai_core.architect.schemas import (
     ArchitectImplementationPhase,
     ArchitectQuestion,
 )
-from ai_core.architect.source import format_source
-from ai_core.config import Settings, get_settings
-from ai_core.model_router import ModelRouter
+from ai_core.ports.model import ModelClient, ModelClientError
 
 
 class ArchitectLLMError(Exception):
@@ -576,13 +575,18 @@ class MockArchitectLLM(ArchitectLLM):
 class DeepSeekArchitectLLM(ArchitectLLM):
     """DeepSeek Chat 实现。"""
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        client: ModelClient | None = None,
+    ) -> None:
         self.settings = settings or get_settings()
         if not self.settings.deepseek_api_key:
             raise ArchitectLLMConfigurationError(
                 "DEEPSEEK_API_KEY 未配置；请设置密钥或使用 llm_provider=mock"
             )
-        self._router = ModelRouter(self.settings)
+        # 应用层只依赖 ModelClient 端口，模型分级与 SDK 由适配器负责。
+        self._client = client or DeepSeekClient(self.settings)
 
     def analyze(self, context: ArchitectContext) -> ArchitectAnalysis:
         system = (
@@ -696,15 +700,9 @@ class DeepSeekArchitectLLM(ArchitectLLM):
 
     def _invoke(self, task: str, system: str, human: str) -> str:
         try:
-            response = self._router.build(task).invoke(
-                [SystemMessage(content=system), HumanMessage(content=human)]
-            )
-        except Exception as exc:  # noqa: BLE001
+            return self._client.generate(task, system, human)
+        except ModelClientError as exc:
             raise ArchitectLLMError(f"DeepSeek Architect 调用失败: {exc}") from exc
-        content = response.content
-        if isinstance(content, list):
-            content = "".join(str(part) for part in content)
-        return str(content)
 
 
 def build_architect_llm(

@@ -11,7 +11,7 @@ from ai_core.supervisor.registry import (
     get_agent_registry,
     reload_agent_registry,
 )
-from ai_core.supervisor.schemas import (
+from ai_core.domain.supervisor import (
     AgentListResponse,
     SupervisorDispatchResponse,
     SupervisorGateResponse,

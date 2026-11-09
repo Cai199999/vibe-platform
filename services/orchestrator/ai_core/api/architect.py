@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 
 from ai_core.agent.events import RunEventBuffer
 from ai_core.architect.llm import ArchitectLLMConfigurationError
-from ai_core.architect.schemas import (
+from ai_core.domain.architect import (
     ArchitectAnswerResponse,
     ArchitectAnswersRequest,
     ArchitectCancelRequest,
@@ -22,7 +22,7 @@ from ai_core.architect.service import (
     ArchitectServiceError,
     get_active_architect_run,
 )
-from ai_core.rag import RAGProviderError
+from ai_core.ports.rag import RAGProviderError
 
 router = APIRouter(prefix="/api/v1/internal/architect", tags=["architect"])
 

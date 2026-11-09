@@ -13,7 +13,7 @@ from typing import Protocol
 
 from ai_core.supervisor.policy import evaluate_policy
 from ai_core.supervisor.registry import AgentDescriptor, AgentRegistry
-from ai_core.supervisor.schemas import SupervisorRequest
+from ai_core.domain.supervisor import SupervisorRequest
 
 # 关键词已迁移到各 Agent 的 manifest.json；以下常量仅作为
 # Manifest 缺失 keywords 时的兜底，保证规则分类器不因配置错误失声。

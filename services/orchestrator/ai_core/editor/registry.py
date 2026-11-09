@@ -18,7 +18,7 @@ from functools import lru_cache
 from typing import Iterable, Mapping
 
 from ai_core.editor.anchor import AnchorCodeEditor
-from ai_core.editor.base import (
+from ai_core.ports.editor import (
     CodeEdit,
     CodeEditor,
     EditKind,

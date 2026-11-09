@@ -23,10 +23,8 @@ from typing import Any
 
 from docker.errors import DockerException
 
-from ai_core.agent.checkpoint import (
-    CheckpointerProvider,
-    get_checkpointer_provider,
-)
+from ai_core.adapters.checkpoint import get_checkpointer_provider
+from ai_core.ports.checkpoint import CheckpointerProvider
 from ai_core.agent.context_doc import (
     VIBE_CONTEXT_FILENAME,
     render_vibe_context,
@@ -43,7 +41,7 @@ from ai_core.agent.llm import (
     AgentLLMError,
     build_agent_llm,
 )
-from ai_core.agent.schemas import (
+from ai_core.domain.agent import (
     AnnotationEnvelope,
     Approval,
     ApprovalDecisionRequest,
@@ -68,8 +66,8 @@ from ai_core.agent.schemas import (
 )
 from ai_core.agent.thread_memory import ThreadMemoryStore, get_thread_store
 from ai_core.config import Settings, get_settings
-from ai_core.sandbox import get_sandbox_provider
-from ai_core.sandbox.base import SandboxError, SandboxHandle, SandboxProvider
+from ai_core.adapters.sandbox import get_sandbox_provider
+from ai_core.ports.sandbox import SandboxError, SandboxHandle, SandboxProvider
 
 logger = logging.getLogger(__name__)
 

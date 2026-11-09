@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from ai_core.agent.schemas import AnnotationEnvelope, ExecuteRunRequest
+from ai_core.domain.agent import AnnotationEnvelope, ExecuteRunRequest
 
 VIBE_CONTEXT_FILENAME = "VIBE_CONTEXT.md"
 

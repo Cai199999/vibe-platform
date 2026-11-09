@@ -17,7 +17,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import Field, field_validator
 
-from ai_core.agent.schemas import CamelModel
+from ai_core.domain.common import CamelModel
 
 MAX_MANIFEST_BYTES = 256 * 1024
 AGENT_ID_PATTERN = r"^[a-z][a-z0-9_-]{2,63}$"

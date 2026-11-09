@@ -4,7 +4,7 @@
 
 ## 架构底座
 
-React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.12 + FastAPI + LangGraph → Docker 沙盒（Node 20 + React/Vite，单服务）。中间件复用 `~/Workspace/infra`：MySQL / Redis / MinIO。
+React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.12 + FastAPI + LangGraph → Docker 沙盒（Node 20 + React/Vite，单服务）。中间件复用 `~/Workspace/infra`：MySQL / Redis / MinIO。AI Core 已按六边形架构分层：`domain`（纯模型）/ `ports`（抽象）/ `adapters`（实现）/ `agent·architect·supervisor`（应用编排），旧 import 保留兼容 shim。
 
 ## 已闭环能力
 
@@ -19,7 +19,9 @@ React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.1
 - Tool：`search_web`（research 节点）+ Supervisor 工具网关
 - Skill：Markdown 挂载 `ui.accessibility`，动态注入 Coder
 - MCP：标准 stdio 子集 + `get_current_time` 示例
-- Eval 10/10；单测 129 passed
+- 六边形重构：`AnnotationEnvelope/ArchitectContract/State` 入 domain；
+  `ModelClient/Sandbox/RAG/Checkpoint` 入 ports；DeepSeek/Docker/Markdown/Chroma 入 adapters
+- Eval 10/10；单测 138 passed
 
 ## 真 / 假边界
 

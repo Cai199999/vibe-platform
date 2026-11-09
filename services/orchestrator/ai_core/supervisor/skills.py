@@ -1,54 +1,22 @@
-"""SkillRegistry：Agent 能力之上的领域技能注册中心（M3 预留）。
+"""SkillRegistry：Agent 能力之上的领域技能注册中心。
 
 三层概念：
   - Agent：执行者，拥有状态机与 Handoff 协议；
   - Tool：底层函数，如读文件、写文件、构建、Git 提交；
   - Skill：领域封装 = Prompt + RAG 知识 + Tool 子集。
 
-当前只登记 Manifest 中的 Skill 声明，不加载 Prompt / RAG，也不执行。
-M3 阶段由 SkillRegistry 将 Skill 动态拼装进 Agent 的运行时上下文。
+``SkillDescriptor`` 是纯领域对象，位于 ``ai_core.domain.skills``；本模块
+只负责线程安全注册与查询，属于应用层。
 """
 
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
 from typing import Any
 
+from ai_core.domain.skills import SkillDescriptor, SkillRegistryError
 
-class SkillRegistryError(ValueError):
-    """Skill 注册冲突或不合法。"""
-
-    code = "SKILL_REGISTRY_ERROR"
-
-
-@dataclass(frozen=True)
-class SkillDescriptor:
-    """一个已声明但尚未执行的 Skill。"""
-
-    skill_id: str
-    name: str
-    agent_id: str
-    description: str = ""
-    prompt_ref: str | None = None
-    # 实际注入模型的系统提示词。只在服务端内存中使用，绝不出现在
-    # /supervisor/agents 等公开响应里。
-    system_prompt: str | None = None
-    rag_refs: tuple[str, ...] = ()
-    tools: tuple[str, ...] = ()
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def to_view(self) -> dict[str, Any]:
-        return {
-            "skillId": self.skill_id,
-            "name": self.name,
-            "agentId": self.agent_id,
-            "description": self.description,
-            "promptRef": self.prompt_ref,
-            "ragRefs": list(self.rag_refs),
-            "tools": list(self.tools),
-            "metadata": dict(self.metadata),
-        }
+__all__ = ["SkillDescriptor", "SkillRegistry", "SkillRegistryError"]
 
 
 class SkillRegistry:

@@ -20,12 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
-
+from ai_core.adapters.model.deepseek import DeepSeekClient
 from ai_core.agent.memory import fallback_summary
-from ai_core.agent.schemas import ExecuteRunRequest, RunOptions
 from ai_core.config import Settings, get_settings
-from ai_core.model_router import ModelRouter
+from ai_core.domain.agent import ExecuteRunRequest, RunOptions
+from ai_core.ports.model import ModelClient, ModelClientError
 from ai_core.skill_loader import skill_prompts_to_system
 from ai_core.editor import (
     CodeEdit,
@@ -364,14 +363,19 @@ class MockAgentLLM(AgentLLM):
 class DeepSeekAgentLLM(AgentLLM):
     """DeepSeek Chat（OpenAI 兼容协议）。"""
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        client: ModelClient | None = None,
+    ) -> None:
         self.settings = settings or get_settings()
         if not self.settings.deepseek_api_key:
             raise AgentLLMConfigurationError(
                 "DEEPSEEK_API_KEY 未配置；请设置密钥或使用 llm_provider=mock"
             )
-        # 模型按任务分级：Planner 走 FAST，Coder 走 STRONG。
-        self._router = ModelRouter(self.settings)
+        # 应用层只依赖 ModelClient 端口；具体厂商调用由适配器完成。
+        # 测试或企业网关可注入自定义 ModelClient，无需修改 Planner/Coder。
+        self._client = client or DeepSeekClient(self.settings)
         # config/skills/*.skill.json 中挂载到 ui_graph 的 Prompt。
         # 只读取服务端静态文件，不接受请求参数注入。
         self._skill_system = skill_prompts_to_system(
@@ -520,16 +524,9 @@ class DeepSeekAgentLLM(AgentLLM):
 
     def _invoke(self, task: str, system: str, human: str) -> str:
         try:
-            model = self._router.build(task)
-            response = model.invoke(
-                [SystemMessage(content=system), HumanMessage(content=human)]
-            )
-        except Exception as exc:  # noqa: BLE001 - 统一转换为领域异常
+            return self._client.generate(task, system, human)
+        except ModelClientError as exc:
             raise AgentLLMError(f"DeepSeek 调用失败: {exc}") from exc
-        content = response.content
-        if isinstance(content, list):
-            content = "".join(str(part) for part in content)
-        return str(content)
 
     def _parse_code_result(self, raw: str, target_files: list[str]) -> CodeResult:
         payload = _extract_json(raw)

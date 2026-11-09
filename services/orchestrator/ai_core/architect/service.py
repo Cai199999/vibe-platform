@@ -15,10 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from ai_core.agent.checkpoint import (
-    CheckpointerProvider,
-    get_checkpointer_provider,
-)
+from ai_core.adapters.checkpoint import get_checkpointer_provider
+from ai_core.ports.checkpoint import CheckpointerProvider
 from ai_core.agent.events import RunEventBuffer, get_event_buffer
 from ai_core.architect.graph import (
     ArchitectGraphRunner,
@@ -29,7 +27,7 @@ from ai_core.architect.llm import (
     ArchitectLLMError,
     build_architect_llm,
 )
-from ai_core.architect.schemas import (
+from ai_core.domain.architect import (
     ArchitectAnswerResponse,
     ArchitectAnswersRequest,
     ArchitectCancelRequest,
@@ -46,7 +44,7 @@ from ai_core.architect.schemas import (
 )
 from ai_core.architect.source import collect_source
 from ai_core.config import Settings, get_settings
-from ai_core.sandbox.base import SandboxProvider
+from ai_core.ports.sandbox import SandboxProvider
 
 logger = logging.getLogger(__name__)
 

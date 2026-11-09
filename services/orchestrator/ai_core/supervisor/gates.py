@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from ai_core.supervisor.schemas import (
+from ai_core.domain.supervisor import (
     GateStatus,
     SubGraphDispatch,
     SupervisorGate,

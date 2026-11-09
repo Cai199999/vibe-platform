@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Mapping
 
-from ai_core.editor.base import (
+from ai_core.ports.editor import (
     CodeEdit,
     EditKind,
     EditLayout,

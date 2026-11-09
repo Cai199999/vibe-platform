@@ -20,7 +20,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from ai_core.config import Settings, get_settings
-from ai_core.sandbox.base import SandboxError, SandboxProvider
+from ai_core.ports.sandbox import SandboxError, SandboxProvider
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +114,7 @@ def collect_source(
         try:
             provider = sandbox
             if provider is None:
-                from ai_core.sandbox import get_sandbox_provider
+                from ai_core.adapters.sandbox import get_sandbox_provider
 
                 provider = get_sandbox_provider()
             archive = provider.export_archive(sandbox_id)

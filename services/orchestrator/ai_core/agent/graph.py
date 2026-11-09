@@ -30,10 +30,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, interrupt
 
-from ai_core.agent.checkpoint import (
-    CheckpointerProvider,
-    get_checkpointer_provider,
-)
+from ai_core.adapters.checkpoint import get_checkpointer_provider
+from ai_core.ports.checkpoint import CheckpointerProvider
 from ai_core.agent.error_context import (
     error_file_hint,
     extract_error_context,
@@ -42,14 +40,14 @@ from ai_core.agent.error_context import (
 from ai_core.agent.events import EventSink, NullEventSink
 from ai_core.agent.llm import AgentLLM
 from ai_core.agent.memory import compress_annotation_context
-from ai_core.agent.state import AgentState
+from ai_core.domain.state import AgentState
 from ai_core.config import get_settings
 from ai_core.editor import (
     CodeEdit,
     EditKind,
     default_editor_registry,
 )
-from ai_core.sandbox.base import SandboxError, SandboxProvider
+from ai_core.ports.sandbox import SandboxError, SandboxProvider
 from ai_core.tools import ToolRegistry, build_default_toolbox
 
 logger = logging.getLogger(__name__)
