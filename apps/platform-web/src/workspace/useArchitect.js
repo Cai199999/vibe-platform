@@ -5,6 +5,7 @@ import {
   fetchArchitectDecision,
   streamArchitect,
 } from './architectStream.js'
+import { streamFullstack } from './fullstackStream.js'
 
 const STORAGE_KEY = 'vibe.architect.v1'
 const TERMINAL = new Set(['CONFIRMED', 'CANCELLED', 'FAILED'])
@@ -17,6 +18,50 @@ const ACTIVE = new Set([
   'CONFIRMING_CONTRACT',
   'CANCELLING',
 ])
+
+/**
+ * 全栈代码生成的默认状态。
+ *
+ * 与 Architect 状态同属一个项目快照（architect.fullstack），但事件流完全
+ * 独立：契约确认后才启动，终态为 fullstack.completed / fullstack.failed。
+ */
+export const EMPTY_FULLSTACK = {
+  runId: null,
+  // IDLE -> RUNNING -> SUCCEEDED | FAILED
+  status: 'IDLE',
+  lastSeq: 0,
+  sandboxId: null,
+  previewUrl: null,
+  // 固定五个节点：DBACoder / BackendCoder / FrontendCoder /
+  // BuildVerifier / SandboxRestart。
+  steps: [],
+  activeNode: null,
+  // 节点输出日志（文件级），只保留最近若干条，避免撑爆 sessionStorage。
+  outputs: [],
+  result: null,
+  error: null,
+  errorCode: null,
+  starting: false,
+  updatedAt: null,
+}
+
+const FULLSTACK_NODES = [
+  'DBACoder',
+  'BackendCoder',
+  'FrontendCoder',
+  'BuildVerifier',
+  'SandboxRestart',
+]
+
+const FULLSTACK_NODE_LABELS = {
+  DBACoder: '数据库工程师',
+  BackendCoder: '后端工程师',
+  FrontendCoder: '前端工程师',
+  BuildVerifier: '构建校验',
+  SandboxRestart: '沙盒重启',
+}
+
+const FULLSTACK_OUTPUT_LIMIT = 40
 
 export const EMPTY_ARCHITECT = {
   open: false,
@@ -41,6 +86,8 @@ export const EMPTY_ARCHITECT = {
   decisionSubmitting: false,
   cancelRequested: false,
   updatedAt: null,
+  // 契约确认后的全栈生成状态；与 Architect Run 生命周期解耦。
+  fullstack: EMPTY_FULLSTACK,
 }
 
 export const ARCHITECT_TERMINAL_STATUSES = TERMINAL
@@ -63,6 +110,24 @@ function loadStates() {
         decisionSubmitting: false,
         cancelRequested: Boolean(saved.cancelRequested),
         messages: Array.isArray(saved.messages) ? saved.messages : [],
+        fullstack: {
+          ...EMPTY_FULLSTACK,
+          ...(saved.fullstack && typeof saved.fullstack === 'object'
+            ? saved.fullstack
+            : {}),
+          // 刷新页面后旧的 SSE 连接已断开；把“进行中”收敛为可重试失败，
+          // 避免按钮永久禁用。服务端生成即使成功也会写入明确终态，重跑幂等。
+          status:
+            saved.fullstack?.status === 'RUNNING' ? 'FAILED' : saved.fullstack?.status ??
+              'IDLE',
+          error:
+            saved.fullstack?.status === 'RUNNING'
+              ? '页面刷新导致生成事件流中断，可重新生成。'
+              : saved.fullstack?.error ?? null,
+          starting: false,
+          activeNode: null,
+          outputs: [],
+        },
       }
     })
     return restored
@@ -288,10 +353,204 @@ function reduceArchitect(state, event) {
   }
 }
 
+function fullstackRunId() {
+  try {
+    return `fsk_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`
+  } catch {
+    return `fsk_${Math.random().toString(36).slice(2, 12)}${Date.now().toString(36)}`
+  }
+}
+
+function createFullstackSteps(nodes = FULLSTACK_NODES) {
+  return nodes.map((node, index) => ({
+    node,
+    label: FULLSTACK_NODE_LABELS[node] ?? node,
+    index: index + 1,
+    total: nodes.length,
+    status: 'PENDING',
+    summary: '',
+    files: [],
+    durationMs: 0,
+    error: null,
+  }))
+}
+
+function updateFullstackStep(steps, node, patch) {
+  let matched = false
+  const next = steps.map((step) => {
+    if (step.node !== node) return step
+    matched = true
+    return { ...step, ...patch }
+  })
+  if (matched) return next
+  // 服务端新增节点（模板演进）时补齐，避免事件被丢弃。
+  return [
+    ...next,
+    {
+      node,
+      label: FULLSTACK_NODE_LABELS[node] ?? node,
+      index: next.length + 1,
+      total: Math.max(next.length + 1, FULLSTACK_NODES.length),
+      status: 'PENDING',
+      summary: '',
+      files: [],
+      durationMs: 0,
+      error: null,
+      ...patch,
+    },
+  ]
+}
+
+function appendFullstackOutput(outputs, entry) {
+  // 同一文件重复输出（例如重试）只保留最后一条，避免日志重复刷屏。
+  const key = `${entry.node}:${entry.path}`
+  const next = outputs.filter((item) => `${item.node}:${item.path}` !== key)
+  next.push(entry)
+  return next.slice(-FULLSTACK_OUTPUT_LIMIT)
+}
+
+/**
+ * 归约 FullstackGraph 事件。
+ *
+ * 事件类型：
+ *   fullstack.started / node.started / node.output / node.completed /
+ *   node.failed / sandbox.restarting / sandbox.ready / completed / failed
+ */
+function reduceFullstack(state, event) {
+  const current = state ?? EMPTY_FULLSTACK
+  const payload = event.payload ?? {}
+  const base = {
+    ...current,
+    lastSeq: Math.max(current.lastSeq ?? 0, event.seq ?? 0),
+    updatedAt: new Date().toISOString(),
+  }
+
+  switch (event.type) {
+    case 'fullstack.started':
+      return {
+        ...base,
+        runId: payload.runId ?? current.runId,
+        status: 'RUNNING',
+        starting: false,
+        sandboxId: payload.sandboxId ?? current.sandboxId,
+        previewUrl: payload.previewUrl ?? current.previewUrl,
+        steps: createFullstackSteps(
+          Array.isArray(payload.nodes) && payload.nodes.length > 0
+            ? payload.nodes
+            : FULLSTACK_NODES,
+        ),
+        error: null,
+        errorCode: null,
+      }
+    case 'fullstack.node.started':
+      return {
+        ...base,
+        status: 'RUNNING',
+        starting: false,
+        activeNode: payload.node ?? current.activeNode,
+        steps: updateFullstackStep(current.steps, payload.node, {
+          status: 'RUNNING',
+          error: null,
+        }),
+      }
+    case 'fullstack.node.output':
+      return {
+        ...base,
+        outputs: appendFullstackOutput(current.outputs, {
+          id: `${payload.node}:${payload.path}`,
+          node: payload.node,
+          path: payload.path,
+          language: payload.language ?? 'text',
+          content: payload.content ?? '',
+          truncated: Boolean(payload.truncated),
+          bytes: payload.bytes ?? 0,
+        }),
+      }
+    case 'fullstack.node.completed':
+      return {
+        ...base,
+        activeNode:
+          current.activeNode === payload.node ? null : current.activeNode,
+        steps: updateFullstackStep(current.steps, payload.node, {
+          status: 'SUCCEEDED',
+          summary: payload.summary ?? '',
+          files: Array.isArray(payload.files) ? payload.files : [],
+          durationMs: payload.durationMs ?? 0,
+          error: null,
+        }),
+      }
+    case 'fullstack.node.failed':
+      return {
+        ...base,
+        activeNode: null,
+        steps: updateFullstackStep(current.steps, payload.node, {
+          status: 'FAILED',
+          error: payload.error ?? '节点执行失败',
+        }),
+      }
+    case 'fullstack.sandbox.restarting':
+      return {
+        ...base,
+        outputs: appendFullstackOutput(current.outputs, {
+          id: `SandboxRestart:restart:${event.seq}`,
+          node: 'SandboxRestart',
+          path: 'container.restart',
+          language: 'text',
+          content: `正在重启沙盒并等待 ${payload.healthPath ?? '/api/health'} 就绪…`,
+          truncated: false,
+          bytes: 0,
+        }),
+      }
+    case 'fullstack.sandbox.ready':
+      return {
+        ...base,
+        sandboxId: payload.sandboxId ?? current.sandboxId,
+        previewUrl: payload.previewUrl ?? current.previewUrl,
+      }
+    case 'fullstack.completed':
+      return {
+        ...base,
+        status: 'SUCCEEDED',
+        starting: false,
+        activeNode: null,
+        sandboxId: payload.sandboxId ?? current.sandboxId,
+        previewUrl: payload.previewUrl ?? current.previewUrl,
+        result: payload,
+        // 成功后把仍在 RUNNING 的节点收口，避免 UI 永远转圈。
+        steps: current.steps.map((step) =>
+          step.status === 'RUNNING'
+            ? { ...step, status: 'SUCCEEDED' }
+            : step,
+        ),
+        error: null,
+        errorCode: null,
+      }
+    case 'fullstack.failed':
+      return {
+        ...base,
+        status: 'FAILED',
+        starting: false,
+        activeNode: null,
+        steps: payload.node
+          ? updateFullstackStep(current.steps, payload.node, {
+              status: 'FAILED',
+              error: payload.error ?? '生成失败',
+            })
+          : current.steps,
+        error: payload.error || '全栈代码生成失败',
+        errorCode: payload.errorCode ?? null,
+      }
+    default:
+      return base
+  }
+}
+
 export function useArchitect({ token } = {}) {
   const [states, setStates] = useState(loadStates)
   const statesRef = useRef(states)
   const controllersRef = useRef(new Map())
+  // 全栈生成与 Architect 澄清是两条独立 SSE，各自维护 AbortController。
+  const fullstackControllersRef = useRef(new Map())
 
   useEffect(() => {
     statesRef.current = states
@@ -321,6 +580,21 @@ export function useArchitect({ token } = {}) {
         errorCode: state.errorCode ?? null,
         cancelRequested: state.cancelRequested,
         updatedAt: state.updatedAt,
+        // 只持久化可恢复字段：节点输出体积大且刷新后无法继续追加，丢弃。
+        fullstack: state.fullstack
+          ? {
+              runId: state.fullstack.runId,
+              status: state.fullstack.status,
+              lastSeq: state.fullstack.lastSeq,
+              sandboxId: state.fullstack.sandboxId,
+              previewUrl: state.fullstack.previewUrl,
+              steps: state.fullstack.steps,
+              result: state.fullstack.result,
+              error: state.fullstack.error,
+              errorCode: state.fullstack.errorCode,
+              updatedAt: state.fullstack.updatedAt,
+            }
+          : undefined,
       }
     })
     try {
@@ -334,6 +608,8 @@ export function useArchitect({ token } = {}) {
     () => () => {
       controllersRef.current.forEach((controller) => controller.abort())
       controllersRef.current.clear()
+      fullstackControllersRef.current.forEach((controller) => controller.abort())
+      fullstackControllersRef.current.clear()
     },
     [],
   )
@@ -396,6 +672,116 @@ export function useArchitect({ token } = {}) {
       }
     },
     [patch, token],
+  )
+
+  /**
+   * 启动全栈生成并消费 SSE。
+   *
+   * 生成在服务端后台线程执行，面板关闭 / 重新渲染都不会中断；只有关闭
+   * 项目窗口或卸载页面时才会 abort 本地连接，服务端仍会产出终态事件，
+   * 重新打开后可通过同一个 runId 重放。
+   */
+  const connectFullstack = useCallback(
+    async (projectId, { payload, runId } = {}) => {
+      const controller = new AbortController()
+      fullstackControllersRef.current.get(projectId)?.abort()
+      fullstackControllersRef.current.set(projectId, controller)
+      try {
+        await streamFullstack({
+          payload,
+          runId,
+          afterSeq: 0,
+          token,
+          signal: controller.signal,
+          onEvent: (event) => {
+            patch(projectId, (previous) => ({
+              ...previous,
+              fullstack: reduceFullstack(previous.fullstack, event),
+            }))
+          },
+        })
+      } catch (cause) {
+        if (cause?.name === 'AbortError') return
+        patch(projectId, (previous) => {
+          const fullstack = previous.fullstack ?? EMPTY_FULLSTACK
+          // 终态已到达时，连接关闭属于正常收尾，不改写结果。
+          if (fullstack.status === 'SUCCEEDED' || fullstack.status === 'FAILED') {
+            return previous
+          }
+          return {
+            ...previous,
+            fullstack: {
+              ...fullstack,
+              status: 'FAILED',
+              starting: false,
+              activeNode: null,
+              error: `全栈生成事件流失败：${cause?.message || cause}`,
+              errorCode: 'FULLSTACK_STREAM_ERROR',
+            },
+          }
+        })
+      } finally {
+        if (fullstackControllersRef.current.get(projectId) === controller) {
+          fullstackControllersRef.current.delete(projectId)
+        }
+      }
+    },
+    [patch, token],
+  )
+
+  /**
+   * 点击“开始生成全栈代码”。
+   *
+   * @param {string} projectId
+   * @param {object} options
+   * @param {object} [options.contract] 已确认契约（默认取当前 Architect 状态）
+   * @param {string} [options.sandboxId]
+   * @param {Record<string,string>} [options.files] 无沙盒时的源码兜底
+   * @returns {boolean} 是否成功启动（重复点击 / 契约缺失返回 false）
+   */
+  const generateFullstack = useCallback(
+    (projectId, options = {}) => {
+      const current = statesRef.current[projectId] ?? EMPTY_ARCHITECT
+      const fullstack = current.fullstack ?? EMPTY_FULLSTACK
+      if (fullstack.starting || fullstack.status === 'RUNNING') return false
+      const contract = options.contract ?? current.contract
+      const contractId = options.contractId ?? contract?.contractId
+      if (!contract || !contractId) return false
+
+      const runId = options.runId || fullstackRunId()
+      patch(projectId, (previous) => ({
+        ...previous,
+        fullstack: {
+          ...EMPTY_FULLSTACK,
+          runId,
+          status: 'RUNNING',
+          starting: true,
+          steps: createFullstackSteps(),
+          updatedAt: new Date().toISOString(),
+        },
+      }))
+
+      const payload = {
+        runId,
+        tenantId: options.tenantId || undefined,
+        projectId,
+        contractId,
+        sandboxId: options.sandboxId || undefined,
+        contract,
+        source: {
+          sandboxId: options.sandboxId || undefined,
+          files: options.files ?? {},
+        },
+        options: {
+          verifyBuild: options.verifyBuild ?? true,
+          restartSandbox: options.restartSandbox ?? true,
+          ...(options.options ?? {}),
+        },
+      }
+      void connectFullstack(projectId, { payload, runId })
+      return true
+    },
+    [connectFullstack, patch],
   )
 
   const start = useCallback(
@@ -550,6 +936,8 @@ export function useArchitect({ token } = {}) {
   const abort = useCallback((projectId) => {
     controllersRef.current.get(projectId)?.abort()
     controllersRef.current.delete(projectId)
+    fullstackControllersRef.current.get(projectId)?.abort()
+    fullstackControllersRef.current.delete(projectId)
   }, [])
 
   const remove = useCallback((projectId) => {
@@ -603,6 +991,7 @@ export function useArchitect({ token } = {}) {
     answer,
     decide,
     cancel,
+    generateFullstack,
     abort,
     remove,
     dispose,

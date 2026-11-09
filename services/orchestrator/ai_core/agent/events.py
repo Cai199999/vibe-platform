@@ -37,6 +37,9 @@ TERMINAL_EVENT_TYPES = {
     "architect.contract.confirmed",
     "architect.cancelled",
     "architect.failed",
+    # 契约确认后的全栈生成：completed / failed 为终态。
+    "fullstack.completed",
+    "fullstack.failed",
 }
 SSE_EVENT_NAME = "run.event"
 HEARTBEAT_SECONDS = 15

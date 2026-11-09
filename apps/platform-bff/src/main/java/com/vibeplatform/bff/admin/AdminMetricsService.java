@@ -41,6 +41,7 @@ public class AdminMetricsService {
     /** 内置 Agent ID：与 ai_core 各模块的 manifest.json 保持一致。 */
     public static final String UI_AGENT_ID = "ui_graph";
     public static final String ARCHITECT_AGENT_ID = "architect_graph";
+    public static final String FULLSTACK_AGENT_ID = "fullstack_graph";
 
     /** 内存中最多保留的 Run 数；看板只展示最近 10 条，其余用于聚合。 */
     private static final int MAX_RUNS = 5_000;
@@ -50,6 +51,7 @@ public class AdminMetricsService {
     private static final Map<String, String> BUILTIN_AGENT_NAMES = Map.of(
             UI_AGENT_ID, "局部 UI 工程师",
             ARCHITECT_AGENT_ID, "全局架构师",
+            FULLSTACK_AGENT_ID, "全栈生成工程师",
             "backend_coder", "后端工程师（预留）",
             "script_agent", "脚本工程师（预留）"
     );
@@ -463,9 +465,10 @@ public class AdminMetricsService {
 
     private static String statusFor(String type) {
         return switch (type) {
-            case "run.started", "architect.started" -> "RUNNING";
-            case "run.succeeded", "architect.contract.confirmed" -> "SUCCEEDED";
-            case "run.failed", "architect.failed" -> "FAILED";
+            case "run.started", "architect.started", "fullstack.started" -> "RUNNING";
+            case "run.succeeded", "architect.contract.confirmed", "fullstack.completed" ->
+                    "SUCCEEDED";
+            case "run.failed", "architect.failed", "fullstack.failed" -> "FAILED";
             case "run.cancelled", "architect.cancelled" -> "CANCELLED";
             case "run.rejected" -> "REJECTED";
             case "approval.required" -> "AWAITING_APPROVAL";

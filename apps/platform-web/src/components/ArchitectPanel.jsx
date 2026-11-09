@@ -285,6 +285,158 @@ function ClarificationForm({ clarification, submitting, onSubmit, onCancel }) {
   )
 }
 
+const FULLSTACK_STEP_TEXT = {
+  PENDING: '等待执行',
+  RUNNING: '执行中…',
+  SUCCEEDED: '已完成',
+  FAILED: '失败',
+}
+
+/**
+ * 契约确认后的全栈生成卡片。
+ *
+ * 只在 full_stack_system 契约上展示可点击按钮：其它形态没有后端与 DDL，
+ * 服务端会直接 422，前端提前禁用避免无意义请求。
+ */
+function FullstackGeneration({ fullstack, contract, onGenerate }) {
+  const state = fullstack ?? {}
+  const status = state.status ?? 'IDLE'
+  const running = Boolean(state.starting) || status === 'RUNNING'
+  const steps = Array.isArray(state.steps) ? state.steps : []
+  const outputs = Array.isArray(state.outputs) ? state.outputs : []
+  const result = state.result
+  const isFullstack = contract?.appShape === 'full_stack_system'
+  const contractReady =
+    isFullstack &&
+    Array.isArray(contract?.apiRoutes) &&
+    contract.apiRoutes.length > 0 &&
+    typeof contract?.databaseDdl === 'string' &&
+    contract.databaseDdl.trim().length > 0
+  // 日志容器自身可滚动；保留最近 24 个文件足以覆盖一次完整生成，
+  // 既避免超长 DOM，也不会把早期生成的 schema.sql 挤出可视列表。
+  const visibleOutputs = outputs.slice(-24)
+
+  return (
+    <section
+      className="architect-fullstack"
+      data-fullstack-status={status}
+      aria-label="全栈代码生成"
+    >
+      <div className="architect-fullstack-head">
+        <div>
+          <span className="architect-form-eyebrow">CONTRACT → SANDBOX</span>
+          <h3>生成前后端与数据库代码</h3>
+          <p>
+            DBACoder 落库 DDL，BackendCoder 生成 Node API，FrontendCoder
+            接入真实请求，最后重启沙盒完成联调。
+          </p>
+        </div>
+        <button
+          type="button"
+          className="architect-primary architect-fullstack-trigger"
+          data-fullstack-generate
+          disabled={!contractReady || running}
+          title={
+            contractReady
+              ? '依据已确认契约生成全栈代码'
+              : isFullstack
+                ? '契约缺少 apiRoutes 或 databaseDdl，无法生成后端'
+                : '当前契约形态不需要生成后端代码'
+          }
+          onClick={() => onGenerate?.()}
+        >
+          {running ? (
+            <>
+              <span className="mini-spinner" aria-label="生成中" />
+              正在生成…
+            </>
+          ) : status === 'SUCCEEDED' ? (
+            '↻ 重新生成全栈代码'
+          ) : (
+            '🚀 开始生成全栈代码'
+          )}
+        </button>
+      </div>
+
+      {state.error && (
+        <div className="architect-fullstack-error" role="alert" data-fullstack-error>
+          <strong>全栈生成失败</strong>
+          <span>{state.error}</span>
+          {state.errorCode && <code>{state.errorCode}</code>}
+        </div>
+      )}
+
+      {steps.length > 0 && (
+        <ol className="fullstack-steps" data-fullstack-progress>
+          {steps.map((step) => (
+            <li
+              key={step.node}
+              className={`fullstack-step is-${String(step.status).toLowerCase()}`}
+              data-fullstack-step={step.node}
+              data-status={step.status}
+            >
+              <span className="fullstack-step-mark" aria-hidden="true">
+                {step.status === 'SUCCEEDED'
+                  ? '✓'
+                  : step.status === 'FAILED'
+                    ? '!'
+                    : step.status === 'RUNNING'
+                      ? '◌'
+                      : '·'}
+              </span>
+              <div className="fullstack-step-body">
+                <div className="fullstack-step-title">
+                  <strong>{step.label || step.node}</strong>
+                  <span>
+                    {step.summary || FULLSTACK_STEP_TEXT[step.status] || step.status}
+                  </span>
+                </div>
+                {Array.isArray(step.files) && step.files.length > 0 && (
+                  <code className="fullstack-step-files">
+                    {step.files.slice(0, 4).join(' · ')}
+                    {step.files.length > 4 ? ` +${step.files.length - 4}` : ''}
+                  </code>
+                )}
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      {result?.collectionPath && (
+        <p className="architect-decision-hint" data-fullstack-result>
+          数据表 <code>{result.table}</code> · 接口前缀{' '}
+          <code>{result.collectionPath}</code>
+        </p>
+      )}
+
+      {visibleOutputs.length > 0 && (
+        <details
+          className="fullstack-log"
+          data-fullstack-log
+          open={status === 'RUNNING'}
+        >
+          <summary>生成日志（{outputs.length}）</summary>
+          <div className="fullstack-log-body">
+            {visibleOutputs.map((output) => (
+              <article key={output.id} data-fullstack-output={output.path}>
+                <header>
+                  <code>{output.path}</code>
+                  <span>
+                    {output.bytes ? `${output.bytes} B` : output.node}
+                    {output.truncated ? ' · 已截断' : ''}
+                  </span>
+                </header>
+                <pre>{output.content}</pre>
+              </article>
+            ))}
+          </div>
+        </details>
+      )}
+    </section>
+  )
+}
+
 function ContractActions({ contract, submitting, onDecide }) {
   const [comment, setComment] = useState('')
   const [cancelConfirm, setCancelConfirm] = useState(false)
@@ -357,6 +509,7 @@ export default function ArchitectPanel({
   onDecide,
   onCancel,
   onRestart,
+  onFullstackGenerate,
   gate,
   onReleaseGate,
 }) {
@@ -642,16 +795,23 @@ export default function ArchitectPanel({
           )}
 
           {status === 'CONFIRMED' && (
-            <div className="architect-outcome is-success" role="status">
-              <span aria-hidden="true">✓</span>
-              <div>
-                <strong>实施契约已确认</strong>
-                <p>
-                  下一阶段可直接依据该契约生成前后端代码与数据库迁移。契约状态已
-                  持久化到本次 Architect Run。
-                </p>
+            <>
+              <div className="architect-outcome is-success" role="status">
+                <span aria-hidden="true">✓</span>
+                <div>
+                  <strong>实施契约已确认</strong>
+                  <p>
+                    下一阶段可直接依据该契约生成前后端代码与数据库迁移。契约状态已
+                    持久化到本次 Architect Run。
+                  </p>
+                </div>
               </div>
-            </div>
+              <FullstackGeneration
+                fullstack={state.fullstack}
+                contract={contract}
+                onGenerate={onFullstackGenerate}
+              />
+            </>
           )}
 
           {status === 'CANCELLED' && (

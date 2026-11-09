@@ -66,6 +66,22 @@ public class RunController {
     }
 
     /**
+     * 契约确认后启动全栈代码生成（DBACoder / BackendCoder / FrontendCoder）。
+     *
+     * <p>请求体直接透传给 Python AI Core，避免 BFF 与生成领域模型耦合：
+     * 契约结构由 Architect 服务端持有，BFF 只负责 SSE 透传与指标。</p>
+     */
+    @PostMapping(
+            value = "/fullstack",
+            produces = MediaType.TEXT_EVENT_STREAM_VALUE
+    )
+    public Flux<ServerSentEvent<String>> streamFullstack(
+            @RequestBody JsonNode request
+    ) {
+        return runStreamService.startFullstack(request);
+    }
+
+    /**
      * 断线重放：从 afterSeq 之后继续推送同一 Run 的事件。
      */
     @GetMapping(

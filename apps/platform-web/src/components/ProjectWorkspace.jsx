@@ -68,6 +68,7 @@ function ProjectWorkspaceInner({
   onArchitectAnswer,
   onArchitectDecide,
   onArchitectCancel,
+  onFullstackGenerate,
   onReleaseGate,
 }) {
   const { linked, setLinked } = useViewportState()
@@ -568,6 +569,7 @@ function ProjectWorkspaceInner({
           onAnswer={onArchitectAnswer}
           onDecide={onArchitectDecide}
           onCancel={onArchitectCancel}
+          onFullstackGenerate={onFullstackGenerate}
           gate={supervisorGate}
           onReleaseGate={onReleaseGate}
         />

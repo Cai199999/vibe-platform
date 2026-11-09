@@ -980,6 +980,9 @@ export default function WorkspacePage() {
   // 在架构面板中手动重试，避免 effect 死循环。
   const gateReleaseInflightRef = useRef(new Set())
   const gateAutoReleaseAttemptedRef = useRef(new Set())
+  // 每个项目只处理一次 fullstack.completed：刷新预览 / 聚焦 / Toast 不能因
+  // Architect 状态的其他字段更新而重复触发。
+  const fullstackHandledRef = useRef(new Map())
   // 页面级挂载标记：所有异步回调写状态前必须检查，避免卸载后 setState。
   const workspaceMountedRef = useRef(true)
   // 每个项目一个单调递增 epoch；新 Run / 强制关闭都会递增，旧请求的
@@ -1232,6 +1235,64 @@ export default function WorkspacePage() {
       [projectId]: (previous[projectId] ?? 0) + 1,
     }))
   }
+
+  /**
+   * 全栈生成完成：更新预览 URL 并强制刷新 iframe。
+   *
+   * fullstack.completed 的 previewUrl 可能带新的端口 / cache-busting 参数；
+   * 同时把新沙盒 ID 写入 run.sandboxIds，保证关闭项目时能正确销毁容器。
+   */
+  useEffect(() => {
+    Object.entries(architectStates).forEach(([projectId, architectState]) => {
+      const fullstack = architectState?.fullstack
+      if (!fullstack?.runId || fullstack.status !== 'SUCCEEDED') return
+      if (fullstackHandledRef.current.get(projectId) === fullstack.runId) return
+      fullstackHandledRef.current.set(projectId, fullstack.runId)
+      patchRun(projectId, (previous) => {
+        const sandboxId = fullstack.sandboxId || previous.result?.sandboxId
+        // 纯 Architect 流程此前没有 run.result；全栈生成第一次创建沙盒，
+        // 必须补一份最小结果，预览面板才会切换到新服务。
+        const nextResult = previous.result
+          ? {
+              ...previous.result,
+              sandboxId: sandboxId || previous.result.sandboxId,
+              previewUrl: fullstack.previewUrl || previous.result.previewUrl,
+            }
+          : sandboxId || fullstack.previewUrl
+            ? {
+                runId: fullstack.runId,
+                status: 'SUCCEEDED',
+                sandboxId: sandboxId || null,
+                previewUrl: fullstack.previewUrl || '',
+                commitHash: null,
+                baselineCommit: null,
+                retryCount: 0,
+                turnCount: 0,
+                commits: [],
+                assistantMessage: '全栈代码已生成，前后端服务已启动。',
+                generatedPatch: '',
+                verifyResult: null,
+                messages: [],
+                error: null,
+              }
+            : previous.result
+        return {
+          ...previous,
+          result: nextResult,
+          sandboxIds:
+            sandboxId && !previous.sandboxIds.includes(sandboxId)
+              ? [...previous.sandboxIds, sandboxId]
+              : previous.sandboxIds,
+        }
+      })
+      setPreviewRefresh((previous) => ({
+        ...previous,
+        [projectId]: (previous[projectId] ?? 0) + 1,
+      }))
+      focusPreview(projectId)
+      showToast('success', '全栈代码已生成，沙盒前后端已重启')
+    })
+  }, [architectStates])
 
   /**
    * 导入项目：上传 zip / 截图 -> Python 解包并启动沙盒 -> 新建 Tab。
@@ -2165,6 +2226,42 @@ export default function WorkspacePage() {
       return
     }
     handleStartArchitect(projectId)
+  }
+
+  /**
+   * 契约确认 -> 全栈代码生成。
+   *
+   * 复用当前项目的沙盒；导入 / 纯前端项目没有 sandboxId 时，把当前入口
+   * 源码作为 source.files 兜底，服务端会先创建一个沙盒再写入代码。
+   */
+  const handleFullstackGenerate = (projectId) => {
+    const project = projects.find((item) => item.id === projectId)
+    const architectState = architectStates[projectId]
+    const contract = architectState?.contract
+    if (!project || !contract?.contractId) {
+      showToast('error', '契约尚未确认，无法生成全栈代码')
+      return
+    }
+    if (contract.appShape !== 'full_stack_system') {
+      showToast('info', '当前契约形态不需要生成后端代码')
+      return
+    }
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const sandboxId = run.result?.sandboxId
+    // 有沙盒时不需要重复上传源码；没有沙盒时至少携带入口文件。
+    const files = sandboxId
+      ? {}
+      : { [projectEntryFile(project)]: projectSource(project) }
+    const started = architect.generateFullstack(projectId, {
+      tenantId: user?.tenantId || 'tenant_local',
+      sandboxId,
+      files,
+    })
+    if (started) {
+      showToast('info', '已启动全栈代码生成，正在写入沙盒…')
+    } else {
+      showToast('info', '全栈代码正在生成中，请稍候')
+    }
   }
 
   /**
@@ -3399,6 +3496,9 @@ export default function WorkspacePage() {
                   architect.decide(project.id, decision, comment)
                 }
                 onArchitectCancel={() => architect.cancel(project.id)}
+                onFullstackGenerate={() =>
+                  handleFullstackGenerate(project.id)
+                }
                 onReleaseGate={() => handleReleaseGate(project.id)}
               />
             )

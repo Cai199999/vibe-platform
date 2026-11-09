@@ -32,6 +32,8 @@ public class RunStreamService {
     private static final Logger log = LoggerFactory.getLogger(RunStreamService.class);
     private static final String STREAM_START_PATH =
             "/api/v1/internal/runs/execute/stream";
+    private static final String FULLSTACK_STREAM_START_PATH =
+            "/api/v1/internal/fullstack/runs/stream";
     private static final String STREAM_EVENTS_PATH =
             "/api/v1/internal/runs/{runId}/events/stream";
     private static final ParameterizedTypeReference<ServerSentEvent<String>> SSE_TYPE =
@@ -59,6 +61,33 @@ public class RunStreamService {
      * 启动 Run 并直接返回上游 SSE。
      */
     public Flux<ServerSentEvent<String>> start(CreateRunRequest request) {
+        return startStream(
+                STREAM_START_PATH,
+                request,
+                "RUN_REQUEST_SERIALIZATION_FAILED",
+                AdminMetricsService.UI_AGENT_ID
+        );
+    }
+
+    /**
+     * 启动契约确认后的全栈代码生成，并把 DBACoder / BackendCoder 等
+     * 节点事件原样透传给浏览器。
+     */
+    public Flux<ServerSentEvent<String>> startFullstack(JsonNode request) {
+        return startStream(
+                FULLSTACK_STREAM_START_PATH,
+                request,
+                "FULLSTACK_REQUEST_SERIALIZATION_FAILED",
+                AdminMetricsService.FULLSTACK_AGENT_ID
+        );
+    }
+
+    private Flux<ServerSentEvent<String>> startStream(
+            String upstreamPath,
+            Object request,
+            String serializationErrorCode,
+            String agentId
+    ) {
         final String jsonBody;
         try {
             jsonBody = objectMapper.writeValueAsString(request);
@@ -66,15 +95,15 @@ public class RunStreamService {
             return Flux.error(new AiCoreStreamException(
                     HttpStatus.BAD_REQUEST,
                     errorJson(
-                            "RUN_REQUEST_SERIALIZATION_FAILED",
-                            "Run 请求序列化失败: " + ex.getMessage()
+                            serializationErrorCode,
+                            "请求序列化失败: " + ex.getMessage()
                     )
             ));
         }
 
         long startedAt = System.nanoTime();
         return aiCoreStreamWebClient.post()
-                .uri(STREAM_START_PATH)
+                .uri(upstreamPath)
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept(MediaType.TEXT_EVENT_STREAM)
                 .bodyValue(jsonBody)
@@ -90,9 +119,10 @@ public class RunStreamService {
                     }
                     return response.bodyToFlux(SSE_TYPE);
                 })
-                .doOnNext(this::observeEvent)
+                .doOnNext(event -> observeEvent(event, agentId))
                 .doOnComplete(() -> log.info(
-                        "run stream completed elapsedMs={}",
+                        "{} completed elapsedMs={}",
+                        upstreamPath,
                         elapsedMillis(startedAt)
                 ))
                 .onErrorMap(
@@ -142,7 +172,10 @@ public class RunStreamService {
                     }
                     return response.bodyToFlux(SSE_TYPE);
                 })
-                .doOnNext(this::observeEvent)
+                .doOnNext(event -> observeEvent(
+                        event,
+                        AdminMetricsService.UI_AGENT_ID
+                ))
                 .onErrorMap(
                         WebClientRequestException.class,
                         ex -> new AiCoreStreamException(
@@ -163,7 +196,7 @@ public class RunStreamService {
      * 只在 payload.sandboxId 是文本时覆盖，避免 run.started 的 null 把之前
      * 已记录的 ID 抹掉。</p>
      */
-    private void observeEvent(ServerSentEvent<String> event) {
+    private void observeEvent(ServerSentEvent<String> event, String agentId) {
         String data = event.data();
         if (data == null || data.isBlank()) {
             return;
@@ -187,7 +220,7 @@ public class RunStreamService {
                     text(node, "type"),
                     parseTimestamp(text(node, "ts")),
                     payload,
-                    AdminMetricsService.UI_AGENT_ID
+                    agentId
             );
         } catch (Exception ex) {
             // 事件数据异常不能中断转发；下游仍按 seq 重连恢复。

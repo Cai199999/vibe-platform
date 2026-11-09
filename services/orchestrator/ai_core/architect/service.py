@@ -139,6 +139,24 @@ def get_active_architect_run(run_id: str) -> ActiveArchitectRun | None:
         return _ACTIVE_RUNS.get(run_id)
 
 
+def find_architect_contract(contract_id: str) -> ArchitectContract | None:
+    """按 contractId 查找内存中的契约。
+
+    Fullstack 请求允许只带 contractId；服务端从 Architect Run 注册表
+    找回权威契约，避免前端回传过期快照。仅返回已确认契约，未确认的
+    契约不能触发代码生成。
+    """
+    with _ACTIVE_LOCK:
+        for active in _ACTIVE_RUNS.values():
+            contract = active.contract
+            if contract is None or contract.contract_id != contract_id:
+                continue
+            if contract.status != "CONFIRMED":
+                return None
+            return contract.model_copy(deep=True)
+    return None
+
+
 class ArchitectService:
     """Architect 执行入口。"""
 

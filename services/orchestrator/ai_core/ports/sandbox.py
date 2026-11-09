@@ -157,6 +157,16 @@ class SandboxProvider(ABC):
         """
         raise SandboxGitError(f"当前 Provider 不支持生成快照 Diff: {sandbox_id}")
 
+    def restart(self, sandbox_id: str, ready_path: str = "/") -> None:
+        """重启沙盒内的开发服务，并等待 ``ready_path`` 可访问。
+
+        默认实现不支持重启；LocalDockerSandbox 通过 ``container.restart``
+        重新执行入口命令，从而拉起新生成的 Node 后端与 Vite 双服务。
+        FullstackGraph 用 ``ready_path="/api/health"`` 同时验证 Vite 代理
+        与后端是否真正就绪。
+        """
+        raise SandboxError(f"当前 Provider 不支持重启沙盒: {sandbox_id}")
+
     @abstractmethod
     def apply_patch(
         self,

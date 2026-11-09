@@ -643,6 +643,21 @@ class LocalDockerSandbox(SandboxProvider):
                 workdir=workdir,
             )
 
+    def restart(self, sandbox_id: str, ready_path: str = "/") -> None:
+        """重启容器并等待开发服务 / 反向代理就绪。
+
+        注意：容器入口为 ``npm run dev``。全栈生成会把该脚本改写为
+        ``node scripts/dev.mjs``，由它同时拉起 Node 后端与 Vite；
+        因此重启后不能只探测 ``/``，还要探测 ``/api/health`` 才能确认
+        Vite 的 ``/api`` 代理和沙盒后端都已可用。
+        """
+        container = self._get_container(sandbox_id)
+        try:
+            container.restart(timeout=20)
+        except DockerException as exc:
+            raise SandboxStartupError(f"重启沙盒失败: {exc}") from exc
+        self._wait_until_ready(container, sandbox_id, ready_path=ready_path)
+
     def apply_patch(
         self,
         sandbox_id: str,
@@ -1005,14 +1020,20 @@ class LocalDockerSandbox(SandboxProvider):
         container: Any,
         sandbox_id: str,
         timeout: int | None = None,
+        ready_path: str = "/",
     ) -> None:
-        """轮询容器内开发服务器，确认端口已真正可用。"""
+        """轮询容器内开发服务器，确认目标路径已真正可用。
+
+        ``ready_path="/api/health"`` 时，请求会经过 Vite 的 ``/api`` 代理，
+        同时验证前端、代理与 Node 后端三者都就绪。
+        """
         deadline = time.monotonic() + (
             timeout or self.settings.sandbox_start_timeout_seconds
         )
+        path = ready_path if ready_path.startswith("/") else f"/{ready_path}"
         probe = (
             "wget -q -T 2 -O /dev/null "
-            f"http://127.0.0.1:{self.settings.sandbox_dev_port}/"
+            f"http://127.0.0.1:{self.settings.sandbox_dev_port}{path}"
         )
         while time.monotonic() < deadline:
             container.reload()

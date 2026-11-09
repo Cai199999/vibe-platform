@@ -14,6 +14,7 @@ from importlib.metadata import PackageNotFoundError, version
 from fastapi import FastAPI
 
 from ai_core.api.architect import router as architect_router
+from ai_core.api.fullstack import router as fullstack_router
 from ai_core.api.runs import router as runs_router
 from ai_core.api.sandbox import router as sandbox_router
 from ai_core.api.supervisor import router as supervisor_router
@@ -44,6 +45,7 @@ app = FastAPI(
 app.include_router(sandbox_router)
 app.include_router(runs_router)
 app.include_router(architect_router)
+app.include_router(fullstack_router)
 app.include_router(supervisor_router)
 
 

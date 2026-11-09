@@ -14,5 +14,13 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     hmr: hmrClientPort > 0 ? { clientPort: hmrClientPort } : true,
+    // FullstackGraph：同源 /api 请求转发到沙盒内 Node 后端（默认 3100）。
+    // 旧沙盒没有该配置时，FrontendCoder 会在运行时补写并重启容器。
+    proxy: {
+      '/api': {
+        target: process.env.FULLSTACK_API_URL || 'http://127.0.0.1:3100',
+        changeOrigin: true,
+      },
+    },
   },
 })
