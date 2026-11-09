@@ -9,6 +9,10 @@ import {
   ViewportProvider,
   useViewportState,
 } from '../workspace/ViewportContext.jsx'
+import {
+  VIEWPORT_BASE_HEIGHT,
+  VIEWPORT_BASE_WIDTH,
+} from '../workspace/useFillViewport.js'
 
 /**
  * 单个项目窗口：支持「对比模式」与「展示模式」两种布局。
@@ -61,6 +65,9 @@ function ProjectWorkspaceInner({
   const [viewMode, setViewMode] = useState('compare')
   // 仅对比模式生效：当前显示画布还是预览。
   const [mode, setMode] = useState('canvas')
+  // 精准点击选择（Inspect）模式与命中组件后的标注草稿。
+  const [inspectMode, setInspectMode] = useState(false)
+  const [inspectDraft, setInspectDraft] = useState(null)
 
   // Supervisor 派发 UI Run（或门控释放）后，自动露出右侧执行时间轴。
   // 使用递增 nonce 而不是布尔值，保证连续两次 handoff 都能重新聚焦。
@@ -102,6 +109,114 @@ function ProjectWorkspaceInner({
         : run.result
           ? 'success'
           : 'idle'
+  const inspectBlocked = submitting || approvalPending || gateActive
+
+  /** 开启 Inspect 时自动切到预览；关闭时清空草稿与高亮。 */
+  const toggleInspect = () => {
+    if (!previewReady || inspectBlocked) return
+    const next = !inspectMode
+    setInspectMode(next)
+    setInspectDraft(null)
+    if (next && viewMode === 'compare') setMode('preview')
+  }
+
+  /** SDK 回传的命中结果转换为本地标注草稿。 */
+  const handleInspectPick = (payload) => {
+    if (!payload?.source?.file) return
+    const rect = payload.rect ?? { x: 0, y: 0, width: 0, height: 0 }
+    const toWorld = (value, total) =>
+      Math.min(1, Math.max(0, Number(value || 0) / total))
+    const worldRect = {
+      x: toWorld(rect.x, VIEWPORT_BASE_WIDTH),
+      y: toWorld(rect.y, VIEWPORT_BASE_HEIGHT),
+      width: toWorld(rect.width, VIEWPORT_BASE_WIDTH),
+      height: toWorld(rect.height, VIEWPORT_BASE_HEIGHT),
+    }
+    const source = payload.source
+    setInspectDraft({
+      source: {
+        file: source.file,
+        line: Number(source.line) || 1,
+        column: Number(source.column) || 1,
+        component: source.component || 'Component',
+        sourceKind: source.sourceKind || 'jsx',
+        marker: source.marker || '',
+        selector: source.selector || '',
+        kind: source.kind || 'element',
+      },
+      container: payload.container
+        ? {
+            source: payload.container.source,
+            rect: payload.container.rect,
+            relativeRect: payload.container.relativeRect,
+          }
+        : null,
+      rect,
+      worldRect,
+      tag: payload.tag || source.tag || 'element',
+      role: payload.role || source.tag || 'element',
+      label: payload.label || source.component || source.tag || '组件',
+      intent: '',
+      action: payload.source.kind === 'container' ? 'ADD' : 'MODIFY',
+      createdAt: new Date().toISOString(),
+    })
+  }
+
+  const handleInspectDraftChange = (patch) => {
+    setInspectDraft((previous) => (previous ? { ...previous, ...patch } : previous))
+  }
+
+  const handleInspectDraftSubmit = () => {
+    if (!inspectDraft || !inspectDraft.intent?.trim()) return
+    const action = inspectDraft.action === 'ADD' ? 'ADD' : 'MODIFY'
+    const clicked = inspectDraft.source
+    const container = inspectDraft.container?.source
+    // ADD 的落点是父容器；MODIFY 的落点就是点击元素。源码出处必须同步切换，
+    // 否则 AnnotationEnvelope 指向的仍是叶子节点，模型会插错位置。
+    const effective =
+      action === 'ADD' && container ? container : clicked
+    const targetView = (sourceItem, fallback = {}) => ({
+      marker: sourceItem.marker || '',
+      selector: sourceItem.selector || '',
+      label: sourceItem.component || sourceItem.tag || fallback.label || '组件',
+      role:
+        fallback.role ||
+        (sourceItem.kind === 'container' ? 'container' : 'element'),
+      component: sourceItem.component || 'Component',
+      tag: sourceItem.tag || fallback.tag || (action === 'ADD' ? 'div' : 'button'),
+      kind: sourceItem.kind || 'element',
+    })
+    onAnnotationAdd?.({
+      rect: inspectDraft.worldRect,
+      target: targetView(clicked, inspectDraft),
+      addTarget: targetView(effective, inspectDraft),
+      relativeRect:
+        action === 'ADD'
+          ? (inspectDraft.container?.relativeRect ?? {
+              x: 0,
+              y: 0,
+              width: 1,
+              height: 1,
+            })
+          : null,
+      action,
+      measured: {
+        mode: 'inspect',
+        source: effective,
+        clickedSource: clicked,
+      },
+      intent: inspectDraft.intent.trim(),
+      source: {
+        file: effective.file,
+        line: Number(effective.line) || 1,
+        column: Number(effective.column) || 1,
+        component: effective.component || 'Component',
+        sourceKind: effective.sourceKind || 'jsx',
+        kind: effective.kind || 'element',
+      },
+    })
+    setInspectDraft(null)
+  }
 
   return (
     <section
@@ -115,6 +230,39 @@ function ProjectWorkspaceInner({
               {annotations.length} 个标注
             </span>
           )}
+          <button
+            className={`inspect-toggle ${inspectMode ? 'is-active' : ''}`}
+            type="button"
+            data-inspect-toggle
+            aria-pressed={inspectMode}
+            disabled={!previewReady || inspectBlocked}
+            title={
+              !previewReady
+                ? '请先执行一次 Agent，等预览沙盒启动后可精准选择组件'
+                : inspectMode
+                  ? '退出精准选择模式'
+                  : '精准选择：移动鼠标高亮组件，左键点击生成标注'
+            }
+            onClick={toggleInspect}
+          >
+            <svg
+              className="inspect-toggle-icon"
+              viewBox="0 0 24 24"
+              width="15"
+              height="15"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M5 3l13.5 7.6-6.2 1.5L9.4 19 5 3z" />
+              <path d="M13 13l5 5" />
+            </svg>
+            {inspectMode ? '退出选择' : '精准选择'}
+          </button>
+
           <label className="model-picker" title="模型设置">
             <span className="model-gear" aria-hidden="true">
               ⚙
@@ -353,6 +501,12 @@ function ProjectWorkspaceInner({
               onGoToCanvas={() => setMode('canvas')}
               onApprovalDecision={onApprovalDecision}
               onCancelRun={onCancelRun}
+              inspectMode={inspectMode && previewVisible && !inspectBlocked}
+              onInspectPick={handleInspectPick}
+              inspectDraft={inspectDraft}
+              onInspectDraftChange={handleInspectDraftChange}
+              onInspectDraftCancel={() => setInspectDraft(null)}
+              onInspectDraftSubmit={handleInspectDraftSubmit}
             />
           </ErrorBoundary>
         </div>

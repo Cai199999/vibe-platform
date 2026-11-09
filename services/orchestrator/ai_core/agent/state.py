@@ -54,6 +54,10 @@ class AgentState(TypedDict, total=False):
     history_summary: str
     history_tokens_before: int
     history_tokens_after: int
+    # 外部检索（search_web）结果与查询词；由 research 节点写入，
+    # planner 会把它追加到计划中，coder 据此引用外部事实。
+    research_query: str
+    research_context: str
 
     # ---- 生成结果 ----
     plan: str

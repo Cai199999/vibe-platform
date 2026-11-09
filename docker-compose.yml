@@ -59,6 +59,13 @@ services:
       TOOL_SHELL_WORKDIR: ${TOOL_SHELL_WORKDIR:-/tmp/vibe-toolbox}
       TOOL_SHELL_TIMEOUT_SECONDS: ${TOOL_SHELL_TIMEOUT_SECONDS:-10}
       TOOL_SHELL_MAX_OUTPUT_CHARS: ${TOOL_SHELL_MAX_OUTPUT_CHARS:-20000}
+      # DuckDuckGo 搜索 Tool（无 API Key，只读）。
+      TOOL_WEB_SEARCH_ENABLED: ${TOOL_WEB_SEARCH_ENABLED:-true}
+      TOOL_WEB_SEARCH_TIMEOUT_SECONDS: ${TOOL_WEB_SEARCH_TIMEOUT_SECONDS:-8}
+      TOOL_WEB_SEARCH_MAX_RESULTS: ${TOOL_WEB_SEARCH_MAX_RESULTS:-5}
+      # 标准 MCP stdio Server；脚本通过只读 volume 挂载到 /app/scripts。
+      MCP_ENABLED: ${MCP_ENABLED:-true}
+      MCP_CALL_TIMEOUT_SECONDS: ${MCP_CALL_TIMEOUT_SECONDS:-10}
       MCP_SERVERS: ${MCP_SERVERS:-[]}
       # 图片导入视觉模型（OpenAI 兼容多模态）；留空则使用确定性占位页。
       VISION_API_KEY: ${VISION_API_KEY:-}
@@ -79,6 +86,8 @@ services:
       # 安全注意：Docker Socket 等价于宿主 root 权限，仅限本地受信任环境。
       # 生产环境替换为独立沙盒节点 / gVisor，禁止业务容器直接挂载。
       - /var/run/docker.sock:/var/run/docker.sock
+      # MCP Demo Server；只读挂载，容器内绝不修改仓库脚本。
+      - ./scripts:/app/scripts:ro
     group_add:
       # 宿主 docker 组 GID，Linux 上用 `stat -c '%g' /var/run/docker.sock` 获取。
       - "${DOCKER_GID:-115}"

@@ -153,13 +153,27 @@ class Settings(BaseSettings):
     tool_shell_timeout_seconds: int = 10
     tool_shell_max_output_chars: int = 20_000
 
+    # DuckDuckGo 搜索 Tool：默认开启；端点 / 超时 / 结果数均由服务端控制。
+    tool_web_search_enabled: bool = True
+    tool_web_search_endpoint: str = "https://html.duckduckgo.com/html/"
+    tool_web_search_fallback_endpoint: str = "https://lite.duckduckgo.com/lite/"
+    tool_web_search_timeout_seconds: float = 8.0
+    tool_web_search_max_results: int = 5
+    tool_web_search_user_agent: str = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    )
+
     # ------------------------------------------------------------
     # MCP（Model Context Protocol）
     # ------------------------------------------------------------
-    # 列表项示例（未来由官方 mcp SDK 挂载）：
-    #   [{"name":"filesystem","transport":"stdio",
-    #     "command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/tmp"]}]
-    # 当前只保存配置，不建立连接；绝不能从浏览器传入。
+    # 标准 MCP stdio Server 列表。每项：
+    #   {"name":"vibe_demo","transport":"stdio","command":"python",
+    #    "args":["scripts/mcp_server_demo.py"],"enabled":true,
+    #    "allowed_tools":["get_current_time"],"timeout_seconds":10}
+    # 只允许服务端配置，绝不接受浏览器传入。
+    mcp_enabled: bool = True
+    mcp_call_timeout_seconds: float = 10.0
     mcp_servers: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------

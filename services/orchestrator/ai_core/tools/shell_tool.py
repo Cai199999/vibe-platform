@@ -15,6 +15,7 @@ LangGraph 工具箱，但调用会返回明确的禁用提示，便于演示与�
 
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 import subprocess
@@ -25,6 +26,8 @@ from langchain_core.tools import BaseTool, tool
 
 from ai_core.config import Settings
 from ai_core.tools.base import ToolDescriptor, ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 _ALLOWED_COMMANDS = {
     "ls",
@@ -175,12 +178,29 @@ def register_shell_tool(registry: ToolRegistry, settings: Settings) -> None:
     )
 
 
-def build_default_toolbox(settings: Settings) -> ToolRegistry:
+def build_default_toolbox(
+    settings: Settings,
+    *,
+    include_mcp: bool = True,
+) -> ToolRegistry:
     """构建 LangGraph 可用的默认工具箱。
 
     新增 Tool 时只需在此注册；Agent 的 Manifest 通过 supported_tools
     声明可用子集，运行时由 Skill 决定实际挂载范围。
+
+    MCP Server 发现失败只记录 warning：搜索 / shell 等本地 Tool 必须仍然
+    可用，不能让一个挂掉的外部进程拖垮整个 Agent。
     """
+    from ai_core.tools.web_search_tool import register_web_search
+
     registry = ToolRegistry()
     register_shell_tool(registry, settings)
+    register_web_search(registry, settings)
+    if include_mcp and settings.mcp_enabled:
+        try:
+            from ai_core.mcp.tools import register_mcp_tools
+
+            register_mcp_tools(registry, settings)
+        except Exception as exc:  # noqa: BLE001 - MCP 故障隔离
+            logger.warning("MCP tool discovery failed: %s", exc)
     return registry

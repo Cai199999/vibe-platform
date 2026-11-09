@@ -92,6 +92,21 @@
         "skillFile": "config/skills/tailwind_magic.skill.json",
         "priority": 40
       }
+    },
+    {
+      "skill_id": "ui.accessibility",
+      "name": "W3C 无障碍规范",
+      "description": "从 config/skills/accessibility.skill.md 挂载的 Markdown Skill，约束生成代码符合 WCAG 2.1 AA / WAI-ARIA。",
+      "prompt_ref": "accessibility.skill.md",
+      "rag_refs": [],
+      "tools": ["read_file", "apply_code_edit", "run_build"],
+      "metadata": {
+        "stage": "M3",
+        "external": true,
+        "skillFile": "config/skills/accessibility.skill.md",
+        "format": "markdown",
+        "priority": 30
+      }
     }
   ],
   "keywords": [

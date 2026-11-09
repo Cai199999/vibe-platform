@@ -34,9 +34,9 @@ services/orchestrator/                Python 3.12 + FastAPI + LangGraph AI Core
 services/orchestrator/ai_core/        Sandbox / Agent / API
 services/orchestrator/ai_core/*/manifest.json 声明式 Agent 能力清单
 services/orchestrator/config/custom_agents/   企业专属 Agent Manifest（演示：Excel 报表专家）
-services/orchestrator/config/skills/          外部 Skill 提示词（tailwind_magic.skill.json）
-services/orchestrator/ai_core/tools/          LangGraph 工具箱（shell_tool 示例 + 安全白名单）
-services/orchestrator/sandbox_template/ React + Vite 沙盒基础镜像
+services/orchestrator/config/skills/          外部 Skill（tailwind_magic.skill.json / accessibility.skill.md）
+services/orchestrator/ai_core/tools/          LangGraph 工具箱（shell_tool + search_web + MCP 适配）
+services/orchestrator/sandbox_template/       React / Vue + Vite 沙盒基础镜像（含 Inspect 源码插件）
 infra/migrations/schema.sql           M1 初始 MySQL schema（无物理外键）
 scripts/init-db.sh                    应用 schema 到已有 Docker MySQL
 scripts/smoke-test.sh                 验证 Java -> Python 跨语言调用
@@ -50,12 +50,14 @@ scripts/rollback_e2e_test.py          浏览器 E2E（Git 提交顺序 / 逐轮�
 scripts/annotation_delete_rollback_e2e_test.py 浏览器 E2E（删除标注回到创建前基线 / 清除全部）
 scripts/add_component_e2e_test.py     浏览器 E2E（圈选卡片内部 → ADD 红色提交按钮 → 构建/预览）
 scripts/blank_area_add_e2e_test.py    浏览器 E2E（画圈框住空白区域 → 自动判定 ADD → 父容器内插入按钮 → 构建）
+scripts/inspect_mode_e2e_test.py      浏览器 E2E（精准点击 React/Vue 按钮 → 源码行号 → visual-draw 标注）
 scripts/import_project_e2e_test.py    浏览器 E2E（导入 React zip / HTML zip / 图片，自动建 Tab 与预览）
 scripts/popover_close_race_e2e_test.py 浏览器 E2E（发送后立即关闭浮层：中止请求 / 丢弃迟到结果 / 预览不报错）
 scripts/supervisor_e2e_test.py        Supervisor 路由 / 注册中心 / 门控 API E2E
 scripts/supervisor_both_e2e_test.py   both 模式 API E2E（契约确认 → release → UI Run）
 scripts/supervisor_mixed_ui_e2e_test.py 浏览器级 both 混合 E2E（决策可视化 + 时间轴）
 scripts/custom_agent_e2e_test.py      浏览器级专属 Agent 秒级接入 E2E
+scripts/mcp_server_demo.py            标准 MCP stdio Server 示例（get_current_time）
 docs/DEMO_3_MIN.md                    3 分钟面试演示脚本
 docs/screenshots/                     联调截图
 docker-compose.yml                    只编排平台自身服务
@@ -406,14 +408,15 @@ CPU 会短时冲高，但每个容器受 1 CPU 限额约束。沙盒镜像
 
 ### Tools / Skills / MCP 扩展点
 
-- **Tools**：`ai_core/tools/` 提供 `ToolRegistry` 与 `shell_tool`，已注册进
-  LangGraph `ToolNode`。默认 `TOOL_SHELL_ENABLED=false`；开启后仍只允许只读
-  白名单命令、固定工作目录、超时与输出截断，拒绝 shell 元字符与路径逃逸。
-- **Skills**：`config/skills/*.skill.json` 由 `SkillRegistry` 扫描；
-  `tailwind_magic` 在 `ui_graph` manifest 中挂载，向 System Prompt 注入
-  Tailwind 设计规范。
-- **MCP**：`config.py` 提供 `MCP_SERVERS: list[dict]`，`graph.py` 预留官方
-  `mcp` SDK 挂载外部 Server（文件系统 / 浏览器）的注释与配置入口。
+- **Tools**：`ai_core/tools/` 提供 `ToolRegistry`、`shell_tool` 与
+  `search_web`（DuckDuckGo）。`research` 节点在用户要求“查最新资料 / 官网”
+  时真实调用，结果并入 plan；Supervisor 网关可列出 / 调用工具。
+- **Skills**：`config/skills/*.skill.json` 与 `*.skill.md`（YAML frontmatter）
+  均由 `SkillRegistry` 扫描；`tailwind_magic`、`ui.accessibility` 挂载到
+  `ui_graph`，初始化时追加进 Coder System Prompt。
+- **MCP**：`scripts/mcp_server_demo.py` 是标准 JSON-RPC stdio Server；
+  `MCP_SERVERS` 配置后由 `ai_core/mcp/` 自动发现并映射为 LangChain Tool，
+  支持 `allowed_tools` 白名单、超时与最小环境变量。
 
 ## 验证
 
@@ -462,6 +465,10 @@ python3 scripts/supervisor_both_e2e_test.py
 # 浏览器：决策可视化 + both 双阶段时间轴 + 专属 Agent 目录/路由
 /tmp/vibe-browser/bin/python scripts/supervisor_mixed_ui_e2e_test.py
 /tmp/vibe-browser/bin/python scripts/custom_agent_e2e_test.py
+
+# 浏览器：精准点击选择（React src/App.jsx + Vue src/VueDemo.vue:17）
+PLAYWRIGHT_CHROMIUM_EXECUTABLE=<chrome> \
+  /tmp/vibe-browser/bin/python scripts/inspect_mode_e2e_test.py
 ```
 
 覆盖：`handoff_ui / handoff_architect / handoff_both / handoff_custom /

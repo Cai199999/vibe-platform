@@ -7037,3 +7037,252 @@ body.is-viewport-panning * {
     align-items: flex-start;
   }
 }
+
+/* ============================================================
+ * 精准点击选择（Inspect Mode）
+ *
+ * 工具栏开关、iframe 命中高亮与标注输入卡片。视觉上与现有深色
+ * 工具栏保持一致，高亮使用 Chrome DevTools 风格的青色描边。
+ * ============================================================ */
+.inspect-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.55);
+  color: #cbd5e1;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.inspect-toggle:hover:not(:disabled) {
+  border-color: rgba(56, 189, 248, 0.6);
+  color: #e0f2fe;
+}
+
+.inspect-toggle.is-active {
+  border-color: #38bdf8;
+  background: rgba(14, 165, 233, 0.2);
+  color: #e0f2fe;
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.22),
+    0 0 16px rgba(56, 189, 248, 0.22);
+}
+
+.inspect-toggle:disabled {
+  opacity: 0.46;
+  cursor: not-allowed;
+}
+
+.inspect-toggle-icon {
+  flex: 0 0 auto;
+}
+
+.preview-gesture-layer.is-inspecting {
+  cursor: crosshair;
+}
+
+/* 高亮框绘制在父页面，按 iframe transform 映射，pointer-events 必须关闭。 */
+.inspect-highlight {
+  position: absolute;
+  z-index: 4;
+  pointer-events: none;
+  border: 2px solid #38bdf8;
+  border-radius: 3px;
+  background: rgba(56, 189, 248, 0.1);
+  box-shadow: 0 0 0 1px rgba(2, 6, 23, 0.55),
+    0 0 20px rgba(56, 189, 248, 0.35);
+}
+
+.inspect-highlight-label {
+  position: absolute;
+  left: -2px;
+  bottom: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 460px;
+  padding: 3px 8px;
+  border-radius: 4px 4px 4px 0;
+  background: #0284c7;
+  color: #f0f9ff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transform: translateY(-1px);
+}
+
+.inspect-highlight-label em {
+  font-style: normal;
+  font-weight: 500;
+  opacity: 0.86;
+}
+
+/* 命中后的标注输入卡片：悬浮在预览舞台右上角，不遮挡中心内容。 */
+.inspect-draft {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 30;
+  width: min(360px, calc(100% - 32px));
+  padding: 14px;
+  border: 1px solid rgba(56, 189, 248, 0.38);
+  border-radius: 14px;
+  background: rgba(2, 6, 23, 0.94);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(56, 189, 248, 0.12) inset;
+  backdrop-filter: blur(16px);
+  color: #e2e8f0;
+}
+
+.inspect-draft-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.inspect-draft-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.inspect-draft-badge {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(56, 189, 248, 0.18);
+  color: #7dd3fc;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.inspect-draft-close {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.inspect-draft-close:hover {
+  background: rgba(148, 163, 184, 0.14);
+  color: #f8fafc;
+}
+
+.inspect-draft-source {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.inspect-draft-source code {
+  color: #7dd3fc;
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+.inspect-draft-tag {
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.inspect-draft-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.inspect-draft-actions button {
+  height: 28px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.6);
+  color: #cbd5e1;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.inspect-draft-actions button.is-active {
+  border-color: #38bdf8;
+  background: rgba(14, 165, 233, 0.18);
+  color: #e0f2fe;
+}
+
+.inspect-draft-hint {
+  margin: 0 0 8px;
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.inspect-draft-hint code {
+  color: #7dd3fc;
+}
+
+.inspect-draft-intent {
+  width: 100%;
+  min-height: 72px;
+  padding: 9px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 9px;
+  background: rgba(15, 23, 42, 0.86);
+  color: #e2e8f0;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.inspect-draft-intent:focus {
+  outline: none;
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.16);
+}
+
+.inspect-draft-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.inspect-draft-meta {
+  color: #64748b;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.inspect-draft-buttons {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.inspect-draft-buttons button {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: 11.5px;
+}

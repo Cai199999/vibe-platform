@@ -272,7 +272,7 @@ function inferAnnotationAction(target, intent, geometryAction) {
  * worldTarget 保留归一化坐标；target 记录圈选命中的元素，帮助模型把
  * “改成蓝色 / 文字改为提交 / 放大一倍”绑定到正确的组件。
  */
-function buildAnnotation(entry, source, targetFile = TARGET_FILE) {
+function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) {
   const rect = entry.rect
   const instruction = entry.intent.trim()
   // 旧 localStorage 里的标注没有 action：按指令与几何判定即时推断。
@@ -300,7 +300,21 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE) {
           component: 'App',
           tag: 'button',
         })
-  const line = findTargetLine(source, target?.marker)
+  // Inspect 模式由 SDK 回传真实文件 / 行号 / 列号；圈选模式继续使用
+  // data-source 标记反查行号。两者最终都收敛到同一个 AnnotationEnvelope。
+  const precise = entry.inspectSource ?? entry.source ?? null
+  const resolvedFile = precise?.file || targetFile
+  const line = Number(precise?.line) || findTargetLine(source, target?.marker)
+  const column = Number(precise?.column) || 1
+  const sourceText = files?.[resolvedFile] ?? source
+  const sourceLines = String(sourceText || '').split('\n')
+  const startLine = precise ? Math.max(1, line - 2) : 1
+  const endLine = precise
+    ? Math.min(sourceLines.length, line + 2)
+    : sourceLines.length
+  const snippetContent = precise
+    ? sourceLines.slice(startLine - 1, endLine).join('\n')
+    : sourceText
   const acceptance =
     action === 'ADD'
       ? [
@@ -317,7 +331,9 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE) {
   return {
     version: 1,
     annotationId: entry.id,
-    type: 'drag',
+    // visual-draw = 精准点击选择；drag = 圈选。后端两者都按 UI 标注处理，
+    // 保留 type 便于审计与后续差异化策略。
+    type: precise ? 'visual-draw' : 'drag',
     action,
     worldTarget: {
       x: Number(rect.x.toFixed(6)),
@@ -342,21 +358,36 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE) {
       ? {
           mode: 'source',
           source: {
-            file: targetFile,
+            file: resolvedFile,
             line,
-            column: 7,
-            component: target.component || 'App',
-            sourceKind: targetFile.endsWith('.html') ? 'html' : 'jsx',
+            column,
+            endLine: precise ? line : undefined,
+            endColumn: precise
+              ? (sourceLines[line - 1]?.length ?? 0) + 1
+              : undefined,
+            component: precise?.component || target.component || 'App',
+            sourceKind:
+              precise?.sourceKind ||
+              (resolvedFile.endsWith('.vue')
+                ? 'vue'
+                : resolvedFile.endsWith('.html')
+                  ? 'html'
+                  : 'jsx'),
           },
           selector: target.selector,
           snippet: {
-            startLine: 1,
-            endLine: source.split('\n').length,
-            content: source,
-            hash: 'sha256:canvas-demo',
+            startLine,
+            endLine,
+            content: snippetContent,
+            hash: precise
+              ? `inspect:${resolvedFile}:${line}`
+              : 'sha256:canvas-demo',
           },
         }
       : null,
+    // Inspect 模式保留命中测量信息（点击元素 vs. ADD 落点父容器），
+    // 便于审计“高亮的是谁、实际改的是谁”。圈选模式该字段为空。
+    measured: entry.measured ?? undefined,
     intent: {
       kind: 'UI_ONLY',
       ui: {
@@ -1124,7 +1155,16 @@ export default function WorkspacePage() {
 
   const handleAnnotationAdd = (
     projectId,
-    { rect, target, addTarget, relativeRect, action: geometryAction, measured },
+    {
+      rect,
+      target,
+      addTarget,
+      relativeRect,
+      action: geometryAction,
+      measured,
+      intent: presetIntent = '',
+      source: inspectSource = null,
+    },
   ) => {
     patchRun(projectId, (previous) => {
       if (previous.annotations.length >= MAX_ANNOTATIONS) return previous
@@ -1150,8 +1190,11 @@ export default function WorkspacePage() {
             // 空白区域 / 圈远大于节点 → ADD；命中元素 → MODIFY，
             // 输入“添加”后自动切换，用户也可在浮层内手动覆盖。
             action: autoAction,
-            actionSource: 'auto',
-            intent: '',
+            actionSource: inspectSource ? 'inspect' : 'auto',
+            // Inspect 模式会直接带上用户填写的意图与真实源码出处；
+            // 圈选模式仍从空输入框开始。
+            intent: presetIntent,
+            inspectSource,
             createdAt: new Date().toISOString(),
             // 每个标注 = 一个独立 Agent thread，后续对话复用同一个 id。
             threadId: newId('thread'),
@@ -1420,7 +1463,10 @@ export default function WorkspacePage() {
       annotations: annotations
         .filter((annotation) => annotation.intent?.trim())
         .map((annotation) =>
-          buildAnnotation(annotation, sourceCode, targetFile),
+          buildAnnotation(annotation, sourceCode, targetFile, {
+            ...(project.files ?? {}),
+            [targetFile]: sourceCode,
+          }),
         ),
       sandboxId: sandboxId || undefined,
       files,

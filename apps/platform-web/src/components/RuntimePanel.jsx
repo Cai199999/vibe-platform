@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import DiffView from './DiffView.jsx'
+import InspectDraftCard from './InspectDraftCard.jsx'
 import ScaledPreview from './ScaledPreview.jsx'
 
 /**
@@ -453,6 +454,12 @@ export default function RuntimePanel({
   onGoToCanvas,
   onApprovalDecision,
   onCancelRun,
+  inspectMode = false,
+  onInspectPick,
+  inspectDraft = null,
+  onInspectDraftChange,
+  onInspectDraftCancel,
+  onInspectDraftSubmit,
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false)
   const {
@@ -528,6 +535,18 @@ export default function RuntimePanel({
             src={previewUrl}
             title={`${projectName} 沙盒预览`}
             visible={visible && !submitting}
+            inspectMode={inspectMode}
+            onInspectPick={onInspectPick}
+          />
+        )}
+
+        {/* 精准选择命中后，在预览画布内直接弹出标注输入卡片。 */}
+        {inspectDraft && !submitting && !approval && (
+          <InspectDraftCard
+            draft={inspectDraft}
+            onChange={onInspectDraftChange}
+            onCancel={onInspectDraftCancel}
+            onSubmit={onInspectDraftSubmit}
           />
         )}
 

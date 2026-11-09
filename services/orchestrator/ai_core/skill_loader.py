@@ -2,24 +2,41 @@
 
 一个 Skill = 领域 System Prompt + 可选 Tool 子集 + 可选 RAG 引用。
 与 Agent Manifest 不同，Skill 文件可以携带实际 Prompt；加载时只读取
-配置目录内的 JSON 文本，绝不执行代码，也不从网络拉取内容。
+配置目录内的文本，绝不执行代码，也不从网络拉取内容。
 
-文件命名：``<dir>/*.skill.json``。字段支持 camelCase（推荐）与 snake_case。
+支持两种格式：
+  - ``<dir>/*.skill.json``：结构化 JSON，字段支持 camelCase / snake_case；
+  - ``<dir>/*.skill.md``  ：YAML frontmatter + Markdown 正文，正文即 Prompt。
+    frontmatter 示例::
+
+        ---
+        skillId: ui.accessibility
+        name: W3C 无障碍规范
+        agentId: ui_graph
+        priority: 30
+        ---
+        Must follow WCAG 2.1 ...
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
 MAX_SKILL_FILE_BYTES = 128 * 1024
 MAX_SYSTEM_PROMPT_CHARS = 24_000
+_MARKDOWN_FRONTMATTER = re.compile(
+    r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)",
+    re.DOTALL,
+)
 
 
 class SkillFileError(ValueError):
@@ -29,7 +46,7 @@ class SkillFileError(ValueError):
 
 
 class SkillFile(BaseModel):
-    """``*.skill.json`` 的强类型契约。"""
+    """``*.skill.json`` / ``*.skill.md`` frontmatter 的强类型契约。"""
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
@@ -84,23 +101,39 @@ def _read_prompt(base: Path, payload: SkillFile) -> str:
     return prompt
 
 
-def read_skill_file(path: Path) -> SkillDescriptor:
-    """读取并校验单个 Skill 文件，转换为注册中心描述符。
+def _payload_from_markdown(path: Path, text: str) -> SkillFile:
+    """解析 YAML frontmatter + Markdown 正文。
 
-    说明：``SkillDescriptor`` 在函数内延迟导入。它定义于
-    ``supervisor.skills``，而 ``supervisor`` 包的 ``__init__`` 会加载
-    Graph/Registry，后者又依赖本模块；顶层导入会形成循环引用。
+    正文被视为 System Prompt；frontmatter 只负责元数据。这样领域规范可以
+    用 Markdown 维护（标题、列表、代码块），而不是塞进 JSON 字符串。
     """
-    from ai_core.supervisor.skills import SkillDescriptor
-
+    match = _MARKDOWN_FRONTMATTER.match(text)
+    if not match:
+        raise SkillFileError(f"Markdown Skill 缺少 YAML frontmatter: {path.name}")
     try:
-        if path.stat().st_size > MAX_SKILL_FILE_BYTES:
-            raise SkillFileError(f"Skill 文件超过大小限制: {path.name}")
-        payload = SkillFile.model_validate_json(path.read_text(encoding="utf-8"))
-    except SkillFileError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - Pydantic / IO 统一包装
-        raise SkillFileError(f"Skill 文件解析失败 {path.name}: {exc}") from exc
+        metadata = yaml.safe_load(match.group(1)) or {}
+    except yaml.YAMLError as exc:
+        raise SkillFileError(
+            f"Markdown Skill frontmatter 解析失败 {path.name}: {exc}"
+        ) from exc
+    if not isinstance(metadata, dict):
+        raise SkillFileError(f"Markdown Skill frontmatter 必须是对象: {path.name}")
+    body = text[match.end() :].strip()
+    if not body:
+        raise SkillFileError(f"Markdown Skill 正文不能为空: {path.name}")
+    payload = dict(metadata)
+    # 正文优先于 frontmatter 中的 systemPrompt，避免出现两份 Prompt。
+    payload["systemPrompt"] = body
+    return SkillFile.model_validate(payload)
+
+
+def _descriptor_from_payload(
+    path: Path,
+    payload: SkillFile,
+    *,
+    source: str,
+) -> SkillDescriptor:
+    from ai_core.supervisor.skills import SkillDescriptor
 
     if not payload.enabled:
         raise SkillFileError(f"Skill 已禁用: {payload.skill_id}")
@@ -118,10 +151,38 @@ def read_skill_file(path: Path) -> SkillDescriptor:
             "version": payload.version,
             "priority": payload.priority,
             "keywords": payload.keywords,
-            "source": "skill_file",
-            "stage": "M3-preview",
+            "source": source,
+            "stage": "M3",
         },
     )
+
+
+def read_skill_file(path: Path) -> SkillDescriptor:
+    """读取并校验单个 Skill 文件（JSON 或 Markdown），转为注册中心描述符。
+
+    说明：``SkillDescriptor`` 在函数内延迟导入。它定义于
+    ``supervisor.skills``，而 ``supervisor`` 包的 ``__init__`` 会加载
+    Graph/Registry，后者又依赖本模块；顶层导入会形成循环引用。
+    """
+    try:
+        if path.stat().st_size > MAX_SKILL_FILE_BYTES:
+            raise SkillFileError(f"Skill 文件超过大小限制: {path.name}")
+        text = path.read_text(encoding="utf-8")
+        if path.suffix.lower() == ".md":
+            payload = _payload_from_markdown(path, text)
+            source = "skill_markdown"
+        else:
+            try:
+                payload = SkillFile.model_validate_json(text)
+            except Exception as exc:  # noqa: BLE001 - Pydantic 错误统一包装
+                raise SkillFileError(f"Skill 文件解析失败 {path.name}: {exc}") from exc
+            source = "skill_file"
+    except SkillFileError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - IO / 解析统一包装
+        raise SkillFileError(f"Skill 文件解析失败 {path.name}: {exc}") from exc
+
+    return _descriptor_from_payload(path, payload, source=source)
 
 
 def load_skill_directory(directory: Path | str) -> list[SkillDescriptor]:
@@ -130,7 +191,8 @@ def load_skill_directory(directory: Path | str) -> list[SkillDescriptor]:
     if not base.exists() or not base.is_dir():
         return []
     skills: list[SkillDescriptor] = []
-    for path in sorted(base.glob("*.skill.json")):
+    paths = sorted(base.glob("*.skill.json")) + sorted(base.glob("*.skill.md"))
+    for path in paths:
         try:
             skills.append(read_skill_file(path))
         except SkillFileError as exc:

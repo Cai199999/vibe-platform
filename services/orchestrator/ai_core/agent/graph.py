@@ -19,6 +19,7 @@ from __future__ import annotations
 import copy
 import difflib
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -55,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 NODE_LABELS = {
     "summarize_history": "压缩对话记忆",
+    "research": "检索外部资料",
     "planner": "理解修改意图",
     "clarify_gate": "检查信息完整性",
     "coder": "生成修改方案",
@@ -113,21 +115,13 @@ class AgentGraphRunner:
         # 调用，但能保证写沙盒 / 构建之后不再继续推进。
         self._cancel_check = cancel_check
 
-        # LangGraph 工具箱：当前 Graph 以结构化 JSON 生成代码，不主动发起
-        # tool call；但工具已注册为真正的 ToolNode，后续接入 tool-calling
-        # 模型时可直接把 self._tool_node 作为图节点挂载，无需改业务代码。
+        # LangGraph 工具箱：本地 search_web / shell_tool 与 MCP 远端工具
+        # 统一注册到 ToolRegistry。当前模型仍输出结构化 JSON，因此由
+        # research 节点在计划前显式调用 search_web；ToolNode 保留给后续
+        # tool-calling 模型，无需改业务代码即可挂载。
         #
-        # MCP 预留：官方 mcp SDK 的连接应放在 Service 启动阶段，而不是节点
-        # 内。示例（伪代码，未引入依赖）：
-        #   from mcp import ClientSession, StdioServerParameters
-        #   from mcp.client.stdio import stdio_client
-        #   params = StdioServerParameters(command=cfg["command"], args=cfg["args"])
-        #   async with stdio_client(params) as (read, write):
-        #       async with ClientSession(read, write) as session:
-        #           await session.initialize()
-        #           tools = await session.list_tools()
-        # 再把远端工具适配为 BaseTool 注册进 ToolRegistry；MCP 配置只允许
-        # 来自服务端 settings.mcp_servers，绝不接受浏览器输入。
+        # MCP 配置只来自服务端 settings.mcp_servers，绝不接受浏览器输入；
+        # 工具适配层见 ai_core/mcp/tools.py（stdio 子进程 + 白名单）。
         self._settings = get_settings()
         self._toolbox: ToolRegistry = build_default_toolbox(self._settings)
         self._tool_node = ToolNode(self._toolbox.list_tools())
@@ -196,6 +190,10 @@ class AgentGraphRunner:
             ),
         )
         builder.add_node(
+            "research",
+            self._instrument("research", NODE_LABELS["research"], self._research),
+        )
+        builder.add_node(
             "planner",
             self._instrument("planner", NODE_LABELS["planner"], self._planner),
         )
@@ -235,7 +233,8 @@ class AgentGraphRunner:
         builder.add_node("failed", self._failed)
 
         builder.add_edge(START, "summarize_history")
-        builder.add_edge("summarize_history", "planner")
+        builder.add_edge("summarize_history", "research")
+        builder.add_edge("research", "planner")
         builder.add_edge("planner", "clarify_gate")
         builder.add_conditional_edges(
             "clarify_gate",
@@ -444,6 +443,60 @@ class AgentGraphRunner:
         )
         return update
 
+    def _research(self, state: AgentState) -> dict[str, Any]:
+        """在规划前按需调用 search_web，为模型补充外部事实。
+
+        触发条件是用户指令里出现“搜索 / 查一下 / 最新版本 / 官网”等
+        明确的外部资料诉求。没有触发词时直接跳过，不产生额外网络请求；
+        搜索失败也只记录消息，绝不阻断主流程。
+        """
+        query = _extract_research_query(state.get("annotation_context") or {})
+        if not query:
+            return {}
+        if not self._settings.tool_web_search_enabled:
+            return {
+                "research_query": query,
+                "messages": [
+                    _message(
+                        "research",
+                        "search_web 已禁用（TOOL_WEB_SEARCH_ENABLED=false）",
+                    )
+                ],
+            }
+        tool = self._toolbox.get("search_web")
+        if tool is None:
+            return {}
+
+        self._emit(
+            "node.progress",
+            {
+                "node": "research",
+                "message": f"检索外部资料：{query}",
+            },
+            dedupe_key=f"node.progress:research:{query}",
+        )
+        try:
+            output = tool.invoke(
+                {
+                    "query": query,
+                    "max_results": self._settings.tool_web_search_max_results,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - 检索失败不阻断 Run
+            logger.warning("search_web invocation failed: %s", exc)
+            return {
+                "research_query": query,
+                "messages": [_message("research", f"外部检索失败: {exc}", error=True)],
+            }
+        text = str(output or "").strip()
+        if len(text) > 6000:
+            text = f"{text[:6000]}\n...[truncated]"
+        return {
+            "research_query": query,
+            "research_context": text,
+            "messages": [_message("research", f"搜索「{query}」完成：{text[:600]}")],
+        }
+
     def _planner(self, state: AgentState) -> dict[str, Any]:
         context = state["annotation_context"]
         answers = list(state.get("clarification_answers") or [])
@@ -468,6 +521,14 @@ class AgentGraphRunner:
             previous_errors=previous_errors,
             clarification_answers=answers or None,
         )
+        # 把 research 节点的外部检索结果并入计划，Coder 会从 state["plan"]
+        # 读到它；要求模型引用时保留 URL，便于用户核查事实来源。
+        plan_text = plan.plan
+        research = (state.get("research_context") or "").strip()
+        if research:
+            plan_text = (
+                f"{plan_text}\n\n外部检索资料（引用时注明来源 URL）：\n{research}"
+            )
         threshold = float(state.get("confidence_threshold", 0.7))
         needs = plan.needs_clarification or plan.confidence_score < threshold
         clarification = plan.clarification if needs else None
@@ -476,13 +537,13 @@ class AgentGraphRunner:
         if clarification is not None:
             clarification = _ensure_clarification_annotation(clarification, annotations)
         return {
-            "plan": plan.plan,
+            "plan": plan_text,
             "plan_confidence": float(plan.confidence_score),
             "plan_needs_clarification": needs,
             "clarification": clarification,
             "annotation_context": context,
             "status": "PLANNING",
-            "messages": [_message("planner", plan.plan)],
+            "messages": [_message("planner", plan_text)],
         }
 
     def _clarify_gate(self, state: AgentState) -> dict[str, Any]:
@@ -1010,6 +1071,35 @@ def _find_interrupt(snapshot: Any) -> dict[str, Any] | None:
             if isinstance(value, dict):
                 return value
     return None
+
+
+# 外部检索触发词：只有用户明确要求查资料时才联网，避免每条标注都搜索。
+_RESEARCH_PATTERN = re.compile(
+    r"搜索|搜一下|查一下|查查|查询|检索|最新资料|最新版本|官网|官方文档|"
+    r"外部资料|联网|search\s+the\s+web|look\s+up|latest\s+version|documentation",
+    re.IGNORECASE,
+)
+
+
+def _extract_research_query(context: dict[str, Any]) -> str | None:
+    """从标注指令中提取检索 query；没有触发词时返回 None。"""
+    texts: list[str] = []
+    for item in context.get("annotations") or []:
+        annotation = item.get("annotation") if isinstance(item, dict) else None
+        if not isinstance(annotation, dict):
+            continue
+        intent = annotation.get("intent") or {}
+        ui = intent.get("ui") if isinstance(intent, dict) else {}
+        if isinstance(ui, dict) and ui.get("summary"):
+            texts.append(str(ui["summary"]))
+        payload = annotation.get("payload") or {}
+        if isinstance(payload, dict) and payload.get("text"):
+            texts.append(str(payload["text"]))
+    combined = " ".join(item.strip() for item in texts if item.strip())
+    if not combined or not _RESEARCH_PATTERN.search(combined):
+        return None
+    # 去掉换行并限制长度，避免把整段验收标准当作 query。
+    return re.sub(r"\s+", " ", combined).strip()[:200]
 
 
 APPROVAL_DIFF_LIMIT = 20000

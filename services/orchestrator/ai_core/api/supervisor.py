@@ -17,10 +17,17 @@ from ai_core.supervisor.schemas import (
     SupervisorGateResponse,
     SupervisorRequest,
     SupervisorRouteResponse,
+    SupervisorToolCallRequest,
+    SupervisorToolCallResponse,
+    SupervisorToolListResponse,
 )
 from ai_core.supervisor.service import (
     SupervisorService,
     SupervisorServiceError,
+)
+from ai_core.supervisor.tools import (
+    SupervisorToolError,
+    SupervisorToolService,
 )
 
 router = APIRouter(prefix="/api/v1/internal/supervisor", tags=["supervisor"])
@@ -75,6 +82,35 @@ def list_agents() -> AgentListResponse:
     """列出内置、预留与企业 Manifest Agent。"""
     service = SupervisorService(get_agent_registry())
     return service.list_agents()
+
+
+@router.get("/tools", response_model=SupervisorToolListResponse)
+def list_tools() -> SupervisorToolListResponse:
+    """列出本地 Tool 与 MCP 远端 Tool；只返回描述，不返回密钥。"""
+    tools, servers = SupervisorToolService().list_tools()
+    return SupervisorToolListResponse(tools=tools, mcp_servers=servers)
+
+
+@router.post(
+    "/tools/{tool_name}/invoke",
+    response_model=SupervisorToolCallResponse,
+)
+def invoke_tool(
+    tool_name: str,
+    request: SupervisorToolCallRequest,
+) -> SupervisorToolCallResponse:
+    """受控调用一个已注册 Tool（search_web / MCP / 受控 shell）。"""
+    try:
+        payload = SupervisorToolService().invoke_tool(
+            tool_name,
+            request.arguments,
+        )
+    except SupervisorToolError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    return SupervisorToolCallResponse.model_validate(payload)
 
 
 @router.post("/agents/reload", response_model=AgentListResponse)

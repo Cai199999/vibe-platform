@@ -190,3 +190,26 @@ class AgentListResponse(CamelModel):
     skill_registry_version: str = "1"
     skills: list[SkillView] = Field(default_factory=list)
     custom_agents_dir: str | None = None
+
+
+class SupervisorToolListResponse(CamelModel):
+    """Supervisor Tool 网关列表。"""
+
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    mcp_servers: list[str] = Field(default_factory=list)
+
+
+class SupervisorToolCallRequest(CamelModel):
+    """Tool 调用入参；arguments 直接映射到 LangChain args_schema。"""
+
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class SupervisorToolCallResponse(CamelModel):
+    """Tool 调用结果，包含耗时与风险等级。"""
+
+    tool: str
+    result: str
+    duration_ms: int
+    danger_level: str = "read"
+    metadata: dict[str, Any] = Field(default_factory=dict)
