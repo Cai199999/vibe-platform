@@ -48,7 +48,8 @@ def cleanup_sandbox(sandbox_id: str | None) -> None:
 
 
 def save_snapshot(page, active, note: str) -> None:
-    """通过工具栏按钮保存一个快照并等待成功提示。"""
+    """通过工具栏「更多」菜单保存一个快照并等待成功提示。"""
+    active.locator("[data-toolbar-more]").click()
     active.locator("[data-snapshot-save]").click()
     modal = page.locator(".snapshot-modal")
     expect(modal).to_be_visible()

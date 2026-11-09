@@ -206,6 +206,8 @@ def main() -> int:
             )
 
             print("\n== 6. 保存快照后解除门控 ==")
+            # 保存快照已折叠进工具栏「更多」菜单。
+            active.locator("[data-toolbar-more]").click()
             active.locator("[data-snapshot-save]").click()
             modal = page.locator(".snapshot-modal")
             expect(modal).to_be_visible()

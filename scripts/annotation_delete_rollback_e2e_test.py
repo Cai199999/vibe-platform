@@ -224,7 +224,9 @@ def main() -> int:
                 and response.url.endswith("/api/v1/runs/rollback"),
                 timeout=120_000,
             ) as clear_info:
-                active.get_by_role("button", name="清除标注").click()
+                # 清除标注已折叠进工具栏「更多」菜单。
+                active.locator("[data-toolbar-more]").click()
+                active.get_by_role("menuitem", name="清除标注").click()
             clear_response = clear_info.value
             if not clear_response.ok:
                 fail(

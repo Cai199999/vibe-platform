@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import AgentCatalogMenu from './AgentCatalogMenu.jsx'
 import ArchitectPanel from './ArchitectPanel.jsx'
 import CanvasStage from './CanvasStage.jsx'
@@ -82,6 +82,27 @@ function ProjectWorkspaceInner({
   // 精准点击选择（Inspect）模式与命中组件后的标注草稿。
   const [inspectMode, setInspectMode] = useState(false)
   const [inspectDraft, setInspectDraft] = useState(null)
+  // 顶部工具栏的「更多」折叠菜单：清空标注 / 保存快照 / 导出 / Agent 目录。
+  const [moreOpen, setMoreOpen] = useState(false)
+  const moreRef = useRef(null)
+
+  useEffect(() => {
+    if (!moreOpen) return undefined
+    const handlePointer = (event) => {
+      if (moreRef.current && !moreRef.current.contains(event.target)) {
+        setMoreOpen(false)
+      }
+    }
+    const handleKey = (event) => {
+      if (event.key === 'Escape') setMoreOpen(false)
+    }
+    window.addEventListener('mousedown', handlePointer)
+    window.addEventListener('keydown', handleKey)
+    return () => {
+      window.removeEventListener('mousedown', handlePointer)
+      window.removeEventListener('keydown', handleKey)
+    }
+  }, [moreOpen])
 
   // Supervisor 派发 UI Run（或门控释放）后，自动露出右侧执行时间轴。
   // 使用递增 nonce 而不是布尔值，保证连续两次 handoff 都能重新聚焦。
@@ -270,6 +291,7 @@ function ProjectWorkspaceInner({
             type="button"
             data-inspect-toggle
             aria-pressed={inspectMode}
+            aria-label={inspectMode ? '退出选择' : '精准选择'}
             disabled={!previewReady || inspectBlocked}
             title={
               !previewReady
@@ -295,7 +317,7 @@ function ProjectWorkspaceInner({
               <path d="M5 3l13.5 7.6-6.2 1.5L9.4 19 5 3z" />
               <path d="M13 13l5 5" />
             </svg>
-            {inspectMode ? '退出选择' : '精准选择'}
+            {inspectMode ? '退出' : '选择'}
           </button>
 
           <label className="model-picker" title="模型设置">
@@ -309,18 +331,12 @@ function ProjectWorkspaceInner({
               onChange={(event) => onModelProviderChange?.(event.target.value)}
             >
               <option value="auto">DeepSeek V3</option>
-              <option value="mock">Mock（本地）</option>
+              <option value="mock">本地演示</option>
             </select>
           </label>
         </div>
 
         <div className="project-toolbar-right">
-          <AgentCatalogMenu
-            agents={agentCatalog?.agents ?? []}
-            loading={Boolean(agentCatalog?.loading)}
-            error={agentCatalog?.error ?? null}
-            onRefresh={onRefreshAgents}
-          />
           {gateActive && (
             <span className="supervisor-gate-chip" role="status">
               <span className="mini-spinner" aria-hidden="true" />
@@ -350,15 +366,6 @@ function ProjectWorkspaceInner({
             {architectState?.status === 'AWAITING_CLARIFICATION' && (
               <span className="architect-launch-dot" aria-label="有待回答问题" />
             )}
-          </button>
-
-          <button
-            className="ghost-button"
-            type="button"
-            disabled={annotations.length === 0 || submitting || approvalPending}
-            onClick={onClearAnnotations}
-          >
-            清除标注
           </button>
 
           <button
@@ -396,38 +403,6 @@ function ProjectWorkspaceInner({
             )}
           </button>
 
-          <div className="segmented view-mode-switch" role="group" aria-label="视图模式">
-            <button
-              type="button"
-              className={viewMode === 'compare' ? 'is-active' : ''}
-              aria-pressed={viewMode === 'compare'}
-              onClick={() => setViewMode('compare')}
-            >
-              对比模式
-            </button>
-            <button
-              type="button"
-              className={viewMode === 'dual' ? 'is-active' : ''}
-              aria-pressed={viewMode === 'dual'}
-              onClick={() => setViewMode('dual')}
-            >
-              展示模式
-            </button>
-          </div>
-
-          {viewMode === 'dual' && (
-            <button
-              type="button"
-              className={`link-toggle ${linked ? 'is-active' : ''}`}
-              aria-pressed={linked}
-              title="画布与预览同步缩放、平移"
-              onClick={() => setLinked((value) => !value)}
-            >
-              <span className="link-dot" aria-hidden="true" />
-              视口联动
-            </button>
-          )}
-
           {viewMode === 'compare' && (
             <div className="segmented pane-switch" role="group" aria-label="单屏视图切换">
               <button
@@ -452,34 +427,123 @@ function ProjectWorkspaceInner({
 
           <button
             type="button"
-            className="snapshot-save-button"
-            data-snapshot-save
-            disabled={!canSaveSnapshot || submitting}
+            className={`view-mode-toggle ${viewMode === 'dual' ? 'is-active' : ''}`}
+            aria-label={viewMode === 'compare' ? '展示模式' : '对比模式'}
+            aria-pressed={viewMode === 'dual'}
             title={
-              canSaveSnapshot
-                ? '把当前沙盒代码保存为一个可回滚的快照'
-                : '请先执行一次 Agent，生成可快照的沙盒项目'
+              viewMode === 'compare'
+                ? '切换到双屏展示模式'
+                : '切换回单屏对比模式'
             }
-            onClick={onSaveSnapshot}
+            onClick={() =>
+              setViewMode((current) =>
+                current === 'compare' ? 'dual' : 'compare',
+              )
+            }
           >
-            <span aria-hidden="true">💾</span>
-            保存快照
+            {viewMode === 'compare' ? (
+              <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
+                <rect x="3" y="4" width="14" height="12" rx="2" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
+                <rect x="2.5" y="4" width="7" height="12" rx="1.6" />
+                <rect x="10.5" y="4" width="7" height="12" rx="1.6" />
+              </svg>
+            )}
           </button>
 
-          <button
-            type="button"
-            className={`export-button ${exporting ? 'is-busy' : ''}`}
-            disabled={!canExport || exporting}
-            title={
-              canExport
-                ? '下载当前项目的 tar.gz（排除 node_modules / .git / dist）'
-                : '请先执行一次 Agent，生成可导出的沙盒项目'
-            }
-            onClick={onExport}
-          >
-            <span aria-hidden="true">📥</span>
-            {exporting ? '导出中…' : '导出代码'}
-          </button>
+          {viewMode === 'dual' && (
+            <button
+              type="button"
+              className={`link-toggle ${linked ? 'is-active' : ''}`}
+              aria-pressed={linked}
+              title="画布与预览同步缩放、平移"
+              onClick={() => setLinked((value) => !value)}
+            >
+              <span className="link-dot" aria-hidden="true" />
+              视口联动
+            </button>
+          )}
+
+          <div className="toolbar-more" ref={moreRef}>
+            <button
+              type="button"
+              className={`toolbar-more-trigger ${moreOpen ? 'is-open' : ''}`}
+              data-toolbar-more
+              aria-haspopup="menu"
+              aria-expanded={moreOpen}
+              aria-label="更多操作"
+              title="更多操作"
+              onClick={() => setMoreOpen((value) => !value)}
+            >
+              <span aria-hidden="true">⋯</span>
+            </button>
+            {moreOpen && (
+              <div className="toolbar-more-menu" role="menu" aria-label="更多操作">
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="ghost-button toolbar-menu-item"
+                  disabled={
+                    annotations.length === 0 || submitting || approvalPending
+                  }
+                  onClick={() => {
+                    setMoreOpen(false)
+                    onClearAnnotations?.()
+                  }}
+                >
+                  清除标注
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="snapshot-save-button toolbar-menu-item"
+                  data-snapshot-save
+                  disabled={!canSaveSnapshot || submitting}
+                  title={
+                    canSaveSnapshot
+                      ? '把当前沙盒代码保存为一个可回滚的快照'
+                      : '请先执行一次 Agent，生成可快照的沙盒项目'
+                  }
+                  onClick={() => {
+                    setMoreOpen(false)
+                    onSaveSnapshot?.()
+                  }}
+                >
+                  <span aria-hidden="true">💾</span>
+                  保存快照
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={`export-button toolbar-menu-item ${exporting ? 'is-busy' : ''}`}
+                  disabled={!canExport || exporting}
+                  title={
+                    canExport
+                      ? '下载当前项目的 tar.gz（排除 node_modules / .git / dist）'
+                      : '请先执行一次 Agent，生成可导出的沙盒项目'
+                  }
+                  onClick={() => {
+                    setMoreOpen(false)
+                    onExport?.()
+                  }}
+                >
+                  <span aria-hidden="true">📥</span>
+                  {exporting ? '导出中…' : '导出代码'}
+                </button>
+                <div className="toolbar-more-divider" role="separator" />
+                <div className="toolbar-more-agents">
+                  <AgentCatalogMenu
+                    agents={agentCatalog?.agents ?? []}
+                    loading={Boolean(agentCatalog?.loading)}
+                    error={agentCatalog?.error ?? null}
+                    onRefresh={onRefreshAgents}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

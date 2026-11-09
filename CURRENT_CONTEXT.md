@@ -15,8 +15,10 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒（Node 22
 - **对话前置建项（新）**：新建项目=空白画布+【✨ 开始创建】；纯自然语言驱动 Architect 多轮敲定契约（前后端路由/布局/组件/API/实体）；形态由 `infer_app_shape` 识别，已移除“全栈/轻量/脚本”三选一
 - **自动前端接力（新）**：契约 CONFIRMED → 自动跑 FrontendCoder→BuildVerifier→SandboxRestart（`mode=frontend`）；`frontendEntry` 回写项目源码，画布从 blank→live 实时预览；失败可重试/重开架构
 - 项目态：pending → architecting → confirmed → bootstrapping → ready/failed
+- **画布双态（新）**：live 页面默认 `annotate`（覆盖层吃指针，可圈选）；单击页面切 `interact`（iframe 吃指针，可直接点按钮）；点灰色空白/Esc/开关回 `annotate`。中键平移在双态均生效：标注态父页处理，交互态由 `inspect_sdk.js` postMessage 桥接。
+- **紧凑工具栏（新）**：单行 TopBar；视图模式合为单图标切换；清空/快照/导出/Agent 目录收进「⋯ 更多」；模型选择保留极简下拉。
 - 生产级全栈：六节点 FullstackGraph；Sequelize+`DATABASE_URL`，沙盒回退 node:sqlite；IaC（Dockerfile/render.yaml/DEPLOY.md）
-- 验证：Python 207、对话前置/架构面板/全栈门控/全栈生成/混合/双侧 E2E、前端构建 PASS
+- 验证：Python 207、对话前置/双态平移/多标注/拖拽/快照/回滚/Inspect/审批/文案/全栈门控/全栈生成/UI 全流程 E2E、前端构建 PASS
 
 ## 真假边界
 

@@ -87,6 +87,8 @@ def main() -> int:
             expect(page.locator(".workspace-tab")).to_have_count(1)
             active = page.locator(".tab-window.is-active")
 
+            # Agent 目录已折叠进工具栏「更多」菜单。
+            active.locator("[data-toolbar-more]").click()
             trigger = active.locator("[data-agent-catalog] > button")
             expect(trigger).to_be_visible(timeout=30_000)
             expect(active.locator("[data-custom-agent-count]")).to_have_text("1")

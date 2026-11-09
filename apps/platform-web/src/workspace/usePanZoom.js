@@ -215,6 +215,41 @@ export default function usePanZoom({
     return true
   }, [])
 
+  /*
+   * 跨文档平移：交互态下 iframe 自己消费指针事件，父页面收不到中键
+   * pointerdown。沙盒内的 inspect SDK 通过 postMessage 转发中键手势，
+   * 这里用一组不依赖 PointerEvent 的接口驱动同一份 pan 状态。
+   *
+   * dx / dy 已经由调用方换算成父页面屏幕像素（iframe 内位移 × scale），
+   * 因此无需再关心 iframe 的缩放或坐标系。
+   */
+  const beginExternalPan = useCallback(() => {
+    panRef.current = { pointerId: 'external', x: 0, y: 0 }
+    setPanning(true)
+  }, [])
+
+  const moveExternalPan = useCallback(
+    (dx, dy) => {
+      if (!panRef.current) return false
+      updateViewport(panel, (previous) =>
+        clampView({
+          ...previous,
+          panX: previous.panX + dx,
+          panY: previous.panY + dy,
+        }),
+      )
+      return true
+    },
+    [panel, updateViewport, clampView],
+  )
+
+  const endExternalPan = useCallback(() => {
+    if (!panRef.current) return false
+    panRef.current = null
+    setPanning(false)
+    return true
+  }, [])
+
   const reset = useCallback(() => {
     resetViewport(panel)
   }, [panel, resetViewport])
@@ -231,5 +266,8 @@ export default function usePanZoom({
     startPan,
     movePan,
     endPan,
+    beginExternalPan,
+    moveExternalPan,
+    endExternalPan,
   }
 }

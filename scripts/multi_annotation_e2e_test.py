@@ -200,6 +200,8 @@ def main() -> int:
 
             print("\n== 6. 导出源码与 VIBE_CONTEXT.md 同时包含 3 条修改 ==")
             with page.expect_download(timeout=30_000) as download_info:
+                # 导出已折叠进工具栏「更多」菜单。
+                active.locator("[data-toolbar-more]").click()
                 active.locator(".export-button").click()
             source, context_doc = read_download_source(download_info.value)
             for token in ("background-color:blue", "全新标题", "transform:scale(2)"):
@@ -228,6 +230,8 @@ def main() -> int:
 
             print("\n== 8. 清除标注：圈与输入框全部清空 ==")
             active.get_by_role("button", name="画布", exact=True).click()
+            # 清除标注已折叠进工具栏「更多」菜单。
+            active.locator("[data-toolbar-more]").click()
             active.locator(".ghost-button", has_text="清除标注").click()
             expect(active.locator(".annotation-ellipse")).to_have_count(0)
             expect(active.locator(".canvas-popover")).to_have_count(0)

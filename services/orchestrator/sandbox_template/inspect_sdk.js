@@ -390,6 +390,76 @@
     true,
   )
 
+  /*
+   * 中键平移桥。
+   * ------------------------------------------------------------------
+   * 交互态下 iframe 接管了指针事件，父页面完全收不到中键 pointerdown。
+   * 这里只转发「中键」手势：按下、位移（以 iframe 内 CSS 像素为单位）
+   * 与松手。父页面乘上画布 scale 后平移画布，因此浏览页面时中键依然
+   * 是平移，不会触发浏览器自动滚动。
+   */
+  var panning = false
+  var panX = 0
+  var panY = 0
+
+  function sendPan(type, payload) {
+    try {
+      window.parent.postMessage(
+        { channel: CHANNEL, type: type, payload: payload || {} },
+        '*',
+      )
+    } catch (error) {
+      // 父页面不存在或被浏览器策略拦截时静默降级，不影响页面自身交互。
+    }
+  }
+
+  document.addEventListener(
+    'pointerdown',
+    function (event) {
+      if (event.button !== 1) return
+      event.preventDefault()
+      panning = true
+      panX = event.clientX
+      panY = event.clientY
+      sendPan('pan-start', { x: panX, y: panY })
+    },
+    true,
+  )
+
+  document.addEventListener(
+    'pointermove',
+    function (event) {
+      if (!panning) return
+      event.preventDefault()
+      var dx = event.clientX - panX
+      var dy = event.clientY - panY
+      if (!dx && !dy) return
+      panX = event.clientX
+      panY = event.clientY
+      sendPan('pan-move', { dx: dx, dy: dy })
+    },
+    true,
+  )
+
+  function endPointerPan(event) {
+    if (!panning || (event && event.button !== 1 && event.type === 'pointerup')) {
+      return
+    }
+    panning = false
+    sendPan('pan-end', {})
+  }
+
+  document.addEventListener('pointerup', endPointerPan, true)
+  document.addEventListener('pointercancel', endPointerPan, true)
+  // 中键在 Windows 上可能触发自动滚动，auxclick 一并拦截。
+  document.addEventListener(
+    'auxclick',
+    function (event) {
+      if (event.button === 1) event.preventDefault()
+    },
+    true,
+  )
+
   // 通知父页面 SDK 已就绪；父页面收到后再下发 enable，避免首次点击丢失。
   try {
     window.parent.postMessage(

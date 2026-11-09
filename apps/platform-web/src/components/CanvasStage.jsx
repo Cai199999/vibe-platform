@@ -922,6 +922,14 @@ export default function CanvasStage({
   const [activeAnnotationId, setActiveAnnotationId] = useState(null)
   // 用户圈选多个区域时，可临时隐藏浮层，避免输入框挡住下一笔圈选。
   const [popoversHidden, setPopoversHidden] = useState(false)
+  // live 画布的双状态：
+  //   annotate = 覆盖层接收指针，用于圈选 / 平移 / 缩放；
+  //   interact = iframe 接管指针，用户可以直接点击真实页面里的按钮。
+  const [interactionMode, setInteractionMode] = useState('annotate')
+  const liveFrameRef = useRef(null)
+  // pointerdown 时的命中目标：pointer capture 会把 pointerup 的 target
+  // 重定向到 stage，因此“是否点在真实页面上”必须在下笔时记录。
+  const livePressRef = useRef(false)
 
   // 与沙盒预览共用 1280×720 设计视口：两边缩放参数与页面尺寸完全一致。
   const {
@@ -960,7 +968,61 @@ export default function CanvasStage({
 
   // 只有 mock / live 画布允许圈选；空白、骨架屏、失败态不可绘制。
   const interactive = mode === 'mock' || mode === 'live'
+  // 交互态只对 live 画布生效：mock 页面没有可点击的真实业务逻辑。
+  const liveInteractive = mode === 'live' && interactionMode === 'interact'
   const atLimit = annotations.length >= MAX_ANNOTATIONS
+
+  // 切换到 mock / 空白画布时，必须回到标注态，避免 iframe 消失后残留状态。
+  useEffect(() => {
+    if (mode !== 'live') setInteractionMode('annotate')
+  }, [mode])
+
+  // Esc 是“退出浏览”的通用快捷键，和预设的「点灰色空白返回标注」互补。
+  useEffect(() => {
+    if (!liveInteractive) return undefined
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setInteractionMode('annotate')
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [liveInteractive])
+
+  /*
+   * 交互态下 iframe 接管指针事件，父页面收不到中键 pointerdown。
+   * 沙盒内的 inspect SDK 会把中键手势通过 postMessage 转发出来，
+   * 这里换算成父页面屏幕像素后交给 usePanZoom，保证两种状态都能平移。
+   */
+  useEffect(() => {
+    if (mode !== 'live') return undefined
+    const onMessage = (event) => {
+      const frame = liveFrameRef.current
+      if (!frame || event.source !== frame.contentWindow) return
+      const data = event.data
+      if (!data || data.channel !== 'vibe-inspect') return
+      if (data.type === 'pan-start') {
+        viewport.beginExternalPan()
+        return
+      }
+      if (data.type === 'pan-move') {
+        const dx = Number(data.payload?.dx) || 0
+        const dy = Number(data.payload?.dy) || 0
+        // SDK 的位移单位是 iframe 内 CSS 像素；画布按 scale 缩放显示。
+        viewport.moveExternalPan(dx * viewport.scale, dy * viewport.scale)
+        return
+      }
+      if (data.type === 'pan-end' || data.type === 'pan-cancel') {
+        viewport.endExternalPan()
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [
+    mode,
+    viewport.beginExternalPan,
+    viewport.moveExternalPan,
+    viewport.endExternalPan,
+    viewport.scale,
+  ])
 
   const flashLimitNotice = () => {
     setLimitNotice(true)
@@ -1005,6 +1067,11 @@ export default function CanvasStage({
     if (disabled || !interactive || event.button !== 0) {
       return
     }
+    // 交互态下指针还能落到 stage，说明点的是 iframe 外的灰色空白区域。
+    // 先收回标注态，再让这一次按下继续参与圈选（拖拽即可顺势画圈）。
+    if (liveInteractive) {
+      setInteractionMode('annotate')
+    }
     // 点击标注标签 = 选中该圈；不开始新的圈选。
     const annotationNode = event.target.closest?.('[data-annotation-id]')
     if (annotationNode) {
@@ -1019,6 +1086,9 @@ export default function CanvasStage({
     event.preventDefault()
     const point = toPoint(event)
     startTargetRef.current = readTarget(event.target)
+    livePressRef.current = Boolean(
+      event.target?.closest?.('.canvas-live-page'),
+    )
     event.currentTarget.setPointerCapture(event.pointerId)
     setDrawing(true)
     setDraft({ originX: point.x, originY: point.y, x: point.x, y: point.y })
@@ -1046,6 +1116,24 @@ export default function CanvasStage({
     const rect = normalizeRect(draft.originX, draft.originY, point.x, point.y)
     setDrawing(false)
     setDraft(null)
+
+    // live 画布的“单击进入交互态”：按下与松开几乎同一点，且落在真实
+    // 页面区域内。第一次点击只负责放行指针，第二次点击就能直接操作
+    // 页面里的按钮；拖拽仍然保持圈选行为。
+    const isPlainClick = rect.width <= 0.008 && rect.height <= 0.008
+    const clickedLivePage = livePressRef.current
+    livePressRef.current = false
+    if (
+      mode === 'live' &&
+      interactionMode === 'annotate' &&
+      clickedLivePage &&
+      isPlainClick
+    ) {
+      setActiveAnnotationId(null)
+      setInteractionMode('interact')
+      startTargetRef.current = null
+      return
+    }
 
     if (rect.width > 0.02 && rect.height > 0.02) {
       // 把归一化选区还原为屏幕坐标，直接测量 DOM 节点的真实覆盖面积。
@@ -1114,7 +1202,8 @@ export default function CanvasStage({
 
       <div
         ref={stageRef}
-        className={`canvas-stage ${disabled || blocked ? 'is-disabled' : ''} ${drawing ? 'is-drawing' : ''} ${viewport.spaceHeld ? 'is-pan-ready' : ''} ${viewport.panning ? 'is-panning' : ''}`}
+        className={`canvas-stage ${disabled || blocked ? 'is-disabled' : ''} ${drawing ? 'is-drawing' : ''} ${liveInteractive ? 'is-interacting' : ''} ${viewport.spaceHeld ? 'is-pan-ready' : ''} ${viewport.panning ? 'is-panning' : ''}`}
+        data-canvas-interaction={mode === 'live' ? interactionMode : undefined}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={finishDrawing}
@@ -1184,11 +1273,13 @@ export default function CanvasStage({
               {liveUrl ? (
                 <iframe
                   key={`${liveUrl}:${refreshNonce}`}
+                  ref={liveFrameRef}
                   className="canvas-live-frame"
                   src={withRefresh(liveUrl, refreshNonce)}
                   title="实时画布预览"
-                  // 指针交给画布覆盖层，保证圈选 / 平移 / 缩放不被 iframe 吞掉。
-                  style={{ pointerEvents: 'none' }}
+                  // 标注态：指针交给覆盖层，圈选 / 平移 / 缩放不被 iframe 吞掉。
+                  // 交互态：把指针放行给真实页面，用户可以直接点击按钮。
+                  style={{ pointerEvents: liveInteractive ? 'auto' : 'none' }}
                 />
               ) : (
                 <div className="canvas-live-empty">
@@ -1390,6 +1481,26 @@ export default function CanvasStage({
           >
             重置视图
           </button>
+          {mode === 'live' && (
+            <button
+              className={`viewport-reset canvas-interaction-toggle ${liveInteractive ? 'is-active' : ''}`}
+              type="button"
+              data-canvas-interaction-toggle
+              aria-pressed={liveInteractive}
+              title={
+                liveInteractive
+                  ? '回到标注态：圈选页面、平移和缩放'
+                  : '浏览页面：让指针穿透到 iframe，可点击页面内按钮'
+              }
+              onClick={() =>
+                setInteractionMode((current) =>
+                  current === 'interact' ? 'annotate' : 'interact',
+                )
+              }
+            >
+              {liveInteractive ? '✋ 标注' : '🖱 浏览'}
+            </button>
+          )}
           {annotations.length > 0 && (
             <button
               className="viewport-reset"
@@ -1412,9 +1523,13 @@ export default function CanvasStage({
                 ? '可重试初始化，或打开架构面板调整契约'
                 : drawing
                   ? '松开鼠标完成圈选'
-                  : interactive
-                    ? '圈选页面区域 · 空格/中键平移 · 滚轮缩放'
-                    : ''}
+                  : mode === 'live'
+                    ? liveInteractive
+                      ? '浏览中 · 点击灰色空白回到标注 · 中键平移'
+                      : '标注中 · 单击页面进入浏览 · 拖拽圈选 · 中键平移'
+                    : interactive
+                      ? '圈选页面区域 · 空格/中键平移 · 滚轮缩放'
+                      : ''}
         </div>
       </div>
     </div>

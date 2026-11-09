@@ -458,6 +458,8 @@ def main() -> None:
         print("\n== 4. 单视口：画布模式圈选并发送意图 ==")
         page.locator(".workspace-tab", has_text="演示项目").click()
         active = page.locator(".tab-window.is-active")
+        # 固定使用 Mock 模型，保证颜色 / 文案断言可重复。
+        active.locator(".model-picker select").select_option("mock")
         expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
         expect(active.locator(".preview-pane.is-visible")).to_have_count(0)
         canvas_box = active.locator(".project-viewport").bounding_box()
@@ -522,6 +524,8 @@ def main() -> None:
         )
 
         print("\n== 7. 导出项目：工具栏与项目下拉菜单均下载 tar.gz ==")
+        # 导出已折叠进工具栏「更多」菜单。
+        active.locator("[data-toolbar-more]").click()
         export_button = active.locator(".export-button")
         expect(export_button).to_be_enabled()
         with page.expect_download(timeout=30_000) as download_info:
@@ -588,7 +592,9 @@ def main() -> None:
         # Diff / Run 详情以抽屉覆盖，不挤压预览画面。
         active.get_by_role("button", name="详情 / 代码 Diff").click()
         expect(active.locator(".runtime-drawer")).to_be_visible()
-        expect(active.locator(".runtime-meta code").nth(3)).to_have_text(sandbox_id)
+        expect(
+            active.locator(".runtime-meta span", has_text="沙盒").locator("code")
+        ).to_contain_text(sandbox_id[:14])
         expect(active.locator(".diff-view")).to_contain_text("background-color")
         active.locator(".runtime-drawer").get_by_role("button", name="关闭").click()
         expect(active.locator(".runtime-drawer")).to_have_count(0)

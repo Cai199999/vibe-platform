@@ -8794,3 +8794,324 @@ body.is-viewport-panning * {
   font-size: 11px;
   cursor: pointer;
 }
+
+/* ================================================================== */
+/* 画布交互态 / 标注态 & 极简工具栏                                    */
+/* ================================================================== */
+
+/* 标注态：光标是十字，覆盖层接收指针；交互态：指针穿透给 iframe。 */
+.canvas-stage.is-interacting {
+  cursor: default;
+}
+
+.canvas-stage.is-interacting .canvas-live-frame {
+  cursor: auto;
+}
+
+.canvas-interaction-toggle.is-active {
+  border-color: rgba(56, 189, 248, 0.6);
+  background: rgba(56, 189, 248, 0.16);
+  color: #e0f2fe;
+}
+
+/* 单图标视图切换：对比 / 展示共用一个按钮，占位从 ~120px 降到 28px。 */
+.view-mode-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.06);
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
+}
+
+.view-mode-toggle svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+
+.view-mode-toggle:hover {
+  border-color: rgba(56, 189, 248, 0.45);
+  color: #bae6fd;
+}
+
+.view-mode-toggle.is-active {
+  border-color: rgba(56, 189, 248, 0.5);
+  background: rgba(56, 189, 248, 0.14);
+  color: #e0f2fe;
+}
+
+/* 「更多」折叠菜单：清空标注 / 保存快照 / 导出 / Agent 目录。 */
+.toolbar-more {
+  position: relative;
+}
+
+.toolbar-more-trigger {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.06);
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
+}
+
+.toolbar-more-trigger:hover,
+.toolbar-more-trigger.is-open {
+  border-color: rgba(56, 189, 248, 0.45);
+  background: rgba(56, 189, 248, 0.1);
+  color: #bae6fd;
+}
+
+.toolbar-more-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 70;
+  display: grid;
+  gap: 4px;
+  width: 230px;
+  padding: 7px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 12px;
+  background: #0b111d;
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.6);
+  animation: menu-in 0.14s ease-out;
+}
+
+.toolbar-more-menu .toolbar-menu-item {
+  width: 100%;
+  justify-content: flex-start;
+  padding: 8px 10px;
+  border-radius: 8px;
+  text-align: left;
+}
+
+.toolbar-more-menu .export-button.toolbar-menu-item {
+  background: rgba(56, 189, 248, 0.14);
+  color: #bae6fd;
+  box-shadow: none;
+}
+
+.toolbar-more-menu .export-button.toolbar-menu-item:hover:not(:disabled) {
+  background: rgba(56, 189, 248, 0.22);
+  transform: none;
+}
+
+.toolbar-more-divider {
+  height: 1px;
+  margin: 3px 4px;
+  background: rgba(148, 163, 184, 0.16);
+}
+
+.toolbar-more-agents .agent-catalog-trigger {
+  width: 100%;
+  justify-content: flex-start;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.toolbar-more-agents .agent-catalog-popover {
+  right: 0;
+  top: calc(100% + 6px);
+}
+
+/* 桌面端极简压缩：把垂直空间全部让给画布 / 预览。 */
+@media (min-width: 721px) {
+  .app-shell {
+    padding: 6px 12px 12px;
+  }
+
+  .topbar {
+    padding: 0 2px 8px;
+    gap: 10px;
+  }
+
+  .brand {
+    gap: 8px;
+  }
+
+  .brand-mark {
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    font-size: 15px;
+    box-shadow: 0 6px 18px rgba(56, 189, 248, 0.22);
+  }
+
+  .brand h1 {
+    font-size: 15px;
+    letter-spacing: 0.1px;
+  }
+
+  .topbar-meta {
+    gap: 6px;
+  }
+
+  .avatar-button {
+    padding: 2px 7px 2px 2px;
+    gap: 6px;
+  }
+
+  .avatar {
+    width: 24px;
+    height: 24px;
+    font-size: 11px;
+  }
+
+  .account-name {
+    font-size: 11px;
+  }
+
+  .live-dot {
+    width: 20px;
+    height: 20px;
+  }
+
+  .workspace {
+    gap: 8px;
+  }
+
+  .workspace-toolbar {
+    padding: 0;
+  }
+
+  .workspace-stats {
+    gap: 6px;
+  }
+
+  .workspace-stats .chip {
+    padding: 3px 8px;
+    font-size: 10.5px;
+  }
+
+  .project-switcher-button {
+    min-width: 190px;
+    padding: 4px 8px;
+    gap: 7px;
+    border-radius: 10px;
+  }
+
+  .project-glyph {
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    font-size: 12px;
+  }
+
+  .project-switcher-text strong {
+    max-width: 150px;
+    font-size: 12px;
+  }
+
+  .workspace-tabs {
+    padding: 3px;
+    border-radius: 11px;
+  }
+
+  .workspace-tab {
+    min-width: 118px;
+    max-width: 200px;
+    padding: 4px 6px 4px 9px;
+    gap: 6px;
+    border-radius: 8px;
+    font-size: 11.5px;
+  }
+
+  .tab-window {
+    padding: 8px 10px 10px;
+    border-radius: 16px;
+    /* 除顶栏 / 项目栏 / 标签 / 工具栏之外，全部给画布。 */
+    --viewport-h: clamp(480px, calc(100vh - 190px), 1200px);
+  }
+
+  .project-toolbar {
+    flex-wrap: nowrap;
+    gap: 8px;
+    min-height: 30px;
+    padding: 0 0 6px;
+  }
+
+  .project-toolbar-left,
+  .project-toolbar-right {
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+
+  .project-toolbar .inspect-toggle {
+    height: 26px;
+    padding: 0 8px;
+    border-radius: 7px;
+    font-size: 11px;
+  }
+
+  .project-toolbar .model-picker {
+    padding: 1px 3px;
+  }
+
+  .project-toolbar .model-picker select {
+    max-width: 104px;
+    font-size: 10.5px;
+  }
+
+  .project-toolbar .architect-launch {
+    gap: 6px;
+    padding: 5px 10px;
+    border-radius: 8px;
+    font-size: 11.5px;
+  }
+
+  .project-toolbar .architect-launch-mark {
+    width: 16px;
+    height: 16px;
+    border-radius: 5px;
+    font-size: 10px;
+  }
+
+  .project-toolbar .submit-annotations {
+    padding: 5px 11px;
+    border-radius: 8px;
+    font-size: 11.5px;
+  }
+
+  .project-toolbar .segmented {
+    padding: 2px;
+    border-radius: 8px;
+  }
+
+  .project-toolbar .segmented button {
+    gap: 5px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+  }
+
+  .project-toolbar .link-toggle {
+    height: 28px;
+    padding: 0 9px;
+    border-radius: 8px;
+    font-size: 11px;
+  }
+
+  .selection-state {
+    padding: 3px 8px;
+    font-size: 10.5px;
+  }
+
+  .supervisor-gate-chip {
+    padding: 3px 8px;
+    font-size: 10.5px;
+  }
+}

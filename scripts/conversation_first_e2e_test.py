@@ -46,6 +46,15 @@ def cleanup_sandbox(sandbox_id: str | None) -> None:
         print(f"WARN: 清理沙盒失败 {sandbox_id}")
 
 
+def middle_drag(page, x: float, y: float, dx: float = 48, dy: float = 24) -> None:
+    """在指定坐标执行一次中键拖拽。"""
+    page.mouse.move(x, y)
+    page.mouse.down(button="middle")
+    page.mouse.move(x + dx, y + dy, steps=6)
+    page.mouse.up(button="middle")
+    page.wait_for_timeout(250)
+
+
 def fill_clarification(panel) -> None:
     """填写当前一轮澄清：选择项取第一项，自由文本按问题语义作答。"""
     form = panel.locator(".architect-clarification")
@@ -166,6 +175,44 @@ def main() -> int:
                 full_page=True,
             )
             print("   OK：画布已替换为契约生成的真实 React 页面")
+
+            print("\n== 5. 标注态 / 交互态自动切换 ==")
+            stage = active.locator(".canvas-stage")
+            expect(stage).to_have_attribute("data-canvas-interaction", "annotate")
+            # 标注态：iframe 不吃指针，单击页面中心先“放行”指针。
+            page_box = active.locator(".canvas-live-page").bounding_box()
+            if not page_box:
+                raise AssertionError("无法读取 live 页面位置")
+            page.mouse.click(
+                page_box["x"] + page_box["width"] / 2,
+                page_box["y"] + page_box["height"] / 2,
+            )
+            expect(stage).to_have_attribute("data-canvas-interaction", "interact")
+            expect(live_frame).to_have_css("pointer-events", "auto")
+            # 交互态：iframe 内部按钮可以直接点击。
+            frame.locator("body").click(position={"x": 40, "y": 40})
+
+            print("\n== 6. 两种状态都保留中键平移 ==")
+            canvas_viewport = active.locator(".canvas-viewport")
+            center_x = page_box["x"] + page_box["width"] / 2
+            center_y = page_box["y"] + page_box["height"] / 2
+            # 交互态：中键事件由沙盒内的 inspect SDK 转发给父页面。
+            before_interact = canvas_viewport.get_attribute("style")
+            middle_drag(page, center_x, center_y)
+            after_interact = canvas_viewport.get_attribute("style")
+            if before_interact == after_interact:
+                raise AssertionError("交互态中键平移未生效")
+            # 点击工具栏开关回到标注态，覆盖层重新接管指针。
+            active.locator("[data-canvas-interaction-toggle]").click()
+            expect(stage).to_have_attribute("data-canvas-interaction", "annotate")
+            expect(live_frame).to_have_css("pointer-events", "none")
+            # 标注态：中键由父页面直接处理。
+            before_annotate = canvas_viewport.get_attribute("style")
+            middle_drag(page, center_x, center_y, dx=-36, dy=-18)
+            after_annotate = canvas_viewport.get_attribute("style")
+            if before_annotate == after_annotate:
+                raise AssertionError("标注态中键平移未生效")
+            print("   OK：单击页面进入交互，点开关回到标注，中键始终可平移")
 
             # 从浏览器恢复快照里取本次项目的 sandboxId，测试结束清理容器。
             sandbox_id = page.evaluate("""() => {
