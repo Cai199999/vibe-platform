@@ -306,12 +306,63 @@ function FullstackGeneration({ fullstack, contract, onGenerate }) {
   const outputs = Array.isArray(state.outputs) ? state.outputs : []
   const result = state.result
   const isFullstack = contract?.appShape === 'full_stack_system'
-  const contractReady =
-    isFullstack &&
-    Array.isArray(contract?.apiRoutes) &&
-    contract.apiRoutes.length > 0 &&
+  const apiRouteCount = Array.isArray(contract?.apiRoutes)
+    ? contract.apiRoutes.length
+    : 0
+  const hasDdl =
     typeof contract?.databaseDdl === 'string' &&
     contract.databaseDdl.trim().length > 0
+  const contractConfirmed = contract?.status === 'CONFIRMED'
+  const contractReady = isFullstack && apiRouteCount > 0 && hasDdl
+
+  // 禁用原因必须是“可操作的中文提示”：用原生 title 在 disabled 按钮上
+  // 多数浏览器不会触发，因此同时渲染可见文案，方便用户与 E2E 断言。
+  const disabledReason = !isFullstack
+    ? `当前契约形态为「${
+        SHAPE_LABELS[contract?.appShape] ?? contract?.appShape ?? '未知'
+      }」，无需生成后端代码。若判断有误，请重新发起澄清并选择“全栈系统”。`
+    : !contractConfirmed
+      ? '契约尚未确认（contract.status 不是 CONFIRMED），暂时无法生成。'
+      : apiRouteCount === 0
+        ? '契约缺少 REST 接口（apiRoutes 为空），已阻止生成；请修订契约补充接口后重新确认。'
+        : !hasDdl
+          ? '契约缺少数据库 DDL（databaseDdl 为空），已阻止生成；请修订契约补充数据实体后重新确认。'
+          : running
+            ? '全栈代码正在生成，按钮暂时锁定；完成后可重新生成。'
+            : ''
+  const tooltip = contractReady
+    ? running
+      ? '生成中，请稍候'
+      : '依据已确认契约生成全栈代码'
+    : disabledReason || '契约未就绪，无法生成'
+
+  // 门控诊断：用户反馈“按钮点不动”时，控制台能直接看到每一项判定。
+  useEffect(() => {
+    console.info('[fullstack] gate state', {
+      status,
+      running,
+      contractStatus: contract?.status ?? null,
+      appShape: contract?.appShape ?? null,
+      apiRouteCount,
+      hasDdl,
+      contractReady,
+      disabledReason: disabledReason || null,
+      starting: Boolean(state.starting),
+      contractId: contract?.contractId ?? null,
+    })
+  }, [
+    status,
+    state.starting,
+    running,
+    contract?.contractId,
+    contract?.status,
+    contract?.appShape,
+    apiRouteCount,
+    hasDdl,
+    contractReady,
+    disabledReason,
+  ])
+
   // 日志容器自身可滚动；保留最近 24 个文件足以覆盖一次完整生成，
   // 既避免超长 DOM，也不会把早期生成的 schema.sql 挤出可视列表。
   const visibleOutputs = outputs.slice(-24)
@@ -320,6 +371,7 @@ function FullstackGeneration({ fullstack, contract, onGenerate }) {
     <section
       className="architect-fullstack"
       data-fullstack-status={status}
+      data-fullstack-ready={contractReady ? 'true' : 'false'}
       aria-label="全栈代码生成"
     >
       <div className="architect-fullstack-head">
@@ -331,31 +383,47 @@ function FullstackGeneration({ fullstack, contract, onGenerate }) {
             接入真实请求，最后重启沙盒完成联调。
           </p>
         </div>
-        <button
-          type="button"
-          className="architect-primary architect-fullstack-trigger"
-          data-fullstack-generate
-          disabled={!contractReady || running}
-          title={
-            contractReady
-              ? '依据已确认契约生成全栈代码'
-              : isFullstack
-                ? '契约缺少 apiRoutes 或 databaseDdl，无法生成后端'
-                : '当前契约形态不需要生成后端代码'
-          }
-          onClick={() => onGenerate?.()}
-        >
-          {running ? (
-            <>
-              <span className="mini-spinner" aria-label="生成中" />
-              正在生成…
-            </>
-          ) : status === 'SUCCEEDED' ? (
-            '↻ 重新生成全栈代码'
-          ) : (
-            '🚀 开始生成全栈代码'
+        <div className="architect-fullstack-actions">
+          <span
+            className="architect-fullstack-trigger-wrap"
+            data-tooltip={tooltip}
+            title={tooltip}
+          >
+            <button
+              type="button"
+              className="architect-primary architect-fullstack-trigger"
+              data-fullstack-generate
+              disabled={!contractReady || running}
+              aria-describedby={
+                disabledReason ? 'fullstack-disabled-reason' : undefined
+              }
+              onClick={() => onGenerate?.()}
+            >
+              {running ? (
+                <>
+                  <span className="mini-spinner" aria-label="生成中" />
+                  正在生成…
+                </>
+              ) : status === 'SUCCEEDED' ? (
+                '↻ 重新生成全栈代码'
+              ) : status === 'FAILED' ? (
+                '↻ 重试生成全栈代码'
+              ) : (
+                '🚀 开始生成全栈代码'
+              )}
+            </button>
+          </span>
+          {disabledReason && (
+            <p
+              id="fullstack-disabled-reason"
+              className="architect-fullstack-gate-hint"
+              data-fullstack-disabled-reason={disabledReason}
+              role="status"
+            >
+              {disabledReason}
+            </p>
           )}
-        </button>
+        </div>
       </div>
 
       {state.error && (

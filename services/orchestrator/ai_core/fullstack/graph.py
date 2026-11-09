@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, TypedDict
 
@@ -32,6 +33,8 @@ from ai_core.fullstack.coders import (
     generate_frontend_bundle,
 )
 from ai_core.ports.sandbox import SandboxProvider
+
+logger = logging.getLogger(__name__)
 
 NODE_LABELS = {
     "DBACoder": "数据库工程师",
@@ -90,7 +93,20 @@ class FullstackGraphRunner:
         self._graph = self._build()
 
     def run(self, initial_state: FullstackState) -> FullstackState:
+        logger.info(
+            "FullstackGraph 启动 run_id=%s project_id=%s sandbox_id=%s",
+            initial_state.get("run_id"),
+            initial_state.get("project_id"),
+            initial_state.get("sandbox_id"),
+        )
         result = self._graph.invoke(dict(initial_state))
+        logger.info(
+            "FullstackGraph 结束 run_id=%s changed_files=%d table=%s preview=%s",
+            initial_state.get("run_id"),
+            len(result.get("files") or []),
+            result.get("table"),
+            result.get("preview_url"),
+        )
         return dict(result)  # type: ignore[return-value]
 
     # --------------------------------------------------------
@@ -303,6 +319,13 @@ class FullstackGraphRunner:
             return None
 
     def _node_started(self, node: str, state: FullstackState, index: int) -> None:
+        logger.info(
+            "FullstackGraph 节点开始 [%d/5] %s run_id=%s sandbox_id=%s",
+            index,
+            node,
+            state.get("run_id"),
+            state.get("sandbox_id"),
+        )
         self._emit(
             "fullstack.node.started",
             {
@@ -323,6 +346,13 @@ class FullstackGraphRunner:
         started: float,
     ) -> None:
         paths = sorted(files) if isinstance(files, dict) else sorted(files)
+        logger.info(
+            "FullstackGraph 节点完成 %s run_id=%s files=%s duration_ms=%d",
+            node,
+            state.get("run_id"),
+            ",".join(paths),
+            int((time.monotonic() - started) * 1000),
+        )
         self._emit(
             "fullstack.node.completed",
             {
@@ -336,6 +366,12 @@ class FullstackGraphRunner:
         )
 
     def _node_failed(self, node: str, state: FullstackState, exc: Exception) -> None:
+        logger.warning(
+            "FullstackGraph 节点失败 %s run_id=%s error=%s",
+            node,
+            state.get("run_id"),
+            exc,
+        )
         self._emit(
             "fullstack.node.failed",
             {

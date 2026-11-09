@@ -5440,6 +5440,49 @@ body.is-viewport-panning * {
   white-space: nowrap;
 }
 
+.architect-fullstack-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 300px;
+}
+
+/* disabled 按钮不触发原生 title，因此用包裹层做自定义 Tooltip。 */
+.architect-fullstack-trigger-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.architect-fullstack-trigger-wrap[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 6;
+  width: max-content;
+  max-width: 260px;
+  padding: 7px 9px;
+  border: 1px solid rgba(129, 140, 248, 0.4);
+  border-radius: 8px;
+  background: rgba(8, 13, 24, 0.98);
+  color: #e2e8f0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  text-align: left;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.architect-fullstack-gate-hint {
+  margin: 0;
+  max-width: 280px;
+  color: #fbbf24;
+  font-size: 10px;
+  line-height: 1.55;
+  text-align: right;
+}
+
 .architect-fullstack-error {
   display: flex;
   flex-direction: column;

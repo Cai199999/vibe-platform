@@ -8,6 +8,8 @@ M1 提供：
 
 from __future__ import annotations
 
+import logging
+import os
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 
@@ -23,6 +25,14 @@ from ai_core.sandbox import get_sandbox_provider
 from ai_core.schemas import HealthResponse, PingResponse
 
 settings = get_settings()
+
+# uvicorn 默认只配置自己的 logger，业务模块的 logging.getLogger(...).info
+# 不会输出。这里显式配置 root handler，FullstackGraph 的节点日志才能
+# 出现在 docker logs 中（生产可用 LOG_LEVEL=WARNING 降噪）。
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 
 
 def _package_version(package_name: str) -> str | None:

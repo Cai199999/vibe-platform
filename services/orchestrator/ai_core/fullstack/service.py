@@ -162,6 +162,15 @@ class FullstackService:
                 return existing
 
         sandbox_id, preview_url, created = self._ensure_sandbox(request)
+        logger.info(
+            "fullstack start run_id=%s project_id=%s contract_id=%s "
+            "sandbox_id=%s created=%s",
+            run_id,
+            request.project_id,
+            contract.contract_id,
+            sandbox_id,
+            created,
+        )
         active = ActiveFullstackRun(
             run_id=run_id,
             fingerprint=fingerprint,

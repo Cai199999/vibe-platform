@@ -14,7 +14,10 @@ React 18 + Vite → Java 21 Spring Boot 3.3.5 BFF → Python 3.12 FastAPI + Lang
 - Tool（search_web）/ Skill / MCP；记忆隔离、上下文分层压缩、Token 降本
 - 契约→全栈生成：`FullstackGraph` 五节点；Vite 5173 + Express 3000，
   `/api` 代理；SQLite 落盘 `data/fullstack.sqlite`，契约 CRUD + `/api/data`
-- 验证：`fullstack_e2e_check.py` 12/12；API/UI E2E、Python 192、Java BFF、前端构建 PASS
+- 生成按钮门控：可见禁用原因 + 自定义 Tooltip + `[fullstack]` 控制台诊断；
+  both 模式先 release 再生成；Graph 节点 INFO 日志可查
+- 验证：`fullstack_e2e_check.py` 12/12；gate/disabled/API/UI E2E、Python 192、
+  Java BFF、前端构建 PASS
 
 ## 真 / 假边界
 

@@ -551,6 +551,9 @@ export function useArchitect({ token } = {}) {
   const controllersRef = useRef(new Map())
   // 全栈生成与 Architect 澄清是两条独立 SSE，各自维护 AbortController。
   const fullstackControllersRef = useRef(new Map())
+  // 同步防重入：点击处理里会先 await 门控释放，这段时间 React 状态
+  // 还未变成 RUNNING，仅靠 statesRef 无法阻止双击启动两个 Run。
+  const fullstackStartingRef = useRef(new Set())
 
   useEffect(() => {
     statesRef.current = states
@@ -723,6 +726,8 @@ export function useArchitect({ token } = {}) {
       } finally {
         if (fullstackControllersRef.current.get(projectId) === controller) {
           fullstackControllersRef.current.delete(projectId)
+          // 事件流已到终态 / 已失败，允许用户重新生成。
+          fullstackStartingRef.current.delete(projectId)
         }
       }
     },
@@ -743,12 +748,46 @@ export function useArchitect({ token } = {}) {
     (projectId, options = {}) => {
       const current = statesRef.current[projectId] ?? EMPTY_ARCHITECT
       const fullstack = current.fullstack ?? EMPTY_FULLSTACK
-      if (fullstack.starting || fullstack.status === 'RUNNING') return false
+      // 所有“静默返回 false”的分支都必须留下日志：否则用户只会看到
+      // 按钮点击后毫无反应，无法判断是锁未释放还是契约缺失。
+      if (
+        fullstack.starting ||
+        fullstack.status === 'RUNNING' ||
+        fullstackStartingRef.current.has(projectId)
+      ) {
+        console.warn('[fullstack] generate skipped: already running', {
+          projectId,
+          status: fullstack.status,
+          starting: Boolean(fullstack.starting),
+          inflight: fullstackStartingRef.current.has(projectId),
+        })
+        return false
+      }
       const contract = options.contract ?? current.contract
       const contractId = options.contractId ?? contract?.contractId
-      if (!contract || !contractId) return false
+      if (!contract || !contractId) {
+        console.warn('[fullstack] generate skipped: contract/contractId missing', {
+          projectId,
+          hasContract: Boolean(contract),
+          contractId: contractId ?? null,
+          architectStatus: current.status,
+        })
+        return false
+      }
+      console.info('[fullstack] generate accepted', {
+        projectId,
+        contractId,
+        appShape: contract.appShape,
+        apiRouteCount: Array.isArray(contract.apiRoutes)
+          ? contract.apiRoutes.length
+          : 0,
+        sandboxId: options.sandboxId ?? null,
+        hasSourceFiles: Object.keys(options.files ?? {}).length > 0,
+      })
 
       const runId = options.runId || fullstackRunId()
+      // 先占位再写状态，确保双击 / 门控释放期间的重复点击被同步拦截。
+      fullstackStartingRef.current.add(projectId)
       patch(projectId, (previous) => ({
         ...previous,
         fullstack: {

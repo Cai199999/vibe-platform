@@ -2127,8 +2127,13 @@ export default function WorkspacePage() {
   /**
    * 释放 both 门控。只有 Architect 契约 CONFIRMED 后服务端才会启动 UI；
    * 重复调用由后端幂等返回同一个 UI Run。
+   *
+   * @param {object} [options]
+   * @param {boolean} [options.awaitUi=true] 是否等待 UI Run 事件流结束。
+   *   全栈生成场景只需要“门控已释放”即可继续写 server 文件，不必等 UI
+   *   修改跑完，因此传 false 可避免阻塞生成链路。
    */
-  const releaseGateFor = async (projectId, gateId) => {
+  const releaseGateFor = async (projectId, gateId, { awaitUi = true } = {}) => {
     if (!gateId || gateReleaseInflightRef.current.has(projectId)) return
     gateReleaseInflightRef.current.add(projectId)
     patchGate(projectId, { releasing: true, error: null })
@@ -2154,12 +2159,20 @@ export default function WorkspacePage() {
       }
       const annotationId = gate?.uiAnnotationId ?? null
       showToast('success', '契约已确认，开始执行界面修改')
-      await attachUiDispatch(projectId, {
+      const uiDispatch = attachUiDispatch(projectId, {
         runId: ui.runId,
         streamPath: ui.streamPath,
         annotationId,
         handoff: 'handoff_both',
       })
+      if (awaitUi) {
+        await uiDispatch
+      } else {
+        // 后台继续消费 UI 事件；失败只记录，不影响全栈生成。
+        void uiDispatch.catch((cause) => {
+          console.warn('[supervisor] 后台 UI Run 事件流失败', cause)
+        })
+      }
     } catch (cause) {
       const messageText = cause?.message || String(cause)
       patchGate(projectId, { releasing: false, error: messageText })
@@ -2234,32 +2247,96 @@ export default function WorkspacePage() {
    * 复用当前项目的沙盒；导入 / 纯前端项目没有 sandboxId 时，把当前入口
    * 源码作为 source.files 兜底，服务端会先创建一个沙盒再写入代码。
    */
-  const handleFullstackGenerate = (projectId) => {
+  const handleFullstackGenerate = async (projectId) => {
     const project = projects.find((item) => item.id === projectId)
     const architectState = architectStates[projectId]
     const contract = architectState?.contract
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const sandboxId = run.result?.sandboxId
+    const gate = gateStates[projectId]
+    const apiRouteCount = Array.isArray(contract?.apiRoutes)
+      ? contract.apiRoutes.length
+      : 0
+    const hasDdl =
+      typeof contract?.databaseDdl === 'string' &&
+      contract.databaseDdl.trim().length > 0
+
+    // 点击入口的完整门控快照：按钮“点不动”时，先看这一行日志。
+    const diagnostics = {
+      projectId,
+      hasProject: Boolean(project),
+      architectStatus: architectState?.status ?? null,
+      hasContract: Boolean(contract),
+      contractId: contract?.contractId ?? null,
+      contractStatus: contract?.status ?? null,
+      appShape: contract?.appShape ?? null,
+      apiRouteCount,
+      hasDdl,
+      sandboxId: sandboxId ?? null,
+      fullstackStatus: architectState?.fullstack?.status ?? 'IDLE',
+      gateId: gate?.gateId ?? null,
+      gateStatus: gate?.status ?? null,
+    }
+    console.info('[fullstack] generate clicked', diagnostics)
+
     if (!project || !contract?.contractId) {
+      console.warn('[fullstack] aborted: contract missing', diagnostics)
       showToast('error', '契约尚未确认，无法生成全栈代码')
       return
     }
+    if (contract.status && contract.status !== 'CONFIRMED') {
+      console.warn('[fullstack] aborted: contract not confirmed', diagnostics)
+      showToast('error', `契约状态为 ${contract.status}，确认后才能生成全栈代码`)
+      return
+    }
     if (contract.appShape !== 'full_stack_system') {
+      console.warn('[fullstack] aborted: app shape is not fullstack', diagnostics)
       showToast('info', '当前契约形态不需要生成后端代码')
       return
     }
-    const run = runStates[projectId] ?? EMPTY_RUN
-    const sandboxId = run.result?.sandboxId
+    const missing = [
+      apiRouteCount === 0 ? 'REST 接口（apiRoutes）' : null,
+      !hasDdl ? '数据库 DDL（databaseDdl）' : null,
+    ].filter(Boolean)
+    if (missing.length > 0) {
+      console.warn('[fullstack] aborted: contract incomplete', {
+        ...diagnostics,
+        missing,
+      })
+      showToast(
+        'error',
+        `契约缺少${missing.join(' 与 ')}，无法生成后端；请修订契约后重试`,
+      )
+      return
+    }
+
+    // both 门控：先释放 UI 锁，再启动全栈生成。releaseGateFor 只等待
+    // release 接口返回，不阻塞 UI Run 的事件流，避免生成被长时间卡住。
+    if (
+      gate?.gateId &&
+      (gate.status === 'AWAITING_CONTRACT' || gate.status === 'RELEASING')
+    ) {
+      console.info('[fullstack] releasing supervisor gate first', diagnostics)
+      await releaseGateFor(projectId, gate.gateId, { awaitUi: false })
+    }
+
     // 有沙盒时不需要重复上传源码；没有沙盒时至少携带入口文件。
     const files = sandboxId
       ? {}
       : { [projectEntryFile(project)]: projectSource(project) }
+    // 显式传入本次渲染确认过的契约，避免 statesRef 尚未同步时静默返回。
     const started = architect.generateFullstack(projectId, {
       tenantId: user?.tenantId || 'tenant_local',
       sandboxId,
       files,
+      contract,
+      contractId: contract.contractId,
     })
+    console.info('[fullstack] generate dispatched', { ...diagnostics, started })
     if (started) {
       showToast('info', '已启动全栈代码生成，正在写入沙盒…')
     } else {
+      console.warn('[fullstack] generateFullstack returned false', diagnostics)
       showToast('info', '全栈代码正在生成中，请稍候')
     }
   }
