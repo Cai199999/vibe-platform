@@ -1,8 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import useFillViewport, {
-  VIEWPORT_BASE_HEIGHT,
-  VIEWPORT_BASE_WIDTH,
-} from '../workspace/useFillViewport.js'
+import useFillViewport from '../workspace/useFillViewport.js'
 import usePanZoom from '../workspace/usePanZoom.js'
 import {
   CREATE_NEW,
@@ -241,17 +238,15 @@ function analyzeSelection(pageRoot, selectionRect, centerPoint, scale = 1) {
 }
 
 /**
- * 浮层与圈使用同一套“世界坐标”（1280×720 设计视口）。
+ * 浮层与圈使用同一套“世界坐标”（动态设计视口，最小 1280×720）。
  *
  * 浮层是 annotation-layer 的普通子元素，和页面共享父级 translate + scale，
  * 不做任何 1/scale 反向补偿：缩放画布时圆角、字号、输入框与浮层一起等比
  * 缩放，视觉上等同于画在画布上的一张图片。因此这里所有尺寸 / 间距都直接
  * 使用世界单位，不再除以 scale。
  */
-function popoverStyleFor(rect, index, active) {
+function popoverStyleFor(rect, index, active, width, height) {
   if (!rect) return null
-  const width = VIEWPORT_BASE_WIDTH
-  const height = VIEWPORT_BASE_HEIGHT
   const leftPx = rect.x * width
   const rightPx = (rect.x + rect.width) * width
   const centerY = (rect.y + rect.height / 2) * height
@@ -331,11 +326,20 @@ function AnnotationPopover({
   onRollback,
   onActivate,
   onDeactivate,
+  viewportWidth,
+  viewportHeight,
 }) {
   const historyRef = useRef(null)
   const style = useMemo(
-    () => popoverStyleFor(annotation.rect, index, active),
-    [annotation.rect, index, active],
+    () =>
+      popoverStyleFor(
+        annotation.rect,
+        index,
+        active,
+        viewportWidth,
+        viewportHeight,
+      ),
+    [annotation.rect, index, active, viewportWidth, viewportHeight],
   )
   const history = annotation.chatHistory ?? []
   const [answers, setAnswers] = useState({})
@@ -866,7 +870,7 @@ function AnnotationPopover({
 /**
  * 画布 Stage：
  *  - 展示一个与沙盒初始源码一致的 Mock 页面；
- *  - 鼠标 / 触控拖拽圈选组件，坐标转换为 1280×720 世界坐标；
+ *  - 鼠标 / 触控拖拽圈选组件，坐标转换为动态世界坐标（最小 1280×720）；
  *  - 页面与标注层使用同一 transform，平移 / 缩放后圈不会漂移；
  *  - 每个圈拥有独立多轮 Chatbox，可单独发送增量修改。
  */
@@ -931,11 +935,14 @@ export default function CanvasStage({
   // 重定向到 stage，因此“是否点在真实页面上”必须在下笔时记录。
   const livePressRef = useRef(false)
 
-  // 与沙盒预览共用 1280×720 设计视口：两边缩放参数与页面尺寸完全一致。
+  // 与沙盒预览共用动态设计视口：最小 1280×720，多余空间直接扩展逻辑宽高，
+  // 保证画面铺满且不会把页面上下裁切。
   const {
     scale: baseScale,
     offsetX: baseOffsetX,
     offsetY: baseOffsetY,
+    designWidth,
+    designHeight,
   } = useFillViewport(stageRef)
   // 画布自己的平移 / 缩放状态，保存在 ProjectWorkspace 级别的 ViewportContext。
   const viewport = usePanZoom({
@@ -1042,7 +1049,7 @@ export default function CanvasStage({
 
   /**
    * Screen -> World：先减去画布在屏幕上的左上角与当前 translate，再除以
-   * 当前 scale，最后归一化到 1280×720 设计视口。这样无论怎么平移 / 缩放，
+   * 当前 scale，最后归一化到当前动态设计视口（最小 1280×720）。这样无论怎么平移 / 缩放，
    * 圈记录的都是页面内容坐标，而不是屏幕坐标。
    */
   const toPoint = (event) => {
@@ -1054,8 +1061,8 @@ export default function CanvasStage({
     const worldY =
       (event.clientY - box.top - viewport.translateY) / viewport.scale
     return {
-      x: clamp01(worldX / VIEWPORT_BASE_WIDTH),
-      y: clamp01(worldY / VIEWPORT_BASE_HEIGHT),
+      x: clamp01(worldX / designWidth),
+      y: clamp01(worldY / designHeight),
     }
   }
 
@@ -1140,20 +1147,16 @@ export default function CanvasStage({
       // 不再只看“中心点命中谁”，否则空白区域会被误判成修改父容器。
       const box = stageRef.current.getBoundingClientRect()
       const left =
-        box.left +
-        viewport.translateX +
-        rect.x * VIEWPORT_BASE_WIDTH * viewport.scale
+        box.left + viewport.translateX + rect.x * designWidth * viewport.scale
       const top =
-        box.top +
-        viewport.translateY +
-        rect.y * VIEWPORT_BASE_HEIGHT * viewport.scale
+        box.top + viewport.translateY + rect.y * designHeight * viewport.scale
       const screenRect = {
         left,
         top,
-        right: left + rect.width * VIEWPORT_BASE_WIDTH * viewport.scale,
-        bottom: top + rect.height * VIEWPORT_BASE_HEIGHT * viewport.scale,
-        width: rect.width * VIEWPORT_BASE_WIDTH * viewport.scale,
-        height: rect.height * VIEWPORT_BASE_HEIGHT * viewport.scale,
+        right: left + rect.width * designWidth * viewport.scale,
+        bottom: top + rect.height * designHeight * viewport.scale,
+        width: rect.width * designWidth * viewport.scale,
+        height: rect.height * designHeight * viewport.scale,
       }
       // live 模式的页面在 iframe 里，画布无法跨文档读取 data-source。
       // 圈选仍然保留为“页面区域新增”，后续由 Inspect / 预览面板精确定位。
@@ -1214,8 +1217,8 @@ export default function CanvasStage({
         <div
           className="canvas-viewport"
           style={{
-            width: `${VIEWPORT_BASE_WIDTH}px`,
-            height: `${VIEWPORT_BASE_HEIGHT}px`,
+            width: `${designWidth}px`,
+            height: `${designHeight}px`,
             transform: `translate(${viewport.translateX}px, ${viewport.translateY}px) scale(${viewport.scale})`,
             transformOrigin: 'top left',
           }}
@@ -1375,6 +1378,8 @@ export default function CanvasStage({
                   onRollback={onAnnotationRollback}
                   onActivate={activateAnnotation}
                   onDeactivate={deactivateAnnotation}
+                  viewportWidth={designWidth}
+                  viewportHeight={designHeight}
                 />
               ))}
           </div>

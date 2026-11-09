@@ -1,9 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  VIEWPORT_BASE_HEIGHT,
-  VIEWPORT_BASE_WIDTH,
-} from './useFillViewport.js'
-import {
   MAX_ZOOM,
   MIN_ZOOM,
   useViewportState,
@@ -111,8 +107,10 @@ export default function usePanZoom({
 
       const width = node.clientWidth
       const height = node.clientHeight
-      const contentWidth = VIEWPORT_BASE_WIDTH * scaleBase * next.zoom
-      const contentHeight = VIEWPORT_BASE_HEIGHT * scaleBase * next.zoom
+      // 基准状态下逻辑视口刚好铺满容器，因此内容尺寸就是容器尺寸 × zoom。
+      // 不再依赖固定的 1280×720，窗口 resize / 工具栏高度变化后同样成立。
+      const contentWidth = width * next.zoom
+      const contentHeight = height * next.zoom
 
       // X / Y 各自独立计算，任何布局模式（对比 / 展示）都不锁轴。
       const translateX = clampAxis(ox + next.panX, contentWidth, width)
@@ -144,7 +142,7 @@ export default function usePanZoom({
         const currentScale = scaleBase * current.zoom
         if (currentScale <= 0) return current
 
-        // 指针下方的世界坐标（1280×720 设计视口坐标系）。
+        // 指针下方的世界坐标（当前动态设计视口坐标系）。
         const worldX = (pointerX - (ox + current.panX)) / currentScale
         const worldY = (pointerY - (oy + current.panY)) / currentScale
         const nextZoom = clamp(current.zoom * factor, MIN_ZOOM, MAX_ZOOM)

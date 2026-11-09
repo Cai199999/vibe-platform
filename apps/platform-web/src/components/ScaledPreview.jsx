@@ -1,15 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import useFillViewport, {
-  VIEWPORT_BASE_HEIGHT,
-  VIEWPORT_BASE_WIDTH,
-} from '../workspace/useFillViewport.js'
+import useFillViewport from '../workspace/useFillViewport.js'
 import usePanZoom from '../workspace/usePanZoom.js'
 
 /**
- * 沙盒预览使用「固定 1280×720 设计视口 + cover 基准 + 用户视口变换」：
+ * 沙盒预览使用「最小 1280×720 逻辑视口 + 自适应铺满 + 用户视口变换」：
  *
- *  1. iframe 始终以 1280×720 作为内部视口，页面按桌面版式排版；
- *  2. 基准 scale / offset 由 useFillViewport 以 cover 方式计算，保证铺满；
+ *  1. iframe 的逻辑宽高由容器尺寸反推（最小 1280×720），页面按桌面版式排版；
+ *  2. useFillViewport 计算统一 scale，使逻辑视口恰好铺满容器，不裁切；
  *  3. 用户滚轮缩放、中键 / 空格 + 左键平移叠加在同一组 transform 上；
  *  4. iframe 上方覆盖一层透明手势层：iframe 会吞掉指针与滚轮事件，只有
  *     通过手势层才能在预览内容任意位置进行缩放和平移；
@@ -59,6 +56,8 @@ export default function ScaledPreview({
     scale: baseScale,
     offsetX: baseOffsetX,
     offsetY: baseOffsetY,
+    designWidth,
+    designHeight,
     recalc,
   } = useFillViewport(screenRef)
   const viewport = usePanZoom({
@@ -147,7 +146,7 @@ export default function ScaledPreview({
     if (!inspectMode) setHover(null)
   }, [inspectMode, src])
 
-  /** 把浏览器指针坐标映射到 iframe 内部 1280×720 设计视口坐标。 */
+  /** 把浏览器指针坐标映射到 iframe 内部当前逻辑视口坐标。 */
   const toFramePoint = (event) => {
     const frame = iframeRef.current
     if (!frame) return null
@@ -161,8 +160,9 @@ export default function ScaledPreview({
     ) {
       return null
     }
-    const scaleX = rect.width / VIEWPORT_BASE_WIDTH
-    const scaleY = rect.height / VIEWPORT_BASE_HEIGHT
+    // clientWidth / clientHeight 是未经 transform 缩放前的逻辑尺寸。
+    const scaleX = rect.width / (frame.clientWidth || designWidth)
+    const scaleY = rect.height / (frame.clientHeight || designHeight)
     return {
       x: (event.clientX - rect.left) / scaleX,
       y: (event.clientY - rect.top) / scaleY,
@@ -290,8 +290,8 @@ export default function ScaledPreview({
           sendInspect(message('enable', { enabled: inspectModeRef.current }))
         }}
         style={{
-          width: `${VIEWPORT_BASE_WIDTH}px`,
-          height: `${VIEWPORT_BASE_HEIGHT}px`,
+          width: `${designWidth}px`,
+          height: `${designHeight}px`,
           transform: `translate(${viewport.translateX}px, ${viewport.translateY}px) scale(${viewport.scale})`,
           transformOrigin: 'top left',
           opacity: scaleReady(baseScale) ? 1 : 0,

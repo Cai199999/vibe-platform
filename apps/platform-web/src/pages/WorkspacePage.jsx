@@ -3625,7 +3625,7 @@ export default function WorkspacePage() {
   }
 
   return (
-    <div className="app-shell app-shell-wide">
+    <div className="app-shell app-shell-wide app-shell-workspace">
       <AppHeader
         busy={anyRunning}
         onOpenAccount={() => setAccountOpen(true)}

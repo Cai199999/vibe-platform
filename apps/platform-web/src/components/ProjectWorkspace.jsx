@@ -10,10 +10,6 @@ import {
   useViewportState,
 } from '../workspace/ViewportContext.jsx'
 import {
-  VIEWPORT_BASE_HEIGHT,
-  VIEWPORT_BASE_WIDTH,
-} from '../workspace/useFillViewport.js'
-import {
   CREATE_NEW,
   MODIFY_EXISTING,
   isCreateAction,
@@ -173,13 +169,17 @@ function ProjectWorkspaceInner({
   const handleInspectPick = (payload) => {
     if (!payload?.source?.file) return
     const rect = payload.rect ?? { x: 0, y: 0, width: 0, height: 0 }
+    // SDK 的 rect 相对当前 iframe 逻辑视口；视口会随画布尺寸扩展，
+    // 因此必须使用 payload 里的真实 innerWidth / innerHeight 归一化。
+    const viewportWidth = Number(payload.viewport?.width) || 1280
+    const viewportHeight = Number(payload.viewport?.height) || 720
     const toWorld = (value, total) =>
       Math.min(1, Math.max(0, Number(value || 0) / total))
     const worldRect = {
-      x: toWorld(rect.x, VIEWPORT_BASE_WIDTH),
-      y: toWorld(rect.y, VIEWPORT_BASE_HEIGHT),
-      width: toWorld(rect.width, VIEWPORT_BASE_WIDTH),
-      height: toWorld(rect.height, VIEWPORT_BASE_HEIGHT),
+      x: toWorld(rect.x, viewportWidth),
+      y: toWorld(rect.y, viewportHeight),
+      width: toWorld(rect.width, viewportWidth),
+      height: toWorld(rect.height, viewportHeight),
     }
     const source = payload.source
     setInspectDraft({

@@ -507,7 +507,13 @@ def main() -> None:
         expect(active.locator(".runtime-preview-frame")).to_be_visible()
         expect(active.locator(".status-pill.is-success")).to_be_visible()
         preview_box = active.locator(".project-viewport").bounding_box()
-        assert_same_box(canvas_box, preview_box, "画布 → 预览")
+        # Run 完成后会出现 Supervisor 轨迹，视口高度随之收缩；宽度必须保持
+        # 不变，且预览仍要占满新的剩余空间（不再使用固定 --viewport-h）。
+        if abs(canvas_box["width"] - preview_box["width"]) > 1:
+            fail(f"画布 → 预览宽度变化: {canvas_box} -> {preview_box}")
+        if preview_box["height"] < 420:
+            fail(f"预览视口高度异常: {preview_box}")
+        canvas_box = preview_box
 
         frame = page.frame_locator(".tab-window.is-active .runtime-preview-frame")
         cta = frame.locator("button")

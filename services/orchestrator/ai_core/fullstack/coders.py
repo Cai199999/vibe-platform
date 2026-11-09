@@ -761,7 +761,9 @@ const SECTIONS = COMPONENTS.reduce((groups, component) => {
 
 const styles = {
   page: {
-    minHeight: '100%',
+    // 最外层铺满沙盒视口：不写死宽度、不 margin:auto 居中。
+    width: '100%',
+    minHeight: '100vh',
     background:
       'radial-gradient(circle at top left, #1e293b 0%, #0f172a 42%, #020617 100%)',
     color: '#e2e8f0',

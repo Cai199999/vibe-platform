@@ -55,6 +55,117 @@ def middle_drag(page, x: float, y: float, dx: float = 48, dy: float = 24) -> Non
     page.wait_for_timeout(250)
 
 
+def assert_canvas_fill(page, label: str) -> None:
+    """断言画布外壳、舞台和 live 页面严格铺满，无黑边 / 无裁切。"""
+    metrics = page.evaluate("""() => {
+            const box = (node) => {
+                const rect = node.getBoundingClientRect();
+                return {x: rect.x, y: rect.y, width: rect.width, height: rect.height};
+            };
+            const shell = document.querySelector('.app-shell-workspace');
+            const stage = document.querySelector('.tab-window.is-active .canvas-stage');
+            const live = document.querySelector('.tab-window.is-active .canvas-live-page');
+            const viewport = document.querySelector('.tab-window.is-active .canvas-viewport');
+            if (!shell || !stage || !live || !viewport) return null;
+            const matrix = new DOMMatrix(getComputedStyle(viewport).transform);
+            return {
+                innerHeight: window.innerHeight,
+                documentHeight: document.documentElement.scrollHeight,
+                shell: box(shell),
+                stage: box(stage),
+                live: box(live),
+                scaleX: matrix.a,
+                scaleY: matrix.d,
+                logicalWidth: viewport.offsetWidth,
+                logicalHeight: viewport.offsetHeight,
+            };
+        }""")
+    if not metrics:
+        raise AssertionError(f"{label}: 画布节点缺失")
+
+    def near(actual: float, expected: float, tolerance: float = 1.5) -> bool:
+        return abs(actual - expected) <= tolerance
+
+    if not near(metrics["shell"]["height"], metrics["innerHeight"], 1):
+        raise AssertionError(
+            f"{label}: 应用壳高度未铺满视口 "
+            f"{metrics['shell']['height']} vs {metrics['innerHeight']}"
+        )
+    if metrics["documentHeight"] > metrics["innerHeight"] + 1:
+        raise AssertionError(
+            f"{label}: 页面出现纵向滚动 "
+            f"{metrics['documentHeight']} > {metrics['innerHeight']}"
+        )
+    for key, label_text in (("width", "宽度"), ("height", "高度")):
+        if not near(metrics["live"][key], metrics["stage"][key]):
+            raise AssertionError(
+                f"{label}: 页面{label_text}未铺满画布 "
+                f"{metrics['live'][key]} vs {metrics['stage'][key]}"
+            )
+    for key, label_text in (("x", "左边距"), ("y", "顶边距")):
+        if not near(metrics["live"][key], metrics["stage"][key]):
+            raise AssertionError(
+                f"{label}: 页面{label_text}存在偏移 "
+                f"{metrics['live'][key]} vs {metrics['stage'][key]}"
+            )
+    # transform 后的逻辑视口必须精确等于舞台尺寸，证明没有 cover 裁切。
+    if not near(metrics["scaleX"] * metrics["logicalWidth"], metrics["stage"]["width"]):
+        raise AssertionError(f"{label}: 横向缩放未铺满 {metrics}")
+    if not near(
+        metrics["scaleY"] * metrics["logicalHeight"], metrics["stage"]["height"]
+    ):
+        raise AssertionError(f"{label}: 纵向缩放未铺满 {metrics}")
+    print(
+        f"   OK {label}: stage={metrics['stage']['width']:.0f}×"
+        f"{metrics['stage']['height']:.0f} / "
+        f"logical={metrics['logicalWidth']}×{metrics['logicalHeight']}"
+    )
+
+
+def assert_preview_fill(page, label: str) -> None:
+    """断言预览 iframe 与预览屏幕严格重合，没有黑边或裁切。"""
+    metrics = page.evaluate("""() => {
+            const box = (node) => {
+                const rect = node.getBoundingClientRect();
+                return {x: rect.x, y: rect.y, width: rect.width, height: rect.height};
+            };
+            const screen = document.querySelector(
+                '.tab-window.is-active .runtime-preview-screen');
+            const frame = document.querySelector(
+                '.tab-window.is-active .runtime-preview-frame');
+            if (!screen || !frame) return null;
+            const matrix = new DOMMatrix(getComputedStyle(frame).transform);
+            return {
+                screen: box(screen),
+                frame: box(frame),
+                scaleX: matrix.a,
+                scaleY: matrix.d,
+                logicalWidth: frame.offsetWidth,
+                logicalHeight: frame.offsetHeight,
+            };
+        }""")
+    if not metrics:
+        raise AssertionError(f"{label}: 预览节点缺失")
+    for key in ("x", "y", "width", "height"):
+        if abs(metrics["frame"][key] - metrics["screen"][key]) > 1.5:
+            raise AssertionError(f"{label}: 预览 iframe 未铺满 {key}: {metrics}")
+    if (
+        abs(metrics["scaleX"] * metrics["logicalWidth"] - metrics["screen"]["width"])
+        > 1.5
+    ):
+        raise AssertionError(f"{label}: 预览横向缩放未铺满 {metrics}")
+    if (
+        abs(metrics["scaleY"] * metrics["logicalHeight"] - metrics["screen"]["height"])
+        > 1.5
+    ):
+        raise AssertionError(f"{label}: 预览纵向缩放未铺满 {metrics}")
+    print(
+        f"   OK {label}: preview={metrics['screen']['width']:.0f}×"
+        f"{metrics['screen']['height']:.0f} / "
+        f"logical={metrics['logicalWidth']}×{metrics['logicalHeight']}"
+    )
+
+
 def fill_clarification(panel) -> None:
     """填写当前一轮澄清：选择项取第一项，自由文本按问题语义作答。"""
     form = panel.locator(".architect-clarification")
@@ -175,6 +286,32 @@ def main() -> int:
                 full_page=True,
             )
             print("   OK：画布已替换为契约生成的真实 React 页面")
+
+            print("\n== 4b. 窗口缩放后画布始终铺满且不裁切 ==")
+            for width, height in (
+                (1600, 1000),
+                (1280, 800),
+                (1920, 1080),
+                (1600, 1000),
+            ):
+                page.set_viewport_size({"width": width, "height": height})
+                page.wait_for_timeout(450)
+                assert_canvas_fill(page, f"{width}×{height}")
+            print("   小 / 中 / 大窗口均无黑边、无页面滚动")
+
+            print("\n== 4c. 预览面板同样自适应铺满 ==")
+            active.get_by_role("button", name="预览", exact=True).click()
+            expect(active.locator(".runtime-preview-frame")).to_be_visible()
+            page.wait_for_timeout(450)
+            assert_preview_fill(page, "预览 1600×1000")
+            page.set_viewport_size({"width": 1280, "height": 800})
+            page.wait_for_timeout(450)
+            assert_preview_fill(page, "预览 1280×800")
+            page.set_viewport_size({"width": 1600, "height": 1000})
+            page.wait_for_timeout(450)
+            active.get_by_role("button", name="画布", exact=True).click()
+            expect(active.locator(".canvas-pane.is-visible")).to_be_visible()
+            print("   预览 iframe 与屏幕区域严格重合")
 
             print("\n== 5. 标注态 / 交互态自动切换 ==")
             stage = active.locator(".canvas-stage")
