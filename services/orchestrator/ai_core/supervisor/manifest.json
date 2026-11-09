@@ -41,6 +41,19 @@
         "maxItems": 3,
         "items": {"type": "object"}
       },
+      "architectHistory": {
+        "type": "array",
+        "maxItems": 30,
+        "description": "Architect 面板专属澄清 / 契约对话，仅投影到 architect_graph。",
+        "items": {"type": "object"}
+      },
+      "uiHistory": {
+        "type": "array",
+        "maxItems": 30,
+        "deprecated": true,
+        "description": "兼容旧客户端；Supervisor 不再转发给任何子图，UI 对话以 annotations[].chatHistory 为准。",
+        "items": {"type": "object"}
+      },
       "scopeHint": {
         "type": "string",
         "enum": ["ui", "architect", "both", "auto"]

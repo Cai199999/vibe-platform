@@ -21,7 +21,10 @@ React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.1
 - MCP：标准 stdio 子集 + `get_current_time` 示例
 - 六边形重构：`AnnotationEnvelope/ArchitectContract/State` 入 domain；
   `ModelClient/Sandbox/RAG/Checkpoint/Editor` 入 ports；DeepSeek/Docker/Markdown/Chroma/Editor 入 adapters
-- Eval 10/10；单测 138 passed
+- 记忆隔离：`ThreadMemoryStore` 按 tenant+project 作用域键；LangGraph
+  checkpoint 按 `ui_run`/`architect_run` + 项目作用域物理隔离；Supervisor
+  只向 Architect 投影 `architectHistory`，UI 只收画布标注；State 字段边界测试固化
+- Eval 10/10；单测 148 passed（含 `test_memory_isolation.py` 10 项）
 
 ## 真 / 假边界
 

@@ -1445,13 +1445,10 @@ export default function WorkspacePage() {
       baseCommitHash: run.result?.commitHash || undefined,
       ...(sandboxId ? {} : { files }),
     }
-    const uiHistory = run.annotations
-      .flatMap((annotation) =>
-        (annotation.chatHistory ?? []).map((item) => ({
-          role: item.role,
-          content: item.content,
-        })),
-      )
+    // Architect 只接收自己面板的澄清 / 契约对话。绝不能把 run.annotations
+    // 里的 UI Coder 聊天拼进来，否则代码指令会污染全局架构上下文。
+    const architectHistory = (architectStates[projectId]?.messages ?? [])
+      .map((item) => ({ role: item.role, content: item.content }))
       .filter((item) => item.content)
       .slice(-20)
 
@@ -1471,7 +1468,7 @@ export default function WorkspacePage() {
       sandboxId: sandboxId || undefined,
       files,
       source,
-      uiHistory,
+      architectHistory,
       options: {
         scopeHint,
         ui: {
@@ -2292,6 +2289,10 @@ export default function WorkspacePage() {
         },
         body: JSON.stringify({
           sandboxId,
+          // 项目作用域：后端据此定位 ThreadMemoryStore，避免跨项目命中
+          // 同名 threadId 的聊天记忆。
+          tenantId: user?.tenantId || 'tenant_local',
+          projectId: project.id,
           threadId: annotation.threadId,
           commitHash: message.commitHash,
           runId: message.runId,

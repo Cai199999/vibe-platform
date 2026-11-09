@@ -65,6 +65,7 @@ from ai_core.domain.agent import (
     VerifyResultModel,
 )
 from ai_core.agent.thread_memory import ThreadMemoryStore, get_thread_store
+from ai_core.domain.scope import memory_scope, scoped_checkpoint_key
 from ai_core.config import Settings, get_settings
 from ai_core.adapters.sandbox import get_sandbox_provider
 from ai_core.ports.sandbox import SandboxError, SandboxHandle, SandboxProvider
@@ -200,6 +201,11 @@ class PreparedRun:
     llm: AgentLLM
     annotations: list[AnnotationEnvelope]
     thread_ids: list[str]
+    # LangGraph Checkpointer 物理键：tenant + project + ui_run + runId。
+    # 与业务 threadId 解耦，避免不同项目 / Agent 的 checkpoint 碰撞。
+    checkpoint_thread_id: str
+    # ThreadMemoryStore 的租户 + 项目作用域哈希。
+    memory_scope: str
     instructions: list[str]
     turn_counts: dict[str, int]
     run_turn_count: int
@@ -748,6 +754,15 @@ class RunExecutionService:
             )
 
         target_files = self._resolve_target_files(request)
+        # 业务 threadId 只用于前端展示与同圈多轮定位；所有持久化键都必须
+        # 再叠加 tenant/project 作用域，禁止跨项目读取同名会话。
+        memory_scope_key = memory_scope(request.tenant_id, request.project_id)
+        checkpoint_thread_id = scoped_checkpoint_key(
+            "ui_run",
+            run_id,
+            tenant_id=request.tenant_id,
+            project_id=request.project_id,
+        )
         thread_ids = [
             self._thread_id(annotation, index)
             for index, annotation in enumerate(annotations, start=1)
@@ -768,13 +783,20 @@ class RunExecutionService:
             llm = build_agent_llm(request, self._settings)
 
             turn_counts = {
-                thread_id: self._threads.next_turn(thread_id, annotation.chat_history)
+                thread_id: self._threads.next_turn(
+                    thread_id,
+                    annotation.chat_history,
+                    scope=memory_scope_key,
+                )
                 for annotation, thread_id in zip(annotations, thread_ids)
             }
             run_turn_count = max(turn_counts.values(), default=1)
 
             handle, reused_sandbox, current_files = self._open_sandbox(
-                request, target_files, thread_ids
+                request,
+                target_files,
+                thread_ids,
+                scope=memory_scope_key,
             )
             # 记录写代码前的 HEAD：审批拒绝 / 取消时 git reset 回这里，
             # 未批准的修改不会污染同一 thread 的下一轮。
@@ -809,7 +831,11 @@ class RunExecutionService:
                     exc_info=True,
                 )
 
-            thread_contexts = self._merge_thread_contexts(annotations, thread_ids)
+            thread_contexts = self._merge_thread_contexts(
+                annotations,
+                thread_ids,
+                scope=memory_scope_key,
+            )
             annotation_context = self._build_annotation_context(
                 request, target_files, thread_contexts, current_files
             )
@@ -893,6 +919,8 @@ class RunExecutionService:
             llm=llm,
             annotations=annotations,
             thread_ids=thread_ids,
+            checkpoint_thread_id=checkpoint_thread_id,
+            memory_scope=memory_scope_key,
             instructions=instructions,
             turn_counts=turn_counts,
             run_turn_count=run_turn_count,
@@ -925,7 +953,7 @@ class RunExecutionService:
         try:
             outcome = runner.run(
                 prepared.initial_state,  # type: ignore[arg-type]
-                thread_id=prepared.run_id,
+                thread_id=prepared.checkpoint_thread_id,
                 resume=resume,
             )
         except RunCancelledError:
@@ -1117,6 +1145,7 @@ class RunExecutionService:
             turn_counts=prepared.turn_counts if commit_hash else None,
             commit_hash=commit_hash,
             baseline_commit=baseline_commit,
+            scope=prepared.memory_scope,
         )
         self._maybe_destroy(prepared.handle.sandbox_id, prepared.request)
         with _ACTIVE_LOCK:
@@ -1305,6 +1334,7 @@ class RunExecutionService:
             patch="",
             changed_files=[],
             retry_count=0,
+            scope=prepared.memory_scope,
         )
         self._maybe_destroy(prepared.handle.sandbox_id, prepared.request)
         response = self._to_response(
@@ -1364,11 +1394,17 @@ class RunExecutionService:
                     raise RunIdConflictError(f"runId={run_id} 已存在且请求内容不同")
                 return existing, False
 
-            requested_threads = set(thread_ids)
+            # “同一 thread 正在执行”必须同时比较项目：不同项目的同名
+            # threadId 是两条完全独立的会话，不能互相阻塞或共享状态。
+            requested = {(request.project_id, thread_id) for thread_id in thread_ids}
             for item in _ACTIVE_RUNS.values():
                 if item.run_id == run_id or item.is_terminal:
                     continue
-                if requested_threads.intersection(item.thread_ids):
+                active_threads = {
+                    (item.request.project_id, thread_id)
+                    for thread_id in item.thread_ids
+                }
+                if requested.intersection(active_threads):
                     raise RunBusyError(
                         "当前标注仍有未完成的修改，请先完成澄清或等待执行结束"
                     )
@@ -1436,11 +1472,15 @@ class RunExecutionService:
         M1.5 接受该限制；M2 用事件溯源重放未撤销标注的意图。
         """
         handle = self._sandbox.get(request.sandbox_id)
+        # 回滚也必须带租户 / 项目作用域；没有 projectId 时 scope 为空，
+        # 只能执行 Git 回滚，绝不能误读其它项目的同名 thread 记忆。
+        rollback_scope = memory_scope(request.tenant_id, request.project_id)
         checkpoint = self._threads.checkpoint(
             request.thread_id,
             run_id=request.run_id,
             turn_count=request.turn_count,
             commit_hash=request.commit_hash,
+            scope=rollback_scope,
         )
         if checkpoint and checkpoint.get("commitHash") != request.commit_hash:
             raise RollbackTargetMismatchError(
@@ -1455,6 +1495,7 @@ class RunExecutionService:
             run_id=request.run_id,
             turn_count=request.turn_count,
             commit_hash=request.commit_hash,
+            scope=rollback_scope,
         )
         if restored is None:
             # python-ai 重启后内存 checkpoint 可能不存在；Git 回滚仍然有效，
@@ -1594,10 +1635,16 @@ class RunExecutionService:
         self,
         annotations: list[AnnotationEnvelope],
         thread_ids: list[str],
+        *,
+        scope: str,
     ) -> dict[str, dict[str, Any]]:
         """把前端历史与服务端记忆合并为模型可读的 threadContext。"""
         return {
-            thread_id: self._threads.merge_context(thread_id, annotation.chat_history)
+            thread_id: self._threads.merge_context(
+                thread_id,
+                annotation.chat_history,
+                scope=scope,
+            )
             for annotation, thread_id in zip(annotations, thread_ids)
         }
 
@@ -1606,13 +1653,15 @@ class RunExecutionService:
         request: ExecuteRunRequest,
         target_files: list[str],
         thread_ids: list[str],
+        *,
+        scope: str,
     ) -> tuple[SandboxHandle, bool, dict[str, str]]:
         """优先复用当前沙盒；失败时根据 thread 源码快照重建。"""
         candidates: list[str] = []
         if request.sandbox_id:
             candidates.append(request.sandbox_id)
         for thread_id in thread_ids:
-            stored = self._threads.sandbox_id(thread_id)
+            stored = self._threads.sandbox_id(thread_id, scope=scope)
             if stored and stored not in candidates:
                 candidates.append(stored)
 
@@ -1645,7 +1694,7 @@ class RunExecutionService:
 
         # 沙盒已销毁时，用服务端保存的最近源码快照重建，避免多轮修改丢失。
         seed_files = dict(request.files)
-        snapshot = self._threads.seed_files(thread_ids)
+        snapshot = self._threads.seed_files(thread_ids, scope=scope)
         if snapshot:
             seed_files.update(snapshot)
 
@@ -1702,6 +1751,7 @@ class RunExecutionService:
         turn_counts: dict[str, int] | None = None,
         commit_hash: str | None = None,
         baseline_commit: str | None = None,
+        scope: str | None = None,
     ) -> None:
         """把本轮对话与修改记录写入每个标注自己的 thread。"""
         user_messages: dict[str, Any] = {}
@@ -1730,6 +1780,7 @@ class RunExecutionService:
             turn_counts=turn_counts,
             commit_hash=commit_hash,
             baseline_commit=baseline_commit,
+            scope=scope,
         )
 
     @staticmethod

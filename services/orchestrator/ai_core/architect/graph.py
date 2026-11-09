@@ -144,13 +144,21 @@ class ArchitectGraphRunner:
         initial_state: ArchitectState,
         *,
         run_id: str | None = None,
+        thread_id: str | None = None,
         resume: Any | None = None,
     ) -> ArchitectGraphOutcome:
+        """执行 / 恢复 Architect 状态机。
+
+        ``thread_id`` 由应用层传入项目作用域后的物理 Checkpoint 键；未传时
+        保持旧行为 ``architect:<runId>``，仅用于单机测试。
+        """
         resolved_run_id = run_id or str(initial_state.get("run_id") or "")
-        thread_id = f"{ARCHITECT_THREAD_PREFIX}{resolved_run_id}"
+        resolved_thread_id = thread_id or (
+            f"{ARCHITECT_THREAD_PREFIX}{resolved_run_id}"
+        )
         config = {
             "recursion_limit": self._recursion_limit,
-            "configurable": {"thread_id": thread_id},
+            "configurable": {"thread_id": resolved_thread_id},
         }
         if resume is None:
             self._graph.invoke(dict(initial_state), config=config)
@@ -163,7 +171,7 @@ class ArchitectGraphRunner:
             state=state,  # type: ignore[arg-type]
             interrupted=bool(snapshot.next),
             interrupt=_find_interrupt(snapshot),
-            thread_id=thread_id,
+            thread_id=resolved_thread_id,
         )
 
     # --------------------------------------------------------

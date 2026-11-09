@@ -129,10 +129,13 @@ class ArchitectSubGraphDispatcher:
         if not source.files and request.files:
             source.files = dict(request.files)
         architect_request = ArchitectRunRequest(
+            tenant_id=request.tenant_id,
             project_id=request.project_id,
             project_name=request.project_name,
+            # Architect 只拿源码 + 自己面板的历史，不接收 UI 标注 / Coder
+            # 对话 / 沙盒代码快照，避免上下文污染与 Token 膨胀。
             source=source,
-            ui_history=list(request.ui_history),
+            ui_history=_architect_only_history(request.architect_history),
             options=request.options.architect,
         )
         active = self._new_service().start_stream(architect_request)
@@ -171,10 +174,15 @@ class UiSubGraphDispatcher:
                 "派发 UI Graph 至少需要 1 个画布标注；"
                 "请先圈选元素或显式选择全局架构设计"
             )
+        # UI 子图只接收画布标注与项目源码；Architect 的澄清历史 / 契约
+        # 不在这里投影。每个 annotation 的 chatHistory 本来就是该 thread
+        # 自己的 UI 对话，不能跨标注或跨项目合并。
         ui_request = ExecuteRunRequest(
             tenant_id=request.tenant_id,
             project_id=request.project_id,
-            annotations=list(request.annotations),
+            annotations=[
+                annotation.model_copy(deep=True) for annotation in request.annotations
+            ],
             sandbox_id=request.sandbox_id,
             files=dict(request.files),
             options=request.options.ui,
@@ -185,6 +193,27 @@ class UiSubGraphDispatcher:
             run_id=active.run_id,
             stream_path=f"/api/v1/runs/{active.run_id}/events/stream",
         )
+
+
+def _architect_only_history(
+    history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """只保留 Architect 对话的 role/content，裁剪一切 UI / 执行元数据。
+
+    - 丢弃 runId / commitHash / turnCount / threadId 等 Coder 坐标；
+    - 只接受 user / assistant 文本，避免把工具输出或代码片段夹带进来；
+    - 最多 30 条，交由 Architect 自己的压缩节点再处理。
+    """
+    projected: list[dict[str, Any]] = []
+    for item in history[-30:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        projected.append({"role": role, "content": content[:8000]})
+    return projected
 
 
 def build_default_dispatchers() -> dict[str, SubGraphDispatcher]:

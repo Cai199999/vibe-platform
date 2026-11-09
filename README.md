@@ -435,6 +435,30 @@ platform-web 在 Compose 中挂载 `./apps/platform-web:/app`（`node_modules`
 回写也始终带 `projectId`，关闭 Tab 后由 `closedProjectsRef` 阻止迟到结果污染
 状态并立即销毁新沙盒。
 
+### 服务端记忆与状态隔离
+
+- **Thread 物理隔离**：`ThreadMemoryStore` 是进程级单例，但所有读写都经过
+  `domain/scope.py` 的 `memory_scope(tenantId, projectId)` 生成 24 位
+  SHA-256 作用域键；同名 `threadId` 在不同项目 / 租户下对应完全独立的
+  `ThreadRecord`、沙盒、checkpoint 与回滚目标。
+- **Checkpoint 物理隔离**：LangGraph `MemorySaver`（未来 Redis 实现同一接口）
+  的 `thread_id` 不再是裸 `runId`，而是
+  `scoped_checkpoint_key(kind, runId, tenantId, projectId)`，其中 `kind`
+  为 `ui_run` 或 `architect_run`。UI Run 与 Architect Run 即使 `runId`
+  相同也互不可读；换项目 / 换租户得到全新空 checkpoint。
+- **Sub-Graph 逻辑隔离**：Supervisor 派发时做专属 Context 投影。UI 子图只
+  接收 `annotations[].chatHistory` + 项目源码；Architect 子图只接收
+  `architectHistory` 中裁剪后的 `role/content`（最长 30 条、单条 8k），
+  不接收画布标注、Coder 聊天、`runId/commitHash/turnCount` 等执行坐标。
+  旧的 `uiHistory` 字段仅为兼容反序列化保留，不再转发。
+- **State Schema 边界**：`AgentState` 只含代码 / DOM / 验证字段，
+  `ArchitectState` 只含源码快照、槽位、澄清、契约字段；两侧字段集合由
+  `tests/test_memory_isolation.py` 断言，新增跨域字段会直接测试失败。
+- **进程级全局内存**：checkpoint Provider、`ThreadMemoryStore`、活跃 Run
+  注册表（`_ACTIVE_RUNS`）、事件缓冲区、门控注册表都是进程单例；它们
+  **只作为存储容器**，隔离责任落在上述 scope / kind / projectId 物理键上。
+  服务重启即清空，当前不跨实例共享。
+
 ## 项目导出
 
 沙盒是项目的唯一真源：导出直接读取运行中的沙盒文件，不依赖前端缓存。

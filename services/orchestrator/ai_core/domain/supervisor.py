@@ -62,6 +62,12 @@ class SupervisorRequest(CamelModel):
     files: dict[str, str] = Field(default_factory=dict)
     # Architect 的源码来源；未显式提供时由 service 从 sandboxId/files 补齐。
     source: ArchitectSource = Field(default_factory=ArchitectSource)
+    # Architect 专属对话历史：只允许来自 Architect 面板的澄清 / 契约问答。
+    # UI Graph 的 coder 历史绝不能放进这里，否则会把代码与 UI 指令污染到
+    # 全局架构上下文。Dispatcher 只投影 role/content 两个字段。
+    architect_history: list[dict[str, Any]] = Field(default_factory=list, max_length=30)
+    # 旧字段：历史上前端把 UI 标注聊天拼进来。为兼容旧客户端保留反序列化，
+    # 但 Supervisor 不再把它转发给任何子图，避免跨 Agent 上下文污染。
     ui_history: list[dict[str, Any]] = Field(default_factory=list, max_length=30)
     options: SupervisorOptions = Field(default_factory=SupervisorOptions)
 

@@ -44,6 +44,7 @@ from ai_core.domain.architect import (
 )
 from ai_core.architect.source import collect_source
 from ai_core.config import Settings, get_settings
+from ai_core.domain.scope import scoped_checkpoint_key
 from ai_core.ports.sandbox import SandboxProvider
 
 logger = logging.getLogger(__name__)
@@ -245,6 +246,14 @@ class ArchitectService:
         outcome = runner.run(
             initial_state or {},
             run_id=active.run_id,
+            # Architect 与 UI 使用不同 kind，且叠加 tenant/project 哈希；
+            # 即使 runId 相同也不可能共享 checkpoint。
+            thread_id=scoped_checkpoint_key(
+                "architect_run",
+                active.run_id,
+                tenant_id=active.request.tenant_id,
+                project_id=active.request.project_id,
+            ),
             resume=resume,
         )
         self._apply_outcome(

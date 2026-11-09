@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from ai_core.domain.scope import memory_scope
+
 MAX_HISTORY = 60
 MAX_PROMPT_HISTORY = 24
 MAX_RUNS = 8
@@ -95,17 +97,30 @@ class ThreadRecord:
 
 
 class ThreadMemoryStore:
-    """线程安全的内存会话存储。"""
+    """线程安全的内存会话存储。
 
-    def __init__(self) -> None:
+    所有公开方法都支持 ``scope`` 参数。生产调用必须传入
+    ``memory_scope(tenant_id, project_id)``，确保不同项目的同名 threadId
+    落在不同的物理 key；不传 scope 仅用于旧测试 / 单机脚本。
+    """
+
+    def __init__(self, *, namespace: str | None = None) -> None:
         self._lock = threading.RLock()
         self._threads: dict[str, ThreadRecord] = {}
+        # 可选实例级命名空间：多个 Store 实例（例如测试或未来按租户分片）
+        # 即使共享同名 threadId 也不会互相读取。
+        self._namespace = namespace
 
-    def _record(self, thread_id: str) -> ThreadRecord:
-        record = self._threads.get(thread_id)
+    def _key(self, thread_id: str, scope: str | None = None) -> str:
+        parts = [part for part in (self._namespace, scope, thread_id) if part]
+        return ":".join(parts)
+
+    def _record(self, thread_id: str, scope: str | None = None) -> ThreadRecord:
+        key = self._key(thread_id, scope)
+        record = self._threads.get(key)
         if record is None:
             record = ThreadRecord(thread_id=thread_id)
-            self._threads[thread_id] = record
+            self._threads[key] = record
         return record
 
     def _append_messages(self, record: ThreadRecord, messages: Iterable[Any]) -> None:
@@ -126,10 +141,12 @@ class ThreadMemoryStore:
         self,
         thread_id: str,
         provided_history: Iterable[Any] | None = None,
+        *,
+        scope: str | None = None,
     ) -> dict[str, Any]:
         """合并前端历史与服务端记忆，返回给模型的 threadContext。"""
         with self._lock:
-            record = self._record(thread_id)
+            record = self._record(thread_id, scope)
             if provided_history:
                 self._append_messages(record, provided_history)
             record.updated_at = _now()
@@ -143,6 +160,8 @@ class ThreadMemoryStore:
         self,
         thread_id: str,
         provided_history: Iterable[Any] | None = None,
+        *,
+        scope: str | None = None,
     ) -> int:
         """计算该圈下一轮 turnCount，作为 Git commit message 的轮次坐标。
 
@@ -151,7 +170,7 @@ class ThreadMemoryStore:
         turn 从头开始。
         """
         with self._lock:
-            record = self._record(thread_id)
+            record = self._record(thread_id, scope)
             if provided_history:
                 self._append_messages(record, provided_history)
             turns: list[int] = []
@@ -170,10 +189,11 @@ class ThreadMemoryStore:
         run_id: str | None = None,
         turn_count: int | None = None,
         commit_hash: str | None = None,
+        scope: str | None = None,
     ) -> dict[str, Any] | None:
         """按 Run / turn / commit 任一坐标查找 thread checkpoint 元数据。"""
         with self._lock:
-            record = self._threads.get(thread_id)
+            record = self._threads.get(self._key(thread_id, scope))
             if record is None:
                 return None
             checkpoint = self._find_checkpoint(
@@ -215,16 +235,21 @@ class ThreadMemoryStore:
             "createdAt": checkpoint.get("createdAt"),
         }
 
-    def sandbox_id(self, thread_id: str) -> str | None:
+    def sandbox_id(self, thread_id: str, *, scope: str | None = None) -> str | None:
         with self._lock:
-            record = self._threads.get(thread_id)
+            record = self._threads.get(self._key(thread_id, scope))
             return record.sandbox_id if record else None
 
-    def seed_files(self, thread_ids: Iterable[str]) -> dict[str, str]:
+    def seed_files(
+        self,
+        thread_ids: Iterable[str],
+        *,
+        scope: str | None = None,
+    ) -> dict[str, str]:
         """沙盒丢失时，用最近一次成功 Run 的源码快照重建。"""
         with self._lock:
             for thread_id in thread_ids:
-                record = self._threads.get(thread_id)
+                record = self._threads.get(self._key(thread_id, scope))
                 if record and record.files:
                     return dict(record.files)
         return {}
@@ -245,6 +270,7 @@ class ThreadMemoryStore:
         turn_counts: dict[str, int] | None = None,
         commit_hash: str | None = None,
         baseline_commit: str | None = None,
+        scope: str | None = None,
     ) -> None:
         """把本轮用户指令、助手回复与修改记录写入每个相关 thread。
 
@@ -256,7 +282,7 @@ class ThreadMemoryStore:
             for thread_id in thread_ids:
                 if not thread_id:
                     continue
-                record = self._record(thread_id)
+                record = self._record(thread_id, scope)
                 user_message = user_messages.get(thread_id)
                 if user_message is not None:
                     self._append_messages(record, [user_message])
@@ -319,10 +345,11 @@ class ThreadMemoryStore:
         run_id: str | None = None,
         turn_count: int | None = None,
         commit_hash: str | None = None,
+        scope: str | None = None,
     ) -> dict[str, Any] | None:
         """恢复 thread 到指定成功轮次，并丢弃其后的历史与 checkpoint。"""
         with self._lock:
-            record = self._threads.get(thread_id)
+            record = self._threads.get(self._key(thread_id, scope))
             if record is None:
                 return None
             target = self._find_checkpoint(

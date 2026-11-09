@@ -447,6 +447,11 @@ class RollbackRunRequest(CamelModel):
     """
 
     sandbox_id: str = Field(min_length=1, max_length=64)
+    # 租户 / 项目作用域：ThreadMemoryStore 的物理 key 由二者共同决定。
+    # 缺省 project_id 时无法定位项目内记忆，只执行 Git 回滚，绝不会退化为
+    # “跨项目读取同名 threadId”。
+    tenant_id: str | None = None
+    project_id: str | None = Field(default=None, max_length=64)
     thread_id: str = Field(min_length=1, max_length=64)
     commit_hash: str = Field(pattern=r"^[0-9a-f]{40}$")
     run_id: str | None = Field(default=None, max_length=64)

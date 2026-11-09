@@ -35,7 +35,12 @@
           }
         }
       },
-      "uiHistory": {"type": "array", "items": {"type": "object"}},
+      "uiHistory": {
+        "type": "array",
+        "maxItems": 30,
+        "description": "字段名保留兼容，语义仅限 Architect 面板的澄清 / 契约对话；禁止传入 UI Coder 聊天或画布标注历史。",
+        "items": {"type": "object"}
+      },
       "options": {"type": "object"}
     }
   },
