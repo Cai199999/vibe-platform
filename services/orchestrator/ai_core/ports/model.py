@@ -11,6 +11,7 @@ SDK 的消息结构泄漏进用例。
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 
 class ModelClientError(RuntimeError):
@@ -30,6 +31,28 @@ class ModelClient(ABC):
             system: 系统提示词。
             human: 用户消息。
         """
+
+    def generate_json(
+        self,
+        task: str,
+        system: str,
+        human: str,
+        *,
+        json_schema: dict[str, Any] | None = None,
+    ) -> str:
+        """要求模型输出 JSON 对象。
+
+        默认实现退化为 ``generate``，保证只实现 ``generate`` 的测试替身 /
+        企业网关仍然可用；DeepSeek 适配器会绑定 ``response_format`` 并在
+        提示词中附加 JSON Schema，降低结构漂移概率。
+
+        Args:
+            task: 逻辑任务名。
+            system: 系统提示词。
+            human: 用户消息。
+            json_schema: 期望的 JSON Schema；为 None 时只要求合法 JSON。
+        """
+        return self.generate(task, system, human)
 
 
 __all__ = ["ModelClient", "ModelClientError"]

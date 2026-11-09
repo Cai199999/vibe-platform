@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Union
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from ai_core.domain.common import CamelModel
 
@@ -84,7 +84,13 @@ class ArchitectQuestion(CamelModel):
 
 
 class ArchitectAnalysis(CamelModel):
-    """LLM 对当前需求的结构化分析。"""
+    """LLM 对当前需求的结构化分析。
+
+    ``business_flows`` 对模型输出保持宽容：DeepSeek 等模型有时返回字符串
+    数组（``["用户登录", "创建订单"]``），有时返回对象数组。字段层面的
+    ``field_validator`` 会把两种形态统一成对象数组，避免因为一个字段的
+    类型漂移就让整次 Architect 分析 500。
+    """
 
     app_shape: AppShape | None = None
     confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -92,10 +98,80 @@ class ArchitectAnalysis(CamelModel):
     slots: dict[str, Any] = Field(default_factory=dict)
     questions: list[ArchitectQuestion] = Field(default_factory=list)
     tech_stack: dict[str, Any] = Field(default_factory=dict)
-    business_flows: list[dict[str, Any]] = Field(default_factory=list)
-    entities: list[dict[str, Any]] = Field(default_factory=list)
+    business_flows: Union[
+        dict[str, Any],
+        str,
+        list[Union[dict[str, Any], str]],
+    ] = Field(default_factory=list)
+    entities: Union[
+        dict[str, Any],
+        str,
+        list[Union[dict[str, Any], str]],
+    ] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     reasoning: str = ""
+
+    @field_validator("business_flows", mode="before")
+    @classmethod
+    def _normalize_business_flows(cls, value: Any) -> list[dict[str, Any]]:
+        """把 str / dict / 混合数组统一为 ``[{"step": ...}]``。
+
+        模型常见输出：
+          - ``"用户登录 -> 下单 -> 支付"``（整段字符串）
+          - ``["用户登录", "创建订单"]``（字符串数组）
+          - ``[{"step": "登录", "actor": "用户"}]``（对象数组）
+
+        统一成对象数组后，前端与契约生成不必再兼容多种形态。
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [value]
+        elif isinstance(value, dict):
+            value = [value]
+        elif not isinstance(value, list):
+            value = [str(value)]
+
+        normalized: list[dict[str, Any]] = []
+        for item in value:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    normalized.append({"step": text})
+                continue
+            if isinstance(item, dict):
+                normalized.append(item)
+                continue
+            text = str(item).strip()
+            if text:
+                normalized.append({"step": text})
+        return normalized
+
+    @field_validator("entities", mode="before")
+    @classmethod
+    def _normalize_entities(cls, value: Any) -> list[dict[str, Any]]:
+        """实体列表同样容忍字符串，统一包装为 ``{"name": ...}``。"""
+        if value is None:
+            return []
+        if isinstance(value, (str, dict)):
+            value = [value]
+        elif not isinstance(value, list):
+            value = [str(value)]
+
+        normalized: list[dict[str, Any]] = []
+        for item in value:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    normalized.append({"name": text})
+                continue
+            if isinstance(item, dict):
+                normalized.append(item)
+                continue
+            text = str(item).strip()
+            if text:
+                normalized.append({"name": text})
+        return normalized
 
 
 class ArchitectClarification(CamelModel):

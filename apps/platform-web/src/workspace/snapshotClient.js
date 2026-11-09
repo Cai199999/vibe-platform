@@ -44,12 +44,26 @@ async function request(path, { token, method = 'GET', body, signal } = {}) {
 const snapshotsPath = (sandboxId) =>
   `/api/v1/sandboxes/${encodeURIComponent(sandboxId)}/snapshots`
 
-/** 创建快照，返回 { sandboxId, commitHash, shortHash, message, committedAt }。 */
-export function createSnapshot(sandboxId, message, token, signal) {
+/**
+ * 创建快照，返回 { sandboxId, commitHash, shortHash, message, committedAt }。
+ *
+ * projectId / tenantId 让 Python 侧在保存快照时刷新项目上下文记忆
+ * （global_summary.md + user_profile.md）；不传时回退到 sandbox 作用域。
+ */
+export function createSnapshot(
+  sandboxId,
+  message,
+  token,
+  scope = {},
+  signal,
+) {
+  const body = { message }
+  if (scope.projectId) body.projectId = scope.projectId
+  if (scope.tenantId) body.tenantId = scope.tenantId
   return request(snapshotsPath(sandboxId), {
     token,
     method: 'POST',
-    body: { message },
+    body,
     signal,
   })
 }

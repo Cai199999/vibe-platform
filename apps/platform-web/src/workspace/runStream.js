@@ -17,6 +17,57 @@ const TERMINAL_EVENTS = new Set([
 
 const RECONNECT_LIMIT = 6
 
+/**
+ * 按动画帧批量派发 SSE 事件。
+ *
+ * 服务端可能在一秒内推送几十个 node.* 事件；如果每个事件都直接 setState，
+ * React 会反复渲染整棵工作区。这里把同一帧内的事件合并成一次回调，
+ * React 18 会自动批处理本次回调里的多次状态更新，显著降低主线程压力。
+ *
+ * 终态事件（run.succeeded / clarification.required 等）立即 flush，
+ * 保证 UI 在流关闭前拿到最终状态。
+ */
+export function createFrameBatcher(callback, immediateTypes = TERMINAL_EVENTS) {
+  let queue = []
+  let frame = 0
+  const schedule =
+    typeof requestAnimationFrame === 'function'
+      ? requestAnimationFrame
+      : (fn) => setTimeout(fn, 16)
+  const cancel =
+    typeof cancelAnimationFrame === 'function'
+      ? cancelAnimationFrame
+      : clearTimeout
+
+  const flush = () => {
+    if (frame) {
+      cancel(frame)
+      frame = 0
+    }
+    if (queue.length === 0) return
+    const batch = queue
+    queue = []
+    callback(batch)
+  }
+
+  const push = (event) => {
+    if (!event) return
+    queue.push(event)
+    if (immediateTypes.has(event.type)) {
+      flush()
+      return
+    }
+    if (!frame) frame = schedule(flush)
+  }
+  push.flush = flush
+  push.cancel = () => {
+    if (frame) cancel(frame)
+    frame = 0
+    queue = []
+  }
+  return push
+}
+
 function abortError() {
   return new DOMException('Aborted', 'AbortError')
 }
@@ -191,7 +242,12 @@ export async function streamRun({
             lastSeq = Math.max(lastSeq, parsed.seq)
           }
           onEvent?.(parsed)
-          if (TERMINAL_EVENTS.has(parsed.type)) terminal = true
+          if (TERMINAL_EVENTS.has(parsed.type)) {
+            // 批量派发器必须在流关闭前同步 flush，否则终态事件可能被
+            // 丢弃在未执行的 requestAnimationFrame 队列里。
+            onEvent?.flush?.()
+            terminal = true
+          }
         },
       })
 

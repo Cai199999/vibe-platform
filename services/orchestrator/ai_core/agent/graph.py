@@ -39,7 +39,8 @@ from ai_core.agent.error_context import (
 )
 from ai_core.agent.events import EventSink, NullEventSink
 from ai_core.agent.llm import AgentLLM
-from ai_core.agent.memory import compress_annotation_context
+from ai_core.agent.memory import IntentClassifier, compress_annotation_context
+from ai_core.context_memory import get_project_memory
 from ai_core.domain.state import AgentState
 from ai_core.config import get_settings
 from ai_core.editor import (
@@ -407,6 +408,9 @@ class AgentGraphRunner:
             self._llm.summarize_history,
             threshold=int(self._settings.history_summary_token_threshold),
             max_chars=int(self._settings.history_summary_max_chars),
+            recent_turns=int(self._settings.history_recent_turns),
+            classifier=IntentClassifier(self._settings),
+            encoding=self._settings.context_token_encoding,
         )
         update: dict[str, Any] = {
             "history_tokens_before": result.tokens_before,
@@ -487,12 +491,32 @@ class AgentGraphRunner:
                 "messages": [_message("research", f"外部检索失败: {exc}", error=True)],
             }
         text = str(output or "").strip()
-        if len(text) > 6000:
-            text = f"{text[:6000]}\n...[truncated]"
+        # 工具完整结果落盘到项目记忆目录；Prompt 只保留预览 + sha256，
+        # 避免一次搜索把上下文窗口吃掉，也方便事后审计。
+        try:
+            memory = get_project_memory(
+                self._settings,
+                state.get("tenant_id"),
+                state.get("project_id"),
+                sandbox_id=state.get("sandbox_id"),
+            )
+            reference = memory.save_tool_output(
+                "search_web",
+                text,
+                preview_chars=int(self._settings.tool_output_preview_chars),
+            )
+            research_context = reference.prompt_text()
+        except Exception:  # noqa: BLE001 - 记忆落盘失败时退化为本地截断
+            logger.warning("tool output memory failed", exc_info=True)
+            research_context = (
+                f"{text[: self._settings.tool_output_preview_chars]}\n...[已截断]"
+            )
         return {
             "research_query": query,
-            "research_context": text,
-            "messages": [_message("research", f"搜索「{query}」完成：{text[:600]}")],
+            "research_context": research_context,
+            "messages": [
+                _message("research", f"搜索「{query}」完成：{research_context[:600]}")
+            ],
         }
 
     def _planner(self, state: AgentState) -> dict[str, Any]:

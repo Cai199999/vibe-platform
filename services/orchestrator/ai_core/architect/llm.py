@@ -11,9 +11,12 @@ LLM 只负责“分析 + 起草”，应用形态约束、槽位校验、置信�
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
+
+from pydantic import ValidationError
 
 from ai_core.adapters.model.deepseek import DeepSeekClient
 from ai_core.agent.memory import fallback_summary
@@ -29,6 +32,8 @@ from ai_core.domain.architect import (
     ArchitectQuestion,
 )
 from ai_core.ports.model import ModelClient, ModelClientError
+
+logger = logging.getLogger(__name__)
 
 
 class ArchitectLLMError(Exception):
@@ -623,13 +628,21 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "写入 slots。不要把“怕不确定”当作全栈的理由。"
         )
         human = _analysis_human(context)
-        raw = self._invoke("architect_analyze", system, human)
-        payload = _extract_json(raw)
-        payload = _normalize_analysis_payload(payload)
-        try:
+
+        def parse(raw: str) -> ArchitectAnalysis:
+            # 先做兼容性归一化，再交给 Pydantic 做严格校验；校验错误会
+            # 原样回传模型，让它只修复不合法字段。
+            payload = _normalize_analysis_payload(_extract_json(raw))
             return ArchitectAnalysis.model_validate(payload)
-        except Exception as exc:  # noqa: BLE001
-            raise ArchitectLLMError(f"Architect 分析 JSON 不合法: {exc}") from exc
+
+        return self._generate_with_repair(
+            task="architect_analyze",
+            system=system,
+            human=human,
+            json_schema=ArchitectAnalysis.model_json_schema(),
+            parse=parse,
+            label="分析",
+        )
 
     def draft_contract(self, context: ArchitectContext) -> ContractDraft:
         system = (
@@ -656,9 +669,14 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "- 不要编造用户未提供的业务实体；不确定处写入 assumptions。"
         )
         human = _contract_human(context)
-        raw = self._invoke("architect_contract", system, human)
-        payload = _extract_json(raw)
-        return _parse_contract_draft(payload)
+        return self._generate_with_repair(
+            task="architect_contract",
+            system=system,
+            human=human,
+            json_schema=None,
+            parse=lambda raw: _parse_contract_draft(_extract_json(raw)),
+            label="契约",
+        )
 
     def revise_contract(
         self,
@@ -703,6 +721,75 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             return self._client.generate(task, system, human)
         except ModelClientError as exc:
             raise ArchitectLLMError(f"DeepSeek Architect 调用失败: {exc}") from exc
+
+    def _invoke_json(
+        self,
+        task: str,
+        system: str,
+        human: str,
+        json_schema: dict[str, Any] | None = None,
+    ) -> str:
+        """调用强制 JSON 输出的模型；端口默认实现会退化为 generate。"""
+        try:
+            return self._client.generate_json(
+                task,
+                system,
+                human,
+                json_schema=json_schema,
+            )
+        except ModelClientError as exc:
+            raise ArchitectLLMError(f"DeepSeek Architect 调用失败: {exc}") from exc
+
+    def _generate_with_repair(
+        self,
+        *,
+        task: str,
+        system: str,
+        human: str,
+        json_schema: dict[str, Any] | None,
+        parse: Callable[[str], Any],
+        label: str,
+    ) -> Any:
+        """生成 JSON 并在校验失败时把错误回传模型重试。
+
+        最多重试 ``ARCHITECT_JSON_RETRY_LIMIT`` 次（默认 2）。每次重试都
+        携带上一轮原始输出与 Pydantic 错误摘要，要求模型只修复不合法字段，
+        避免因单个字段类型漂移直接抛 500。
+        """
+        attempts = max(0, int(self.settings.architect_json_retry_limit))
+        current_human = human
+        last_error = "未知错误"
+        for attempt in range(attempts + 1):
+            raw = self._invoke_json(task, system, current_human, json_schema)
+            try:
+                return parse(raw)
+            except (
+                ValidationError,
+                ArchitectLLMError,
+                ValueError,
+                TypeError,
+                KeyError,
+            ) as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "architect %s JSON 校验失败 attempt=%s/%s: %s",
+                    label,
+                    attempt + 1,
+                    attempts + 1,
+                    last_error,
+                )
+                if attempt >= attempts:
+                    break
+                current_human = (
+                    f"{human}\n\n"
+                    f"【上一次输出】\n{_truncate_text(raw, 6000)}\n\n"
+                    f"【校验错误】\n{_truncate_text(last_error, 2000)}\n\n"
+                    "请只输出修正后的完整 JSON 对象：保留已经正确的字段，"
+                    "修复校验错误指出的字段，不要输出 Markdown 围栏或解释。"
+                )
+        raise ArchitectLLMError(
+            f"Architect {label} JSON 连续 {attempts + 1} 次不合法: {last_error}"
+        )
 
 
 def build_architect_llm(
@@ -764,6 +851,14 @@ def _format_chunks(chunks: list[dict[str, Any]]) -> str:
             f"{chunk.get('section')}\n{chunk.get('content', '')}"
         )
     return "\n\n".join(parts)
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    """截断错误反馈，避免重试 Prompt 自己把上下文撑爆。"""
+    value = str(text or "")
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}\n...[已截断，共 {len(value)} 字符]"
 
 
 def _extract_json(raw: str) -> dict[str, Any]:
@@ -834,6 +929,11 @@ def _normalize_analysis_payload(payload: dict[str, Any]) -> dict[str, Any]:
             normalized[key] = [str(item) for item in value or [] if str(item).strip()][
                 :12
             ]
+        elif key in {"business_flows", "entities"}:
+            # 保留 str / dict / 混合数组；字段级 field_validator 会做最终
+            # 归一化。不能在这里把字符串直接丢掉，否则模型只给了字符串
+            # 流程时会被静默变成空数组。
+            normalized[key] = value if isinstance(value, (list, dict, str)) else []
         else:
             normalized[key] = value if isinstance(value, list) else []
 

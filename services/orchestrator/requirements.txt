@@ -12,6 +12,8 @@ PyYAML==6.0.3
 langgraph==0.2.62
 langchain==0.3.14
 langchain-openai==0.3.0
+# 精确 Token 计数；离线 / 无编码缓存时由 memory.count_tokens 自动回退估算。
+tiktoken==0.8.0
 
 # 内部 HTTP 调用（后续调用 Sandbox / 模型网关）
 httpx==0.28.1

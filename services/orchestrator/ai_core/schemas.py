@@ -132,9 +132,14 @@ class CreateSnapshotRequest(BaseModel):
     """创建快照：把沙盒当前工作区提交为一个 Git checkpoint。
 
     备注必填且 ≤200 字，去除首尾空白后再校验，避免只有空格的无意义快照。
+    ``project_id`` / ``tenant_id`` 用于把快照与项目上下文记忆关联：保存
+    快照时基于 local_summary.md 刷新 global_summary.md 与 user_profile.md。
+    旧客户端不传时回退到 sandbox 作用域，保持兼容。
     """
 
     message: str = Field(min_length=1, max_length=200)
+    project_id: str | None = Field(default=None, max_length=64)
+    tenant_id: str | None = Field(default=None, max_length=64)
 
     @field_validator("message")
     @classmethod
@@ -143,6 +148,12 @@ class CreateSnapshotRequest(BaseModel):
         if not cleaned:
             raise ValueError("快照备注不能为空")
         return cleaned
+
+    @field_validator("project_id", "tenant_id")
+    @classmethod
+    def _strip_scope(cls, value: str | None) -> str | None:
+        cleaned = (value or "").strip()
+        return cleaned or None
 
 
 class SnapshotInfo(CamelResponse):

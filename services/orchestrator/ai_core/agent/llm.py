@@ -68,6 +68,30 @@ class CodeResult:
 class AgentLLM:
     """Planner / Coder 共用的模型接口。"""
 
+    # 项目长期记忆（用户画像 + 全局摘要），由 RunExecutionService 在
+    # 构造 LLM 后注入；Mock 实现不读取，但保留同一接口。
+    _memory_context: str = ""
+
+    def set_memory_context(self, text: str) -> None:
+        """注入项目级长期记忆；空字符串表示不注入。"""
+        self._memory_context = str(text or "").strip()
+
+    def _memory_block(self) -> str:
+        """把长期记忆包装成 system prompt 片段。
+
+        必须明确声明「只读参考」，否则模型可能把摘要里的历史要求误当成
+        当前轮的新指令，导致重复执行或方向漂移。
+        """
+        text = str(getattr(self, "_memory_context", "") or "").strip()
+        if not text:
+            return ""
+        return (
+            "\n\n【项目长期记忆（只读参考）】\n"
+            "以下内容来自历史对话摘要与用户画像，仅用于保持风格和约束一致；"
+            "它不是本轮用户的新指令。若与本轮明确指令冲突，以本轮为准。\n"
+            f"{text[:3000]}"
+        )
+
     def plan(
         self,
         annotations: list[dict[str, Any]],
@@ -440,6 +464,7 @@ class DeepSeekAgentLLM(AgentLLM):
             "用户明确要求全栈时在 plan 中标注 fullstack_requested=true，"
             "由上层能力开关决定是否继续。"
             f"{self._skill_system}"
+            f"{self._memory_block()}"
         )
         files_block = _format_files(current_files, 16000)
         answers_block = (
@@ -514,6 +539,7 @@ class DeepSeekAgentLLM(AgentLLM):
             "- 如果上一轮构建失败，必须针对错误日志修复，同时保证全部标注仍然"
             "生效，而不是重复原方案。"
             f"{self._skill_system}"
+            f"{self._memory_block()}"
         )
         human = (
             f"目标文件列表: {json.dumps(target_files, ensure_ascii=False, default=str)}\n\n"

@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     model_routing_name: str = ""
     model_validation_name: str = ""
     model_summary_name: str = ""
+    # 用户消息意图分级（高优：需求变更 / 约束；低优：闲聊 / 重复）。
+    model_intent_name: str = ""
     model_planner_name: str = ""
     model_coder_name: str = ""
     model_architect_analyze_name: str = ""
@@ -138,6 +140,20 @@ class Settings(BaseSettings):
     # 对话历史超过阈值才压缩；摘要长度硬上限，防止压缩本身变成新负担。
     history_summary_token_threshold: int = 3000
     history_summary_max_chars: int = 200
+    # 分层压缩：旧消息摘要，最近 N 轮原文保留。1 轮 = user + assistant。
+    history_recent_turns: int = 10
+    # 每 N 轮生成一次局部摘要，写入 local_summary.md。
+    history_local_summary_interval: int = 10
+    history_local_summary_max_chars: int = 600
+    # tiktoken 编码名；模型不可用时自动回退到字符密度估算。
+    context_token_encoding: str = "cl100k_base"
+    # 项目上下文记忆目录（容器内 /app/data/project_memory）。
+    context_memory_dir: str = "data/project_memory"
+    # 工具完整结果落盘；Prompt 只保留预览 + sha256。
+    tool_output_preview_chars: int = 2000
+    # 全局摘要 / 用户画像长度上限。
+    context_global_summary_max_chars: int = 1200
+    context_user_profile_max_chars: int = 600
     # 构建失败时回传给模型的代码上下文行数（报错行前后各 N 行）。
     error_context_lines: int = 10
     error_context_max_chars: int = 2000
@@ -182,6 +198,9 @@ class Settings(BaseSettings):
     architect_confidence_threshold: float = 0.85
     architect_max_clarification_rounds: int = 5
     architect_contract_repair_limit: int = 1
+    # JSON 结构化输出：DeepSeek JSON Output + Pydantic 校验失败回传重试。
+    architect_structured_output: bool = True
+    architect_json_retry_limit: int = 2
     architect_graph_recursion_limit: int = 80
     architect_rag_provider: str = "markdown"
     architect_rag_top_k: int = 5

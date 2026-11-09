@@ -44,9 +44,21 @@ public class SandboxSnapshotService {
     }
 
     /** 创建快照：AI Core 执行 git commit 并返回 commit hash。 */
-    public ResponseEntity<JsonNode> create(String sandboxId, String message) {
+    public ResponseEntity<JsonNode> create(
+            String sandboxId,
+            String message,
+            String projectId,
+            String tenantId
+    ) {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("message", message);
+        // 上下文记忆作用域：旧客户端不传时 Python 侧回退到 sandbox 作用域。
+        if (projectId != null && !projectId.isBlank()) {
+            body.put("projectId", projectId.trim());
+        }
+        if (tenantId != null && !tenantId.isBlank()) {
+            body.put("tenantId", tenantId.trim());
+        }
         return proxy("create", sandboxId, () -> aiCoreRunRestClient.post()
                 .uri(SNAPSHOTS_PATH, sandboxId)
                 .contentType(MediaType.APPLICATION_JSON)

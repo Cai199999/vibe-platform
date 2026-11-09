@@ -31,6 +31,8 @@ public class SandboxController {
     private static final Pattern SANDBOX_ID_PATTERN = Pattern.compile("[A-Za-z0-9_-]{1,80}");
     // commit hash 只接受完整 40 位十六进制；Python 侧还会再做一次白名单校验。
     private static final Pattern COMMIT_HASH_PATTERN = Pattern.compile("[0-9a-f]{40}");
+    // 上下文记忆作用域只允许安全字符，避免路径穿越；Python 侧还会再清洗。
+    private static final Pattern SCOPE_PATTERN = Pattern.compile("[A-Za-z0-9_-]{1,64}");
 
     private final SandboxService sandboxService;
     private final SandboxExportService sandboxExportService;
@@ -57,7 +59,17 @@ public class SandboxController {
     ) {
         ResponseEntity<JsonNode> invalid = validateSandboxId(sandboxId);
         if (invalid != null) return invalid;
-        return snapshotService.create(sandboxId, request.message().trim());
+        ResponseEntity<JsonNode> invalidScope = validateOptionalScope(
+                request.projectId(),
+                request.tenantId()
+        );
+        if (invalidScope != null) return invalidScope;
+        return snapshotService.create(
+                sandboxId,
+                request.message().trim(),
+                trimToNull(request.projectId()),
+                trimToNull(request.tenantId())
+        );
     }
 
     /** 版本历史：按时间倒序返回快照列表。 */
@@ -114,6 +126,22 @@ public class SandboxController {
         return badRequest("INVALID_SANDBOX_ID", "非法的 sandboxId");
     }
 
+    private ResponseEntity<JsonNode> validateOptionalScope(
+            String projectId,
+            String tenantId
+    ) {
+        for (String value : new String[]{projectId, tenantId}) {
+            if (value == null || value.isBlank()) continue;
+            if (!SCOPE_PATTERN.matcher(value.trim()).matches()) {
+                return badRequest(
+                        "INVALID_MEMORY_SCOPE",
+                        "projectId / tenantId 只允许 1-64 位字母、数字、下划线或短横线"
+                );
+            }
+        }
+        return null;
+    }
+
     private ResponseEntity<JsonNode> validateCommitHash(String commitHash) {
         if (commitHash != null
                 && COMMIT_HASH_PATTERN.matcher(normalizeCommitHash(commitHash)).matches()) {
@@ -124,6 +152,13 @@ public class SandboxController {
 
     private String normalizeCommitHash(String commitHash) {
         return commitHash == null ? "" : commitHash.trim().toLowerCase(Locale.ROOT);
+    }
+
+    /** 作用域去空白；空白串按未提供处理，Python 侧会回退到 sandbox 作用域。 */
+    private static String trimToNull(String value) {
+        if (value == null) return null;
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private ResponseEntity<JsonNode> badRequest(String code, String message) {

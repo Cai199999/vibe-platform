@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from docker.errors import DockerException
 
 from ai_core.api.errors import sandbox_error_to_http
 from ai_core.config import get_settings
+from ai_core.context_memory import get_project_memory, refresh_global_memory
 from ai_core.adapters.sandbox import get_sandbox_provider
 from ai_core.ports.sandbox import SandboxError
 from ai_core.sandbox.importer import import_zip
@@ -45,6 +47,7 @@ from ai_core.schemas import (
 )
 
 router = APIRouter(prefix="/api/v1/internal/sandbox", tags=["sandbox"])
+logger = logging.getLogger(__name__)
 
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _ZIP_SUFFIXES = (".zip",)
@@ -239,6 +242,24 @@ def create_snapshot(
         commit_hash = provider.git_commit(sandbox_id, request.message)
     except SandboxError as exc:
         raise sandbox_error_to_http(exc) from exc
+
+    # 快照 = 项目里程碑：基于所有局部摘要刷新全局摘要与用户画像。
+    # 记忆生成属于增强能力，失败只记录日志，绝不能让快照本身失败。
+    try:
+        settings = get_settings()
+        memory = get_project_memory(
+            settings,
+            request.tenant_id,
+            request.project_id,
+            sandbox_id=sandbox_id,
+        )
+        refresh_global_memory(memory, settings=settings)
+    except Exception:  # noqa: BLE001 - 记忆生成失败不影响快照
+        logger.warning(
+            "refresh global memory failed sandbox_id=%s",
+            sandbox_id,
+            exc_info=True,
+        )
 
     return CreateSnapshotResponse(
         sandbox_id=sandbox_id,

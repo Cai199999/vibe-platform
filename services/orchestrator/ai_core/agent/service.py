@@ -65,6 +65,7 @@ from ai_core.domain.agent import (
     VerifyResultModel,
 )
 from ai_core.agent.thread_memory import ThreadMemoryStore, get_thread_store
+from ai_core.context_memory import ContextSummarizer, get_project_memory
 from ai_core.domain.scope import memory_scope, scoped_checkpoint_key
 from ai_core.config import Settings, get_settings
 from ai_core.adapters.sandbox import get_sandbox_provider
@@ -781,6 +782,17 @@ class RunExecutionService:
         try:
             # 先构造 LLM，避免密钥缺失时已经创建了沙盒。
             llm = build_agent_llm(request, self._settings)
+            # 注入项目长期记忆（global_summary + user_profile）。记忆是可选
+            # 增强能力，读取失败只记录日志，绝不影响 Run。
+            try:
+                memory = get_project_memory(
+                    self._settings,
+                    request.tenant_id,
+                    request.project_id,
+                )
+                llm.set_memory_context(memory.prompt_context())
+            except Exception:  # noqa: BLE001 - 记忆不可用不能阻断 Run
+                logger.warning("load project memory failed", exc_info=True)
 
             turn_counts = {
                 thread_id: self._threads.next_turn(
@@ -1146,6 +1158,13 @@ class RunExecutionService:
             commit_hash=commit_hash,
             baseline_commit=baseline_commit,
             scope=prepared.memory_scope,
+        )
+        # 每 N 轮写一次局部摘要；快照保存时再汇总为 global_summary.md。
+        self._maybe_write_local_summary(
+            prepared,
+            status=status,
+            changed_files=changed_files,
+            assistant_message=assistant_message,
         )
         self._maybe_destroy(prepared.handle.sandbox_id, prepared.request)
         with _ACTIVE_LOCK:
@@ -1796,6 +1815,63 @@ class RunExecutionService:
             baseline_commit=baseline_commit,
             scope=scope,
         )
+
+    def _maybe_write_local_summary(
+        self,
+        prepared: PreparedRun,
+        *,
+        status: str,
+        changed_files: list[str],
+        assistant_message: str,
+    ) -> None:
+        """每 N 个成功轮次生成一条 local_summary.md。
+
+        - 只统计成功轮次（失败 / 拒绝不污染项目记忆）；
+        - 以 project 为作用域，多个标注 thread 共用一份项目摘要；
+        - 同一 turn 幂等：多进程 / 重试不会重复追加。
+        """
+        if status != "SUCCEEDED":
+            return
+        interval = int(self._settings.history_local_summary_interval)
+        turn = int(prepared.run_turn_count or 0)
+        if interval <= 0 or turn <= 0 or turn % interval != 0:
+            return
+        try:
+            memory = get_project_memory(
+                self._settings,
+                prepared.request.tenant_id,
+                prepared.request.project_id,
+            )
+            if memory.has_local_summary(turn):
+                return
+            transcript = self._threads.transcript(
+                prepared.thread_ids,
+                scope=prepared.memory_scope,
+                limit=60,
+            )
+            extras: list[str] = []
+            if changed_files:
+                extras.append("本轮修改文件：" + "、".join(changed_files))
+            if assistant_message:
+                extras.append("本轮结果：" + assistant_message[:500])
+            if extras:
+                transcript = f"{transcript}\n" + "\n".join(extras)
+            summary = ContextSummarizer(self._settings).local_summary(
+                transcript,
+                int(self._settings.history_local_summary_max_chars),
+            )
+            if summary:
+                memory.append_local_summary(
+                    summary,
+                    turn=turn,
+                    run_id=prepared.run_id,
+                )
+        except Exception:  # noqa: BLE001 - 记忆写入失败不能影响 Run 终态
+            logger.warning(
+                "write local summary failed run_id=%s",
+                prepared.run_id,
+                exc_info=True,
+            )
 
     @staticmethod
     def _resolve_target_files(request: ExecuteRunRequest) -> list[str]:

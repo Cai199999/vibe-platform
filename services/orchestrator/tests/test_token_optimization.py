@@ -117,12 +117,15 @@ class HistoryCompressionTest(unittest.TestCase):
         }
 
     def test_annotation_context_compressed_over_threshold(self) -> None:
-        long_text = "请把按钮改成红色。" * 200
+        # 不含“必须 / 改成”等高优关键词，确保旧消息可以完全折叠为摘要；
+        # 高优关键词的逐字保留由 test_context_compression 单独覆盖。
+        long_text = "请处理这个按钮的样式细节。" * 200
         result = compress_annotation_context(
             self._context(long_text),
             lambda text, max_chars: "按钮必须为红色，禁止改成蓝色",
             threshold=100,
             max_chars=50,
+            recent_turns=0,
         )
         self.assertTrue(result.compressed)
         self.assertLess(result.tokens_after, result.tokens_before)
@@ -168,6 +171,7 @@ class HistoryCompressionTest(unittest.TestCase):
             lambda text, max_chars: "核心需求：订单管理；约束：必须使用 MySQL",
             threshold=50,
             max_chars=60,
+            recent_turns=0,
         )
         self.assertTrue(result.compressed)
         self.assertEqual(len(result.value), 1)
@@ -312,7 +316,9 @@ class GraphSummaryNodeTest(unittest.TestCase):
         thread = update["annotation_context"]["annotations"][0]["annotation"][
             "threadContext"
         ]
-        self.assertEqual(len(thread["chatHistory"]), 1)
+        # system 摘要 + 最近一轮原文（user + assistant）
+        self.assertEqual(len(thread["chatHistory"]), 3)
+        self.assertIn("核心需求", thread["chatHistory"][0]["content"])
         self.assertTrue(runner.events)
 
 

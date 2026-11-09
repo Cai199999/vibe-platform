@@ -33,8 +33,13 @@ React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.1
 - 项目快照：沙盒 Git checkpoint（💾 保存 / 版本历史抽屉 / 只读快照标签 +
   累积 Diff / 二次确认 `reset --hard`）；恢复后版本列表刷新、iframe 以
   nonce 重建加载回滚版本；不引入额外数据库
-- Eval 10/10；单测 164 passed（含隔离 10 + 序列化 4 + 相对坐标 4 +
-  澄清 3 + 快照 5）
+- 上下文分层：tiktoken 预算 + FAST 意图分级（高优逐字/低优合并）+ 最近
+  10 轮原文；工具结果落 `tool_outputs/<sha256>` 只传预览；每 10 轮写
+  `local_summary.md`，快照刷新 `global_summary.md` + `user_profile.md` 并注入
+  system；Architect `response_format` + 校验错误回传重试；前端 VirtualList +
+  rAF 合帧
+- Eval 10/10；Python 178 passed（新增上下文 14），Java BFF 6 passed；
+  快照/Architect/空白 ADD/澄清/开发者面板 E2E 全 PASS
 
 ## 真 / 假边界
 

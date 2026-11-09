@@ -49,7 +49,7 @@ from langgraph.types import Command, interrupt
 from ai_core.adapters.checkpoint import get_checkpointer_provider
 from ai_core.ports.checkpoint import CheckpointerProvider
 from ai_core.agent.events import EventSink, NullEventSink
-from ai_core.agent.memory import compress_architect_history
+from ai_core.agent.memory import IntentClassifier, compress_architect_history
 from ai_core.architect.confidence import apply_confidence_guard
 from ai_core.architect.contract import (
     assemble_contract,
@@ -254,6 +254,9 @@ class ArchitectGraphRunner:
             self._llm.summarize_history,
             threshold=int(self._settings.history_summary_token_threshold),
             max_chars=int(self._settings.history_summary_max_chars),
+            recent_turns=int(self._settings.history_recent_turns),
+            classifier=IntentClassifier(self._settings),
+            encoding=self._settings.context_token_encoding,
         )
         update: dict[str, Any] = {
             "history_tokens_before": result.tokens_before,

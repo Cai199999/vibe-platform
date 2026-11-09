@@ -88,6 +88,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # MCP Demo Server；只读挂载，容器内绝不修改仓库脚本。
       - ./scripts:/app/scripts:ro
+      # 项目上下文记忆（local/global summary、用户画像、工具结果）。
+      # 挂载到宿主持久化，容器重建后仍可注入 system prompt。
+      - ./services/orchestrator/data:/app/data
     group_add:
       # 宿主 docker 组 GID，Linux 上用 `stat -c '%g' /var/run/docker.sock` 获取。
       - "${DOCKER_GID:-115}"

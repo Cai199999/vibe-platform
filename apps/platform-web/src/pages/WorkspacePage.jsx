@@ -5,12 +5,13 @@ import SettingsDialog from '../components/SettingsDialog.jsx'
 import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
 import ProjectWorkspace from '../components/ProjectWorkspace.jsx'
 import SnapshotWorkspace from '../components/SnapshotWorkspace.jsx'
+import VirtualList from '../components/VirtualList.jsx'
 import WorkspaceTabs from '../components/WorkspaceTabs.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { useSettings } from '../settings/SettingsContext.jsx'
 import { useWorkspace } from '../workspace/useWorkspace.js'
 import { EMPTY_ARCHITECT, useArchitect } from '../workspace/useArchitect.js'
-import { streamRun } from '../workspace/runStream.js'
+import { createFrameBatcher, streamRun } from '../workspace/runStream.js'
 import { importProjectFile } from '../workspace/importClient.js'
 import {
   createSnapshot,
@@ -2001,6 +2002,28 @@ export default function WorkspacePage() {
     streamControllersRef.current.get(projectId)?.abort()
     streamControllersRef.current.set(projectId, controller)
 
+    // 同一帧内到达的多个 SSE 事件合并为一次状态更新，避免流式输出时
+    // 每个 node.* 事件都触发整页重渲染。
+    const emitEvent = createFrameBatcher((events) => {
+      for (const event of events) {
+        if (isStale()) continue
+        if (closedProjectsRef.current.has(projectId)) {
+          if (
+            event.type === 'run.succeeded' ||
+            event.type === 'run.failed' ||
+            event.type === 'run.cancelled' ||
+            event.type === 'run.rejected'
+          ) {
+            void destroySandbox(event.payload?.sandboxId, session?.token)
+          }
+          continue
+        }
+        patchRun(projectId, (previous) =>
+          applyStreamEvent(previous, event, annotationId),
+        )
+      }
+    })
+
     try {
       await streamRun({
         payload,
@@ -2011,25 +2034,7 @@ export default function WorkspacePage() {
         afterSeq,
         token: session?.token,
         signal: controller.signal,
-        onEvent: (event) => {
-          if (isStale()) return
-          if (closedProjectsRef.current.has(projectId)) {
-            // 用户关闭项目后 Run 仍会完成；终态到达时销毁后端新沙盒，
-            // 避免前端不再持有 sandboxId 导致容器泄漏。
-            if (
-              event.type === 'run.succeeded' ||
-              event.type === 'run.failed' ||
-              event.type === 'run.cancelled' ||
-              event.type === 'run.rejected'
-            ) {
-              void destroySandbox(event.payload?.sandboxId, session?.token)
-            }
-            return
-          }
-          patchRun(projectId, (previous) =>
-            applyStreamEvent(previous, event, annotationId),
-          )
-        },
+        onEvent: emitEvent,
       })
     } catch (cause) {
       if (cause?.name === 'AbortError' || isStale()) return
@@ -2051,6 +2056,8 @@ export default function WorkspacePage() {
         ),
       }))
     } finally {
+      // 流结束前把最后一批事件落进状态，避免 rAF 尚未执行就被清理。
+      emitEvent.flush()
       // 只有当前 controller 仍是自己的才允许清理；强制关闭 / 新一轮提交
       // 可能已经替换了 Map 中的 controller，旧流不能误删新连接。
       if (streamControllersRef.current.get(projectId) === controller) {
@@ -2637,7 +2644,10 @@ export default function WorkspacePage() {
 
     setSnapshotSave((previous) => ({ ...previous, saving: true, error: null }))
     try {
-      const payload = await createSnapshot(sandboxId, message, session?.token)
+      const payload = await createSnapshot(sandboxId, message, session?.token, {
+        projectId,
+        tenantId: user?.tenantId || 'tenant_local',
+      })
       if (!workspaceMountedRef.current) return
       setSnapshotSave((previous) => ({ ...previous, saving: false, open: false }))
       showSnapshotToast(
@@ -2951,6 +2961,86 @@ export default function WorkspacePage() {
   const activeSnapshotTab =
     snapshotTabs.find((tab) => tab.id === activeSnapshotId) ?? null
 
+  /**
+   * 单条快照的渲染函数。
+   * 版本历史可能长达 200 条：普通列表一次性挂载会造成明显卡顿，
+   * 因此超过阈值时交给 VirtualList 按可视区渲染。
+   */
+  const renderSnapshotItem = (item) => {
+    const isHead = item.commitHash === snapshotDrawer.headCommit
+    const confirming = snapshotDrawer.confirmHash === item.commitHash
+    const restoring = snapshotDrawer.restoring === item.commitHash
+    return (
+      <li
+        key={item.commitHash}
+        className={`snapshot-item ${isHead ? 'is-head' : ''}`}
+        data-snapshot-item
+        data-commit-hash={item.commitHash}
+      >
+        <div className="snapshot-item-head">
+          <span className="snapshot-item-message">
+            {item.message || '（无备注）'}
+          </span>
+          {isHead && <span className="snapshot-head-tag">当前版本</span>}
+        </div>
+        <div className="snapshot-item-meta">
+          <code>{item.shortHash}</code>
+          <span>{formatSnapshotTime(item.committedAt)}</span>
+          {item.author && <span>{item.author}</span>}
+        </div>
+        <div className="snapshot-item-actions">
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={() => handleViewSnapshot(snapshotDrawer.projectId, item)}
+          >
+            查看
+          </button>
+          <button
+            type="button"
+            className="ghost-button is-danger"
+            disabled={isHead || restoring}
+            onClick={() => requestRestoreSnapshot(item.commitHash)}
+          >
+            {restoring ? '恢复中…' : isHead ? '已是当前版本' : '恢复'}
+          </button>
+        </div>
+        {confirming && (
+          <div
+            className="snapshot-confirm"
+            role="alertdialog"
+            aria-label="确认恢复快照"
+          >
+            <p>当前未保存的修改将丢失，是否继续？</p>
+            <div className="snapshot-confirm-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={restoring}
+                onClick={cancelRestoreSnapshot}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                disabled={restoring}
+                onClick={confirmRestoreSnapshot}
+              >
+                {restoring ? '恢复中…' : '继续恢复'}
+              </button>
+            </div>
+            {snapshotDrawer.confirmError && (
+              <p className="snapshot-error" role="alert">
+                {snapshotDrawer.confirmError}
+              </p>
+            )}
+          </div>
+        )}
+      </li>
+    )
+  }
+
   return (
     <div className="app-shell app-shell-wide">
       <AppHeader
@@ -3186,96 +3276,23 @@ export default function WorkspacePage() {
                   </p>
                 )}
 
-              <ol className="snapshot-list">
-                {snapshotDrawer.snapshots.map((item) => {
-                  const isHead =
-                    item.commitHash === snapshotDrawer.headCommit
-                  const confirming =
-                    snapshotDrawer.confirmHash === item.commitHash
-                  const restoring =
-                    snapshotDrawer.restoring === item.commitHash
-                  return (
-                    <li
-                      key={item.commitHash}
-                      className={`snapshot-item ${isHead ? 'is-head' : ''}`}
-                      data-snapshot-item
-                      data-commit-hash={item.commitHash}
-                    >
-                      <div className="snapshot-item-head">
-                        <span className="snapshot-item-message">
-                          {item.message || '（无备注）'}
-                        </span>
-                        {isHead && (
-                          <span className="snapshot-head-tag">当前版本</span>
-                        )}
-                      </div>
-                      <div className="snapshot-item-meta">
-                        <code>{item.shortHash}</code>
-                        <span>{formatSnapshotTime(item.committedAt)}</span>
-                        {item.author && <span>{item.author}</span>}
-                      </div>
-                      <div className="snapshot-item-actions">
-                        <button
-                          type="button"
-                          className="ghost-button"
-                          onClick={() =>
-                            handleViewSnapshot(
-                              snapshotDrawer.projectId,
-                              item,
-                            )
-                          }
-                        >
-                          查看
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost-button is-danger"
-                          disabled={isHead || restoring}
-                          onClick={() => requestRestoreSnapshot(item.commitHash)}
-                        >
-                          {restoring
-                            ? '恢复中…'
-                            : isHead
-                              ? '已是当前版本'
-                              : '恢复'}
-                        </button>
-                      </div>
-                      {confirming && (
-                        <div
-                          className="snapshot-confirm"
-                          role="alertdialog"
-                          aria-label="确认恢复快照"
-                        >
-                          <p>当前未保存的修改将丢失，是否继续？</p>
-                          <div className="snapshot-confirm-actions">
-                            <button
-                              type="button"
-                              className="ghost-button"
-                              disabled={restoring}
-                              onClick={cancelRestoreSnapshot}
-                            >
-                              取消
-                            </button>
-                            <button
-                              type="button"
-                              className="danger-button"
-                              disabled={restoring}
-                              onClick={confirmRestoreSnapshot}
-                            >
-                              {restoring ? '恢复中…' : '继续恢复'}
-                            </button>
-                          </div>
-                          {snapshotDrawer.confirmError && (
-                            <p className="snapshot-error" role="alert">
-                              {snapshotDrawer.confirmError}
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </li>
-                  )
-                })}
-              </ol>
+              {snapshotDrawer.snapshots.length > 12 ? (
+                <VirtualList
+                  className="snapshot-list"
+                  items={snapshotDrawer.snapshots}
+                  getKey={(item) => item.commitHash}
+                  height={Math.min(560, Math.max(320, window.innerHeight - 240))}
+                  // 展开二次确认时该行更高；其余行使用估算值，渲染后自动修正。
+                  itemHeight={(item) =>
+                    snapshotDrawer.confirmHash === item.commitHash ? 238 : 118
+                  }
+                  renderItem={renderSnapshotItem}
+                />
+              ) : (
+                <ol className="snapshot-list">
+                  {snapshotDrawer.snapshots.map(renderSnapshotItem)}
+                </ol>
+              )}
             </div>
           </aside>
         </div>

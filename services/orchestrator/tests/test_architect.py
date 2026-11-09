@@ -24,7 +24,9 @@ from ai_core.architect.contract import validate_draft
 from ai_core.architect.graph import ArchitectGraphRunner
 from ai_core.architect.llm import (
     ArchitectContext,
+    ArchitectLLMError,
     ContractDraft,
+    DeepSeekArchitectLLM,
     MockArchitectLLM,
 )
 from ai_core.architect.schemas import (
@@ -32,6 +34,7 @@ from ai_core.architect.schemas import (
     ArchitectApiRoute,
     ArchitectImplementationPhase,
 )
+from ai_core.config import Settings
 
 SHAPES = ("lightweight_web", "script_automation", "full_stack_system")
 
@@ -265,6 +268,89 @@ class ArchitectFlowTest(unittest.TestCase):
         )
         event_types = [event.type for event in harness.buffer.snapshot()]
         self.assertIn("architect.failed", event_types)
+
+
+class ArchitectJsonRepairTest(unittest.TestCase):
+    """business_flows 宽容解析 + 校验失败回传重试。"""
+
+    class _SequenceClient:
+        def __init__(self, outputs: list[str]) -> None:
+            self.outputs = list(outputs)
+            self.calls: list[tuple[str, str, str]] = []
+
+        def generate(self, task: str, system: str, human: str) -> str:
+            self.calls.append((task, system, human))
+            return self.outputs.pop(0)
+
+        def generate_json(
+            self,
+            task: str,
+            system: str,
+            human: str,
+            *,
+            json_schema: dict[str, Any] | None = None,
+        ) -> str:
+            self.calls.append((task, system, human))
+            return self.outputs.pop(0)
+
+    @staticmethod
+    def _context() -> ArchitectContext:
+        return ArchitectContext(
+            project_id="p1",
+            project_name="测试项目",
+            source_files={},
+            ui_history=[],
+            slots={},
+            app_shape=None,
+            round=0,
+            threshold=0.85,
+        )
+
+    def test_business_flows_accepts_string_and_mixed_list(self) -> None:
+        analysis = ArchitectAnalysis.model_validate(
+            {
+                "business_flows": ["用户登录", {"step": "创建订单", "actor": "用户"}],
+                "entities": ["订单", {"name": "用户"}],
+            }
+        )
+        self.assertEqual(analysis.business_flows[0], {"step": "用户登录"})
+        self.assertEqual(analysis.business_flows[1]["step"], "创建订单")
+        self.assertEqual(analysis.entities[0], {"name": "订单"})
+
+        bare = ArchitectAnalysis.model_validate({"business_flows": "下单 -> 支付"})
+        self.assertEqual(bare.business_flows, [{"step": "下单 -> 支付"}])
+
+    def test_validation_error_is_fed_back_and_retried(self) -> None:
+        client = self._SequenceClient(
+            [
+                # reasoning 必须是字符串；对象会在 Pydantic 校验时报错。
+                '{"reasoning": {"bad": true}}',
+                '{"business_flows": ["登录", "下单"], "confidence_score": 0.4}',
+            ]
+        )
+        llm = DeepSeekArchitectLLM(
+            Settings(deepseek_api_key="test-key", architect_json_retry_limit=2),
+            client=client,
+        )
+        analysis = llm.analyze(self._context())
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(analysis.confidence_score, 0.4)
+        self.assertEqual(analysis.business_flows[0], {"step": "登录"})
+        # 第二次请求必须携带上一轮校验错误，模型才知道要修什么。
+        self.assertIn("校验错误", client.calls[1][2])
+
+    def test_retry_limit_exhausted_raises_readable_error(self) -> None:
+        client = self._SequenceClient(
+            ['{"reasoning": {"bad": true}}'] * 3,
+        )
+        llm = DeepSeekArchitectLLM(
+            Settings(deepseek_api_key="test-key", architect_json_retry_limit=2),
+            client=client,
+        )
+        with self.assertRaises(ArchitectLLMError) as captured:
+            llm.analyze(self._context())
+        self.assertEqual(len(client.calls), 3)
+        self.assertIn("连续 3 次不合法", str(captured.exception))
 
 
 class ConfidenceGuardTest(unittest.TestCase):

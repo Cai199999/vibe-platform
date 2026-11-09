@@ -32,6 +32,7 @@ TaskName = Literal[
     "routing",
     "validation",
     "summary",
+    "intent",
     "planner",
     "coder",
     "architect_analyze",
@@ -47,6 +48,8 @@ TASK_CAPABILITY: dict[str, Capability] = {
     "validation": "fast",
     # 历史记忆压缩：输入长、输出短，用最快最便宜的模型。
     "summary": "fast",
+    # 用户消息意图分级（高优 / 低优），只输出短 JSON，走廉价模型。
+    "intent": "fast",
     # UI Planner 只输出结构化计划，不需要强推理。
     "planner": "fast",
     # Coder 直接决定构建成功率，必须用强模型。
@@ -62,6 +65,7 @@ TASK_SETTING_FIELD: dict[str, str] = {
     "routing": "model_routing_name",
     "validation": "model_validation_name",
     "summary": "model_summary_name",
+    "intent": "model_intent_name",
     "planner": "model_planner_name",
     "coder": "model_coder_name",
     "architect_analyze": "model_architect_analyze_name",

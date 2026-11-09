@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import DiffView from './DiffView.jsx'
 import InspectDraftCard from './InspectDraftCard.jsx'
 import ScaledPreview from './ScaledPreview.jsx'
+import VirtualList from './VirtualList.jsx'
 
 /**
  * 时间轴：直接渲染后端 SSE 的 node.started / node.finished 事件。
@@ -454,14 +455,34 @@ function RunDetails({
               Agent 执行轨迹
               <span>{result.messages.length} 条</span>
             </summary>
-            <ol className="trace-list">
-              {result.messages.map((message, index) => (
-                <li key={index} className={message.level === 'error' ? 'is-error' : ''}>
-                  <span className="trace-node">{message.node}</span>
-                  <p>{message.content}</p>
-                </li>
-              ))}
-            </ol>
+            {result.messages.length > 30 ? (
+              // 自动修复 / 多轮重试会产生大量轨迹消息；虚拟滚动只渲染
+              // 可视区，避免开发者详情抽屉一次性操作上百个 DOM 节点。
+              <VirtualList
+                className="trace-list"
+                items={result.messages}
+                height={360}
+                itemHeight={64}
+                renderItem={(message) => (
+                  <li className={message.level === 'error' ? 'is-error' : ''}>
+                    <span className="trace-node">{message.node}</span>
+                    <p>{message.content}</p>
+                  </li>
+                )}
+              />
+            ) : (
+              <ol className="trace-list">
+                {result.messages.map((message, index) => (
+                  <li
+                    key={index}
+                    className={message.level === 'error' ? 'is-error' : ''}
+                  >
+                    <span className="trace-node">{message.node}</span>
+                    <p>{message.content}</p>
+                  </li>
+                ))}
+              </ol>
+            )}
           </details>
         )}
       </div>

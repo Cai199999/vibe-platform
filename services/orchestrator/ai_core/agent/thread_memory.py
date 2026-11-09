@@ -247,6 +247,46 @@ class ThreadMemoryStore:
             record = self._threads.get(self._key(thread_id, scope))
             return record.sandbox_id if record else None
 
+    def transcript(
+        self,
+        thread_ids: Iterable[str],
+        *,
+        scope: str | None = None,
+        limit: int = 60,
+    ) -> str:
+        """导出多个 thread 的最近对话与 Run 摘要，供局部摘要器使用。
+
+        只读取服务端记忆，不依赖前端 chatHistory；同一 Run 的多标注 thread
+        可能包含重复消息，按 ``(role, runId, content)`` 去重。
+        """
+        with self._lock:
+            lines: list[str] = []
+            seen: set[tuple[str, str, str]] = set()
+            for thread_id in thread_ids:
+                record = self._threads.get(self._key(thread_id, scope))
+                if record is None:
+                    continue
+                for message in record.chat_history[-limit:]:
+                    role = str(message.get("role") or "")
+                    content = str(message.get("content") or "").strip()
+                    if not content:
+                        continue
+                    key = (role, str(message.get("runId") or ""), content)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    lines.append(f"{role}: {content}")
+                for run in record.runs[-5:]:
+                    summary = str(run.get("summary") or "").strip()
+                    if not summary:
+                        continue
+                    files = "、".join(run.get("changedFiles") or [])
+                    lines.append(
+                        f"run {run.get('turnCount', '?')}: {summary[:300]}"
+                        + (f"；文件：{files}" if files else "")
+                    )
+            return "\n".join(lines[-limit:])
+
     def seed_files(
         self,
         thread_ids: Iterable[str],
