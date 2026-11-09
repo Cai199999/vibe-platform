@@ -1,11 +1,13 @@
-# 单前端 React 沙盒基础镜像。
-# 依赖在镜像构建期安装，创建沙盒时只需写入项目文件并启动 Vite，秒级就绪。
+# React/Vue 全栈沙盒基础镜像。
+# 依赖（express）在镜像构建期安装，创建沙盒时只需写入项目文件，
+# 由 scripts/dev.mjs 同时启动 Vite(5173) 与 Express(3000)。
+# SQLite 使用 Node 22 内置的 node:sqlite，无需原生扩展编译。
 #
 # 构建加速：
 #   - 基础镜像走宿主已配置的 Registry Mirror；
 #   - npm 依赖走 npmmirror 国内镜像；
 #   - package.json 单独成层，改源码不会重新下载依赖。
-FROM node:20-alpine
+FROM node:22-alpine
 
 # git 用于应用 Agent 输出的 unified diff；unzip 供导入 zip 时容器内排查使用。
 # 真正的上传解压通过 Docker put_archive 完成，不依赖容器内 unzip。
@@ -25,7 +27,7 @@ RUN npm install --no-audit --no-fund
 # .dockerignore 已排除 node_modules / dist，不会覆盖刚安装的依赖。
 COPY . .
 
-EXPOSE 5173
+EXPOSE 5173 3000
 
 # 实际端口 / HMR 客户端端口由 LocalDockerSandbox 通过环境变量与端口映射控制。
 CMD ["npm", "run", "dev"]

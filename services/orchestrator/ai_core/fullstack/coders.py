@@ -1,13 +1,13 @@
 """全栈代码生成器：DBACoder / BackendCoder / FrontendCoder。
 
-设计原则（MVP）：
+设计原则：
 
 1. **确定性优先**：不依赖模型随机输出，契约字段直接映射为可运行代码，
    保证同一份契约生成结果可复现、可测试。
-2. **零后端依赖**：沙盒镜像内只保证 Node 20，不联网安装 Express /
-   mysql2；因此后端使用 Node 标准库 ``node:http`` 实现 REST CRUD。
-3. **DDL 先落盘**：MVP 不要求沙盒内常驻 MySQL，先把契约 DDL 写为
-   ``server/schema.sql``，后端用内存仓储保证前后端能真实联调。
+2. **Express + SQLite**：沙盒镜像预装 ``express`` / ``sqlite3``；后端按
+   契约生成 ``server/index.js`` 与 ``server/db.js``，数据真实落盘。
+3. **DDL 可执行**：``server/schema.sql`` 是沙盒内可直接执行的 SQLite
+   DDL，``server/schema.mysql.sql`` 保留契约原始 MySQL DDL。
 4. **前端渐进增强**：不重写用户界面，而是在 ``src/main.jsx`` 挂载一个
    ``FullstackDataPanel``，用真实 API 数据替代原先的 Mock 数据展示。
 """
@@ -20,8 +20,13 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from ai_core.domain.architect import ArchitectApiRoute, ArchitectContract
+from ai_core.fullstack.templates import (
+    DEV_SCRIPT_TEMPLATE,
+    EXPRESS_SERVER_TEMPLATE,
+    SQLITE_DB_TEMPLATE,
+)
 
-API_PORT = 3100
+API_PORT = 3000
 DEFAULT_COLLECTION_PATH = "/api/v1/records"
 DEFAULT_TABLE = "app_records"
 
@@ -92,6 +97,116 @@ def extract_columns(ddl: str) -> list[str]:
         if name not in columns:
             columns.append(name)
     return columns or ["id", "name", "status"]
+
+
+def _split_definitions(body: str) -> list[str]:
+    """按顶层逗号切分 CREATE TABLE 字段定义。
+
+    ``DECIMAL(10,2)`` 这类类型内部也有逗号，必须跟踪括号深度，
+    否则会把一个字段拆成两段，生成的 SQLite DDL 直接损坏。
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote: str | None = None
+    for char in body:
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = None
+            continue
+        if char in "'\"`":
+            quote = char
+            current.append(char)
+        elif char == "(":
+            depth += 1
+            current.append(char)
+        elif char == ")":
+            depth = max(0, depth - 1)
+            current.append(char)
+        elif char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    if current:
+        parts.append("".join(current))
+    return parts
+
+
+_SQLITE_INTEGER = {
+    "INT",
+    "INTEGER",
+    "BIGINT",
+    "SMALLINT",
+    "TINYINT",
+    "MEDIUMINT",
+    "BOOLEAN",
+    "BIT",
+    "SERIAL",
+}
+_SQLITE_REAL = {"REAL", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC", "MONEY"}
+_SQLITE_BLOB = {"BLOB", "BINARY", "VARBINARY", "BYTEA"}
+
+
+def extract_column_defs(ddl: str) -> list[tuple[str, str]]:
+    """把 DDL 字段映射为 SQLite ``(name, type)`` 列表。
+
+    只保留字段名与 SQLite 类型亲和性；``NOT NULL`` / 默认值等约束
+    交给生成的 ``server/db.js`` 在写入时补全，避免不同数据库方言
+    导致沙盒启动即失败。
+    """
+    match = re.search(r"\((.*)\)\s*;?\s*$", ddl or "", re.DOTALL)
+    if not match:
+        return [
+            ("id", "INTEGER"),
+            ("name", "TEXT"),
+            ("status", "TEXT"),
+        ]
+    defs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for part in _split_definitions(match.group(1)):
+        name_match = _COLUMN_LINE.match(part.strip())
+        if not name_match:
+            continue
+        name = name_match.group(1).lower()
+        if name in _COLUMN_STOPWORDS or name in seen:
+            continue
+        rest = part.strip()[name_match.end() :].strip()
+        type_match = re.match(r"([A-Za-z]+)", rest)
+        raw_type = type_match.group(1).upper() if type_match else "TEXT"
+        if raw_type in _SQLITE_INTEGER:
+            sqlite_type = "INTEGER"
+        elif raw_type in _SQLITE_REAL:
+            sqlite_type = "REAL"
+        elif raw_type in _SQLITE_BLOB:
+            sqlite_type = "BLOB"
+        else:
+            # JSON / DATETIME / TIMESTAMP / VARCHAR / TEXT 等统一存 TEXT。
+            sqlite_type = "TEXT"
+        defs.append((name, sqlite_type))
+        seen.add(name)
+    if not defs:
+        return [("id", "INTEGER"), ("name", "TEXT"), ("status", "TEXT")]
+    # SQLite 自增主键必须命名为 id 且类型为 INTEGER；契约没有 id 时补一列。
+    if "id" not in seen:
+        defs.insert(0, ("id", "INTEGER"))
+    else:
+        defs = [("id", "INTEGER")] + [
+            (name, sqlite_type) for name, sqlite_type in defs if name != "id"
+        ]
+    return defs
+
+
+def sqlite_schema_sql(table: str, column_defs: list[tuple[str, str]]) -> str:
+    """生成可在沙盒内直接执行的 SQLite 建表语句。"""
+    lines = ['  "id" INTEGER PRIMARY KEY AUTOINCREMENT']
+    for name, sqlite_type in column_defs:
+        if name == "id":
+            continue
+        lines.append(f'  "{name}" {sqlite_type}')
+    body = ",\n".join(lines)
+    return f'CREATE TABLE IF NOT EXISTS "{table}" (\n{body}\n);\n'
 
 
 def _route_key(route: ArchitectApiRoute) -> tuple[str, str]:
@@ -173,9 +288,10 @@ def _seed_rows(columns: list[str], table: str, entity: str) -> list[dict[str, An
 # DBACoder
 # ------------------------------------------------------------
 def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
-    """把契约 DDL 落为可执行的 ``server/schema.sql``。"""
+    """生成沙盒内可执行的 SQLite DDL，并保留契约 MySQL DDL 副本。"""
     table = extract_table_name(contract.database_ddl)
-    columns = extract_columns(contract.database_ddl)
+    column_defs = extract_column_defs(contract.database_ddl)
+    columns = [name for name, _ in column_defs]
     ddl = (contract.database_ddl or "").strip()
     if ddl and not ddl.endswith(";"):
         ddl += ";"
@@ -183,210 +299,63 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
         "-- 由 DBA Agent 根据《全栈实施契约》生成。\n"
         f"-- contract: {contract.contract_id}\n"
         f"-- table: {table}\n"
-        "-- 说明：MVP 沙盒不常驻 MySQL；本文件可直接在目标 MySQL 执行。\n\n"
+        "-- 说明：本文件是沙盒 SQLite 的可执行建表语句；\n"
+        "-- 目标 MySQL 的原始 DDL 见 server/schema.mysql.sql。\n\n"
     )
-    files = {"server/schema.sql": header + ddl + "\n"}
+    files = {
+        "server/schema.sql": header + sqlite_schema_sql(table, column_defs),
+        "server/schema.mysql.sql": (
+            f"-- 契约原始 MySQL DDL（contract: {contract.contract_id}）\n\n"
+            + ddl
+            + "\n"
+        ),
+    }
     return GeneratedBundle(
         files=files,
-        summary=f"生成 {table} 建表 SQL（{len(columns)} 个字段）",
-        metadata={"table": table, "columns": columns},
+        summary=f"生成 {table} SQLite 建表语句（{len(columns)} 个字段）",
+        metadata={"table": table, "columns": columns, "columnTypes": column_defs},
     )
 
 
 # ------------------------------------------------------------
 # BackendCoder
 # ------------------------------------------------------------
-_BACKEND_SERVER = r"""// 由 BackendCoder 根据《全栈实施契约》生成。
-// 零依赖 Node HTTP 服务：不引入 Express / mysql2，沙盒镜像无需联网安装依赖。
-// 生产替换点：把 records 数组替换为 MySQL Repository 即可，REST 契约不变。
-import { createServer } from 'node:http'
-import { URL } from 'node:url'
-
-const PORT = Number(process.env.FULLSTACK_API_PORT || __API_PORT__)
-const TABLE = '__TABLE__'
-const ENTITY = '__ENTITY__'
-const COLLECTION_PATH = '__COLLECTION_PATH__'
-const ITEM_PATH = '__ITEM_PATH__'
-const COLUMNS = __COLUMNS_JSON__
-
-const now = () => new Date().toISOString()
-let nextId = __NEXT_ID__
-let records = __SEED_ROWS__
-
-function sendJson(response, status, payload) {
-  const body = JSON.stringify(payload)
-  response.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(body),
-    'Cache-Control': 'no-store',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key',
-    'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-  })
-  response.end(body)
-}
-
-function readBody(request) {
-  return new Promise((resolve, reject) => {
-    let raw = ''
-    request.on('data', (chunk) => {
-      raw += chunk
-      if (raw.length > 1_000_000) {
-        reject(new Error('request body too large'))
-        request.destroy()
-      }
-    })
-    request.on('end', () => {
-      if (!raw) return resolve({})
-      try {
-        resolve(JSON.parse(raw))
-      } catch {
-        reject(new Error('invalid JSON body'))
-      }
-    })
-    request.on('error', reject)
-  })
-}
-
-function itemId(pathname) {
-  const prefix = `${COLLECTION_PATH.replace(/\/$/, '')}/`
-  if (!pathname.startsWith(prefix)) return null
-  const rest = pathname.slice(prefix.length)
-  return /^\d+$/.test(rest) ? Number(rest) : null
-}
-
-function pickName(body) {
-  return String(body.name ?? body.title ?? body.label ?? `新${ENTITY}`)
-}
-
-const server = createServer(async (request, response) => {
-  const url = new URL(request.url || '/', 'http://127.0.0.1')
-  const pathname = url.pathname.replace(/\/$/, '') || '/'
-
-  if (request.method === 'OPTIONS') {
-    return sendJson(response, 204, {})
-  }
-
-  if (request.method === 'GET' && pathname === '/api/health') {
-    return sendJson(response, 200, {
-      status: 'ok',
-      table: TABLE,
-      entity: ENTITY,
-      runtime: 'node-http',
-      records: records.length,
-    })
-  }
-
-  if (request.method === 'GET' && pathname === COLLECTION_PATH) {
-    const page = Math.max(1, Number(url.searchParams.get('page') || 1))
-    const size = Math.min(100, Math.max(1, Number(url.searchParams.get('size') || 20)))
-    const start = (page - 1) * size
-    return sendJson(response, 200, {
-      items: records.slice(start, start + size),
-      total: records.length,
-      page,
-      size,
-      table: TABLE,
-    })
-  }
-
-  if (request.method === 'POST' && pathname === COLLECTION_PATH) {
-    let body
-    try {
-      body = await readBody(request)
-    } catch (error) {
-      return sendJson(response, 400, {
-        code: 'INVALID_BODY',
-        message: error.message,
-      })
-    }
-    const id = nextId++
-    const record = { ...body, id }
-    if (COLUMNS.includes('tenant_id') && !record.tenant_id) {
-      record.tenant_id = 'tenant_local'
-    }
-    if (COLUMNS.includes('name') && !record.name) {
-      record.name = pickName(body)
-    }
-    if (COLUMNS.includes('status') && !record.status) {
-      record.status = 'ACTIVE'
-    }
-    if (COLUMNS.includes('created_at') && !record.created_at) {
-      record.created_at = now()
-    }
-    if (COLUMNS.includes('updated_at') && !record.updated_at) {
-      record.updated_at = record.created_at
-    }
-    records = [record, ...records]
-    return sendJson(response, 201, record)
-  }
-
-  const id = itemId(pathname)
-  if (id !== null) {
-    const index = records.findIndex((item) => Number(item.id) === id)
-    if (index < 0) {
-      return sendJson(response, 404, {
-        code: 'RECORD_NOT_FOUND',
-        message: `记录不存在: ${id}`,
-      })
-    }
-    if (request.method === 'GET') {
-      return sendJson(response, 200, records[index])
-    }
-    if (request.method === 'PUT' || request.method === 'PATCH') {
-      let body
-      try {
-        body = await readBody(request)
-      } catch (error) {
-        return sendJson(response, 400, { code: 'INVALID_BODY', message: error.message })
-      }
-      const updated = {
-        ...records[index],
-        ...body,
-        id,
-        updated_at: COLUMNS.includes('updated_at') ? now() : records[index].updated_at,
-      }
-      records = records.map((item, itemIndex) => (itemIndex === index ? updated : item))
-      return sendJson(response, 200, updated)
-    }
-    if (request.method === 'DELETE') {
-      records = records.filter((item) => Number(item.id) !== id)
-      return sendJson(response, 200, { deleted: true, id })
-    }
-  }
-
-  return sendJson(response, 404, {
-    code: 'ROUTE_NOT_FOUND',
-    message: `未实现的路由: ${request.method} ${pathname}`,
-  })
-})
-
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[fullstack-api] ${TABLE} -> http://127.0.0.1:${PORT}${COLLECTION_PATH}`)
-})
-"""
+def _express_path(path: str) -> str:
+    """把契约里的 ``/todos/{id}`` 转为 Express 的 ``/todos/:id``。"""
+    return re.sub(r"\{(\w+)\}", r":\1", path.strip())
 
 
 def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
-    """按契约 apiRoutes 生成后端服务与 README。"""
+    """按契约 apiRoutes 生成 Express + SQLite 后端。"""
     routes = contract.api_routes or []
     table = extract_table_name(contract.database_ddl)
-    columns = extract_columns(contract.database_ddl)
+    column_defs = extract_column_defs(contract.database_ddl)
+    columns = [name for name, _ in column_defs]
     base = collection_path(routes)
-    detail = item_path(routes, base)
+    detail = _express_path(item_path(routes, base))
     entity = _entity_label(contract, table)
     seeds = _seed_rows(columns, table, entity)
 
-    server_code = (
-        _BACKEND_SERVER.replace("__API_PORT__", str(API_PORT))
-        .replace("__TABLE__", table)
-        .replace("__ENTITY__", entity)
-        .replace("__COLLECTION_PATH__", base)
-        .replace("__ITEM_PATH__", detail)
-        .replace("__COLUMNS_JSON__", json.dumps(columns, ensure_ascii=False))
-        .replace("__NEXT_ID__", str(max(4, len(seeds) + 1)))
-        .replace("__SEED_ROWS__", json.dumps(seeds, ensure_ascii=False, indent=2))
-    )
+    replacements = {
+        "__API_PORT__": str(API_PORT),
+        "__TABLE__": table,
+        "__ENTITY__": entity,
+        "__COLLECTION_PATH__": base,
+        "__ITEM_PATH__": detail,
+    }
+    server_code = EXPRESS_SERVER_TEMPLATE
+    for key, value in replacements.items():
+        server_code = server_code.replace(key, value)
+
+    db_code = SQLITE_DB_TEMPLATE
+    db_replacements = {
+        "__TABLE__": table,
+        "__ENTITY__": entity,
+        "__COLUMN_DEFS_JSON__": json.dumps(column_defs, ensure_ascii=False, indent=2),
+        "__SEED_ROWS_JSON__": json.dumps(seeds, ensure_ascii=False, indent=2),
+    }
+    for key, value in db_replacements.items():
+        db_code = db_code.replace(key, value)
 
     route_lines = []
     for route in routes:
@@ -396,25 +365,30 @@ def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
         route_lines.append(f"- `{method} {path}` — {description}")
     readme = (
         f"# {entity} Backend\n\n"
-        "由 BackendCoder 根据契约生成，运行于 Node 20，零第三方依赖。\n\n"
+        "由 BackendCoder 根据契约生成：Express + SQLite，数据真实落盘。\n"
+        "沙盒镜像已预装 express；SQLite 使用 Node 22 内置 node:sqlite。\n\n"
         f"- 表：`{table}`\n"
         f"- 集合路由：`{base}`\n"
         f"- 详情路由：`{detail}`\n"
-        f"- 健康检查：`/api/health`\n\n"
+        f"- 通用数据别名：`/api/data`\n"
+        f"- 健康检查：`/api/health`（返回 storage=sqlite）\n"
+        f"- 数据库文件：`data/fullstack.sqlite`\n\n"
         "## 契约路由\n\n"
         + ("\n".join(route_lines) if route_lines else "- 无显式路由，使用默认 CRUD")
-        + "\n\n## 运行\n\n```bash\nnode server/index.mjs\n```\n"
+        + "\n\n## 运行\n\n```bash\nnode server/index.js\n```\n"
     )
 
     files = {
-        "server/index.mjs": server_code,
+        "server/index.js": server_code,
+        "server/db.js": db_code,
         "server/README.md": readme,
         "server/package.json": json.dumps(
             {
                 "name": "vibe-fullstack-server",
                 "private": True,
                 "type": "module",
-                "scripts": {"start": "node index.mjs"},
+                "dependencies": {"express": "4.21.2"},
+                "scripts": {"start": "node index.js"},
             },
             ensure_ascii=False,
             indent=2,
@@ -423,12 +397,14 @@ def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
     }
     return GeneratedBundle(
         files=files,
-        summary=f"生成 {len(routes) or 2} 条 REST 路由，集合路径 {base}",
+        summary=f"生成 Express + SQLite 后端，{len(routes) or 2} 条 REST 路由",
         metadata={
             "table": table,
+            "columns": columns,
             "collectionPath": base,
             "itemPath": detail,
             "entity": entity,
+            "runtime": "express-sqlite",
             "routes": [
                 {"method": str(r.method or "GET").upper(), "path": str(r.path or "")}
                 for r in routes
@@ -468,11 +444,13 @@ export default function FullstackDataPanel() {
   const [items, setItems] = useState([])
   const [name, setName] = useState('')
   const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
   async function load() {
     setStatus('loading')
     setError('')
+    setSuccess('')
     try {
       const response = await fetch(COLLECTION_PATH, {
         headers: { Accept: 'application/json' },
@@ -498,6 +476,7 @@ export default function FullstackDataPanel() {
     if (submitting) return
     setSubmitting(true)
     setError('')
+    setSuccess('')
     try {
       const response = await fetch(COLLECTION_PATH, {
         method: 'POST',
@@ -511,8 +490,14 @@ export default function FullstackDataPanel() {
       if (!response.ok) {
         throw new Error(`POST ${COLLECTION_PATH} -> HTTP ${response.status}`)
       }
-      const created = await response.json()
-      setItems((previous) => [created, ...previous])
+      const payload = await response.json()
+      // 兼容直接返回记录与 { data, message } 两种后端响应。
+      const created = payload?.data ?? payload
+      setItems((previous) => [
+        created,
+        ...previous.filter((item) => item?.id !== created?.id),
+      ])
+      setSuccess(payload?.message || '提交成功，数据已写入数据库')
       setName('')
       setStatus('ready')
     } catch (cause) {
@@ -565,7 +550,16 @@ export default function FullstackDataPanel() {
       )}
       {status === 'ready' && (
         <span data-fullstack-ready style={{ color: '#34d399' }}>
-          后端数据已加载
+          后端数据已加载 · SQLite
+        </span>
+      )}
+      {success && (
+        <span
+          data-fullstack-success
+          role="status"
+          style={{ color: '#4ade80', fontWeight: 600 }}
+        >
+          {success}
         </span>
       )}
 
@@ -631,49 +625,6 @@ export default function FullstackDataPanel() {
 }
 """
 
-_DEV_SCRIPT = r"""// 由 FullstackGraph 生成：同时拉起前端 Vite 与 Node 后端。
-// 容器 CMD 为 `npm run dev`，因此无需修改镜像启动方式。
-import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
-
-const children = []
-let shuttingDown = false
-
-function start(label, command, args) {
-  const child = spawn(command, args, {
-    stdio: 'inherit',
-    env: process.env,
-  })
-  children.push(child)
-  child.on('exit', (code, signal) => {
-    console.log(`[vibe-dev] ${label} exited code=${code} signal=${signal}`)
-    if (!shuttingDown && label === 'vite') {
-      shutdown(code ?? 1)
-    }
-  })
-  return child
-}
-
-function shutdown(code) {
-  if (shuttingDown) return
-  shuttingDown = true
-  children.forEach((child) => {
-    if (!child.killed) child.kill('SIGTERM')
-  })
-  setTimeout(() => process.exit(code), 300)
-}
-
-process.on('SIGTERM', () => shutdown(0))
-process.on('SIGINT', () => shutdown(0))
-
-if (existsSync('server/index.mjs')) {
-  start('api', process.execPath, ['server/index.mjs'])
-} else {
-  console.log('[vibe-dev] 未找到 server/index.mjs，仅启动前端')
-}
-start('vite', 'npm', ['run', 'dev:vite'])
-"""
-
 
 def generate_frontend_bundle(
     contract: ArchitectContract,
@@ -695,7 +646,7 @@ def generate_frontend_bundle(
     )
     files: dict[str, str] = {
         "src/fullstack-api.jsx": panel,
-        "scripts/dev.mjs": _DEV_SCRIPT,
+        "scripts/dev.mjs": DEV_SCRIPT_TEMPLATE,
     }
 
     if not existing_main:
@@ -761,10 +712,12 @@ __all__ = [
     "API_PORT",
     "GeneratedBundle",
     "collection_path",
+    "extract_column_defs",
     "extract_columns",
     "extract_table_name",
     "generate_backend_bundle",
     "generate_dba_bundle",
     "generate_frontend_bundle",
     "item_path",
+    "sqlite_schema_sql",
 ]

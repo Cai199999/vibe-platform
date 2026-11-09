@@ -24,6 +24,7 @@ from ai_core.domain.architect import (
 from ai_core.domain.fullstack import FullstackRunRequest
 from ai_core.fullstack.coders import (
     collection_path,
+    extract_column_defs,
     extract_columns,
     extract_table_name,
     generate_backend_bundle,
@@ -183,29 +184,44 @@ class CoderTests(unittest.TestCase):
         self.assertNotIn("primary", columns)
         self.assertEqual(extract_table_name("-- 没有 DDL"), "app_records")
 
+        defs = dict(extract_column_defs(DDL))
+        self.assertEqual(defs["id"], "INTEGER")
+        self.assertEqual(defs["name"], "TEXT")
+        self.assertEqual(defs["payload"], "TEXT")
+        # 契约没有 id 时自动补 SQLite 自增主键。
+        self.assertEqual(extract_column_defs("CREATE TABLE t (title TEXT)")[0][0], "id")
+
     def test_collection_path_prefers_get_collection_route(self) -> None:
         contract = _contract()
         self.assertEqual(collection_path(contract.api_routes), "/api/v1/todos")
 
-    def test_dba_bundle_writes_schema_sql(self) -> None:
+    def test_dba_bundle_writes_sqlite_and_mysql_schema(self) -> None:
         bundle = generate_dba_bundle(_contract())
         self.assertEqual(bundle.metadata["table"], "todos")
         sql = bundle.files["server/schema.sql"]
-        self.assertIn("CREATE TABLE todos", sql)
-        self.assertIn("MVP 沙盒不常驻 MySQL", sql)
+        self.assertIn('CREATE TABLE IF NOT EXISTS "todos"', sql)
+        self.assertIn('"payload" TEXT', sql)
+        mysql = bundle.files["server/schema.mysql.sql"]
+        self.assertIn("CREATE TABLE todos", mysql)
 
-    def test_backend_bundle_generates_zero_dependency_server(self) -> None:
+    def test_backend_bundle_generates_express_sqlite_server(self) -> None:
         bundle = generate_backend_bundle(_contract())
-        self.assertIn("server/index.mjs", bundle.files)
+        self.assertIn("server/index.js", bundle.files)
+        self.assertIn("server/db.js", bundle.files)
         self.assertIn("server/package.json", bundle.files)
-        code = bundle.files["server/index.mjs"]
+        code = bundle.files["server/index.js"]
         # 真实 REST 行为：健康检查、集合 GET/POST、详情 GET/DELETE、CORS。
+        self.assertIn("from 'express'", code)
         self.assertIn("/api/health", code)
+        self.assertIn("/api/data", code)
         self.assertIn("/api/v1/todos", code)
-        self.assertIn("'POST'", code)
-        self.assertIn("'DELETE'", code)
         self.assertIn("Access-Control-Allow-Origin", code)
+        db_code = bundle.files["server/db.js"]
+        self.assertIn("from 'node:sqlite'", db_code)
+        self.assertIn("fullstack.sqlite", db_code)
+        self.assertIn('CREATE TABLE IF NOT EXISTS "${TABLE}"', db_code)
         self.assertEqual(bundle.metadata["collectionPath"], "/api/v1/todos")
+        self.assertEqual(bundle.metadata["runtime"], "express-sqlite")
 
     def test_frontend_bundle_patches_main_vite_and_package(self) -> None:
         main = (
@@ -238,12 +254,16 @@ class CoderTests(unittest.TestCase):
         patched_main = bundle.files["src/main.jsx"]
         self.assertIn("FullstackDataPanel", patched_main)
         self.assertIn("<App /><FullstackDataPanel />", patched_main)
+        panel = bundle.files["src/fullstack-api.jsx"]
+        self.assertIn("data-fullstack-success", panel)
+        self.assertIn("提交成功", panel)
         patched_vite = bundle.files["vite.config.js"]
         self.assertIn("'/api'", patched_vite)
-        self.assertIn("127.0.0.1:3100", patched_vite)
+        self.assertIn("127.0.0.1:3000", patched_vite)
         patched_package = bundle.files["package.json"]
         self.assertIn('"dev": "node scripts/dev.mjs"', patched_package)
         self.assertIn('"dev:vite": "vite"', patched_package)
+        self.assertIn("server/index.js", bundle.files["scripts/dev.mjs"])
 
     def test_frontend_bundle_requires_react_main(self) -> None:
         with self.assertRaises(ValueError):
@@ -277,13 +297,13 @@ class GraphTests(unittest.TestCase):
 
         # 三类产物 + 启动配置全部落盘。
         self.assertIn("server/schema.sql", sandbox.files)
-        self.assertIn("server/index.mjs", sandbox.files)
+        self.assertIn("server/index.js", sandbox.files)
         self.assertIn("src/fullstack-api.jsx", sandbox.files)
         self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/api/health")])
         self.assertEqual(sandbox.verified, [(sandbox.handle.sandbox_id, "build")])
         self.assertEqual(outcome["table"], "todos")
         self.assertEqual(outcome["collection_path"], "/api/v1/todos")
-        self.assertIn("server/index.mjs", outcome["backend_files"])
+        self.assertIn("server/index.js", outcome["backend_files"])
 
         events = buffer.snapshot()
         node_order = [
@@ -316,7 +336,7 @@ class GraphTests(unittest.TestCase):
         # 每个节点的源码输出都通过 node.output 推送，前端据此展示生成日志。
         outputs = [event for event in events if event.type == "fullstack.node.output"]
         self.assertTrue(
-            any(event.payload["path"] == "server/index.mjs" for event in outputs)
+            any(event.payload["path"] == "server/index.js" for event in outputs)
         )
         self.assertTrue(
             any(event.payload["path"] == "server/schema.sql" for event in outputs)
@@ -435,7 +455,7 @@ class ServiceTests(unittest.TestCase):
 
         snapshot = service.snapshot(run_id)
         self.assertEqual(snapshot.status, "SUCCEEDED", snapshot.error)
-        self.assertIn("server/index.mjs", snapshot.files)
+        self.assertIn("server/index.js", snapshot.files)
         events = active.buffer.snapshot()
         types = [event.type for event in events]
         self.assertIn("fullstack.started", types)
@@ -447,7 +467,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(completed.payload["status"], "SUCCEEDED")
         self.assertEqual(completed.payload["sandboxId"], sandbox.handle.sandbox_id)
         self.assertEqual(completed.payload["collectionPath"], "/api/v1/todos")
-        self.assertIn("server/index.mjs", completed.payload["backendFiles"])
+        self.assertIn("server/index.js", completed.payload["backendFiles"])
         self.assertIn("server/schema.sql", completed.payload["dbaFiles"])
         self.assertTrue(completed.payload["previewUrl"].startswith("http://127.0.0.1"))
         self.assertEqual(sandbox.restarts[-1][1], "/api/health")

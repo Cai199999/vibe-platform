@@ -345,6 +345,15 @@ def wait_preview(preview_url: str, timeout: float = 90) -> None:
 def verify_crud(preview_url: str, collection_path: str) -> None:
     status, health = http_get_json(f"{preview_url}/api/health")
     check(status == 200 and health.get("status") == "ok", f"健康检查失败: {health}")
+    # 全栈后端必须是 Express + SQLite，而不是内存仓储。
+    check(
+        health.get("storage") == "sqlite",
+        f"后端未使用 SQLite: {health}",
+    )
+    check(
+        health.get("runtime") == "express-sqlite",
+        f"后端运行时不是 Express: {health}",
+    )
 
     collection_url = f"{preview_url}{collection_path}"
     status, listing = http_get_json(collection_url)
@@ -366,6 +375,17 @@ def verify_crud(preview_url: str, collection_path: str) -> None:
     check(
         any(item.get("name") == name for item in items),
         "POST 后列表未包含新建记录",
+    )
+
+    # 通用别名 /api/data 必须指向同一张 SQLite 表。
+    status, alias_listing = http_get_json(f"{preview_url}/api/data")
+    alias_items = (
+        alias_listing.get("items") if isinstance(alias_listing, dict) else alias_listing
+    )
+    check(status == 200, f"GET /api/data -> HTTP {status}")
+    check(
+        any(item.get("name") == name for item in (alias_items or [])),
+        "/api/data 未查到刚写入的记录",
     )
 
 
@@ -415,7 +435,7 @@ def main() -> int:
             if event.get("type") == "fullstack.node.output"
         }
         check("server/schema.sql" in generated_paths, "缺少 schema.sql 生成日志")
-        check("server/index.mjs" in generated_paths, "缺少后端代码生成日志")
+        check("server/index.js" in generated_paths, "缺少后端代码生成日志")
         check("src/fullstack-api.jsx" in generated_paths, "缺少前端接入生成日志")
         check("fullstack.sandbox.ready" in types, "缺少沙盒就绪事件")
         payload = terminal["payload"]

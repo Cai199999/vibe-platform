@@ -56,6 +56,11 @@ GITIGNORE_CONTENT = (
     "*.log\n"
     "vite.config.*.timestamp-*\n"
     "*.timestamp-*.mjs\n"
+    # 全栈生成：SQLite 数据库文件属于运行时数据，不进入项目快照。
+    "data/\n"
+    "*.sqlite\n"
+    "*.sqlite3\n"
+    "*.db\n"
 )
 # 写入 .git/info/exclude：兼容本次升级前已创建、且 .gitignore 不含上述
 # 临时文件规则的旧沙盒，避免它们在下一次 checkpoint 时偶发失败。
@@ -67,6 +72,10 @@ GIT_EXCLUDE_CONTENT = (
     "*.log\n"
     "vite.config.*.timestamp-*\n"
     "*.timestamp-*.mjs\n"
+    "data/\n"
+    "*.sqlite\n"
+    "*.sqlite3\n"
+    "*.db\n"
 )
 FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 

@@ -41,7 +41,8 @@ Architect 契约 `CONFIRMED` 后不再停在面板：一键生成 DDL、后端�
 
 ## 已知边界
 
-- 生成后端为内存仓储，DDL 仅落 `schema.sql`，未接 MySQL。
+- 初次实现为内存仓储；后续已在
+  `2026-11-09_express_sqlite_fullstack.md` 升级为 Express + SQLite 真实落盘。
 - 关闭项目 Tab 会中断 SSE 并销毁沙盒；生成本身不可恢复，需重新点击。
 - `test_eval_suite` 在容器 `/app` 挂载下因 `REPO_ROOT` 路径断言失败，
   属测试环境差异，非业务回归。

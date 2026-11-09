@@ -4,77 +4,33 @@
 
 ## 架构底座
 
-React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.12 + FastAPI + LangGraph → Docker 沙盒（Node 20 + React/Vite + Node 后端，双服务 MVP）。中间件复用 `~/Workspace/infra`：MySQL / Redis / MinIO。AI Core 已按六边形架构分层：`domain`（纯模型）/ `ports`（抽象）/ `adapters`（实现）/ `agent·architect·supervisor`（应用编排），旧 import 保留兼容 shim。
+React 18 + Vite → Java 21 Spring Boot 3.3.5 BFF → Python 3.12 FastAPI + LangGraph → Docker 沙盒（Node 22 + Vite + Express + SQLite）。中间件复用 `~/Workspace/infra`。AI Core 六边形分层：domain / ports / adapters / agent·architect·fullstack。
 
 ## 已闭环能力
 
-- 画布圈选 / 空白 ADD / 精准点击 Inspect（React+Vue 源码文件:行:列）
-- 多标注（≤3）、多轮对话、世界坐标无漂移
-- SSE `seq`/`afterSeq` 重放、HITL 澄清、Diff 审批、取消、Git 回滚
-- Supervisor 路由：ui / architect / both / custom / rejected
-- Architect 形态判别 + 动态澄清 + BM25 契约
-- 多 Tab、zip/HTML/图片导入、预览、`/admin`
-- Token 降本：模型分级、历史摘要、错误截断、同错终止
-- 团队 8 Agent Manifest（3+5）
-- Tool：`search_web`（research 节点）+ Supervisor 工具网关
-- Skill：Markdown 挂载 `ui.accessibility`，动态注入 Coder
-- MCP：标准 stdio 子集 + `get_current_time` 示例
-- 六边形重构：`AnnotationEnvelope/ArchitectContract/State` 入 domain；
-  `ModelClient/Sandbox/RAG/Checkpoint/Editor` 入 ports；DeepSeek/Docker/Markdown/Chroma/Editor 入 adapters
-- 记忆隔离：`ThreadMemoryStore` 按 tenant+project 作用域键；LangGraph
-  checkpoint 按 `ui_run`/`architect_run` + 项目作用域物理隔离；Supervisor
-  只向 Architect 投影 `architectHistory`，UI 只收画布标注；State 字段边界测试固化
-- 序列化：Annotation / chatHistory 的 `createdAt` 统一 ISO 8601；Prompt 与 SSE
-  `json.dumps` 加 `default=str` 兜底，修复 datetime 导致的后端 500
-- 开发者工具化：ADD 的 `relativeTarget` 增加 CSS 像素坐标（relativeX/Y、
-  widthPx/heightPx、parentW/H），Prompt 按 flex/grid/absolute 精确落位；
-  澄清期间主输入栏常驻 + 自定义 textarea + comment 入上下文；预览底部
-  状态栏与抽屉展示模型/沙盒/AST 路径/Diff/LangGraph 时间轴
-- 项目快照：沙盒 Git checkpoint（💾 保存 / 版本历史抽屉 / 只读快照标签 +
-  累积 Diff / 二次确认 `reset --hard`）；恢复后版本列表刷新、iframe 以
-  nonce 重建加载回滚版本；不引入额外数据库
-- 生成流重构：`CREATE_NEW` 只生成组件主体 + `data-vibe-created`，预览层
-  拖拽定位；确认后以 `MODIFY_EXISTING + payload.position` 回写 absolute。
-  `run.dirty` 保存门控：【下一步】置灰 + Toast；保存快照刷新
-  `global_summary.md`，Architect 请求携带 `projectSummary/latestChanges`
-- 记忆落盘：BFF camelCase 请求字段改用 Pydantic alias 解析；python-ai
-  entrypoint 启动时修正 bind mount 属主后降权到 app，修复摘要静默失败
-- 上下文分层：tiktoken 预算 + FAST 意图分级（高优逐字/低优合并）+ 最近
-  10 轮原文；工具结果落 `tool_outputs/<sha256>` 只传预览；每 10 轮写
-  `local_summary.md`，快照刷新 `global_summary.md` + `user_profile.md` 并注入
-  system；Architect `response_format` + 校验错误回传重试；前端 VirtualList +
-  rAF 合帧
-- Architect 置信度：必需槽位才算封顶，可选 auth/api 不再扣分；
-  assumptions 齐全时封顶 0.90；问题按必需槽位优先；自由文本确定性回填
-  框架/数据库/实体/业务流；诊断脚本 `scripts/architect_confidence_debug_test.py`
-- 契约→全栈生成闭环：`FullstackGraph`（DBACoder → BackendCoder →
-  FrontendCoder → BuildVerifier → SandboxRestart）；SSE `fullstack.*`
-  事件 + seq 重放；沙盒多服务（Vite 5173 + 零依赖 Node 3100，`/api`
-  代理）；预览区真实 GET/POST；API 与浏览器 UI E2E 均 PASS
-- Eval 10/10；Python 全栈单测 12 PASS、其余 192 PASS（`test_eval_suite`
-  在容器 `/app` 挂载下路径断言失败，属环境差异）；Java BFF 编译/测试 PASS；
-  拖拽定位→保存门控→Architect 澄清→全栈生成 E2E PASS，快照/Architect/
-  空白 ADD/新增组件回归全 PASS
+- 画布圈选 / ADD / Inspect，多标注、多 Tab、zip/HTML/图片导入与预览
+- SSE `seq` 重放、HITL 澄清、Diff 审批、取消、Git 回滚与项目快照
+- Supervisor 路由、Architect 形态判别 + 动态澄清、8 Agent Manifest
+- Tool（search_web）/ Skill / MCP；记忆隔离、上下文分层压缩、Token 降本
+- 契约→全栈生成：`FullstackGraph` 五节点；Vite 5173 + Express 3000，
+  `/api` 代理；SQLite 落盘 `data/fullstack.sqlite`，契约 CRUD + `/api/data`
+- 验证：`fullstack_e2e_check.py` 12/12；API/UI E2E、Python 192、Java BFF、前端构建 PASS
 
 ## 真 / 假边界
 
-| 能力 | 真实状态 |
+| 能力 | 状态 |
 |---|---|
-| DeepSeek | 已接 OpenAI 兼容接口，`.env` 有 Key；Eval 仍用 Mock |
+| DeepSeek | 已接 OpenAI 兼容接口；Eval 仍 Mock |
 | 鉴权 | Mock Token + Header，无 JWT |
-| 持久化 | BFF 无 DB；状态进程内，重启丢失 |
-| MySQL / Redis / MinIO | 仅连接配置，未读写 |
-| 数据中台 | Knowledge/Prompt/Feedback 仅契约 |
-| 沙盒 | React/Vue Vite + Node 后端双服务（MVP），无 gVisor |
-| Agent | 3 available + 5 reserved；reserved 仅 Manifest |
-| 外网 | 当前环境不可达，`search_web` 返回可读失败；解析器已单测 |
-| Admin Eval | 契约冻结，未接路由 |
+| 持久化 | BFF 无 DB；全栈沙盒用 SQLite |
+| MySQL/Redis/MinIO | 仅连接配置，未读写 |
+| 沙盒 | Vite + Express + SQLite 双服务，无 gVisor |
+| Agent | 3 available + 5 reserved |
+| 外网 | 不可达，search_web 返回可读失败 |
 
 ## 下一步
 
-- **P0 真实 DeepSeek**：Eval 接 `deepseek-chat`，建质量/成本基线
-- **P0 M3.2 知识中台**：摄取、租户隔离检索
-- **P1 前端精度**：高 DPI / 极端缩放的圈选与高亮坐标
-- **P1 运行时**：Redis checkpoint + Stream + 分布式门控
-- **P2 全栈深化**：生成后端接真实 MySQL、Java/Spring 代码、多接口拆分
-- **P2 平台化**：真实认证/RBAC、Prompt Registry、Feedback
+- P0 真实 DeepSeek 质量/成本基线
+- P0 M3.2 知识中台摄取与租户隔离检索
+- P1 高 DPI 圈选精度、Redis checkpoint/Stream
+- P2 全栈深化：真实 MySQL、按契约重写用户表单

@@ -138,7 +138,7 @@ def main() -> int:
                     panel.locator(f'[data-fullstack-step="{node}"]')
                 ).to_have_attribute("data-status", "SUCCEEDED")
             expect(
-                panel.locator('[data-fullstack-output="server/index.mjs"]')
+                panel.locator('[data-fullstack-output="server/index.js"]')
             ).to_have_count(1)
             expect(
                 panel.locator('[data-fullstack-output="server/schema.sql"]')
