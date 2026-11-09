@@ -379,8 +379,9 @@ function FullstackGeneration({ fullstack, contract, onGenerate }) {
           <span className="architect-form-eyebrow">CONTRACT → SANDBOX</span>
           <h3>生成前后端与数据库代码</h3>
           <p>
-            DBACoder 落库 DDL，BackendCoder 生成 Node API，FrontendCoder
-            接入真实请求，最后重启沙盒完成联调。
+            DBACoder 生成 Sequelize ORM，BackendCoder 提供 Node API，
+            FrontendCoder 接入真实请求，InfraCoder 输出 Dockerfile /
+            render.yaml / .env.example，最后重启沙盒完成联调。
           </p>
         </div>
         <div className="architect-fullstack-actions">

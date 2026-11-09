@@ -24,12 +24,14 @@ from ai_core.domain.architect import (
 from ai_core.domain.fullstack import FullstackRunRequest
 from ai_core.fullstack.coders import (
     collection_path,
+    contract_database_engine,
     extract_column_defs,
     extract_columns,
     extract_table_name,
     generate_backend_bundle,
     generate_dba_bundle,
     generate_frontend_bundle,
+    generate_infra_bundle,
 )
 from ai_core.fullstack.graph import FullstackGraphRunner
 from ai_core.fullstack.service import FullstackService
@@ -55,6 +57,12 @@ def _contract(**overrides) -> ArchitectContract:
         "status": "CONFIRMED",
         "confidenceScore": 0.94,
         "contractMarkdown": "# Todo 全栈契约",
+        "techStack": {
+            "backend": "node_express",
+            "database": "mysql",
+            "databaseEngine": "mysql",
+            "orm": "sequelize",
+        },
         "apiRoutes": [
             ArchitectApiRoute(
                 method="GET",
@@ -195,19 +203,45 @@ class CoderTests(unittest.TestCase):
         contract = _contract()
         self.assertEqual(collection_path(contract.api_routes), "/api/v1/todos")
 
-    def test_dba_bundle_writes_sqlite_and_mysql_schema(self) -> None:
+    def test_contract_database_engine_normalizes_and_defaults(self) -> None:
+        self.assertEqual(contract_database_engine(_contract()), "mysql")
+        postgres = _contract(
+            techStack={"backend": "node_express", "database": "PostgreSQL 16"}
+        )
+        self.assertEqual(postgres.database_engine, "postgresql")
+        self.assertEqual(contract_database_engine(postgres), "postgresql")
+        sqlite = _contract(techStack={"backend": "node_express", "database": "SQLite"})
+        self.assertEqual(contract_database_engine(sqlite), "sqlite")
+
+    def test_dba_bundle_writes_sqlite_preview_and_target_schema(self) -> None:
         bundle = generate_dba_bundle(_contract())
         self.assertEqual(bundle.metadata["table"], "todos")
+        self.assertEqual(bundle.metadata["databaseEngine"], "mysql")
+        self.assertEqual(bundle.metadata["orm"], "sequelize")
         sql = bundle.files["server/schema.sql"]
         self.assertIn('CREATE TABLE IF NOT EXISTS "todos"', sql)
         self.assertIn('"payload" TEXT', sql)
         mysql = bundle.files["server/schema.mysql.sql"]
         self.assertIn("CREATE TABLE todos", mysql)
+        db_code = bundle.files["server/db.js"]
+        # 生产 ORM 与沙盒回退同时存在。
+        self.assertIn("node:sqlite", db_code)
+        self.assertIn("process.env.DATABASE_URL", db_code)
+        self.assertIn("import('sequelize')", db_code)
+        self.assertIn("findAndCountAll", db_code)
+        self.assertIn("server/migrate.mjs", bundle.files)
 
-    def test_backend_bundle_generates_express_sqlite_server(self) -> None:
+        postgres = generate_dba_bundle(
+            _contract(techStack={"backend": "node_express", "database": "postgresql"})
+        )
+        self.assertIn("server/schema.postgresql.sql", postgres.files)
+        self.assertIn(
+            "dialect = STORAGE === 'postgresql'", postgres.files["server/db.js"]
+        )
+
+    def test_backend_bundle_generates_express_sequelize_server(self) -> None:
         bundle = generate_backend_bundle(_contract())
         self.assertIn("server/index.js", bundle.files)
-        self.assertIn("server/db.js", bundle.files)
         self.assertIn("server/package.json", bundle.files)
         code = bundle.files["server/index.js"]
         # 真实 REST 行为：健康检查、集合 GET/POST、详情 GET/DELETE、CORS。
@@ -216,12 +250,16 @@ class CoderTests(unittest.TestCase):
         self.assertIn("/api/data", code)
         self.assertIn("/api/v1/todos", code)
         self.assertIn("Access-Control-Allow-Origin", code)
-        db_code = bundle.files["server/db.js"]
-        self.assertIn("from 'node:sqlite'", db_code)
-        self.assertIn("fullstack.sqlite", db_code)
-        self.assertIn('CREATE TABLE IF NOT EXISTS "${TABLE}"', db_code)
+        self.assertIn("process.env.PORT", code)
+        self.assertIn("process.env.CORS_ORIGIN", code)
         self.assertEqual(bundle.metadata["collectionPath"], "/api/v1/todos")
-        self.assertEqual(bundle.metadata["runtime"], "express-sqlite")
+        self.assertEqual(bundle.metadata["runtime"], "express-sequelize")
+        self.assertEqual(bundle.metadata["databaseEngine"], "mysql")
+        package = bundle.files["server/package.json"]
+        self.assertIn('"sequelize"', package)
+        self.assertIn('"mysql2"', package)
+        self.assertIn('"pg"', package)
+        self.assertIn('"db:migrate"', package)
 
     def test_frontend_bundle_patches_main_vite_and_package(self) -> None:
         main = (
@@ -257,6 +295,9 @@ class CoderTests(unittest.TestCase):
         panel = bundle.files["src/fullstack-api.jsx"]
         self.assertIn("data-fullstack-success", panel)
         self.assertIn("提交成功", panel)
+        # 生产前后端分域部署：面板必须支持 VITE_API_BASE_URL。
+        self.assertIn("VITE_API_BASE_URL", panel)
+        self.assertIn("apiUrl(COLLECTION_PATH)", panel)
         patched_vite = bundle.files["vite.config.js"]
         self.assertIn("'/api'", patched_vite)
         self.assertIn("127.0.0.1:3000", patched_vite)
@@ -273,6 +314,38 @@ class CoderTests(unittest.TestCase):
                 existing_vite="export default {}",
                 existing_package="{}",
             )
+
+    def test_infra_bundle_generates_production_deployment_files(self) -> None:
+        bundle = generate_infra_bundle(_contract())
+        self.assertEqual(
+            set(bundle.files),
+            {
+                "Dockerfile",
+                ".dockerignore",
+                "render.yaml",
+                ".env.example",
+                "DEPLOY.md",
+            },
+        )
+        dockerfile = bundle.files["Dockerfile"]
+        self.assertIn("FROM node:22-alpine", dockerfile)
+        self.assertIn("COPY server/package.json", dockerfile)
+        self.assertIn('CMD ["node", "index.js"]', dockerfile)
+        render = bundle.files["render.yaml"]
+        self.assertIn("runtime: docker", render)
+        self.assertIn("runtime: static", render)
+        self.assertIn("DATABASE_URL", render)
+        self.assertIn("/api/health", render)
+        env = bundle.files[".env.example"]
+        self.assertIn("DATABASE_URL=", env)
+        self.assertIn("DB_ENGINE=mysql", env)
+        self.assertIn("PORT=3000", env)
+        self.assertIn("VITE_API_BASE_URL=", env)
+        deploy = bundle.files["DEPLOY.md"]
+        self.assertIn("Vercel", deploy)
+        self.assertIn("Railway", deploy)
+        self.assertIn("MySQL 8", deploy)
+        self.assertEqual(bundle.metadata["databaseEngine"], "mysql")
 
 
 class GraphTests(unittest.TestCase):
@@ -297,13 +370,18 @@ class GraphTests(unittest.TestCase):
 
         # 三类产物 + 启动配置全部落盘。
         self.assertIn("server/schema.sql", sandbox.files)
+        self.assertIn("server/db.js", sandbox.files)
         self.assertIn("server/index.js", sandbox.files)
         self.assertIn("src/fullstack-api.jsx", sandbox.files)
+        self.assertIn("Dockerfile", sandbox.files)
+        self.assertIn("render.yaml", sandbox.files)
+        self.assertIn(".env.example", sandbox.files)
         self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/api/health")])
         self.assertEqual(sandbox.verified, [(sandbox.handle.sandbox_id, "build")])
         self.assertEqual(outcome["table"], "todos")
         self.assertEqual(outcome["collection_path"], "/api/v1/todos")
         self.assertIn("server/index.js", outcome["backend_files"])
+        self.assertIn("Dockerfile", outcome["infra_files"])
 
         events = buffer.snapshot()
         node_order = [
@@ -317,6 +395,7 @@ class GraphTests(unittest.TestCase):
                 "DBACoder",
                 "BackendCoder",
                 "FrontendCoder",
+                "InfraCoder",
                 "BuildVerifier",
                 "SandboxRestart",
             ],
@@ -469,6 +548,9 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(completed.payload["collectionPath"], "/api/v1/todos")
         self.assertIn("server/index.js", completed.payload["backendFiles"])
         self.assertIn("server/schema.sql", completed.payload["dbaFiles"])
+        self.assertIn("Dockerfile", completed.payload["infraFiles"])
+        self.assertEqual(completed.payload["databaseEngine"], "mysql")
+        self.assertEqual(completed.payload["orm"], "sequelize")
         self.assertTrue(completed.payload["previewUrl"].startswith("http://127.0.0.1"))
         self.assertEqual(sandbox.restarts[-1][1], "/api/health")
 

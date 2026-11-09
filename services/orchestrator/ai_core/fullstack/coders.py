@@ -19,16 +19,41 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from ai_core.domain.architect import ArchitectApiRoute, ArchitectContract
+from ai_core.domain.architect import (
+    ArchitectApiRoute,
+    ArchitectContract,
+    normalize_database_engine,
+)
 from ai_core.fullstack.templates import (
+    BACKEND_DOCKERFILE_TEMPLATE,
+    DEPLOY_GUIDE_TEMPLATE,
     DEV_SCRIPT_TEMPLATE,
+    DOCKERIGNORE_TEMPLATE,
+    ENV_EXAMPLE_TEMPLATE,
     EXPRESS_SERVER_TEMPLATE,
-    SQLITE_DB_TEMPLATE,
+    MIGRATE_SCRIPT_TEMPLATE,
+    RENDER_YAML_TEMPLATE,
+    SEQUELIZE_DB_TEMPLATE,
 )
 
 API_PORT = 3000
 DEFAULT_COLLECTION_PATH = "/api/v1/records"
 DEFAULT_TABLE = "app_records"
+
+DATABASE_ENGINE_LABELS = {
+    "mysql": "MySQL 8（生产部署）",
+    "postgresql": "PostgreSQL（生产部署）",
+    "sqlite": "SQLite（仅供本地测试）",
+}
+PRODUCTION_ENGINES = {"mysql", "postgresql"}
+SERVER_DEPENDENCIES = {
+    "express": "4.21.2",
+    # 生产 ORM 与两套驱动；沙盒未配置 DATABASE_URL 时不会加载它们。
+    "sequelize": "6.37.5",
+    "mysql2": "3.11.5",
+    "pg": "8.13.1",
+    "pg-hstore": "2.3.4",
+}
 
 _SQL_IDENTIFIER = re.compile(r"[^a-zA-Z0-9_]")
 _CREATE_TABLE = re.compile(
@@ -64,6 +89,22 @@ class GeneratedBundle:
 def _safe_identifier(value: str, fallback: str) -> str:
     cleaned = _SQL_IDENTIFIER.sub("_", (value or "").strip()).strip("_")
     return cleaned or fallback
+
+
+def contract_database_engine(contract: ArchitectContract) -> str:
+    """解析契约目标数据库；旧契约从 tech_stack 兜底。
+
+    返回值限定为 mysql / postgresql / sqlite。历史契约没有
+    ``databaseEngine`` 字段，但只要技术栈写了 MySQL 就应继续生成生产路径，
+    绝不能因为字段缺失而静默回退 SQLite。
+    """
+    engine = normalize_database_engine(contract.database_engine)
+    if not engine:
+        engine = normalize_database_engine(
+            contract.tech_stack.get("databaseEngine")
+            or contract.tech_stack.get("database")
+        )
+    return engine or "mysql"
 
 
 def extract_table_name(ddl: str) -> str:
@@ -288,10 +329,17 @@ def _seed_rows(columns: list[str], table: str, entity: str) -> list[dict[str, An
 # DBACoder
 # ------------------------------------------------------------
 def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
-    """生成沙盒内可执行的 SQLite DDL，并保留契约 MySQL DDL 副本。"""
+    """生成 Sequelize ORM 持久化层与可执行的 SQLite 预览 DDL。
+
+    生产环境通过 ``DATABASE_URL`` 连接契约选择的 MySQL / PostgreSQL；
+    沙盒没有 DATABASE_URL 时，``server/db.js`` 自动回退到 Node 22 内置
+    SQLite，保证预览与 E2E 不依赖外部数据库。
+    """
     table = extract_table_name(contract.database_ddl)
+    engine = contract_database_engine(contract)
     column_defs = extract_column_defs(contract.database_ddl)
     columns = [name for name, _ in column_defs]
+    entity = _entity_label(contract, table)
     ddl = (contract.database_ddl or "").strip()
     if ddl and not ddl.endswith(";"):
         ddl += ";"
@@ -299,21 +347,54 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
         "-- 由 DBA Agent 根据《全栈实施契约》生成。\n"
         f"-- contract: {contract.contract_id}\n"
         f"-- table: {table}\n"
-        "-- 说明：本文件是沙盒 SQLite 的可执行建表语句；\n"
-        "-- 目标 MySQL 的原始 DDL 见 server/schema.mysql.sql。\n\n"
+        f"-- 目标数据库: {engine}（生产通过 DATABASE_URL 连接）\n"
+        "-- 说明：本文件是沙盒 SQLite 的预览建表语句；\n"
+        "-- 生产 DDL 见 server/schema.<engine>.sql，ORM 见 server/db.js。\n\n"
+    )
+    db_code = SEQUELIZE_DB_TEMPLATE
+    db_replacements = {
+        "__TABLE__": table,
+        "__ENTITY__": entity,
+        "__DB_ENGINE__": engine,
+        "__COLUMN_DEFS_JSON__": json.dumps(column_defs, ensure_ascii=False, indent=2),
+        "__SEED_ROWS_JSON__": json.dumps(
+            _seed_rows(columns, table, entity),
+            ensure_ascii=False,
+            indent=2,
+        ),
+    }
+    for key, value in db_replacements.items():
+        db_code = db_code.replace(key, value)
+
+    schema_name = (
+        "server/schema.sqlite.sql"
+        if engine == "sqlite"
+        else f"server/schema.{engine}.sql"
     )
     files = {
         "server/schema.sql": header + sqlite_schema_sql(table, column_defs),
-        "server/schema.mysql.sql": (
-            f"-- 契约原始 MySQL DDL（contract: {contract.contract_id}）\n\n"
+        schema_name: (
+            f"-- 契约原始 {engine} DDL（contract: {contract.contract_id}）\n\n"
             + ddl
             + "\n"
         ),
+        "server/db.js": db_code,
+        "server/migrate.mjs": MIGRATE_SCRIPT_TEMPLATE,
     }
     return GeneratedBundle(
         files=files,
-        summary=f"生成 {table} SQLite 建表语句（{len(columns)} 个字段）",
-        metadata={"table": table, "columns": columns, "columnTypes": column_defs},
+        summary=(
+            f"生成 {table} Sequelize ORM（目标 {engine}，"
+            f"{len(columns)} 个字段）+ SQLite 预览 DDL"
+        ),
+        metadata={
+            "table": table,
+            "columns": columns,
+            "columnTypes": column_defs,
+            "databaseEngine": engine,
+            "orm": "sequelize",
+            "previewStorage": "sqlite",
+        },
     )
 
 
@@ -326,15 +407,20 @@ def _express_path(path: str) -> str:
 
 
 def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
-    """按契约 apiRoutes 生成 Express + SQLite 后端。"""
+    """按契约 apiRoutes 生成 Express + Sequelize 后端。
+
+    ``server/db.js`` 与 ``server/package.json`` 由 DBACoder 一并生成；
+    BackendCoder 负责 HTTP 层、依赖清单与运行说明，保持节点职责清晰。
+    """
     routes = contract.api_routes or []
     table = extract_table_name(contract.database_ddl)
     column_defs = extract_column_defs(contract.database_ddl)
     columns = [name for name, _ in column_defs]
+    engine = contract_database_engine(contract)
+    engine_label = DATABASE_ENGINE_LABELS.get(engine, engine)
     base = collection_path(routes)
     detail = _express_path(item_path(routes, base))
     entity = _entity_label(contract, table)
-    seeds = _seed_rows(columns, table, entity)
 
     replacements = {
         "__API_PORT__": str(API_PORT),
@@ -347,16 +433,6 @@ def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
     for key, value in replacements.items():
         server_code = server_code.replace(key, value)
 
-    db_code = SQLITE_DB_TEMPLATE
-    db_replacements = {
-        "__TABLE__": table,
-        "__ENTITY__": entity,
-        "__COLUMN_DEFS_JSON__": json.dumps(column_defs, ensure_ascii=False, indent=2),
-        "__SEED_ROWS_JSON__": json.dumps(seeds, ensure_ascii=False, indent=2),
-    }
-    for key, value in db_replacements.items():
-        db_code = db_code.replace(key, value)
-
     route_lines = []
     for route in routes:
         method = str(route.method or "GET").upper()
@@ -365,30 +441,42 @@ def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
         route_lines.append(f"- `{method} {path}` — {description}")
     readme = (
         f"# {entity} Backend\n\n"
-        "由 BackendCoder 根据契约生成：Express + SQLite，数据真实落盘。\n"
-        "沙盒镜像已预装 express；SQLite 使用 Node 22 内置 node:sqlite。\n\n"
+        "由 BackendCoder 根据契约生成：Express + Sequelize ORM。\n"
+        f"目标数据库：**{engine_label}**；生产通过环境变量 `DATABASE_URL` 连接。\n"
+        "沙盒未配置 `DATABASE_URL` 时自动回退到 Node 22 内置 SQLite，\n"
+        "保证预览与 E2E 不依赖外部数据库。\n\n"
         f"- 表：`{table}`\n"
         f"- 集合路由：`{base}`\n"
         f"- 详情路由：`{detail}`\n"
         f"- 通用数据别名：`/api/data`\n"
-        f"- 健康检查：`/api/health`（返回 storage=sqlite）\n"
-        f"- 数据库文件：`data/fullstack.sqlite`\n\n"
+        f"- 健康检查：`/api/health`（生产 storage={engine}，沙盒 storage=sqlite）\n"
+        f"- 本地预览库：`data/fullstack.sqlite`\n"
+        "- 迁移：`npm run db:migrate`（生产需 DATABASE_URL）\n\n"
         "## 契约路由\n\n"
         + ("\n".join(route_lines) if route_lines else "- 无显式路由，使用默认 CRUD")
-        + "\n\n## 运行\n\n```bash\nnode server/index.js\n```\n"
+        + "\n\n## 运行\n\n```bash\nnode server/index.js\n```\n\n"
+        "## 生产环境变量\n\n"
+        "```bash\n"
+        f"DATABASE_URL='<{engine} 连接串>'\n"
+        f"DB_ENGINE={engine}\n"
+        "DB_AUTO_MIGRATE=true\n"
+        "CORS_ORIGIN='https://your-frontend.example.com'\n"
+        "```\n"
     )
 
     files = {
         "server/index.js": server_code,
-        "server/db.js": db_code,
         "server/README.md": readme,
         "server/package.json": json.dumps(
             {
                 "name": "vibe-fullstack-server",
                 "private": True,
                 "type": "module",
-                "dependencies": {"express": "4.21.2"},
-                "scripts": {"start": "node index.js"},
+                "dependencies": SERVER_DEPENDENCIES,
+                "scripts": {
+                    "start": "node index.js",
+                    "db:migrate": "node migrate.mjs",
+                },
             },
             ensure_ascii=False,
             indent=2,
@@ -397,14 +485,20 @@ def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
     }
     return GeneratedBundle(
         files=files,
-        summary=f"生成 Express + SQLite 后端，{len(routes) or 2} 条 REST 路由",
+        summary=(
+            f"生成 Express + Sequelize 后端（{engine_label}），"
+            f"{len(routes) or 2} 条 REST 路由"
+        ),
         metadata={
             "table": table,
             "columns": columns,
             "collectionPath": base,
             "itemPath": detail,
             "entity": entity,
-            "runtime": "express-sqlite",
+            "runtime": "express-sequelize",
+            "previewRuntime": "express-sqlite",
+            "databaseEngine": engine,
+            "orm": "sequelize",
             "routes": [
                 {"method": str(r.method or "GET").upper(), "path": str(r.path or "")}
                 for r in routes
@@ -423,6 +517,16 @@ import { useEffect, useState } from 'react'
 const COLLECTION_PATH = '__COLLECTION_PATH__'
 const ENTITY = '__ENTITY__'
 const TABLE = '__TABLE__'
+// 生产前后端通常分域部署：构建时注入 VITE_API_BASE_URL；
+// 沙盒未配置时为空字符串，继续走 Vite 同源 /api 代理。
+const API_BASE = String(import.meta.env.VITE_API_BASE_URL || '').replace(
+  /\/$/,
+  '',
+)
+
+function apiUrl(path) {
+  return `${API_BASE}${path}`
+}
 
 function normalizeItems(payload) {
   if (Array.isArray(payload)) return payload
@@ -443,6 +547,7 @@ export default function FullstackDataPanel() {
   const [status, setStatus] = useState('loading')
   const [items, setItems] = useState([])
   const [name, setName] = useState('')
+  const [storage, setStorage] = useState('database')
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -452,7 +557,7 @@ export default function FullstackDataPanel() {
     setError('')
     setSuccess('')
     try {
-      const response = await fetch(COLLECTION_PATH, {
+      const response = await fetch(apiUrl(COLLECTION_PATH), {
         headers: { Accept: 'application/json' },
       })
       if (!response.ok) {
@@ -460,6 +565,7 @@ export default function FullstackDataPanel() {
       }
       const payload = await response.json()
       setItems(normalizeItems(payload))
+      setStorage(String(payload?.storage || 'database'))
       setStatus('ready')
     } catch (cause) {
       setError(String(cause?.message || cause))
@@ -478,7 +584,7 @@ export default function FullstackDataPanel() {
     setError('')
     setSuccess('')
     try {
-      const response = await fetch(COLLECTION_PATH, {
+      const response = await fetch(apiUrl(COLLECTION_PATH), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -540,7 +646,9 @@ export default function FullstackDataPanel() {
           {items.length}
         </span>
       </header>
-      <code style={{ fontSize: 10.5, color: '#64748b' }}>{COLLECTION_PATH}</code>
+      <code style={{ fontSize: 10.5, color: '#64748b' }}>
+        {apiUrl(COLLECTION_PATH)}
+      </code>
 
       {status === 'loading' && <span>正在请求后端…</span>}
       {status === 'error' && (
@@ -549,8 +657,12 @@ export default function FullstackDataPanel() {
         </span>
       )}
       {status === 'ready' && (
-        <span data-fullstack-ready style={{ color: '#34d399' }}>
-          后端数据已加载 · SQLite
+        <span
+          data-fullstack-ready
+          data-fullstack-storage={storage}
+          style={{ color: '#34d399' }}
+        >
+          后端数据已加载 · {storage}
         </span>
       )}
       {success && (
@@ -708,16 +820,75 @@ def generate_frontend_bundle(
     )
 
 
+# ------------------------------------------------------------
+# InfraCoder：一键部署配置（Infrastructure as Code）
+# ------------------------------------------------------------
+def generate_infra_bundle(contract: ArchitectContract) -> GeneratedBundle:
+    """生成 Dockerfile、Render Blueprint、环境变量模板与部署指引。
+
+    目标不是“能跑起来的沙盒玩具”，而是可以直接导出、推送到 Git 仓库，
+    再由 Render / Railway / Vercel / 任意容器平台部署的生产级项目包。
+    """
+    table = extract_table_name(contract.database_ddl)
+    entity = _entity_label(contract, table)
+    engine = contract_database_engine(contract)
+    engine_label = DATABASE_ENGINE_LABELS.get(engine, engine)
+    base = collection_path(contract.api_routes or [])
+    service_name = _safe_identifier(f"vibe_{table}", "vibe_app")
+    service_name = service_name.replace("_", "-")[:48].strip("-") or "vibe-app"
+    project_name = f"{entity} 全栈应用" if entity else f"{table} 全栈应用"
+
+    replacements = {
+        "__PROJECT_NAME__": project_name,
+        "__SERVICE_NAME__": service_name,
+        "__DB_ENGINE__": engine,
+        "__DB_ENGINE_LABEL__": engine_label,
+        "__COLLECTION_PATH__": base,
+    }
+
+    def render(template: str) -> str:
+        result = template
+        for key, value in replacements.items():
+            result = result.replace(key, value)
+        return result
+
+    files = {
+        "Dockerfile": render(BACKEND_DOCKERFILE_TEMPLATE),
+        ".dockerignore": DOCKERIGNORE_TEMPLATE,
+        "render.yaml": render(RENDER_YAML_TEMPLATE),
+        ".env.example": render(ENV_EXAMPLE_TEMPLATE),
+        "DEPLOY.md": render(DEPLOY_GUIDE_TEMPLATE),
+    }
+    return GeneratedBundle(
+        files=files,
+        summary=(
+            f"生成一键部署配置（{engine_label}）：Dockerfile、"
+            "render.yaml、.env.example、DEPLOY.md"
+        ),
+        metadata={
+            "table": table,
+            "entity": entity,
+            "databaseEngine": engine,
+            "serviceName": service_name,
+            "targets": ["docker", "render", "vercel", "railway"],
+        },
+    )
+
+
 __all__ = [
     "API_PORT",
+    "DATABASE_ENGINE_LABELS",
     "GeneratedBundle",
+    "PRODUCTION_ENGINES",
     "collection_path",
+    "contract_database_engine",
     "extract_column_defs",
     "extract_columns",
     "extract_table_name",
     "generate_backend_bundle",
     "generate_dba_bundle",
     "generate_frontend_bundle",
+    "generate_infra_bundle",
     "item_path",
     "sqlite_schema_sql",
 ]

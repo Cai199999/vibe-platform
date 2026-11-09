@@ -164,9 +164,15 @@ def main() -> int:
                 fail(f"像素 x 与归一化 x 不一致: {relative}")
             if abs(ratio_y - relative.get("y", 0)) > 0.02:
                 fail(f"像素 y 与归一化 y 不一致: {relative}")
-            if relative["relativeX"] + relative["widthPx"] > relative["parentWidth"] + 1:
+            if (
+                relative["relativeX"] + relative["widthPx"]
+                > relative["parentWidth"] + 1
+            ):
                 fail(f"圈选超出父容器右边界: {relative}")
-            if relative["relativeY"] + relative["heightPx"] > relative["parentHeight"] + 1:
+            if (
+                relative["relativeY"] + relative["heightPx"]
+                > relative["parentHeight"] + 1
+            ):
                 fail(f"圈选超出父容器下边界: {relative}")
             print(
                 "   契约校验通过: "

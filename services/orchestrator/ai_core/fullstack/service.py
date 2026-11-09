@@ -6,7 +6,8 @@
       -> 校验契约已 CONFIRMED（且必须是 full_stack_system）
       -> 复用 / 创建沙盒
       -> 后台线程执行 FullstackGraph
-      -> SSE 输出 DBACoder / BackendCoder / FrontendCoder / 构建 / 重启
+      -> SSE 输出 DBACoder / BackendCoder / FrontendCoder / InfraCoder /
+         构建 / 重启
       -> fullstack.completed | fullstack.failed（终态）
 
 事件 seq 由 ``RunEventBuffer`` 唯一分配；BFF 与前端只透传 / 重放。
@@ -32,7 +33,11 @@ from ai_core.domain.fullstack import (
     FullstackRunSnapshot,
     FullstackStep,
 )
-from ai_core.fullstack.coders import collection_path, extract_table_name
+from ai_core.fullstack.coders import (
+    collection_path,
+    contract_database_engine,
+    extract_table_name,
+)
 from ai_core.fullstack.graph import (
     FullstackGenerationError,
     FullstackGraphRunner,
@@ -199,10 +204,13 @@ class FullstackService:
                 "sandboxId": sandbox_id,
                 "previewUrl": preview_url,
                 "appShape": contract.app_shape,
+                "databaseEngine": contract_database_engine(contract),
+                "orm": "sequelize",
                 "nodes": [
                     "DBACoder",
                     "BackendCoder",
                     "FrontendCoder",
+                    "InfraCoder",
                     "BuildVerifier",
                     "SandboxRestart",
                 ],
@@ -252,9 +260,12 @@ class FullstackService:
                     "table": active.table,
                     "collectionPath": active.collection_path,
                     "files": active.files,
+                    "databaseEngine": contract_database_engine(active.contract),
+                    "orm": "sequelize",
                     "dbaFiles": list(outcome.get("dba_files") or []),
                     "backendFiles": list(outcome.get("backend_files") or []),
                     "frontendFiles": list(outcome.get("frontend_files") or []),
+                    "infraFiles": list(outcome.get("infra_files") or []),
                     "elapsedMs": int((time.monotonic() - started) * 1000),
                 },
                 dedupe_key=f"fullstack.completed:{active.run_id}",
@@ -392,6 +403,8 @@ class FullstackService:
         return {
             "contractId": contract.contract_id,
             "appShape": contract.app_shape,
+            "databaseEngine": contract_database_engine(contract),
+            "orm": "sequelize",
             "table": table,
             "collectionPath": collection_path(contract.api_routes),
             "routeCount": len(contract.api_routes),

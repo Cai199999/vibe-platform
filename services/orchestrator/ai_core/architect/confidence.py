@@ -366,12 +366,15 @@ def question_for_slot(slot: str, shape: str | None = None) -> ArchitectQuestion 
             question_id="q_database_engine",
             slot=slot,
             type="single_choice",
-            prompt="数据库使用哪一种？",
+            prompt=(
+                "数据库使用哪一种？SQLite 仅用于本地测试；"
+                "需要部署上线时请选择 MySQL 或 PostgreSQL。"
+            ),
             required=True,
             options=[
-                {"value": "mysql", "label": "MySQL 8"},
-                {"value": "postgresql", "label": "PostgreSQL"},
-                {"value": "sqlite", "label": "SQLite（轻量部署）"},
+                {"value": "mysql", "label": "MySQL 8（用于生产部署）"},
+                {"value": "postgresql", "label": "PostgreSQL（用于生产部署）"},
+                {"value": "sqlite", "label": "SQLite（仅供本地测试）"},
             ],
             default_value="mysql",
         )

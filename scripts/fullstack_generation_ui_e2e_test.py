@@ -3,9 +3,10 @@
 
 覆盖：
   1. Architect 面板在 CONFIRMED 后展示【🚀 开始生成全栈代码】；
-  2. 点击后 SSE 节点 DBACoder / BackendCoder / FrontendCoder 依次完成；
+  2. 点击后 SSE 六节点（含 InfraCoder）依次完成；
   3. 沙盒重启后预览 iframe 中数据面板进入 ready；
-  4. 面板通过 Vite /api 代理对 Node 后端执行 GET / POST，不再出现网络错误。
+  4. 面板通过 Vite /api 代理对 Node 后端执行 GET / POST，不再出现网络错误；
+  5. 预览区【部署上线】按钮展示生产部署配置指引（Mock）。
 
 前置：
     docker compose up -d
@@ -127,34 +128,61 @@ def main() -> int:
             trigger.click()
             progress = panel.locator("[data-fullstack-progress]")
             expect(progress).to_be_visible(timeout=30_000)
-            expect(progress.locator("[data-fullstack-step]")).to_have_count(5)
+            expect(progress.locator("[data-fullstack-step]")).to_have_count(6)
 
             # 只断言终态；运行中节点状态交替太快，不适合逐帧断言。
             expect(panel.locator("[data-fullstack-status]")).to_have_attribute(
                 "data-fullstack-status", "SUCCEEDED", timeout=240_000
             )
-            for node in ("DBACoder", "BackendCoder", "FrontendCoder"):
+            for node in (
+                "DBACoder",
+                "BackendCoder",
+                "FrontendCoder",
+                "InfraCoder",
+            ):
                 expect(
                     panel.locator(f'[data-fullstack-step="{node}"]')
                 ).to_have_attribute("data-status", "SUCCEEDED")
-            expect(
-                panel.locator('[data-fullstack-output="server/index.js"]')
-            ).to_have_count(1)
-            expect(
-                panel.locator('[data-fullstack-output="server/schema.sql"]')
-            ).to_have_count(1)
+            for path in (
+                "server/index.js",
+                "server/db.js",
+                "server/schema.sql",
+                "Dockerfile",
+                "render.yaml",
+                ".env.example",
+            ):
+                expect(
+                    panel.locator(f'[data-fullstack-output="{path}"]')
+                ).to_have_count(1)
             expect(panel.locator("[data-fullstack-result]")).to_contain_text("接口前缀")
             page.screenshot(
                 path=str(SCREENSHOT_DIR / "fullstack-generation-completed.png"),
                 full_page=True,
             )
-            print("   OK：五个节点完成，生成日志可见")
+            print("   OK：六个节点完成，ORM 与部署配置日志可见")
 
-            print("\n== 4. 关闭面板，检查预览区真实数据面板 ==")
+            print("\n== 4. 关闭面板，检查预览区真实数据面板与部署指引 ==")
             panel.get_by_role("button", name="关闭架构师面板").click()
             expect(panel).to_be_hidden()
             expect(active.locator(".preview-pane.is-visible")).to_be_visible(
                 timeout=30_000
+            )
+
+            deploy_button = active.locator("[data-deploy-button]")
+            expect(deploy_button).to_be_visible()
+            deploy_button.click()
+            deploy_dialog = active.locator("[data-deploy-dialog]")
+            expect(deploy_dialog).to_be_visible(timeout=10_000)
+            for keyword in ("Dockerfile", "render.yaml", "Vercel", "Railway"):
+                expect(deploy_dialog).to_contain_text(keyword)
+            page.screenshot(
+                path=str(SCREENSHOT_DIR / "fullstack-deploy-guide.png"),
+                full_page=True,
+            )
+            deploy_dialog.get_by_role("button", name="关闭部署指引").click()
+            expect(deploy_dialog).to_be_hidden()
+            print(
+                "   OK：部署上线 Mock 指引展示 Dockerfile / render.yaml / Vercel / Railway"
             )
             frame = page.frame_locator(".tab-window.is-active .runtime-preview-frame")
             panel_root = frame.locator("[data-fullstack-panel]")

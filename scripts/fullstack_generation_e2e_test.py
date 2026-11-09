@@ -228,6 +228,10 @@ def drive_to_fullstack_contract() -> (
             )
             check(bool(contract.get("apiRoutes")), "全栈契约缺少 apiRoutes")
             check("CREATE TABLE" in contract.get("databaseDdl", ""), "缺少 DDL")
+            check(
+                contract.get("databaseEngine") in {"mysql", "postgresql", "sqlite"},
+                f"契约缺少 databaseEngine: {contract.get('databaseEngine')}",
+            )
             return run_id, contract, last_seq, all_events
         check(
             terminal["type"] == "architect.clarification.required",
@@ -426,7 +430,8 @@ def main() -> int:
             if event.get("type") == "fullstack.node.started"
         ]
         check(
-            started_nodes[:3] == ["DBACoder", "BackendCoder", "FrontendCoder"],
+            started_nodes[:4]
+            == ["DBACoder", "BackendCoder", "FrontendCoder", "InfraCoder"],
             f"节点顺序错误: {started_nodes}",
         )
         generated_paths = {
@@ -436,10 +441,24 @@ def main() -> int:
         }
         check("server/schema.sql" in generated_paths, "缺少 schema.sql 生成日志")
         check("server/index.js" in generated_paths, "缺少后端代码生成日志")
+        check("server/db.js" in generated_paths, "缺少 Sequelize ORM 生成日志")
         check("src/fullstack-api.jsx" in generated_paths, "缺少前端接入生成日志")
+        check("Dockerfile" in generated_paths, "缺少 Dockerfile 生成日志")
+        check("render.yaml" in generated_paths, "缺少 render.yaml 生成日志")
+        check(".env.example" in generated_paths, "缺少 .env.example 生成日志")
         check("fullstack.sandbox.ready" in types, "缺少沙盒就绪事件")
         payload = terminal["payload"]
         check(payload["status"] == "SUCCEEDED", "终态不是 SUCCEEDED")
+        check(
+            payload.get("databaseEngine") in {"mysql", "postgresql", "sqlite"},
+            f"终态缺少 databaseEngine: {payload.get('databaseEngine')}",
+        )
+        check(payload.get("orm") == "sequelize", "终态未声明 Sequelize ORM")
+        for path in ("Dockerfile", "render.yaml", ".env.example", "DEPLOY.md"):
+            check(
+                path in (payload.get("infraFiles") or []),
+                f"infraFiles 缺少 {path}: {payload.get('infraFiles')}",
+            )
         check(
             payload["previewUrl"].startswith("http"),
             f"previewUrl 非法: {payload['previewUrl']}",

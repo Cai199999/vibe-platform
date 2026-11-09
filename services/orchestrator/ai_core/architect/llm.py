@@ -31,6 +31,7 @@ from ai_core.domain.architect import (
     ArchitectComponentInteraction,
     ArchitectImplementationPhase,
     ArchitectQuestion,
+    normalize_database_engine,
 )
 from ai_core.ports.model import ModelClient, ModelClientError
 
@@ -395,7 +396,9 @@ class MockArchitectLLM(ArchitectLLM):
 
     def _full_stack_contract(self, context: ArchitectContext) -> ContractDraft:
         backend = str(context.slots.get("backend.framework") or "java_spring_boot")
-        database = str(context.slots.get("database.engine") or "mysql")
+        database = (
+            normalize_database_engine(context.slots.get("database.engine")) or "mysql"
+        )
         flows = str(context.slots.get("business.key_flows") or "创建并查询业务记录")
         entities = str(context.slots.get("data.entities") or "业务记录")
         table = _table_name(entities)
@@ -415,7 +418,7 @@ class MockArchitectLLM(ArchitectLLM):
                 description="创建业务记录",
             ),
         ]
-        ddl = _mock_ddl(table)
+        ddl = _mock_ddl(table, database)
         interactions = [
             ArchitectComponentInteraction(
                 component="RecordList",
@@ -451,7 +454,11 @@ class MockArchitectLLM(ArchitectLLM):
 - 前端：React 18 + Vite
 - 后端：`{backend}`
 - 数据库：`{database}`
+- ORM：Sequelize（生产通过 `DATABASE_URL` 连接；沙盒预览自动回退 SQLite）
 - 通信：RESTful JSON API
+
+> 数据库选型说明：`sqlite` 只用于本地测试与沙盒预览；生产部署必须使用
+> `mysql` 或 `postgresql`，并通过环境变量 `DATABASE_URL` 注入连接串。
 
 ## 3. 关键业务流程
 
@@ -506,6 +513,9 @@ class MockArchitectLLM(ArchitectLLM):
                 "frontend": "React 18 + Vite",
                 "backend": backend,
                 "database": database,
+                "databaseEngine": database,
+                "orm": "sequelize",
+                "databaseUrlEnv": "DATABASE_URL",
                 "apiStyle": "RESTful JSON",
             },
             api_routes=api_routes,
@@ -550,11 +560,15 @@ class MockArchitectLLM(ArchitectLLM):
                 "runtime": slots.get("script.runtime") or "python",
                 "ui": None,
             }
+        engine = normalize_database_engine(slots.get("database.engine")) or "mysql"
         return {
             "appShape": shape,
             "frontend": "React 18 + Vite",
             "backend": slots.get("backend.framework"),
-            "database": slots.get("database.engine"),
+            "database": engine,
+            "databaseEngine": engine,
+            "orm": "sequelize",
+            "databaseUrlEnv": "DATABASE_URL",
             "apiStyle": "RESTful JSON",
         }
 
@@ -619,6 +633,9 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "output、script.logic；绝对不要追问前端框架；\n"
             "- full_stack_system：要求 backend.framework、database.engine、"
             "business.key_flows、data.entities；\n"
+            "- full_stack_system 的 database.engine 必须区分使用场景：sqlite "
+            "仅供本地测试；用户要部署上线时必须选 mysql 或 postgresql。"
+            "用户没有明确指定时默认 mysql，禁止默认 sqlite；\n"
             "- 如果源码与对话仍不足以判断形态，app_shape 必须为 null，"
             "confidence_score 不得高于 0.42，并首先询问："
             f"“{_shape_question()}”\n\n"
@@ -695,7 +712,10 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "interactions / ui_logic 必须为空；契约只包含脚本逻辑、依赖、"
             "运行环境、输入输出、错误码；\n"
             "- full_stack_system：必须给出 REST API、数据库 DDL（禁止物理"
-            "外键）、组件交互、前后端联调；\n"
+            "外键）、组件交互、前后端联调；tech_stack.database 必须是 "
+            "mysql / postgresql / sqlite 之一；选择 mysql/postgresql 时必须"
+            "在契约中写明后端通过 Sequelize ORM 与环境变量 DATABASE_URL "
+            "连接云数据库，禁止把 SQLite 描述为生产数据库；\n"
             "- 所有形态都必须给 implementation_path 与可验证验收标准；\n"
             "- 必须复用 Project Summary 中已确认的技术栈与架构决策，不要另起"
             "一套；latestChanges 涉及的前后端能力必须进入契约；\n"
@@ -1110,7 +1130,36 @@ def _snake(value: str) -> str:
     return value or "app_records"
 
 
-def _mock_ddl(table: str) -> str:
+def _mock_ddl(table: str, engine: str = "mysql") -> str:
+    """按目标数据库生成对应方言的 Mock DDL。
+
+    sqlite 仅用于本地测试；mysql / postgresql 是生产部署的推荐选项。
+    字段集合保持一致，Coder 只需理解列名与类型亲和性，不依赖方言细节。
+    """
+    if engine == "postgresql":
+        return f"""CREATE TABLE {table} (
+  id BIGSERIAL PRIMARY KEY,
+  tenant_id VARCHAR(64) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+  payload JSONB NULL,
+  created_at TIMESTAMP(3) NOT NULL,
+  updated_at TIMESTAMP(3) NOT NULL,
+  deleted_at TIMESTAMP(3) NULL
+);
+CREATE INDEX idx_{table}_tenant_updated ON {table} (tenant_id, updated_at);
+CREATE INDEX idx_{table}_tenant_status ON {table} (tenant_id, status);"""
+    if engine == "sqlite":
+        return f"""CREATE TABLE {table} (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  payload TEXT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT NULL
+);"""
     return f"""CREATE TABLE {table} (
   id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   tenant_id VARCHAR(64) NOT NULL,

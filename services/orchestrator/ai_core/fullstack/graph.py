@@ -2,15 +2,17 @@
 
 拓扑::
 
-    START -> DBACoder -> BackendCoder -> FrontendCoder
+    START -> DBACoder -> BackendCoder -> FrontendCoder -> InfraCoder
           -> BuildVerifier -> SandboxRestart -> END
 
 设计说明：
 
   - 每个节点只操作沙盒文件与本次 Run 的临时状态，不依赖 LangGraph
     Checkpoint：生成失败时重新点一次“开始生成全栈代码”即可幂等重跑；
-  - DBACoder / BackendCoder / FrontendCoder 使用确定性模板，保证离线、
-    Mock 与真实模型环境行为一致；
+  - DBACoder / BackendCoder / FrontendCoder / InfraCoder 使用确定性模板，
+    保证离线、Mock 与真实模型环境行为一致；
+  - DBACoder 生成 Sequelize ORM（生产走 DATABASE_URL，沙盒回退 SQLite）；
+  - InfraCoder 生成 Dockerfile / render.yaml / .env.example 等一键部署配置；
   - 构建校验与沙盒重启放在图内，失败会带节点名进入 ``fullstack.failed``，
     前端可准确定位是“代码生成失败”还是“服务启动失败”。
 """
@@ -31,15 +33,20 @@ from ai_core.fullstack.coders import (
     generate_backend_bundle,
     generate_dba_bundle,
     generate_frontend_bundle,
+    generate_infra_bundle,
 )
 from ai_core.ports.sandbox import SandboxProvider
 
 logger = logging.getLogger(__name__)
 
+# 节点总数用于日志与 SSE 的 index/total；新增节点时只需改这一处。
+GRAPH_NODE_TOTAL = 6
+
 NODE_LABELS = {
     "DBACoder": "数据库工程师",
     "BackendCoder": "后端工程师",
     "FrontendCoder": "前端工程师",
+    "InfraCoder": "部署配置工程师",
     "BuildVerifier": "构建校验",
     "SandboxRestart": "沙盒重启",
 }
@@ -77,6 +84,7 @@ class FullstackState(TypedDict, total=False):
     dba_files: list[str]
     backend_files: list[str]
     frontend_files: list[str]
+    infra_files: list[str]
 
 
 class FullstackGraphRunner:
@@ -117,13 +125,15 @@ class FullstackGraphRunner:
         builder.add_node("DBACoder", self._dba_coder)
         builder.add_node("BackendCoder", self._backend_coder)
         builder.add_node("FrontendCoder", self._frontend_coder)
+        builder.add_node("InfraCoder", self._infra_coder)
         builder.add_node("BuildVerifier", self._build_verifier)
         builder.add_node("SandboxRestart", self._sandbox_restart)
 
         builder.add_edge(START, "DBACoder")
         builder.add_edge("DBACoder", "BackendCoder")
         builder.add_edge("BackendCoder", "FrontendCoder")
-        builder.add_edge("FrontendCoder", "BuildVerifier")
+        builder.add_edge("FrontendCoder", "InfraCoder")
+        builder.add_edge("InfraCoder", "BuildVerifier")
         builder.add_edge("BuildVerifier", "SandboxRestart")
         builder.add_edge("SandboxRestart", END)
         return builder.compile()
@@ -210,12 +220,36 @@ class FullstackGraphRunner:
             ) from exc
 
     # --------------------------------------------------------
+    # 节点：InfraCoder
+    # --------------------------------------------------------
+    def _infra_coder(self, state: FullstackState) -> dict[str, Any]:
+        contract = state["contract"]
+        started = time.monotonic()
+        self._node_started("InfraCoder", state, 4)
+        try:
+            bundle = generate_infra_bundle(contract)
+            files = self._write_bundle(state, bundle)
+            self._emit_outputs("InfraCoder", bundle, state)
+            self._node_completed(
+                "InfraCoder", state, bundle.summary, bundle.files, started
+            )
+            return {
+                "infra_files": sorted(bundle.files),
+                "files": files,
+            }
+        except Exception as exc:
+            self._node_failed("InfraCoder", state, exc)
+            raise FullstackGenerationError(
+                f"InfraCoder 生成失败: {exc}", node="InfraCoder"
+            ) from exc
+
+    # --------------------------------------------------------
     # 节点：BuildVerifier
     # --------------------------------------------------------
     def _build_verifier(self, state: FullstackState) -> dict[str, Any]:
         options = state.get("options") or FullstackRunOptions()
         started = time.monotonic()
-        self._node_started("BuildVerifier", state, 4)
+        self._node_started("BuildVerifier", state, 5)
         if not options.verify_build:
             self._node_completed(
                 "BuildVerifier",
@@ -261,7 +295,7 @@ class FullstackGraphRunner:
         options = state.get("options") or FullstackRunOptions()
         sandbox_id = state["sandbox_id"]
         started = time.monotonic()
-        self._node_started("SandboxRestart", state, 5)
+        self._node_started("SandboxRestart", state, 6)
         if not options.restart_sandbox:
             self._node_completed(
                 "SandboxRestart",
@@ -320,8 +354,9 @@ class FullstackGraphRunner:
 
     def _node_started(self, node: str, state: FullstackState, index: int) -> None:
         logger.info(
-            "FullstackGraph 节点开始 [%d/5] %s run_id=%s sandbox_id=%s",
+            "FullstackGraph 节点开始 [%d/%d] %s run_id=%s sandbox_id=%s",
             index,
+            GRAPH_NODE_TOTAL,
             node,
             state.get("run_id"),
             state.get("sandbox_id"),
@@ -333,7 +368,7 @@ class FullstackGraphRunner:
                 "node": node,
                 "label": NODE_LABELS.get(node, node),
                 "index": index,
-                "total": 5,
+                "total": GRAPH_NODE_TOTAL,
             },
         )
 
@@ -396,17 +431,24 @@ class FullstackGraphRunner:
             ".jsx": "jsx",
             ".json": "json",
             ".md": "markdown",
+            ".yaml": "yaml",
+            ".yml": "yaml",
         }
         for path, content in sorted(bundle.files.items()):
             truncated = len(content) > limit
             suffix = path[path.rfind(".") :] if "." in path else ""
+            language = (
+                "dockerfile"
+                if path.rsplit("/", 1)[-1] == "Dockerfile"
+                else language_by_suffix.get(suffix, "text")
+            )
             self._emit(
                 "fullstack.node.output",
                 {
                     "runId": state["run_id"],
                     "node": node,
                     "path": path,
-                    "language": language_by_suffix.get(suffix, "text"),
+                    "language": language,
                     "content": content[:limit],
                     "truncated": truncated,
                     "bytes": len(content.encode("utf-8")),
@@ -418,6 +460,7 @@ class FullstackGraphRunner:
 
 
 __all__ = [
+    "GRAPH_NODE_TOTAL",
     "FullstackBuildError",
     "FullstackGenerationError",
     "FullstackGraphRunner",

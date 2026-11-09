@@ -49,6 +49,7 @@ const FULLSTACK_NODES = [
   'DBACoder',
   'BackendCoder',
   'FrontendCoder',
+  'InfraCoder',
   'BuildVerifier',
   'SandboxRestart',
 ]
@@ -57,6 +58,7 @@ const FULLSTACK_NODE_LABELS = {
   DBACoder: '数据库工程师',
   BackendCoder: '后端工程师',
   FrontendCoder: '前端工程师',
+  InfraCoder: '部署配置工程师',
   BuildVerifier: '构建校验',
   SandboxRestart: '沙盒重启',
 }

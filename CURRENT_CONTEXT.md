@@ -1,39 +1,38 @@
 # vibe-platform · 当前状态简报
 
-> 唯一上下文入口 · 2026-11-09 · 详细历史见 `docs/design`、`docs/archive`（默认不读）
+> 2026-11-09 · 历史见 `docs/design`、`docs/archive`
 
 ## 架构底座
 
-React 18 + Vite → Java 21 Spring Boot 3.3.5 BFF → Python 3.12 FastAPI + LangGraph → Docker 沙盒（Node 22 + Vite + Express + SQLite）。中间件复用 `~/Workspace/infra`。AI Core 六边形分层：domain / ports / adapters / agent·architect·fullstack。
+React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒（Node 22+Vite+Express）；中间件复用 `~/Workspace/infra`；AI Core 六边形分层。
 
-## 已闭环能力
+## 已闭环
 
-- 画布圈选 / ADD / Inspect，多标注、多 Tab、zip/HTML/图片导入与预览
-- SSE `seq` 重放、HITL 澄清、Diff 审批、取消、Git 回滚与项目快照
-- Supervisor 路由、Architect 形态判别 + 动态澄清、8 Agent Manifest
-- Tool（search_web）/ Skill / MCP；记忆隔离、上下文分层压缩、Token 降本
-- 契约→全栈生成：`FullstackGraph` 五节点；Vite 5173 + Express 3000，
-  `/api` 代理；SQLite 落盘 `data/fullstack.sqlite`，契约 CRUD + `/api/data`
-- 生成按钮门控：可见禁用原因 + 自定义 Tooltip + `[fullstack]` 控制台诊断；
-  both 模式先 release 再生成；Graph 节点 INFO 日志可查
-- 验证：`fullstack_e2e_check.py` 12/12；gate/disabled/API/UI E2E、Python 192、
-  Java BFF、前端构建 PASS
+- 画布圈选/ADD/Inspect、多标注多 Tab、导入预览
+- SSE 重放、HITL 澄清、Diff 审批、取消、Git 回滚/快照
+- Supervisor 路由、Architect 动态澄清、8 Agent Manifest、Tool/Skill/MCP
+- 记忆隔离、上下文压缩
+- 生产级全栈：六节点 FullstackGraph（DBA→Backend→Frontend→Infra→Verifier→Restart）；Sequelize+`DATABASE_URL` 连 MySQL/PostgreSQL，沙盒回退 node:sqlite；契约 `databaseEngine` 三选一
+- 生成 IaC：Dockerfile/.dockerignore/render.yaml/.env.example/DEPLOY.md
+- 预览【🚀 部署上线】Mock 指引（Render/Vercel/Railway）
+- 验证：Python 203、四套 E2E、前端构建、MySQL/SQLite 冒烟 PASS
 
-## 真 / 假边界
+## 真假边界
 
 | 能力 | 状态 |
 |---|---|
-| DeepSeek | 已接 OpenAI 兼容接口；Eval 仍 Mock |
-| 鉴权 | Mock Token + Header，无 JWT |
-| 持久化 | BFF 无 DB；全栈沙盒用 SQLite |
-| MySQL/Redis/MinIO | 仅连接配置，未读写 |
-| 沙盒 | Vite + Express + SQLite 双服务，无 gVisor |
+| DeepSeek | 接口已接，Eval 仍 Mock |
+| 鉴权 | Mock Token |
+| 持久化 | BFF 无 DB；生产路径需自备云库 |
+| 中间件 | 仅配置未读写 |
+| 沙盒 | 双服务，无 gVisor |
+| 部署按钮 | 仅指引 |
 | Agent | 3 available + 5 reserved |
-| 外网 | 不可达，search_web 返回可读失败 |
+| 外网 | 不可达，search_web 失败 |
 
 ## 下一步
 
-- P0 真实 DeepSeek 质量/成本基线
-- P0 M3.2 知识中台摄取与租户隔离检索
-- P1 高 DPI 圈选精度、Redis checkpoint/Stream
-- P2 全栈深化：真实 MySQL、按契约重写用户表单
+- P0 DeepSeek 基线
+- P0 M3.2 知识中台
+- P1 圈选精度、Redis checkpoint
+- P2 部署按钮接真实 API

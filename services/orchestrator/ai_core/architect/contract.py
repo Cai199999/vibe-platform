@@ -22,6 +22,7 @@ from ai_core.domain.architect import (
     ArchitectComponentInteraction,
     ArchitectContract,
     ArchitectImplementationPhase,
+    normalize_database_engine,
 )
 
 
@@ -214,6 +215,19 @@ def assemble_contract(
             )
         markdown += "\n".join(lines)
 
+    tech_stack = dict(draft.tech_stack)
+    # 全栈契约必须把数据库引擎提升为一级字段：Coder 与部署配置都依赖它。
+    # sqlite 仅用于本地测试；生产选型为 mysql / postgresql。
+    database_engine = ""
+    if shape == "full_stack_system":
+        database_engine = (
+            normalize_database_engine(
+                tech_stack.get("databaseEngine") or tech_stack.get("database")
+            )
+            or "mysql"
+        )
+        tech_stack["databaseEngine"] = database_engine
+
     return ArchitectContract(
         contract_id=contract_id,
         run_id=run_id,
@@ -223,7 +237,8 @@ def assemble_contract(
         threshold=threshold,
         source_hash=source_hash,
         contract_markdown=markdown,
-        tech_stack=draft.tech_stack,
+        tech_stack=tech_stack,
+        database_engine=database_engine,
         api_routes=draft.api_routes,
         database_ddl=draft.database_ddl,
         component_interactions=draft.component_interactions,

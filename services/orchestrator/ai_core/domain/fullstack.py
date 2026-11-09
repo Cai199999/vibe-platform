@@ -1,11 +1,13 @@
 """全栈生成领域模型。
 
 契约确认后，``FullstackGraph`` 依次执行 DBACoder / BackendCoder /
-FrontendCoder，把沙盒从“单前端 Vite”升级为“前端 + Node 轻后端”：
+FrontendCoder / InfraCoder，把沙盒从“单前端 Vite”升级为
+“前端 + Node 后端 + 数据库 + 部署配置”：
 
-  - DBA：把契约 DDL 落为 ``server/schema.sql``；
-  - Backend：按契约 apiRoutes 生成零依赖 Node HTTP 服务；
+  - DBA：生成 Sequelize ORM 与 SQLite 预览 DDL；
+  - Backend：按契约 apiRoutes 生成 Express REST 服务；
   - Frontend：生成 API client，并挂载到 ``src/main.jsx``；
+  - Infra：生成 Dockerfile / render.yaml / .env.example；
   - 重启沙盒，通过 Vite ``/api`` 反向代理完成真实联调。
 
 本模块属于纯领域层：只依赖标准库与 Pydantic。
@@ -86,7 +88,15 @@ class FullstackGeneratedFile(CamelModel):
 class FullstackStep(CamelModel):
     """一个生成节点的执行结果。"""
 
-    node: Literal["DBACoder", "BackendCoder", "FrontendCoder", "Sandbox"]
+    node: Literal[
+        "DBACoder",
+        "BackendCoder",
+        "FrontendCoder",
+        "InfraCoder",
+        "BuildVerifier",
+        "SandboxRestart",
+        "Sandbox",
+    ]
     label: str
     status: Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED"] = "PENDING"
     summary: str = ""

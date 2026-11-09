@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import DeployGuideDialog from './DeployGuideDialog.jsx'
 import DiffView from './DiffView.jsx'
 import InspectDraftCard from './InspectDraftCard.jsx'
 import ScaledPreview from './ScaledPreview.jsx'
@@ -588,6 +589,7 @@ export default function RuntimePanel({
   refreshNonce = 0,
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false)
+  const [deployOpen, setDeployOpen] = useState(false)
   const {
     submitting,
     elapsed,
@@ -667,6 +669,15 @@ export default function RuntimePanel({
           {stateLabel}
         </span>
         <div className="runtime-chrome-meta">
+          <button
+            type="button"
+            className="runtime-deploy-button"
+            data-deploy-button
+            title="查看生产部署配置与上线指引"
+            onClick={() => setDeployOpen(true)}
+          >
+            🚀 部署上线
+          </button>
           <span className="runtime-chip" title="当前模型">
             {modelLabel}
           </span>
@@ -864,6 +875,12 @@ export default function RuntimePanel({
           />
         )}
       </div>
+
+      <DeployGuideDialog
+        open={deployOpen}
+        onClose={() => setDeployOpen(false)}
+        sandboxId={result?.sandboxId ?? ''}
+      />
     </aside>
   )
 }

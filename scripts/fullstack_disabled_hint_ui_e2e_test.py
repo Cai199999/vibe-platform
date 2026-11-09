@@ -121,7 +121,9 @@ def main() -> int:
                 fail("包裹层缺少 data-tooltip")
             if not any("[fullstack] gate state" in line for line in console_logs):
                 fail("控制台没有 [fullstack] gate state 诊断日志")
-            gate_logs = [line for line in console_logs if "[fullstack] gate state" in line]
+            gate_logs = [
+                line for line in console_logs if "[fullstack] gate state" in line
+            ]
             # Playwright 的 console.text() 只保留对象的前若干个字段，
             # 因此只断言 appShape 的值出现，而不是字段名。
             if not any("lightweight_web" in line for line in gate_logs):

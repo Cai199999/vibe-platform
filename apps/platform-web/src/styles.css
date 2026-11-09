@@ -2327,6 +2327,123 @@ body.is-viewport-panning * {
   cursor: pointer;
 }
 
+/* ------------------------------------------------------------------ */
+/* Deploy guide dialog（Mock 一键部署指引）                            */
+/* ------------------------------------------------------------------ */
+.deploy-dialog {
+  width: min(620px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  padding: 24px;
+  border: 1px solid rgba(56, 189, 248, 0.26);
+  border-radius: 22px;
+  background: linear-gradient(180deg, #0d1728, #070d18);
+  box-shadow: 0 40px 100px rgba(0, 0, 0, 0.62);
+  animation: dialog-in 0.18s ease-out;
+}
+
+.deploy-dialog-lead {
+  margin: 0 0 12px;
+  color: #cbd5e1;
+  font-size: 12.5px;
+  line-height: 1.75;
+}
+
+.deploy-dialog-sandbox {
+  margin: 0 0 16px;
+  padding: 8px 10px;
+  border: 1px dashed rgba(56, 189, 248, 0.28);
+  border-radius: 10px;
+  color: #94a3b8;
+  font-size: 10.5px;
+}
+
+.deploy-dialog-sandbox code {
+  color: #bae6fd;
+}
+
+.deploy-dialog-section {
+  margin-top: 18px;
+}
+
+.deploy-dialog-section h3 {
+  margin: 0 0 10px;
+  color: #e2e8f0;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.deploy-file-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 7px;
+}
+
+.deploy-file-list li {
+  display: grid;
+  grid-template-columns: minmax(130px, auto) 1fr;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.deploy-file-list code {
+  color: #7dd3fc;
+  font-size: 11px;
+}
+
+.deploy-file-list span {
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.deploy-steps {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 10px;
+  color: #94a3b8;
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+
+.deploy-steps strong {
+  display: block;
+  color: #e2e8f0;
+  font-size: 12px;
+}
+
+.deploy-steps code,
+.deploy-dialog-note code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(56, 189, 248, 0.12);
+  color: #bae6fd;
+  font-size: 10.5px;
+}
+
+.deploy-dialog-note {
+  margin-top: 18px;
+  padding: 10px 12px;
+  border-left: 3px solid rgba(56, 189, 248, 0.55);
+  border-radius: 0 10px 10px 0;
+  background: rgba(56, 189, 248, 0.08);
+  color: #cbd5e1;
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.deploy-dialog .dialog-actions {
+  margin-top: 22px;
+}
+
 .icon-button:hover {
   border-color: rgba(56, 189, 248, 0.4);
   color: #bae6fd;
@@ -3391,6 +3508,34 @@ body.is-viewport-panning * {
   height: 5px;
   border-radius: 50%;
   background: #64748b;
+}
+
+/* 预览区工具栏：生产部署入口（当前为 Mock 指引）。 */
+.runtime-deploy-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 999px;
+  background: linear-gradient(
+    180deg,
+    rgba(14, 165, 233, 0.22),
+    rgba(37, 99, 235, 0.18)
+  );
+  color: #e0f2fe;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.runtime-deploy-button:hover {
+  border-color: rgba(56, 189, 248, 0.65);
+  background: rgba(56, 189, 248, 0.24);
 }
 
 .runtime-chip.is-sandbox.is-online {

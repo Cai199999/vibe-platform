@@ -8,7 +8,7 @@
   3. 多轮澄清 → 契约 ready → 确认契约；
   4. 断言【开始生成全栈代码】按钮**可点击**，并打印门控诊断信息；
   5. 点击按钮前先确认 both 门控（若存在）已释放；
-  6. 等待 FullstackGraph 五节点完成；
+  6. 等待 FullstackGraph 六节点完成；
   7. 直接进入沙盒容器断言：
        /app/server/index.js、db.js、schema.sql 存在；
        /app/data/fullstack.sqlite 是真实 SQLite 文件（文件头校验）。
@@ -55,7 +55,9 @@ def cleanup_sandbox(sandbox_id: str | None) -> None:
         print(f"   cleanup {sandbox_id} -> {exc}")
 
 
-def docker_exec(container: str, *args: str, timeout: float = 30) -> subprocess.CompletedProcess:
+def docker_exec(
+    container: str, *args: str, timeout: float = 30
+) -> subprocess.CompletedProcess:
     """在沙盒容器内执行命令；返回 CompletedProcess 供断言使用。"""
     return subprocess.run(
         ["docker", "exec", container, *args],
@@ -75,10 +77,14 @@ def assert_sandbox_files(sandbox_id: str) -> None:
     for line in listing.stdout.splitlines():
         print(f"     {line}")
 
-    for name in ("index.js", "db.js", "schema.sql"):
+    for name in ("index.js", "db.js", "schema.sql", "migrate.mjs"):
         check = docker_exec(container, "test", "-f", f"/app/server/{name}")
         if check.returncode != 0:
             fail(f"沙盒缺少 /app/server/{name}")
+    for name in ("Dockerfile", "render.yaml", ".env.example", "DEPLOY.md"):
+        check = docker_exec(container, "test", "-f", f"/app/{name}")
+        if check.returncode != 0:
+            fail(f"沙盒缺少 /app/{name}")
 
     # SQLite 文件必须真实落盘；只检查文件存在还不够，校验文件头。
     header = docker_exec(
@@ -94,7 +100,10 @@ def assert_sandbox_files(sandbox_id: str) -> None:
             "沙盒数据文件不是真实 SQLite："
             f"rc={header.returncode} out={compact_header!r} err={header.stderr.strip()}"
         )
-    print("   OK：server/index.js、db.js、schema.sql 与 data/fullstack.sqlite 均存在")
+    print(
+        "   OK：server/index.js、db.js、schema.sql、migrate.mjs、"
+        "Dockerfile、render.yaml、.env.example 与 data/fullstack.sqlite 均存在"
+    )
 
 
 def wait_run_completed(active) -> None:
@@ -331,7 +340,7 @@ def main() -> int:
                     "data-supervisor-gate", "RELEASED", timeout=60_000
                 )
 
-            print("\n== 5. 点击生成并等待五节点完成 ==")
+            print("\n== 5. 点击生成并等待六节点完成 ==")
             trigger.click()
             expect(panel.locator("[data-fullstack-progress]")).to_be_visible(
                 timeout=30_000
@@ -381,8 +390,7 @@ def main() -> int:
                 (
                     index
                     for index, item in enumerate(fullstack_requests)
-                    if "/api/v1/supervisor/gates/" in item
-                    and item.endswith("/release")
+                    if "/api/v1/supervisor/gates/" in item and item.endswith("/release")
                 ),
                 None,
             )

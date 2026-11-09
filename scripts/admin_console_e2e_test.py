@@ -112,9 +112,11 @@ def main() -> int:
         admin_requests: list[str] = []
         member_page.on(
             "request",
-            lambda request: admin_requests.append(request.url)
-            if "/api/v1/admin/metrics" in request.url
-            else None,
+            lambda request: (
+                admin_requests.append(request.url)
+                if "/api/v1/admin/metrics" in request.url
+                else None
+            ),
         )
         login(member_page, "member@vibe.local", admin=False)
 

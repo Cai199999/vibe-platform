@@ -23,6 +23,31 @@ APP_SHAPE_LABELS: dict[str, str] = {
     "full_stack_system": "全栈系统",
 }
 
+DATABASE_ENGINE_LABELS: dict[str, str] = {
+    "mysql": "MySQL 8（生产部署）",
+    "postgresql": "PostgreSQL（生产部署）",
+    "sqlite": "SQLite（仅供本地测试）",
+}
+
+
+def normalize_database_engine(value: Any) -> str:
+    """把模型 / 用户输入归一为稳定的数据库引擎枚举。
+
+    契约里 ``tech_stack.database`` 可能写成 "MySQL 8"、"PostgreSQL 16"、
+    "Postgres" 甚至带驱动名；下游 Coder 只接受 ``mysql``、``postgresql``、
+    ``sqlite`` 三种值。无法识别时返回空字符串，由调用方决定默认值。
+    """
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if text.startswith(("postgres", "pgsql")):
+        return "postgresql"
+    if text.startswith(("mysql", "mariadb")):
+        return "mysql"
+    if text.startswith("sqlite"):
+        return "sqlite"
+    return ""
+
 
 class ArchitectSource(CamelModel):
     """当前前端代码来源。
@@ -261,6 +286,9 @@ class ArchitectContract(CamelModel):
     source_hash: str = ""
     contract_markdown: str
     tech_stack: dict[str, Any] = Field(default_factory=dict)
+    # 数据库引擎是生产部署的关键决策：sqlite 只用于本地测试，
+    # mysql / postgresql 用于生产；空字符串表示非全栈契约。
+    database_engine: str = Field(default="", max_length=32)
     api_routes: list[ArchitectApiRoute] = Field(default_factory=list)
     database_ddl: str = ""
     component_interactions: list[ArchitectComponentInteraction] = Field(
@@ -276,6 +304,27 @@ class ArchitectContract(CamelModel):
     citations: list[ArchitectCitation] = Field(default_factory=list)
     created_at: datetime | None = None
     decided_at: datetime | None = None
+
+    @field_validator("database_engine", mode="before")
+    @classmethod
+    def _normalize_engine(cls, value: Any) -> str:
+        return normalize_database_engine(value)
+
+    @model_validator(mode="after")
+    def _derive_engine_from_tech_stack(self) -> "ArchitectContract":
+        """兼容旧契约：只写了 tech_stack.database 时自动补齐引擎。
+
+        历史契约没有 ``databaseEngine`` 字段；只要技术栈里写明了
+        MySQL / PostgreSQL / SQLite，就把它提升为一级决策字段，避免
+        Coder 在“旧契约 + 生产数据库”场景下回退到错误默认值。
+        """
+        if self.app_shape != "full_stack_system":
+            return self
+        if self.database_engine:
+            return self
+        raw = self.tech_stack.get("databaseEngine") or self.tech_stack.get("database")
+        self.database_engine = normalize_database_engine(raw) or "mysql"
+        return self
 
 
 class ArchitectDecisionRequest(CamelModel):
