@@ -131,6 +131,8 @@ class Settings(BaseSettings):
     agent_clarification_ttl_hours: int = 24
     # Diff 审批最长等待时间；超时决策返回 APPROVAL_EXPIRED 并回滚沙盒。
     agent_approval_ttl_hours: int = 24
+    # Reflection：同一实现偏好累计多少次成功修改后，才作为默认值注入 Prompt。
+    agent_preference_min_evidence: int = 2
     # 每个 Run 的内存事件缓冲上限；生产切换 Redis Stream 后由 stream TTL 管理。
     agent_event_buffer_size: int = 2000
 

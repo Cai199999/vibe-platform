@@ -262,6 +262,22 @@ class RunCommitRecord(CamelModel):
 class ClarificationOption(CamelModel):
     value: str
     label: str
+    description: str = ""
+
+
+class ClarificationDecisionOption(CamelModel):
+    """核心决策的一键选项。
+
+    与问题内的 ``options`` 不同，本结构直接包含 ``questionId``，前端可在
+    其余必填问题都有默认值时立即提交，实现真正的“一键选择”。
+    """
+
+    option_id: str
+    label: str
+    description: str = ""
+    recommended: bool = False
+    question_id: str = ""
+    value: Any = None
 
 
 class ClarificationQuestion(CamelModel):
@@ -293,7 +309,15 @@ class Clarification(CamelModel):
     max_rounds: int = Field(default=3, ge=1, le=3)
     status: Literal["PENDING", "ANSWERED", "EXPIRED"] = "PENDING"
     reason: str = "ambiguous_intent"
+    # 分级决策：只有 CORE_BUSINESS 可进入本模型；IMPLEMENTATION_DETAIL
+    # 不会触发 interrupt，此处默认值仅用于兼容旧 payload。
+    decision_impact: Literal["CORE_BUSINESS", "IMPLEMENTATION_DETAIL"] = "CORE_BUSINESS"
+    decision_summary: str = ""
     questions: list[ClarificationQuestion] = Field(default_factory=list)
+    # 首轮一键决策按钮；为空时前端回退渲染 questions[].options。
+    clarification_options: list[ClarificationDecisionOption] = Field(
+        default_factory=list
+    )
     expires_at: datetime | None = None
     answered_at: datetime | None = None
 

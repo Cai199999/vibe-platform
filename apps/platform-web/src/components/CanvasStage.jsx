@@ -295,6 +295,7 @@ const CLARIFICATION_REASON_TEXT = {
   missing_component_type: '新增组件还缺少关键信息，确认后我再开始改：',
   low_confidence: '我还不确定你的具体意图，先确认一下：',
   fullstack_scope: '这看起来是一个业务需求，先确认改动范围：',
+  core_business_decision: '这属于核心业务决策，确认实现范围后我再继续：',
 }
 
 /**
@@ -432,18 +433,29 @@ function AnnotationPopover({
     })
   }
 
-  const clarificationComplete = Boolean(
-    clarification?.questions?.every((question) => {
-      if (!question.required) return true
-      const value = answers[question.questionId]
-      const extra = String(customText[question.questionId] ?? '').trim()
-      if (Array.isArray(value)) return value.length > 0 || extra !== ''
-      return (
-        (value !== undefined && value !== null && String(value).trim() !== '') ||
-        extra !== ''
-      )
-    }),
-  )
+  // 合并“当前草稿 + 本次一键选择的覆盖值”，用于判断能否直接提交。
+  const effectiveAnswer = (question, overrides = {}) =>
+    Object.prototype.hasOwnProperty.call(overrides, question.questionId)
+      ? overrides[question.questionId]
+      : answers[question.questionId]
+
+  const answersAreComplete = (overrides = {}) =>
+    Boolean(
+      clarification?.questions?.every((question) => {
+        if (!question.required) return true
+        const value = effectiveAnswer(question, overrides)
+        const extra = String(customText[question.questionId] ?? '').trim()
+        if (Array.isArray(value)) return value.length > 0 || extra !== ''
+        return (
+          (value !== undefined &&
+            value !== null &&
+            String(value).trim() !== '') ||
+          extra !== ''
+        )
+      }),
+    )
+
+  const clarificationComplete = answersAreComplete()
 
   // 全部为可选问题时，“完整”不代表有内容；至少要有一条答案或补充说明，
   // 否则后端会以“至少回答一个澄清问题”拒绝。
@@ -479,12 +491,42 @@ function AnnotationPopover({
     }
   }
 
-  const submitClarification = (comment = '') => {
-    if (!clarification || !clarificationComplete || !clarificationHasInput) return
+  /**
+   * 一键决策：把结构化 quick option 映射到对应问题。
+   *
+   * 若其余必填问题已有答案，立即自动提交，用户无需再点“发送并继续”；
+   * 若仍有缺失，则只填入该答案，保留逐项补充的交互。
+   */
+  const applyQuickOption = (option) => {
+    if (!clarification || submitting) return
+    const questionId =
+      option.questionId || clarification.questions?.[0]?.questionId
+    if (!questionId) return
+    const value =
+      option.value !== undefined && option.value !== null
+        ? option.value
+        : option.label
+    const overrides = { [questionId]: value }
+    setAnswers((previous) => ({ ...previous, ...overrides }))
+    if (answersAreComplete(overrides)) {
+      submitClarification('', overrides)
+    }
+  }
+
+  const submitClarification = (comment = '', overrides = {}) => {
+    const hasInput =
+      Object.keys(overrides).length > 0 || clarificationHasInput
+    if (
+      !clarification ||
+      !answersAreComplete(overrides) ||
+      !hasInput
+    ) {
+      return
+    }
     const payload = clarification.questions
       .map((question) => {
         const extra = String(customText[question.questionId] ?? '').trim()
-        let value = answers[question.questionId]
+        let value = effectiveAnswer(question, overrides)
         if (question.type === 'multi_choice') {
           const selected = Array.isArray(value) ? value : []
           const merged = extra && !selected.includes(extra)
@@ -694,6 +736,47 @@ function AnnotationPopover({
               : CLARIFICATION_REASON_TEXT[clarification.reason] ??
                 '请补充以下信息，确认后我继续执行：'}
           </p>
+          {clarification.decisionSummary && (
+            <p className="clarification-impact">
+              <span className="clarification-impact-tag">核心决策</span>
+              {clarification.decisionSummary}
+            </p>
+          )}
+
+          {/* 结构化一键决策：只用于 CORE_BUSINESS，实现细节不会走到这里。 */}
+          {clarification.status !== 'EXPIRED' &&
+            clarification.clarificationOptions?.length > 0 && (
+              <div className="clarification-quick" data-clarification-quick>
+                <span className="clarification-quick-title">
+                  一键选择，立即继续
+                </span>
+                <div className="clarification-quick-options">
+                  {clarification.clarificationOptions.map((option) => (
+                    <button
+                      key={option.optionId}
+                      type="button"
+                      className={`clarification-quick-option ${option.recommended ? 'is-recommended' : ''}`}
+                      data-clarification-quick-option={option.optionId}
+                      data-recommended={option.recommended ? 'true' : 'false'}
+                      disabled={submitting}
+                      onClick={() => applyQuickOption(option)}
+                    >
+                      <span className="clarification-quick-label">
+                        {option.label}
+                        {option.recommended && (
+                          <em className="clarification-recommended">推荐</em>
+                        )}
+                      </span>
+                      {option.description && (
+                        <span className="clarification-quick-desc">
+                          {option.description}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
           {clarification.status !== 'EXPIRED' &&
             clarification.questions?.map((question) => {

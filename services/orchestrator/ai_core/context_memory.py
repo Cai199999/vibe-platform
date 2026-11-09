@@ -7,6 +7,7 @@
         local_summary.md   每 N 轮对话生成一次，记录需求 / 决策 / 修改点
         global_summary.md  每次保存项目快照时由全部局部摘要汇总
         user_profile.md    用户技术栈 / 设计 / 协作偏好，注入 system prompt
+        preferences.json   Reflection 累计的结构化实现偏好（带证据次数）
         tool_outputs/      工具完整结果（Prompt 只保留预览 + sha256）
 
 设计约束：
@@ -18,6 +19,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -102,6 +104,10 @@ class ProjectMemory:
     @property
     def user_profile_path(self) -> Path:
         return self.directory / "user_profile.md"
+
+    @property
+    def preferences_path(self) -> Path:
+        return self.directory / "preferences.json"
 
     @property
     def tool_output_dir(self) -> Path:
@@ -195,6 +201,147 @@ class ProjectMemory:
 
     def read_user_profile(self) -> str:
         return self._read_text(self.user_profile_path)
+
+    # --------------------------------------------------------
+    # Reflection：结构化实现偏好
+    # --------------------------------------------------------
+    def read_preferences(self) -> dict[str, Any]:
+        """读取偏好账本；文件损坏 / 不存在时返回空账本，不阻断 Run。"""
+        try:
+            raw = self.preferences_path.read_text(encoding="utf-8")
+            payload = json.loads(raw)
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError):
+            logger.warning("读取偏好账本失败 path=%s", self.preferences_path)
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def record_preferences(
+        self,
+        observations: list[dict[str, Any]],
+        *,
+        min_evidence: int = 2,
+    ) -> dict[str, Any]:
+        """累计 Reflection 证据并原子写回。
+
+        账本结构::
+
+            {"primary_color": {
+                "values": {
+                    "purple": {"count": 2, "lastSeen": "...", "label": "紫色",
+                               "evidence": "主色改成紫色"}
+                },
+                "updatedAt": "..."
+            }}
+
+        ``count`` 只统计“同一 key + 同一 value”的成功 Run；换色不会清零旧值，
+        但稳定偏好只选择证据数达到阈值的最高票，避免一次改色立刻覆盖长期风格。
+        """
+        items = [item for item in observations if isinstance(item, dict)]
+        if not items:
+            return self.read_preferences()
+
+        with self._lock:
+            ledger = self.read_preferences()
+            now = _now()
+            for item in items:
+                key = str(item.get("key") or "").strip()
+                value = str(item.get("value") or "").strip()
+                if not key or not value:
+                    continue
+                entry = ledger.setdefault(key, {"values": {}, "updatedAt": now})
+                values = entry.setdefault("values", {})
+                cell = values.setdefault(value, {"count": 0})
+                cell["count"] = int(cell.get("count", 0)) + 1
+                cell["lastSeen"] = now
+                cell["label"] = str(item.get("label") or value)[:80]
+                cell["evidence"] = str(item.get("evidence") or "")[:200]
+                entry["updatedAt"] = now
+            self._atomic_write(
+                self.preferences_path,
+                json.dumps(ledger, ensure_ascii=False, indent=2) + "\n",
+            )
+            return ledger
+
+    def stable_preferences(
+        self,
+        *,
+        min_evidence: int = 2,
+    ) -> dict[str, dict[str, Any]]:
+        """返回证据数达到阈值的稳定偏好。
+
+        同一 key 有多个候选值时，选择 ``count`` 最高者；票数相同时取最近
+        一次出现，保证“用户后来连续改口”最终能接管默认值。
+        """
+        ledger = self.read_preferences()
+        minimum = max(1, int(min_evidence))
+        stable: dict[str, dict[str, Any]] = {}
+        for key, entry in ledger.items():
+            if not isinstance(entry, dict):
+                continue
+            values = entry.get("values")
+            if not isinstance(values, dict):
+                continue
+            candidates: list[tuple[int, str, str, dict[str, Any]]] = []
+            for value, cell in values.items():
+                if not isinstance(cell, dict):
+                    continue
+                count = int(cell.get("count", 0))
+                if count < minimum:
+                    continue
+                last_seen = str(cell.get("lastSeen") or "")
+                candidates.append(
+                    (
+                        count,
+                        last_seen,
+                        str(value),
+                        {
+                            "value": str(value),
+                            "label": str(cell.get("label") or value),
+                            "count": count,
+                            "lastSeen": last_seen,
+                            "evidence": str(cell.get("evidence") or ""),
+                        },
+                    )
+                )
+            if not candidates:
+                continue
+            _count, _last_seen, _value, detail = max(
+                candidates,
+                key=lambda item: (item[0], item[1]),
+            )
+            stable[str(key)] = detail
+        return stable
+
+    def preference_context(
+        self,
+        max_chars: int = 1200,
+        *,
+        min_evidence: int = 2,
+    ) -> str:
+        """把稳定偏好格式化为 Prompt 片段；没有稳定偏好时返回空串。"""
+        stable = self.stable_preferences(min_evidence=min_evidence)
+        if not stable:
+            return ""
+        labels = {
+            "primary_color": "主色调",
+            "text_color": "文字颜色",
+            "corner_style": "圆角风格",
+            "density": "布局密度",
+        }
+        lines = [
+            "【已确认的实现偏好（只读参考，默认采用）】",
+            "这些偏好来自用户多次明确修改，属于 IMPLEMENTATION_DETAIL；"
+            "生成时直接采用，不要再次询问。用户本轮明确指定其它值时以本轮为准。",
+        ]
+        for key in sorted(stable):
+            detail = stable[key]
+            name = labels.get(key, key)
+            lines.append(
+                f"- {name}：{detail['label']}（已出现 {detail['count']} 次明确修改）"
+            )
+        return "\n".join(lines)[:max_chars]
 
     # --------------------------------------------------------
     # Prompt 注入

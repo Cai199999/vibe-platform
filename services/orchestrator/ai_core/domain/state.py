@@ -75,6 +75,11 @@ class AgentState(TypedDict, total=False):
     # 当前计划置信度与是否需要澄清；由 Planner 写入、clarify_gate 读取。
     plan_confidence: float
     plan_needs_clarification: bool
+    # 决策影响面：CORE_BUSINESS 才允许打断用户；IMPLEMENTATION_DETAIL
+    # 由 Agent 自主决定并按最佳实践生成。
+    plan_decision_impact: str
+    # 结构化一键决策选项（A/B/C），与 questions 同时下发以兼容旧前端。
+    clarification_options: list[dict[str, Any]]
     # 当前待回答的问题（暂停后由 checkpoint 保留）。
     clarification: dict[str, Any] | None
     # 已经回答的轮次与结构化答案。
@@ -87,6 +92,10 @@ class AgentState(TypedDict, total=False):
     # 澄清有效期（小时），由 Service 从 Settings 注入，供 clarify_gate
     # 计算 expiresAt。
     clarification_ttl_hours: int
+
+    # ---- Reflection 设计偏好 ----
+    # 成功路径上提取到的偏好证据；Service 仅在 SUCCEEDED 后落盘。
+    reflection_preferences: list[dict[str, Any]]
 
     # ---- HITL Diff 审批 ----
     # 是否在构建通过后暂停等待人工审批；由 options.requireManualApproval
@@ -109,7 +118,7 @@ class AgentState(TypedDict, total=False):
     last_repair_error_fingerprint: str
 
     # ---- 路由 / 终态 ----
-    next_action: Literal["applier", "retry", "approve", "fail"]
+    next_action: Literal["applier", "retry", "approve", "succeed", "fail"]
     status: Literal[
         "RUNNING",
         "PLANNING",

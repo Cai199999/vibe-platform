@@ -17,9 +17,11 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒（Node 22
 - 项目态：pending → architecting → confirmed → bootstrapping → ready/failed
 - **画布双态（新）**：live 页面默认 `annotate`（覆盖层吃指针，可圈选）；单击页面切 `interact`（iframe 吃指针，可直接点按钮）；点灰色空白/Esc/开关回 `annotate`。中键平移在双态均生效：标注态父页处理，交互态由 `inspect_sdk.js` postMessage 桥接。
 - **紧凑工具栏（新）**：单行 TopBar；视图模式合为单图标切换；清空/快照/导出/Agent 目录收进「⋯ 更多」；模型选择保留极简下拉。
-- **自适应铺满（新）**：工作台 `100dvh` 纵向 flex 链，画布 `flex:1` 吃掉全部剩余高度；视口改为 `min(容器比例)` + 动态逻辑宽高（≥1280×720），不再 cover 裁切上下内容；沙盒 `html/body/#root` 与生成页最外层均 `width:100%; min-height:100vh; margin:0`。
+- **自适应铺满**：工作台 `100dvh` flex 链；动态逻辑视口（≥1280×720）严格铺满，不 cover 裁切。
+- **分级决策（新）**：Planner 输出 `decision_impact`；仅 `CORE_BUSINESS` 触发 HITL，`IMPLEMENTATION_DETAIL` 自主生成。核心澄清下发 `clarificationOptions` 一键按钮，点击推荐项自动恢复。
+- **Reflection 偏好（新）**：成功路径提取主色/圆角/密度证据写入 `preferences.json`，累计 ≥2 次后注入 Planner/Coder 默认采用。
 - 生产级全栈：六节点 FullstackGraph；Sequelize+`DATABASE_URL`，沙盒回退 node:sqlite；IaC（Dockerfile/render.yaml/DEPLOY.md）
-- 验证：Python 17 全栈单测、对话前置/缩放铺满/双态平移/多标注/拖拽/快照/回滚/Inspect/审批/文案/全栈门控/全栈生成/UI 全流程 E2E、前端构建 PASS
+- 验证：Python 16 分级决策单测 + 全栈单测；分级决策/澄清 UI/画布双态/多标注/快照全流程 E2E；前端构建 PASS
 
 ## 真假边界
 

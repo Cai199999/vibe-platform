@@ -69,22 +69,19 @@ class EvaluatorApprovalBranchTest(unittest.TestCase):
         update = self.runner._evaluator(self._success_state(True))
         self.assertEqual(update["next_action"], "approve")
         self.assertEqual(update["status"], "AWAITING_APPROVAL")
-        self.assertEqual(
-            self.runner._route_after_evaluator({**self._success_state(True), **update}),
-            "approval_gate",
-        )
+        state = {**self._success_state(True), **update}
+        # 成功路径必须先经过 reflection 提取偏好，再进入审批。
+        self.assertEqual(self.runner._route_after_evaluator(state), "reflection")
+        self.assertEqual(self.runner._route_after_reflection(state), "approval_gate")
 
     def test_success_without_approval_ends_succeeded(self) -> None:
         update = self.runner._evaluator(self._success_state(False))
         self.assertEqual(update["next_action"], "succeed")
         self.assertEqual(update["status"], "SUCCEEDED")
         self.assertIsNone(update["error"])
-        self.assertEqual(
-            self.runner._route_after_evaluator(
-                {**self._success_state(False), **update}
-            ),
-            "succeeded",
-        )
+        state = {**self._success_state(False), **update}
+        self.assertEqual(self.runner._route_after_evaluator(state), "reflection")
+        self.assertEqual(self.runner._route_after_reflection(state), "succeeded")
 
     def test_failure_retry_is_independent_of_approval_switch(self) -> None:
         state = {

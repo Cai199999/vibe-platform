@@ -40,6 +40,15 @@ from ai_core.agent.error_context import (
 from ai_core.agent.events import EventSink, NullEventSink
 from ai_core.agent.llm import AgentLLM
 from ai_core.agent.memory import IntentClassifier, compress_annotation_context
+from ai_core.agent.preferences import (
+    CORE_BUSINESS,
+    IMPLEMENTATION_DETAIL,
+    build_clarification_options,
+    extract_preference_observations,
+    infer_decision_impact,
+    normalize_decision_impact,
+    should_interrupt,
+)
 from ai_core.context_memory import get_project_memory
 from ai_core.domain.state import AgentState
 from ai_core.config import get_settings
@@ -62,6 +71,7 @@ NODE_LABELS = {
     "applier": "写入沙盒",
     "verifier": "构建与校验",
     "evaluator": "整理结果",
+    "reflection": "反思设计偏好",
     "approval_gate": "等待人工审批",
     "awaiting_approval": "确认结果",
     "succeeded": "完成",
@@ -218,6 +228,10 @@ class AgentGraphRunner:
             self._instrument("evaluator", NODE_LABELS["evaluator"], self._evaluator),
         )
         builder.add_node(
+            "reflection",
+            self._instrument("reflection", NODE_LABELS["reflection"], self._reflection),
+        )
+        builder.add_node(
             "approval_gate",
             self._instrument(
                 "approval_gate", NODE_LABELS["approval_gate"], self._approval_gate
@@ -256,10 +270,16 @@ class AgentGraphRunner:
             self._route_after_evaluator,
             {
                 "coder": "coder",
-                "approval_gate": "approval_gate",
-                "awaiting_approval": "awaiting_approval",
-                "succeeded": "succeeded",
+                "reflection": "reflection",
                 "failed": "failed",
+            },
+        )
+        builder.add_conditional_edges(
+            "reflection",
+            self._route_after_reflection,
+            {
+                "approval_gate": "approval_gate",
+                "succeeded": "succeeded",
             },
         )
         builder.add_conditional_edges(
@@ -552,16 +572,37 @@ class AgentGraphRunner:
                 f"{plan_text}\n\n外部检索资料（引用时注明来源 URL）：\n{research}"
             )
         threshold = float(state.get("confidence_threshold", 0.7))
-        needs = plan.needs_clarification or plan.confidence_score < threshold
+        # 分级决策：模型未输出 decision_impact 时，用确定性关键词兜底。
+        # 只有 CORE_BUSINESS 才允许触发中断，IMPLEMENTATION_DETAIL 一律自主执行。
+        impact = normalize_decision_impact(
+            getattr(plan, "decision_impact", None)
+        ) or infer_decision_impact(annotations)
+        needs = should_interrupt(
+            decision_impact=impact,
+            needs_clarification=bool(plan.needs_clarification),
+            confidence_score=float(plan.confidence_score),
+            threshold=threshold,
+            mode=str(state.get("clarification_mode", "auto")),
+        )
         clarification = plan.clarification if needs else None
         if needs and clarification is None:
             clarification = _fallback_clarification(annotations)
         if clarification is not None:
             clarification = _ensure_clarification_annotation(clarification, annotations)
+            # 统一以 Planner 的判定为准，防止模型在 payload 中写错影响面。
+            clarification = {
+                **clarification,
+                "decisionImpact": impact,
+                "decisionSummary": clarification.get("decisionSummary")
+                or _decision_summary(annotations),
+            }
+        options = (clarification or {}).get("clarificationOptions") or []
         return {
             "plan": plan_text,
             "plan_confidence": float(plan.confidence_score),
             "plan_needs_clarification": needs,
+            "plan_decision_impact": impact,
+            "clarification_options": options,
             "clarification": clarification,
             "annotation_context": context,
             "status": "PLANNING",
@@ -570,7 +611,17 @@ class AgentGraphRunner:
 
     def _clarify_gate(self, state: AgentState) -> dict[str, Any]:
         mode = state.get("clarification_mode", "auto")
-        needs = bool(state.get("plan_needs_clarification")) and mode != "off"
+        impact = (
+            normalize_decision_impact(state.get("plan_decision_impact"))
+            or IMPLEMENTATION_DETAIL
+        )
+        # 双保险：即使旧 checkpoint 残留 plan_needs_clarification=True，
+        # 只要影响面不是核心业务，也绝不能在实现细节上打断用户。
+        needs = (
+            bool(state.get("plan_needs_clarification"))
+            and mode != "off"
+            and impact == CORE_BUSINESS
+        )
         if not needs:
             return {
                 "clarification_outcome": "proceed",
@@ -951,6 +1002,29 @@ class AgentGraphRunner:
             ],
         }
 
+    def _reflection(self, state: AgentState) -> dict[str, Any]:
+        """成功路径上的确定性反思：只提取证据，不调用模型。
+
+        这里不直接写偏好账本：Service 只有在确认本次运行 SUCCEEDED 后
+        才落盘，失败 / 拒绝 / 取消的运行不会污染长期偏好。
+        """
+        annotations = [
+            item["annotation"]
+            for item in (state.get("annotation_context") or {}).get("annotations", [])
+        ]
+        observations = extract_preference_observations(
+            annotations, run_id=str(state.get("run_id") or "")
+        )
+        if not observations:
+            return {"reflection_preferences": []}
+        labels = "、".join(
+            f"{item.get('key')}={item.get('value')}" for item in observations
+        )
+        return {
+            "reflection_preferences": observations,
+            "messages": [_message("reflection", f"记录到实现偏好修改：{labels}")],
+        }
+
     def _approval_gate(self, state: AgentState) -> dict[str, Any]:
         """构建通过后暂停，等待用户逐文件查看 Diff 并批准 / 拒绝。
 
@@ -1066,14 +1140,17 @@ class AgentGraphRunner:
 
     def _route_after_evaluator(self, state: AgentState) -> str:
         action = state.get("next_action")
-        if action == "approve":
-            return "approval_gate"
-        if action == "succeed":
-            # 开关关闭：验证通过即终态，不经过审批 / 确认节点。
-            return "succeeded"
+        # 成功 / 待审批都先经过 reflection 提取偏好证据，再进入后续节点。
+        if action in {"approve", "succeed"}:
+            return "reflection"
         if action == "retry":
             return "coder"
         return "failed"
+
+    def _route_after_reflection(self, state: AgentState) -> str:
+        if state.get("next_action") == "approve" and state.get("approval_required"):
+            return "approval_gate"
+        return "succeeded"
 
     def _route_after_approval(self, state: AgentState) -> str:
         return (
@@ -1277,8 +1354,15 @@ def _build_clarification_payload(
         "threadId": thread_id,
         "round": round_no,
         "maxRounds": int(state.get("max_clarification_rounds", 3)),
-        "reason": clarification.get("reason") or "ambiguous_intent",
+        "reason": clarification.get("reason") or "core_business_decision",
+        "decisionImpact": clarification.get("decisionImpact")
+        or state.get("plan_decision_impact")
+        or CORE_BUSINESS,
+        "decisionSummary": clarification.get("decisionSummary") or "",
         "questions": clarification.get("questions") or [],
+        # 前端一键决策按钮；questions[].options 作为兼容回退。
+        "clarificationOptions": clarification.get("clarificationOptions")
+        or build_clarification_options(clarification.get("questions") or []),
         "expiresAt": expires_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
 
@@ -1366,28 +1450,60 @@ def _ensure_clarification_annotation(
 
 
 def _fallback_clarification(annotations: list[dict[str, Any]]) -> dict[str, Any]:
+    """核心业务决策的兜底澄清模板。
+
+    只有 Planner 已判定 CORE_BUSINESS 且模型未返回结构化澄清时才会走到
+    这里；实现细节层不会调用本函数。
+    """
     annotation_id = None
     if annotations:
         annotation_id = annotations[0].get("annotationId") or annotations[0].get(
             "annotation_id"
         )
+    questions = [
+        {
+            "questionId": "q_core_scope",
+            "type": "single_choice",
+            "prompt": "这个需求涉及核心业务逻辑，你希望如何实现？",
+            "required": True,
+            "options": [
+                {
+                    "value": "ui_only",
+                    "label": "只做前端演示",
+                    "description": "不接后端，先看效果",
+                },
+                {
+                    "value": "backend_api",
+                    "label": "补齐后端接口",
+                    "description": "新增或修改 API / 数据表",
+                },
+                {
+                    "value": "existing_service",
+                    "label": "复用已有服务",
+                    "description": "接入现有接口，不改契约",
+                },
+            ],
+            "defaultValue": "backend_api",
+        }
+    ]
     return {
-        "reason": "low_confidence",
+        "reason": "core_business_decision",
+        "decisionImpact": CORE_BUSINESS,
+        "decisionSummary": _decision_summary(annotations),
         "annotationId": str(annotation_id) if annotation_id else None,
-        "questions": [
-            {
-                "questionId": "q_confirm",
-                "type": "single_choice",
-                "prompt": "当前信息不足，你希望怎么继续？",
-                "required": True,
-                "options": [
-                    {"value": "confirm", "label": "按当前最佳计划执行"},
-                    {"value": "adjust", "label": "我再补充具体要求"},
-                ],
-                "defaultValue": "adjust",
-            }
-        ],
+        "questions": questions,
+        "clarificationOptions": build_clarification_options(questions),
     }
+
+
+def _decision_summary(annotations: list[dict[str, Any]]) -> str:
+    text = ""
+    if annotations:
+        payload = annotations[0].get("payload") or {}
+        text = str(payload.get("text") or "").strip()
+    if not text:
+        return "该需求涉及核心业务决策，需要你确认实现范围"
+    return f"该需求涉及核心业务决策：{text[:80]}"
 
 
 def _node_summary(
@@ -1406,8 +1522,10 @@ def _node_summary(
     if name == "planner":
         plan = str(update.get("plan") or "")
         confidence = update.get("plan_confidence")
+        impact = update.get("plan_decision_impact")
         suffix = f"（置信度 {confidence:.2f}）" if isinstance(confidence, float) else ""
-        return f"{plan[:120]}{suffix}"
+        impact_text = f"[{impact}] " if impact else ""
+        return f"{impact_text}{plan[:120]}{suffix}"
     if name == "clarify_gate":
         outcome = update.get("clarification_outcome")
         if outcome == "replan":
@@ -1415,6 +1533,13 @@ def _node_summary(
         if outcome == "exhausted":
             return "澄清轮次耗尽"
         return "信息充分，继续执行"
+    if name == "reflection":
+        observations = update.get("reflection_preferences") or []
+        if not observations:
+            return "本轮没有新的实现偏好"
+        return "记录 " + "、".join(
+            f"{item.get('key')}={item.get('value')}" for item in observations
+        )
     if name == "coder":
         files = sorted((update.get("generated_files") or {}).keys())
         return (

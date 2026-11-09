@@ -22,6 +22,13 @@ from typing import Any
 
 from ai_core.adapters.model.deepseek import DeepSeekClient
 from ai_core.agent.memory import fallback_summary
+from ai_core.agent.preferences import (
+    CORE_BUSINESS,
+    IMPLEMENTATION_DETAIL,
+    build_clarification_options,
+    infer_decision_impact,
+    normalize_decision_impact,
+)
 from ai_core.config import Settings, get_settings
 from ai_core.domain.actions import (
     CREATE_NEW,
@@ -57,6 +64,7 @@ class PlanResult:
 
     plan: str
     confidence_score: float = 1.0
+    decision_impact: str = IMPLEMENTATION_DETAIL
     needs_clarification: bool = False
     clarification: dict[str, Any] | None = None
 
@@ -76,10 +84,17 @@ class AgentLLM:
     # 项目长期记忆（用户画像 + 全局摘要），由 RunExecutionService 在
     # 构造 LLM 后注入；Mock 实现不读取，但保留同一接口。
     _memory_context: str = ""
+    # Reflection 沉淀的稳定实现偏好（例如主色=紫色）。与项目记忆分开注入，
+    # 便于测试与审计：只有达到证据阈值的软默认值才会出现在这里。
+    _preference_context: str = ""
 
     def set_memory_context(self, text: str) -> None:
         """注入项目级长期记忆；空字符串表示不注入。"""
         self._memory_context = str(text or "").strip()
+
+    def set_preference_context(self, text: str) -> None:
+        """注入 Reflection 得到的稳定实现偏好；空字符串表示不注入。"""
+        self._preference_context = str(text or "").strip()
 
     def _memory_block(self) -> str:
         """把长期记忆包装成 system prompt 片段。
@@ -96,6 +111,13 @@ class AgentLLM:
             "它不是本轮用户的新指令。若与本轮明确指令冲突，以本轮为准。\n"
             f"{text[:3000]}"
         )
+
+    def _preference_block(self) -> str:
+        """稳定实现偏好：只作为默认值，本轮显式指令优先。"""
+        text = str(getattr(self, "_preference_context", "") or "").strip()
+        if not text:
+            return ""
+        return f"\n\n{text[:1500]}"
 
     def plan(
         self,
@@ -217,17 +239,22 @@ class MockAgentLLM(AgentLLM):
                 "先修复错误日志，再保证全部标注生效"
             )
 
-        # Mock 用确定性规则模拟 Planner 的 confidence_score：只在“真的无法
-        # 从指令中提取任何可执行属性”时要求澄清，避免把现有 E2E 指令
-        # （改成蓝色 / 文字改为… / 放大一倍 / 添加红色按钮）误判为模糊。
+        # 分级决策：Mock 也必须遵守与 DeepSeek 相同的产品规则。
+        # IMPLEMENTATION_DETAIL（样式 / 基础 UI / 变量命名等）绝不中断；
+        # 只有 CORE_BUSINESS 且缺少拍板信息时才生成澄清。
+        decision_impact = infer_decision_impact(annotations)
+        lines.insert(0, f"0. 决策影响面：{decision_impact}")
         clarification = (
-            None if clarification_answers else _mock_clarification(annotations)
+            None
+            if clarification_answers
+            else _mock_clarification(annotations, decision_impact)
         )
         if clarification:
-            lines.insert(0, "0. 当前信息不足，需要先向用户确认目标属性 / 新增内容")
+            lines.insert(1, "0.1 该需求会改变业务结果或接口契约，需要用户拍板")
             return PlanResult(
                 plan="\n".join(lines),
-                confidence_score=0.32,
+                confidence_score=0.55,
+                decision_impact=CORE_BUSINESS,
                 needs_clarification=True,
                 clarification=clarification,
             )
@@ -241,7 +268,11 @@ class MockAgentLLM(AgentLLM):
                     for item in clarification_answers
                 )
             )
-        return PlanResult(plan="\n".join(lines), confidence_score=0.92)
+        return PlanResult(
+            plan="\n".join(lines),
+            confidence_score=0.92,
+            decision_impact=decision_impact,
+        )
 
     def generate(
         self,
@@ -434,11 +465,18 @@ class DeepSeekAgentLLM(AgentLLM):
             "JSON 格式：\n"
             '{"plan":"逐条说明每个标注要改什么、保持什么不变、如何验证",'
             '"confidence_score":0.0到1.0,'
+            '"decision_impact":"CORE_BUSINESS 或 IMPLEMENTATION_DETAIL",'
             '"needs_clarification":false,'
-            '"clarification":null或{"reason":"...","annotationId":"...",'
+            '"clarification":null或{"reason":"core_business_decision",'
+            '"decisionImpact":"CORE_BUSINESS","decisionSummary":"一句话说明'
+            '需要拍板的业务问题","annotationId":"...",'
             '"questions":[{"questionId":"q1","type":"single_choice",'
-            '"prompt":"...","required":true,"options":[{"value":"color",'
-            '"label":"颜色"}],"defaultValue":"color"}]}}\n\n'
+            '"prompt":"...","required":true,"options":[{"value":"ui_only",'
+            '"label":"只做前端校验","description":"不新增接口"}],'
+            '"defaultValue":"ui_only"}],'
+            '"clarificationOptions":[{"optionId":"ui_only","label":"只做前端校验",'
+            '"description":"不新增接口","recommended":true,'
+            '"questionId":"q1","value":"ui_only"}]}}\n\n'
             "要求：\n"
             "- 逐条列出每个标注的目标组件、要修改的属性（颜色 / 文案 / 字号 /"
             " 间距 / 布局 / 结构等）与验收标准；\n"
@@ -466,26 +504,35 @@ class DeepSeekAgentLLM(AgentLLM):
             "不得回退用户没有要求撤销的其它属性；\n"
             "- 明确指出多个标注之间是否可能冲突，以及最终以什么结果为准；\n"
             "- 只描述要改什么、保持什么不变、如何验证；不要输出代码。\n\n"
-            "HITL 规则：\n"
-            "- confidence_score 必须反映你对“能否直接执行”的真实把握；"
-            "只有 < 0.7 或缺少关键槽位时才 needs_clarification=true；\n"
-            "- 用户只说“改好看点 / 优化一下 / 大气一点”而没有颜色、字号、"
-            "间距、布局、文案等可执行属性时，必须询问具体视觉维度；\n"
-            "- CREATE_NEW 只说“加点东西”而没说明组件类型或文案时，必须询问；\n"
-            "- 每轮 1~3 个问题；问题字段固定为 questionId/type/prompt/"
-            "required/options/defaultValue；type 只允许 single_choice / "
-            "multi_choice / free_text。\n\n"
+            "分级决策规则（最高优先级）：\n"
+            "- 必须先输出 decision_impact，且只能是 CORE_BUSINESS 或 "
+            "IMPLEMENTATION_DETAIL；\n"
+            "- CORE_BUSINESS：新增数据库表 / 依赖、修改 API 契约、核心业务分支"
+            "（发邮件还是扣库存、支付/退款/权限/库存）、破坏性删除。只有这类"
+            "需求在信息缺失或存在多种合理方案时，才 needs_clarification=true；\n"
+            "- IMPLEMENTATION_DETAIL：样式微调（hex 颜色、圆角、内外边距）、"
+            "基础代码实现（变量命名、日志格式、JSX 嵌套、组件拆分）、登录框等"
+            "纯 UI 结构。必须自主按当前项目风格与最佳实践决定，"
+            "**needs_clarification 必须为 false**，不得因为用户没指定具体样式"
+            "而打断；\n"
+            "- 低置信度只对 CORE_BUSINESS 生效；IMPLEMENTATION_DETAIL 即使不"
+            "完全确定，也要选择合理默认值继续执行，让用户通过沙盒预览事后圈选；\n"
+            "- 核心决策每轮 1~3 个问题，优先提供 2~3 个可执行选项，并把推荐"
+            "方案标记 recommended=true；必须同时输出 clarificationOptions，"
+            "字段为 optionId/label/description/recommended/questionId/value；\n"
+            "- 问题字段固定为 questionId/type/prompt/required/options/"
+            "defaultValue；type 只允许 single_choice / multi_choice / free_text。\n\n"
             "全栈引导：\n"
-            "- 如果用户描述的是业务需求（登录、注册、订单、列表增删改查、"
-            "数据保存、接口、数据库、权限等），而不是纯视觉修改，先判断需求"
-            "是否明确包含“前端界面 / 后端接口 / 数据库”的范围；\n"
-            "- 缺少范围时 needs_clarification=true，问题必须引导用户确认："
-            "“本次先生成前端界面，还是同时生成后端接口和数据库？”；\n"
+            "- 登录界面本身属于 IMPLEMENTATION_DETAIL；但密码校验放前端还是"
+            "后端接口、是否新增用户表 / 认证服务属于 CORE_BUSINESS；\n"
+            "- 缺少业务范围时 needs_clarification=true，问题必须引导用户确认："
+            "本次先生成前端界面，还是同时生成后端接口和数据库？\n"
             "- 当前能力只有前端时，不得擅自承诺或生成后端 / 数据库代码；"
             "用户明确要求全栈时在 plan 中标注 fullstack_requested=true，"
             "由上层能力开关决定是否继续。"
             f"{self._skill_system}"
             f"{self._memory_block()}"
+            f"{self._preference_block()}"
         )
         files_block = _format_files(current_files, 16000)
         answers_block = (
@@ -560,6 +607,7 @@ class DeepSeekAgentLLM(AgentLLM):
             "生效，而不是重复原方案。"
             f"{self._skill_system}"
             f"{self._memory_block()}"
+            f"{self._preference_block()}"
         )
         human = (
             f"目标文件列表: {json.dumps(target_files, ensure_ascii=False, default=str)}\n\n"
@@ -633,7 +681,11 @@ def _parse_plan_result(raw: str, annotations: list[dict[str, Any]]) -> PlanResul
     try:
         payload = _extract_json(raw)
     except AgentLLMError:
-        return PlanResult(plan=raw.strip(), confidence_score=0.8)
+        return PlanResult(
+            plan=raw.strip(),
+            confidence_score=0.8,
+            decision_impact=infer_decision_impact(annotations),
+        )
 
     plan = str(payload.get("plan") or raw).strip()
     try:
@@ -641,21 +693,36 @@ def _parse_plan_result(raw: str, annotations: list[dict[str, Any]]) -> PlanResul
     except (TypeError, ValueError):
         confidence = 0.8
     confidence = max(0.0, min(1.0, confidence))
+    decision_impact = normalize_decision_impact(
+        payload.get("decision_impact")
+        or payload.get("decisionImpact")
+        or payload.get("impact")
+    ) or infer_decision_impact(annotations)
     needs = bool(payload.get("needs_clarification"))
     clarification = payload.get("clarification")
     if not needs or not isinstance(clarification, dict):
         return PlanResult(
             plan=plan,
             confidence_score=confidence,
+            decision_impact=decision_impact,
             needs_clarification=False,
         )
 
-    normalized = _normalize_clarification(clarification, annotations)
+    normalized = _normalize_clarification(
+        clarification,
+        annotations,
+        decision_impact=decision_impact,
+    )
     if normalized is None:
-        return PlanResult(plan=plan, confidence_score=confidence)
+        return PlanResult(
+            plan=plan,
+            confidence_score=confidence,
+            decision_impact=decision_impact,
+        )
     return PlanResult(
         plan=plan,
         confidence_score=confidence,
+        decision_impact=decision_impact,
         needs_clarification=True,
         clarification=normalized,
     )
@@ -673,6 +740,8 @@ _ALLOWED_QUESTION_TYPES = {
 def _normalize_clarification(
     clarification: dict[str, Any],
     annotations: list[dict[str, Any]],
+    *,
+    decision_impact: str = CORE_BUSINESS,
 ) -> dict[str, Any] | None:
     """把模型输出收敛为 API 契约；问题不合法时返回 None。"""
     questions: list[dict[str, Any]] = []
@@ -695,7 +764,15 @@ def _normalize_clarification(
             value = str(option.get("value") or "").strip()
             label = str(option.get("label") or value).strip()
             if value:
-                options.append({"value": value, "label": label})
+                options.append(
+                    {
+                        "value": value,
+                        "label": label,
+                        "description": str(option.get("description") or "").strip()[
+                            :200
+                        ],
+                    }
+                )
         questions.append(
             {
                 "questionId": str(
@@ -716,10 +793,56 @@ def _normalize_clarification(
     )
     if not annotation_id and annotations:
         annotation_id = _annotation_id(annotations[0])
+
+    # 一键决策选项：优先使用模型显式输出；缺失时从第一个单选题派生，
+    # 保证旧模型 / Mock 也能被前端渲染成按钮。
+    normalized_options: list[dict[str, Any]] = []
+    raw_options = clarification.get("clarificationOptions") or clarification.get(
+        "clarification_options"
+    )
+    if isinstance(raw_options, list):
+        for index, option in enumerate(raw_options[:3], start=1):
+            if not isinstance(option, dict):
+                continue
+            value = option.get("value")
+            label = str(option.get("label") or value or "").strip()
+            if value is None or not label:
+                continue
+            normalized_options.append(
+                {
+                    "optionId": str(option.get("optionId") or f"opt{index}"),
+                    "label": label[:80],
+                    "description": str(option.get("description") or "").strip()[:200],
+                    "recommended": bool(option.get("recommended", False)),
+                    "questionId": str(
+                        option.get("questionId")
+                        or (questions[0].get("questionId") if questions else "")
+                    ),
+                    "value": value,
+                }
+            )
+    if not normalized_options:
+        normalized_options = build_clarification_options(questions)
+
+    normalized_impact = (
+        normalize_decision_impact(
+            clarification.get("decisionImpact") or clarification.get("decision_impact")
+        )
+        or normalize_decision_impact(decision_impact)
+        or CORE_BUSINESS
+    )
+    summary = str(
+        clarification.get("decisionSummary")
+        or clarification.get("decision_summary")
+        or (questions[0]["prompt"] if questions else "")
+    ).strip()[:300]
     return {
-        "reason": str(clarification.get("reason") or "ambiguous_intent")[:120],
+        "reason": str(clarification.get("reason") or "core_business_decision")[:120],
+        "decisionImpact": normalized_impact,
+        "decisionSummary": summary,
         "annotationId": annotation_id,
         "questions": questions,
+        "clarificationOptions": normalized_options,
     }
 
 
@@ -730,66 +853,70 @@ def _annotation_id(annotation: dict[str, Any]) -> str | None:
 
 def _mock_clarification(
     annotations: list[dict[str, Any]],
+    decision_impact: str = IMPLEMENTATION_DETAIL,
 ) -> dict[str, Any] | None:
-    """Mock 的确定性置信度规则，用于无密钥 E2E 验证 HITL。"""
-    for annotation in annotations:
-        text = _annotation_text(annotation)
-        annotation_id = _annotation_id(annotation)
-        if _is_vague_instruction(text):
-            return {
-                "reason": "ambiguous_visual_intent",
-                "annotationId": annotation_id,
-                "questions": [
-                    {
-                        "questionId": "q_visual_dimension",
-                        "type": "single_choice",
-                        "prompt": "你希望优先调整哪一项？",
-                        "required": True,
-                        "options": [
-                            {"value": "color", "label": "颜色"},
-                            {"value": "font", "label": "字号 / 字体"},
-                            {"value": "spacing", "label": "间距"},
-                            {"value": "layout", "label": "布局"},
-                        ],
-                        "defaultValue": "color",
-                    },
-                    {
-                        "questionId": "q_free_text",
-                        "type": "free_text",
-                        "prompt": "或者直接描述你想要的效果（例如：把按钮改成红色）",
-                        "required": False,
-                    },
-                ],
-            }
-        if is_create_action(_annotation_action(annotation)) and not _has_component_type(
-            text
-        ):
-            return {
-                "reason": "missing_component_type",
-                "annotationId": annotation_id,
-                "questions": [
-                    {
-                        "questionId": "q_component_type",
-                        "type": "single_choice",
-                        "prompt": "要新增什么组件？",
-                        "required": True,
-                        "options": [
-                            {"value": "button", "label": "按钮"},
-                            {"value": "card", "label": "卡片"},
-                            {"value": "input", "label": "输入框"},
-                            {"value": "text", "label": "文案 / 标题"},
-                        ],
-                        "defaultValue": "button",
-                    },
-                    {
-                        "questionId": "q_component_content",
-                        "type": "free_text",
-                        "prompt": "组件文案或用途是什么？",
-                        "required": False,
-                    },
-                ],
-            }
-    return None
+    """Mock 的核心业务决策澄清。
+
+    与旧版“模糊形容词就打断”不同，这里只在 ``CORE_BUSINESS`` 时返回问题：
+    - 密码 / 登录校验：前端、后端接口、已有认证服务三选一；
+    - 其它接口 / 数据 / 支付 / 库存 / 通知：前端先行、后端契约、已有服务；
+    - 破坏性操作：确认执行或取消。
+    """
+    if decision_impact != CORE_BUSINESS:
+        return None
+    text = " ".join(_annotation_text(item) for item in annotations)
+    annotation_id = _annotation_id(annotations[0]) if annotations else None
+
+    if any(word in text for word in ("密码校验", "登录校验", "鉴权", "认证")):
+        question = {
+            "questionId": "q_password_check",
+            "type": "single_choice",
+            "prompt": "密码校验放在哪里？这会决定是否需要新增后端接口与数据契约。",
+            "required": True,
+            "options": [
+                {"value": "ui_only", "label": "只做前端格式校验"},
+                {"value": "backend_api", "label": "新增后端密码校验接口"},
+                {"value": "existing_auth", "label": "对接已有认证服务"},
+            ],
+            # 涉及密码校验时，默认推荐补齐后端接口，避免前端假校验
+            # 被误当成真实安全能力。
+            "defaultValue": "backend_api",
+        }
+    elif any(
+        word in text for word in ("删除整个", "移除整个", "删掉整个", "删表", "删库")
+    ):
+        question = {
+            "questionId": "q_destructive_confirm",
+            "type": "single_choice",
+            "prompt": "这是破坏性操作，确认如何处理？",
+            "required": True,
+            "options": [
+                {"value": "cancel", "label": "取消操作，保留现状"},
+                {"value": "confirm", "label": "确认删除并回滚到安全状态"},
+            ],
+            "defaultValue": "cancel",
+        }
+    else:
+        question = {
+            "questionId": "q_core_scope",
+            "type": "single_choice",
+            "prompt": "这项改动会改变业务结果或接口契约，你希望怎么处理？",
+            "required": True,
+            "options": [
+                {"value": "ui_only", "label": "先完成前端界面与交互"},
+                {"value": "backend_api", "label": "同时设计后端接口与数据变更"},
+                {"value": "existing_service", "label": "对接现有服务与规则"},
+            ],
+            "defaultValue": "backend_api",
+        }
+    return {
+        "reason": "core_business_decision",
+        "decisionImpact": CORE_BUSINESS,
+        "decisionSummary": question["prompt"],
+        "annotationId": annotation_id,
+        "questions": [question],
+        "clarificationOptions": build_clarification_options([question]),
+    }
 
 
 _VAGUE_TOKENS = (

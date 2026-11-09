@@ -47,7 +47,7 @@ def main() -> int:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1600, "height": 1000})
-        # Mock 提供确定性澄清：ADD 且未说明组件类型时必问。
+        # 只有核心业务决策才允许中断：密码校验放在哪里会影响接口契约。
         context.add_init_script(
             "window.localStorage.setItem('vibe.llmProvider', 'mock')"
         )
@@ -62,7 +62,7 @@ def main() -> int:
             active = page.locator(".tab-window.is-active")
             expect(active.locator(".mock-card")).to_be_visible()
 
-            print("\n== 2. 在卡片空白区域画圈并发送模糊指令 ==")
+            print("\n== 2. 在卡片空白区域画圈并发送核心业务指令 ==")
             card = active.locator(".mock-card").bounding_box()
             if not card:
                 fail("找不到大卡片")
@@ -77,7 +77,9 @@ def main() -> int:
 
             popover = active.locator(".canvas-popover")
             expect(popover).to_have_count(1)
-            popover.locator(".popover-row input").fill("加个东西")
+            popover.locator(".popover-row input").fill(
+                "加个登录框，密码校验放在前端还是对接已有认证服务"
+            )
             popover.locator(".popover-send").click()
 
             print("\n== 3. 等待澄清，并验证主输入栏仍可用 ==")
@@ -96,7 +98,17 @@ def main() -> int:
             if main_input.input_value() != "补充：整体风格保持现有设计":
                 fail("主输入栏文本未保留")
 
-            print("\n== 4. 点击预设选项，主输入栏与文本必须保留 ==")
+            print("\n== 4. 验证一键决策按钮，再点击预设选项 ==")
+            quick = popover.locator("[data-clarification-quick-option]")
+            if quick.count() != 3:
+                fail(f"核心决策应提供 3 个一键选项，实际 {quick.count()}")
+            recommended = popover.locator(
+                '[data-clarification-quick-option][data-recommended="true"]'
+            )
+            if recommended.count() != 1:
+                fail("核心决策必须且只能有一个推荐项")
+            if "后端密码校验接口" not in recommended.first.inner_text():
+                fail("密码校验场景应推荐补齐后端接口")
             preset = popover.locator(".clarification-option").first
             preset.click()
             if not main_input.is_enabled():

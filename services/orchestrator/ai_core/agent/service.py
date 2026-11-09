@@ -791,6 +791,13 @@ class RunExecutionService:
                     request.project_id,
                 )
                 llm.set_memory_context(memory.prompt_context())
+                # Reflection：把多次确认过的实现偏好作为默认值注入，
+                # 未达到证据阈值（默认 2 次）的偏好不会影响生成。
+                llm.set_preference_context(
+                    memory.preference_context(
+                        min_evidence=self._settings.agent_preference_min_evidence
+                    )
+                )
             except Exception:  # noqa: BLE001 - 记忆不可用不能阻断 Run
                 logger.warning("load project memory failed", exc_info=True)
 
@@ -1051,6 +1058,32 @@ class RunExecutionService:
         # 这里不再追加终态事件，SSE 订阅者会在该事件后自动关闭。
         return response
 
+    def _persist_preferences(
+        self,
+        prepared: PreparedRun,
+        final_state: dict[str, Any],
+    ) -> None:
+        """把本轮成功提取的偏好证据合并进项目偏好账本（best effort）。"""
+        observations = final_state.get("reflection_preferences") or []
+        if not observations:
+            return
+        try:
+            memory = get_project_memory(
+                self._settings,
+                prepared.request.tenant_id,
+                prepared.request.project_id,
+            )
+            memory.record_preferences(
+                observations,
+                min_evidence=self._settings.agent_preference_min_evidence,
+            )
+        except Exception:  # noqa: BLE001 - 偏好落盘失败不能影响 Run
+            logger.warning(
+                "persist reflection preferences failed run_id=%s",
+                prepared.run_id,
+                exc_info=True,
+            )
+
     def _complete_finished(
         self,
         active: ActiveRun,
@@ -1107,6 +1140,11 @@ class RunExecutionService:
         elif status == "REJECTED":
             # 用户拒绝：丢弃工作区改动，不生成 commit，不写 thread 成功记忆。
             preview_url = self._revert_sandbox(prepared)
+
+        # Reflection 证据只在真正成功（含审批通过）后落盘；失败、拒绝、
+        # 取消的运行不会影响长期偏好。
+        if status == "SUCCEEDED":
+            self._persist_preferences(prepared, final_state)
 
         assistant_message = self._assistant_message(
             prepared.instructions,

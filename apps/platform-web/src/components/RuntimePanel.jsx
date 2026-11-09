@@ -271,9 +271,31 @@ function PausedState({
     <div className="loading-state runtime-loading is-paused">
       <div className="loading-copy timeline-head">
         <h3 className="loading-title">等待你确认</h3>
-        <p className="muted">意图还不够明确，Agent 已暂停执行。</p>
+        <p className="muted">
+          {clarification?.decisionImpact === 'CORE_BUSINESS'
+            ? '这属于核心业务决策，Agent 已暂停执行，避免擅自改动架构或契约。'
+            : 'Agent 已暂停执行，确认后继续。'}
+        </p>
       </div>
       <Timeline items={timeline} />
+      {clarification?.decisionSummary && (
+        <p className="paused-decision-summary">
+          {clarification.decisionSummary}
+        </p>
+      )}
+      {clarification?.clarificationOptions?.length > 0 && (
+        <ul className="paused-quick-options">
+          {clarification.clarificationOptions.map((option) => (
+            <li key={option.optionId}>
+              <strong>
+                {option.label}
+                {option.recommended ? '（推荐）' : ''}
+              </strong>
+              {option.description && <span>{option.description}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
       {clarification?.questions?.length > 0 && (
         <ul className="paused-questions">
           {clarification.questions.map((question) => (
