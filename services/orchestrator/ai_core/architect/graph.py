@@ -2,7 +2,8 @@
 
 拓扑：
 
-    START -> ingest_context -> retrieve_knowledge -> architect_analyze
+    START -> summarize_history -> ingest_context -> retrieve_knowledge
+                               -> architect_analyze
                                                              │
                                                              ▼
                                                      confidence_gate
@@ -50,6 +51,7 @@ from ai_core.agent.checkpoint import (
     get_checkpointer_provider,
 )
 from ai_core.agent.events import EventSink, NullEventSink
+from ai_core.agent.memory import compress_architect_history
 from ai_core.architect.confidence import apply_confidence_guard
 from ai_core.architect.contract import (
     assemble_contract,
@@ -70,6 +72,7 @@ from ai_core.architect.schemas import (
     ArchitectQuestion,
 )
 from ai_core.architect.state import ArchitectState
+from ai_core.config import get_settings
 from ai_core.rag import RAGProviderError, get_rag_provider
 
 logger = logging.getLogger(__name__)
@@ -78,6 +81,7 @@ ARCHITECT_THREAD_PREFIX = "architect:"
 CONTRACT_REVISION_SOFT_LIMIT = 8
 
 NODE_LABELS = {
+    "summarize_history": "压缩对话记忆",
     "ingest_context": "读取当前源码",
     "retrieve_knowledge": "检索架构规范",
     "architect_analyze": "判别应用形态",
@@ -130,6 +134,7 @@ class ArchitectGraphRunner:
         # 暂停事件先于 graph.invoke 返回，服务层必须在该事件可见前拿到
         # 待回答的澄清 / 待确认的契约，否则快速点击会命中“尚不存在”的竞态。
         self._pause_hook = pause_hook
+        self._settings = get_settings()
         self._graph = self._build()
 
     def run(
@@ -164,6 +169,7 @@ class ArchitectGraphRunner:
     # --------------------------------------------------------
     def _build(self):
         builder = StateGraph(ArchitectState)
+        builder.add_node("summarize_history", self._summarize_history)
         builder.add_node("ingest_context", self._ingest_context)
         builder.add_node("retrieve_knowledge", self._retrieve_knowledge)
         builder.add_node("architect_analyze", self._architect_analyze)
@@ -179,7 +185,8 @@ class ArchitectGraphRunner:
         builder.add_node("confidence_exhausted", self._confidence_exhausted)
         builder.add_node("failed", self._failed)
 
-        builder.add_edge(START, "ingest_context")
+        builder.add_edge(START, "summarize_history")
+        builder.add_edge("summarize_history", "ingest_context")
         builder.add_edge("ingest_context", "retrieve_knowledge")
         builder.add_edge("retrieve_knowledge", "architect_analyze")
         builder.add_edge("architect_analyze", "confidence_gate")
@@ -220,6 +227,47 @@ class ArchitectGraphRunner:
         builder.add_edge("confidence_exhausted", END)
         builder.add_edge("failed", END)
         return builder.compile(checkpointer=self._checkpointer_provider.get())
+
+    # --------------------------------------------------------
+    # 节点：历史压缩
+    # --------------------------------------------------------
+    def _summarize_history(self, state: ArchitectState) -> dict[str, Any]:
+        """在 Checkpointer 之前压缩 architect 的 ui_history。
+
+        超过阈值时把多轮问答压成一条“核心需求与约束”；摘要会替换
+        ui_history，后续 ``_context_from_state`` 只带摘要进入模型。
+        压缩失败时保留原历史，不影响 Run。
+        """
+        history = list(state.get("ui_history") or [])
+        result = compress_architect_history(
+            history,
+            self._llm.summarize_history,
+            threshold=int(self._settings.history_summary_token_threshold),
+            max_chars=int(self._settings.history_summary_max_chars),
+        )
+        update: dict[str, Any] = {
+            "history_tokens_before": result.tokens_before,
+            "history_tokens_after": result.tokens_after,
+        }
+        if not result.compressed:
+            return update
+        update.update(
+            {
+                "ui_history": result.value,
+                "history_summary": result.summary,
+            }
+        )
+        self._emit(
+            "architect.history.compressed",
+            {
+                "runId": state.get("run_id"),
+                "tokensBefore": result.tokens_before,
+                "tokensAfter": result.tokens_after,
+                "summary": result.summary,
+            },
+            dedupe_key=f"architect.history.compressed:{state.get('run_id')}",
+        )
+        return update
 
     # --------------------------------------------------------
     # 节点：上下文与 RAG

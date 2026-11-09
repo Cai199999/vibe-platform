@@ -21,10 +21,11 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
+from ai_core.agent.memory import fallback_summary
 from ai_core.agent.schemas import ExecuteRunRequest, RunOptions
 from ai_core.config import Settings, get_settings
+from ai_core.model_router import ModelRouter
 from ai_core.skill_loader import skill_prompts_to_system
 from ai_core.editor import (
     CodeEdit,
@@ -86,6 +87,10 @@ class AgentLLM:
         verify_result: dict[str, Any],
         retry_count: int,
     ) -> CodeResult:
+        raise NotImplementedError
+
+    def summarize_history(self, text: str, max_chars: int = 200) -> str:
+        """把长对话压缩为核心需求与约束。子类必须实现。"""
         raise NotImplementedError
 
 
@@ -278,6 +283,10 @@ class MockAgentLLM(AgentLLM):
         cleaned = "\n".join(lines)
         return cleaned + "\n" if code.endswith("\n") else cleaned
 
+    def summarize_history(self, text: str, max_chars: int = 200) -> str:
+        """Mock 用确定性截取，保证离线 E2E 也能验证压缩链路。"""
+        return fallback_summary(text, max_chars)
+
     def _apply_instruction(
         self,
         code: str,
@@ -361,14 +370,8 @@ class DeepSeekAgentLLM(AgentLLM):
             raise AgentLLMConfigurationError(
                 "DEEPSEEK_API_KEY 未配置；请设置密钥或使用 llm_provider=mock"
             )
-        self._model = ChatOpenAI(
-            model=self.settings.deepseek_model,
-            api_key=self.settings.deepseek_api_key,
-            base_url=self.settings.deepseek_base_url,
-            temperature=0,
-            timeout=120,
-            max_retries=2,
-        )
+        # 模型按任务分级：Planner 走 FAST，Coder 走 STRONG。
+        self._router = ModelRouter(self.settings)
         # config/skills/*.skill.json 中挂载到 ui_graph 的 Prompt。
         # 只读取服务端静态文件，不接受请求参数注入。
         self._skill_system = skill_prompts_to_system(
@@ -443,7 +446,7 @@ class DeepSeekAgentLLM(AgentLLM):
             f"用户已澄清的回答:\n{answers_block}\n\n"
             f"上一轮错误（如有）:\n{_truncate(previous_errors or '无', 4000)}"
         )
-        content = self._invoke(system, human)
+        content = self._invoke("planner", system, human)
         return _parse_plan_result(content, annotations)
 
     def generate(
@@ -501,12 +504,24 @@ class DeepSeekAgentLLM(AgentLLM):
             f"上一轮验证结果:\n{json.dumps(verify_result, ensure_ascii=False)}\n\n"
             f"当前重试次数: {retry_count}"
         )
-        content = self._invoke(system, human)
+        content = self._invoke("coder", system, human)
         return self._parse_code_result(content, target_files)
 
-    def _invoke(self, system: str, human: str) -> str:
+    def summarize_history(self, text: str, max_chars: int = 200) -> str:
+        """用 FAST 模型把历史对话压缩为最多 max_chars 个字符。"""
+        system = (
+            "你是对话记忆压缩器。只保留与当前开发任务相关的核心需求、"
+            "已确认决策、约束与禁止项；丢弃寒暄、重复解释和中间代码。\n"
+            f"只输出一段纯文本摘要，不超过 {max_chars} 字，不要 Markdown。"
+        )
+        human = f"历史对话：\n{_truncate(text, 24000)}"
+        summary = self._invoke("summary", system, human).strip()
+        return _truncate(summary, max_chars)
+
+    def _invoke(self, task: str, system: str, human: str) -> str:
         try:
-            response = self._model.invoke(
+            model = self._router.build(task)
+            response = model.invoke(
                 [SystemMessage(content=system), HumanMessage(content=human)]
             )
         except Exception as exc:  # noqa: BLE001 - 统一转换为领域异常

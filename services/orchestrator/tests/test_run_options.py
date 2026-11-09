@@ -112,6 +112,58 @@ class EvaluatorApprovalBranchTest(unittest.TestCase):
             "failed",
         )
 
+    def test_same_error_after_repair_aborts_immediately(self) -> None:
+        state = {
+            "verify_result": {
+                "success": False,
+                "error_logs": "boom",
+                "error_context": "[error] Expected }",
+                "error_fingerprint": "abc123",
+            },
+            "retry_count": 1,
+            "max_retries": 3,
+            "last_repair_error_fingerprint": "abc123",
+        }
+        update = self.runner._evaluator(state)
+        self.assertEqual(update["next_action"], "fail")
+        self.assertEqual(update["status"], "FAILED")
+        self.assertEqual(update["error_code"], "REPEATED_ERROR")
+        self.assertEqual(
+            self.runner._route_after_evaluator({**state, **update}),
+            "failed",
+        )
+
+    def test_different_error_still_retries(self) -> None:
+        state = {
+            "verify_result": {
+                "success": False,
+                "error_logs": "boom",
+                "error_context": "[error] Cannot find module",
+                "error_fingerprint": "def456",
+            },
+            "retry_count": 1,
+            "max_retries": 3,
+            "last_repair_error_fingerprint": "abc123",
+        }
+        update = self.runner._evaluator(state)
+        self.assertEqual(update["next_action"], "retry")
+        self.assertEqual(update["retry_count"], 2)
+        self.assertEqual(update["last_repair_error_fingerprint"], "def456")
+
+    def test_first_failure_records_fingerprint(self) -> None:
+        state = {
+            "verify_result": {
+                "success": False,
+                "error_logs": "boom",
+                "error_fingerprint": "abc123",
+            },
+            "retry_count": 0,
+            "max_retries": 3,
+        }
+        update = self.runner._evaluator(state)
+        self.assertEqual(update["next_action"], "retry")
+        self.assertEqual(update["last_repair_error_fingerprint"], "abc123")
+
 
 if __name__ == "__main__":
     unittest.main()

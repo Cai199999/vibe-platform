@@ -8,6 +8,7 @@
 | [04.M2 Agent 执行架构](04.M2_Agent_ToolCalling_SSE_HITL.md) | v2.0 设计稿 | Tool Calling、SSE 时间轴、HITL 澄清 |
 | [05.Supervisor 多 Agent 协同](05.Supervisor_Multi_Agent.md) | v1.1 | 总调度、AgentRegistry、子图 Handoff、both 强门控、CustomAgent 沙盒隔离 |
 | [06.Agent OS 数据中台与管理中台](06.Agent_OS_Data_Management.md) | v1.0 | Knowledge Service、多租户检索、Admin / Prompt Registry、Feedback 自优化闭环 |
+| [08.Token 成本优化](08.Token_成本优化.md) | v1.0 | 模型分级路由、历史记忆压缩、错误上下文截断、同错终止 |
 
 ## 阅读顺序
 
@@ -19,6 +20,7 @@
 5. 05 是多 Agent 总调度设计；Supervisor 只路由，子图协议仍以 04 为准。
 6. 06 定义 M3 数据中台与管理中台；知识库 / Admin / Prompt / Feedback 的字段
    细节以 06 为准，03 §14 提供端点索引与错误码汇总。
+7. 08 定义 Token 成本优化；模型路由、历史压缩与错误截断以 08 为准。
 
 ## 约定
 

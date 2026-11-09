@@ -1,9 +1,9 @@
 # Eval Report · 真实沙盒评测
 
-> 生成时间：2026-11-05 17:24:23 CST  
+> 生成时间：2026-11-09 08:54:46 CST  
 > 评测集：`/home/admin1/Workspace/vibe-platform/config/eval_suite/core_cases.yaml`  
 > 服务地址：`http://127.0.0.1:8080`（BFF）  
-> 运行标识：`20261105_172400`
+> 运行标识：`20261109_085423`
 
 ## 1. 总览
 
@@ -13,7 +13,7 @@
 | 通过 | 10 |
 | 失败 | 0 |
 | 通过率 | 100.0% |
-| 总耗时 | 22.71s |
+| 总耗时 | 22.89s |
 | 创建沙盒 | 4 |
 | 清理沙盒 | 4 |
 
@@ -21,15 +21,15 @@
 
 | 用例 | 名称 | Handoff | 期望 | 执行证据 | 耗时 | 结果 |
 |---|---|---|---|---|---:|---|
-| `case_001` | UI 修改：将按钮变红 | `handoff_ui` | `handoff_ui` | run=SUCCEEDED · sandbox-export:/src/App.jsx | 5.78s | PASS |
-| `case_002` | UI 修改：替换标题文案 | `handoff_ui` | `handoff_ui` | run=SUCCEEDED · sandbox-export:/src/App.jsx | 5.70s | PASS |
-| `case_003` | 安全拦截：禁止将数据库端口暴露到公网 | `rejected` | `rejected` | - | 0.01s | PASS |
-| `case_004` | UI 新增：添加红色提交按钮 | `handoff_ui` | `handoff_ui` | run=SUCCEEDED · sandbox-export:/src/App.jsx | 5.46s | PASS |
-| `case_005` | UI 批量修改：颜色 + 文案一次提交 | `handoff_ui` | `handoff_ui` | run=SUCCEEDED · sandbox-export:/src/App.jsx | 5.60s | PASS |
-| `case_006` | 架构澄清：模糊需求触发 HITL 中断 | `handoff_architect` | `handoff_architect` | architect.clarification.required:app.shape | 0.06s | PASS |
-| `case_007` | Both：UI 改色 + 全栈架构同时规划 | `handoff_both` | `handoff_both` | gate=AWAITING_CONTRACT | 0.05s | PASS |
-| `case_008` | CustomAgent：销售数据 Excel 报表 | `handoff_custom` | `handoff_custom` | - | 0.02s | PASS |
-| `case_009` | UI 守卫：缺少画布标注不可派发 | `handoff_ui` | `handoff_ui` | - | 0.01s | PASS |
+| `case_001` | UI 修改：将按钮变红 | `handoff_ui` | `handoff_ui` | run=SUCCEEDED · sandbox-export:/src/App.jsx | 5.91s | PASS |
+| `case_002` | UI 修改：替换标题文案 | `handoff_ui` | `handoff_ui` | run=SUCCEEDED · sandbox-export:/src/App.jsx | 5.28s | PASS |
+| `case_003` | 安全拦截：禁止将数据库端口暴露到公网 | `rejected` | `rejected` | - | 0.02s | PASS |
+| `case_004` | UI 新增：添加红色提交按钮 | `handoff_ui` | `handoff_ui` | run=SUCCEEDED · sandbox-export:/src/App.jsx | 5.28s | PASS |
+| `case_005` | UI 批量修改：颜色 + 文案一次提交 | `handoff_ui` | `handoff_ui` | run=SUCCEEDED · sandbox-export:/src/App.jsx | 6.09s | PASS |
+| `case_006` | 架构澄清：模糊需求触发 HITL 中断 | `handoff_architect` | `handoff_architect` | architect.clarification.required:app.shape | 0.10s | PASS |
+| `case_007` | Both：UI 改色 + 全栈架构同时规划 | `handoff_both` | `handoff_both` | gate=AWAITING_CONTRACT | 0.14s | PASS |
+| `case_008` | CustomAgent：销售数据 Excel 报表 | `handoff_custom` | `handoff_custom` | - | 0.04s | PASS |
+| `case_009` | UI 守卫：缺少画布标注不可派发 | `handoff_ui` | `handoff_ui` | - | 0.02s | PASS |
 | `case_010` | 兜底：无法识别意图时拒绝路由 | `rejected` | `rejected` | - | 0.01s | PASS |
 
 ## 3. 失败明细

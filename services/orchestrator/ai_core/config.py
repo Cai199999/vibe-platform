@@ -32,6 +32,24 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
 
+    # ------------------------------------------------------------
+    # 模型分级路由（ModelRouter）
+    # ------------------------------------------------------------
+    # 解析优先级：任务级覆盖 > 层级模型 > deepseek_model。
+    # 留空表示回退到上一级，避免强制配置。
+    model_fast_name: str = ""
+    model_strong_name: str = ""
+    model_fast_temperature: float = 0.0
+    model_strong_temperature: float = 0.2
+    # 任务级覆盖：只配置需要偏离层级的节点。
+    model_routing_name: str = ""
+    model_validation_name: str = ""
+    model_summary_name: str = ""
+    model_planner_name: str = ""
+    model_coder_name: str = ""
+    model_architect_analyze_name: str = ""
+    model_architect_contract_name: str = ""
+
     # 复用宿主机 Docker Redis；当前骨架不主动连接。
     redis_host: str = "127.0.0.1"
     redis_port: int = 6379
@@ -113,6 +131,16 @@ class Settings(BaseSettings):
     agent_approval_ttl_hours: int = 24
     # 每个 Run 的内存事件缓冲上限；生产切换 Redis Stream 后由 stream TTL 管理。
     agent_event_buffer_size: int = 2000
+
+    # ------------------------------------------------------------
+    # Token 成本优化
+    # ------------------------------------------------------------
+    # 对话历史超过阈值才压缩；摘要长度硬上限，防止压缩本身变成新负担。
+    history_summary_token_threshold: int = 3000
+    history_summary_max_chars: int = 200
+    # 构建失败时回传给模型的代码上下文行数（报错行前后各 N 行）。
+    error_context_lines: int = 10
+    error_context_max_chars: int = 2000
 
     # 声明式 Skill 目录：*.skill.json，由 AgentRegistry 加载，并在 UI Agent
     # 运行时把 systemPrompt 追加进模型上下文。

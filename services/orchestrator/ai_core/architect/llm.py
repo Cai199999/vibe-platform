@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
+from ai_core.agent.memory import fallback_summary
 from ai_core.architect.confidence import is_known_shape, missing_slots_for
 from ai_core.architect.schemas import (
     APP_SHAPE_LABELS,
@@ -29,6 +29,7 @@ from ai_core.architect.schemas import (
 )
 from ai_core.architect.source import format_source
 from ai_core.config import Settings, get_settings
+from ai_core.model_router import ModelRouter
 
 
 class ArchitectLLMError(Exception):
@@ -92,6 +93,10 @@ class ArchitectLLM:
     ) -> ContractDraft:
         """根据校验反馈修复契约；默认重新起草。"""
         return self.draft_contract(context)
+
+    def summarize_history(self, text: str, max_chars: int = 200) -> str:
+        """把长对话压缩为核心需求与约束。子类必须实现。"""
+        raise NotImplementedError
 
 
 # ------------------------------------------------------------
@@ -179,6 +184,10 @@ class MockArchitectLLM(ArchitectLLM):
     # --------------------------------------------------------
     # Mock 分级契约
     # --------------------------------------------------------
+    def summarize_history(self, text: str, max_chars: int = 200) -> str:
+        """Mock 用确定性截取，保证离线链路可验证。"""
+        return fallback_summary(text, max_chars)
+
     def _lightweight_contract(self, context: ArchitectContext) -> ContractDraft:
         flow = str(context.slots.get("ui.primary_flow") or "展示内容并响应交互").strip()
         storage = str(context.slots.get("ui.persistence") or "localStorage")
@@ -573,14 +582,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             raise ArchitectLLMConfigurationError(
                 "DEEPSEEK_API_KEY 未配置；请设置密钥或使用 llm_provider=mock"
             )
-        self._model = ChatOpenAI(
-            model=self.settings.deepseek_model,
-            api_key=self.settings.deepseek_api_key,
-            base_url=self.settings.deepseek_base_url,
-            temperature=0,
-            timeout=120,
-            max_retries=2,
-        )
+        self._router = ModelRouter(self.settings)
 
     def analyze(self, context: ArchitectContext) -> ArchitectAnalysis:
         system = (
@@ -617,7 +619,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "写入 slots。不要把“怕不确定”当作全栈的理由。"
         )
         human = _analysis_human(context)
-        raw = self._invoke(system, human)
+        raw = self._invoke("architect_analyze", system, human)
         payload = _extract_json(raw)
         payload = _normalize_analysis_payload(payload)
         try:
@@ -650,7 +652,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "- 不要编造用户未提供的业务实体；不确定处写入 assumptions。"
         )
         human = _contract_human(context)
-        raw = self._invoke(system, human)
+        raw = self._invoke("architect_contract", system, human)
         payload = _extract_json(raw)
         return _parse_contract_draft(payload)
 
@@ -672,12 +674,29 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             f"上一版契约:\n{json.dumps(_draft_to_payload(previous), ensure_ascii=False)}\n\n"
             f"校验反馈:\n{feedback[:3000]}"
         )
-        raw = self._invoke(system, human)
+        raw = self._invoke("architect_contract", system, human)
         return _parse_contract_draft(_extract_json(raw))
 
-    def _invoke(self, system: str, human: str) -> str:
+    def summarize_history(self, text: str, max_chars: int = 200) -> str:
+        """用廉价模型把长对话压缩为核心需求与约束。"""
+        if not text.strip():
+            return ""
+        system = (
+            "你是对话压缩器。把给定对话压缩为 200 字以内的“核心需求与约束”，"
+            "只保留：用户明确要求、已确认的技术约束、禁止事项、当前待办。"
+            "丢弃寒暄、中间代码和重复解释。直接输出摘要，不要前缀。"
+        )
+        human = f"对话内容:\n{text[:12000]}"
+        summary = self._invoke("summary", system, human).strip()
+        if not summary:
+            return fallback_summary(text, max_chars)
+        if len(summary) > max_chars:
+            summary = summary[:max_chars]
+        return summary
+
+    def _invoke(self, task: str, system: str, human: str) -> str:
         try:
-            response = self._model.invoke(
+            response = self._router.build(task).invoke(
                 [SystemMessage(content=system), HumanMessage(content=human)]
             )
         except Exception as exc:  # noqa: BLE001

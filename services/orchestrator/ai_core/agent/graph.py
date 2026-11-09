@@ -2,7 +2,8 @@
 
 拓扑：
 
-    START -> planner -> clarify_gate -> coder -> applier -> verifier -> evaluator
+    START -> summarize_history -> planner -> clarify_gate -> coder -> applier
+                                    -> verifier -> evaluator
                 ▲              │           ▲                              │
                 │              │(澄清)     └──── repair (<= 3 次) ◄───────┤
                 │              ▼                                          │
@@ -32,8 +33,14 @@ from ai_core.agent.checkpoint import (
     CheckpointerProvider,
     get_checkpointer_provider,
 )
+from ai_core.agent.error_context import (
+    error_file_hint,
+    extract_error_context,
+    extract_error_fingerprint,
+)
 from ai_core.agent.events import EventSink, NullEventSink
 from ai_core.agent.llm import AgentLLM
+from ai_core.agent.memory import compress_annotation_context
 from ai_core.agent.state import AgentState
 from ai_core.config import get_settings
 from ai_core.editor import (
@@ -47,6 +54,7 @@ from ai_core.tools import ToolRegistry, build_default_toolbox
 logger = logging.getLogger(__name__)
 
 NODE_LABELS = {
+    "summarize_history": "压缩对话记忆",
     "planner": "理解修改意图",
     "clarify_gate": "检查信息完整性",
     "coder": "生成修改方案",
@@ -180,6 +188,14 @@ class AgentGraphRunner:
         builder = StateGraph(AgentState)
 
         builder.add_node(
+            "summarize_history",
+            self._instrument(
+                "summarize_history",
+                NODE_LABELS["summarize_history"],
+                self._summarize_history,
+            ),
+        )
+        builder.add_node(
             "planner",
             self._instrument("planner", NODE_LABELS["planner"], self._planner),
         )
@@ -218,7 +234,8 @@ class AgentGraphRunner:
         builder.add_node("rejected", self._rejected)
         builder.add_node("failed", self._failed)
 
-        builder.add_edge(START, "planner")
+        builder.add_edge(START, "summarize_history")
+        builder.add_edge("summarize_history", "planner")
         builder.add_edge("planner", "clarify_gate")
         builder.add_conditional_edges(
             "clarify_gate",
@@ -381,6 +398,52 @@ class AgentGraphRunner:
     # --------------------------------------------------------
     # 节点
     # --------------------------------------------------------
+    def _summarize_history(self, state: AgentState) -> dict[str, Any]:
+        """在 Checkpointer 之前压缩历史。
+
+        只有超过阈值才调用轻量模型，把每个标注的 chatHistory / previousRuns
+        压成一条“核心需求与约束”。压缩失败时保留原上下文，绝不阻断 Run。
+        """
+        context = state.get("annotation_context") or {}
+        result = compress_annotation_context(
+            context,
+            self._llm.summarize_history,
+            threshold=int(self._settings.history_summary_token_threshold),
+            max_chars=int(self._settings.history_summary_max_chars),
+        )
+        update: dict[str, Any] = {
+            "history_tokens_before": result.tokens_before,
+            "history_tokens_after": result.tokens_after,
+        }
+        if not result.compressed:
+            return update
+
+        update.update(
+            {
+                "annotation_context": result.value,
+                "history_summary": result.summary,
+                "messages": [
+                    _message(
+                        "summarize_history",
+                        "历史已压缩："
+                        f"{result.tokens_before} -> {result.tokens_after} tokens",
+                    )
+                ],
+            }
+        )
+        self._emit(
+            "node.progress",
+            {
+                "node": "summarize_history",
+                "message": (
+                    "对话历史超过阈值，已压缩为摘要："
+                    f"{result.tokens_before} -> {result.tokens_after} tokens"
+                ),
+            },
+            dedupe_key=f"node.progress:summarize_history:{state.get('run_id')}",
+        )
+        return update
+
     def _planner(self, state: AgentState) -> dict[str, Any]:
         context = state["annotation_context"]
         answers = list(state.get("clarification_answers") or [])
@@ -397,7 +460,8 @@ class AgentGraphRunner:
                 ),
             )
         annotations = [item["annotation"] for item in context["annotations"]]
-        previous_errors = (state.get("verify_result") or {}).get("error_logs")
+        # 只注入精准截断后的错误上下文，避免把完整构建日志塞回 Planner。
+        previous_errors = _repair_feedback(state.get("verify_result") or {})
         plan = self._llm.plan(
             annotations=annotations,
             current_files=state["current_files"],
@@ -504,7 +568,9 @@ class AgentGraphRunner:
                 plan=state.get("plan", ""),
                 current_files=current_files,
                 target_files=state["target_files"],
-                verify_result=verify_result,
+                # 只把 Error Message + 报错行附近代码交给模型，
+                # 完整 stdout/stderr 仅保留在状态里供 UI 与审计使用。
+                verify_result=_repair_payload(verify_result),
                 retry_count=retry_count,
             )
             # files 模式必须经过 FileCreator 落地：已有文件 REWRITE_FILE，
@@ -646,6 +712,8 @@ class AgentGraphRunner:
             "error_logs": "" if result.success else result.logs,
             "exit_code": result.exit_code,
             "duration_ms": result.duration_ms,
+            "error_context": "",
+            "error_fingerprint": "",
         }
         if result.success:
             self._emit(
@@ -654,13 +722,23 @@ class AgentGraphRunner:
                 dedupe_key=f"verify.passed:{key}",
             )
         else:
+            # 精准截断：提取报错行号 + Error Message + 前后 N 行代码。
+            error_context = extract_error_context(
+                result.logs,
+                _select_error_source(result.logs, state),
+                context_lines=int(self._settings.error_context_lines),
+                max_chars=int(self._settings.error_context_max_chars),
+            )
+            fingerprint = extract_error_fingerprint(result.logs)
+            verify_state["error_context"] = error_context
+            verify_state["error_fingerprint"] = fingerprint
             self._emit(
                 "verify.failed",
                 {
                     "exitCode": result.exit_code,
                     "durationMs": result.duration_ms,
-                    "errorSummary": _tail(result.logs, 1000),
-                    "fingerprint": "",
+                    "errorSummary": error_context[:1000],
+                    "fingerprint": fingerprint,
                 },
                 dedupe_key=f"verify.failed:{key}",
             )
@@ -712,6 +790,39 @@ class AgentGraphRunner:
             }
 
         error_logs = str(verify.get("error_logs") or "未知构建错误")
+        error_context = _repair_feedback(verify) or _tail(error_logs, 1500)
+        fingerprint = str(verify.get("error_fingerprint") or "")
+        last_fingerprint = str(state.get("last_repair_error_fingerprint") or "")
+
+        # 同一错误已经修过一次仍然复现：继续重试只会重复烧钱，直接终止。
+        if retry_count >= 1 and fingerprint and fingerprint == last_fingerprint:
+            logger.warning("repeated error %s after repair, aborting", fingerprint)
+            self._emit(
+                "repair.aborted",
+                {
+                    "attempt": retry_count,
+                    "fingerprint": fingerprint,
+                    "reason": "连续两次自愈失败且错误相同",
+                },
+                dedupe_key=(
+                    f"repair.aborted:{state.get('run_id')}:{retry_count}:{fingerprint}"
+                ),
+            )
+            return {
+                "next_action": "fail",
+                "status": "FAILED",
+                "error_code": "REPEATED_ERROR",
+                "error": "连续两次自愈失败且错误相同，已终止以避免无效重试",
+                "messages": [
+                    _message(
+                        "evaluator",
+                        "检测到与上次修复相同的错误，终止重试。"
+                        f"错误指纹: {fingerprint}",
+                        error=True,
+                    )
+                ],
+            }
+
         if retry_count < max_retries:
             logger.info(
                 "verification failed, scheduling repair %s/%s",
@@ -723,19 +834,21 @@ class AgentGraphRunner:
                 {
                     "attempt": retry_count + 1,
                     "maxAttempts": max_retries,
-                    "reason": _tail(error_logs, 1000),
+                    "reason": error_context[:1000],
                 },
                 dedupe_key=(f"repair.started:{state.get('run_id')}:{retry_count + 1}"),
             )
             return {
                 "retry_count": retry_count + 1,
+                # 记录本次错误指纹，下一轮若原样复现则终止。
+                "last_repair_error_fingerprint": fingerprint,
                 "next_action": "retry",
                 "status": "REPAIRING",
                 "messages": [
                     _message(
                         "evaluator",
                         f"构建失败，开始第 {retry_count + 1}/{max_retries} 次修复。"
-                        f"错误摘要:\n{_tail(error_logs, 1500)}",
+                        f"错误摘要:\n{error_context}",
                         error=True,
                     )
                 ],
@@ -1170,6 +1283,14 @@ def _node_summary(
     update: dict[str, Any],
     state: AgentState,
 ) -> str:
+    if name == "summarize_history":
+        before = update.get("history_tokens_before", 0)
+        after = update.get("history_tokens_after", 0)
+        if not before:
+            return "无历史需要压缩"
+        if before != after:
+            return f"历史已压缩：{before} -> {after} tokens"
+        return f"历史未超过阈值（{before} tokens）"
     if name == "planner":
         plan = str(update.get("plan") or "")
         confidence = update.get("plan_confidence")
@@ -1229,11 +1350,72 @@ def _message(node: str, content: str, error: bool = False) -> dict[str, Any]:
 
 
 def _failure(error_logs: str) -> dict[str, Any]:
+    """非构建类失败（Coder / Applier / 沙盒执行异常）。
+
+    这类错误本身已经很短，error_context 直接复用截断后的消息。
+    """
     return {
         "success": False,
         "error_logs": error_logs,
+        "error_context": _tail(error_logs, 2000),
+        "error_fingerprint": "",
         "exit_code": -1,
         "duration_ms": 0,
+    }
+
+
+def _select_error_source(logs: str, state: AgentState) -> str:
+    """根据错误日志中的文件路径选择要截取的源码。
+
+    依次回退：日志里的文件 -> target_files 第一个 -> target_file -> 任意文件。
+    """
+    files = dict(state.get("current_files") or {})
+    hint = error_file_hint(logs)
+    if hint:
+        wanted = hint.replace("\\", "/").lstrip("./")
+        for path, source in files.items():
+            normalized = path.replace("\\", "/").lstrip("./")
+            if (
+                normalized == wanted
+                or normalized.endswith(wanted)
+                or wanted.endswith(normalized)
+            ):
+                return source
+    for path in state.get("target_files") or []:
+        if path in files:
+            return files[path]
+    target = state.get("target_file")
+    if target and target in files:
+        return files[target]
+    return next(iter(files.values()), "")
+
+
+def _repair_feedback(verify_result: dict[str, Any]) -> str | None:
+    """返回注入 Planner / Coder 的精简错误；成功或空结果返回 None。
+
+    Vite 的失败日志通常只有 1~3KB，此时完整日志比“日志 + 代码窗口”更短，
+    直接复用完整日志，避免截断逻辑反而放大 Prompt；只有日志足够长时才
+    使用 ``error_context``（最多 2000 字符）实现降本。
+    """
+    if not verify_result or verify_result.get("success", True):
+        return None
+    logs = str(verify_result.get("error_logs") or "").strip()
+    context = str(verify_result.get("error_context") or "").strip()
+    if logs and len(logs) <= 2000 and len(logs) <= len(context or ""):
+        return logs
+    if context:
+        return context
+    return _tail(logs, 2000) if logs else None
+
+
+def _repair_payload(verify_result: dict[str, Any]) -> dict[str, Any]:
+    """Coder 只看到必要字段，避免完整 stdout/stderr 重复进入 Prompt。"""
+    if not verify_result:
+        return {}
+    return {
+        "success": bool(verify_result.get("success")),
+        "exit_code": verify_result.get("exit_code", -1),
+        "error_context": _repair_feedback(verify_result) or "",
     }
 
 

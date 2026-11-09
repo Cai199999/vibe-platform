@@ -11,9 +11,10 @@ React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.1
 - 画布圈选 / 空白 ADD、多标注（≤3）、多轮对话、世界坐标无漂移
 - SSE `seq`/`afterSeq` 重放、HITL 澄清、Diff 审批、取消、Git 回滚
 - Supervisor 路由：ui / architect / both / custom / rejected
-- Architect 形态判别 + 动态澄清 + BM25 契约；both 强门控
-- 多 Tab、zip/HTML/图片导入、预览、导出，`/admin` 看板
-- Eval 双引擎 10/10 PASS；单测 85 passed
+- Architect 形态判别 + 动态澄清 + BM25 契约
+- 多 Tab、zip/HTML/图片导入、预览、`/admin` 看板
+- Token 降本：模型分级、历史摘要、错误截断、同错终止
+- Eval 双引擎 10/10；单测 108 passed
 
 ## 真 / 假边界
 
@@ -21,12 +22,12 @@ React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.1
 |---|---|
 | DeepSeek | 已接 OpenAI 兼容接口，`.env` 有 Key；Eval 仍用 Mock |
 | 鉴权 | 前端 Mock Token + `X-User-Role`，无 JWT |
-| 持久化 | BFF 无 DB 层；状态全在进程内，重启丢失 |
-| MySQL / Redis / MinIO | 仅连接配置，主链路未读写 |
+| 持久化 | BFF 无 DB 层；状态进程内，重启丢失 |
+| MySQL / Redis / MinIO | 仅连接配置，未读写 |
 | 数据中台 | Knowledge / Prompt / Feedback 仅契约 |
 | 沙盒 | 单 React/Vite，无多服务、无 gVisor |
-| Agent | UI / Architect 可用；BackendCoder / ScriptAgent 仅 Manifest 预留 |
-| Admin Eval | 契约冻结，未注册路由 |
+| Agent | BackendCoder / ScriptAgent 仅 Manifest |
+| Admin Eval | 契约冻结，未接路由 |
 
 ## 下一步
 

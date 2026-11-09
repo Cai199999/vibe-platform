@@ -17,6 +17,11 @@ class VerifyState(TypedDict, total=False):
     error_logs: str
     exit_code: int
     duration_ms: int
+    # 精准截断后的错误上下文（Error Message + 报错行附近代码），
+    # 只把它注入 Planner / Coder，完整 error_logs 仅保留给 UI 与审计。
+    error_context: str
+    # 归一化错误指纹；同错连续出现时用于直接终止重试。
+    error_fingerprint: str
 
 
 class AgentState(TypedDict, total=False):
@@ -45,6 +50,10 @@ class AgentState(TypedDict, total=False):
     # 本轮 Run 开始前的文件快照；审批 Diff / 拒绝回滚都以它为基线。
     # 节点不会更新该字段，始终保持“写沙盒之前”的内容。
     initial_files: dict[str, str]
+    # 历史压缩后的“核心需求与约束”，由 summarize_history 节点写入。
+    history_summary: str
+    history_tokens_before: int
+    history_tokens_after: int
 
     # ---- 生成结果 ----
     plan: str
@@ -87,6 +96,8 @@ class AgentState(TypedDict, total=False):
     apply_failed: bool
     retry_count: int
     max_retries: int
+    # 上一次自愈时的错误指纹；本次失败指纹与之相同则直接 FAILED。
+    last_repair_error_fingerprint: str
 
     # ---- 路由 / 终态 ----
     next_action: Literal["applier", "retry", "approve", "fail"]

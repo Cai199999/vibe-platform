@@ -837,6 +837,11 @@ class RunExecutionService:
                 "apply_failed": False,
                 "retry_count": 0,
                 "max_retries": min(request.options.max_retries, 3),
+                # Token 优化：历史压缩与同错去重
+                "history_summary": "",
+                "history_tokens_before": 0,
+                "history_tokens_after": 0,
+                "last_repair_error_fingerprint": "",
                 # HITL
                 "clarification_mode": request.options.clarification_mode,
                 "max_clarification_rounds": request.options.max_clarification_rounds,

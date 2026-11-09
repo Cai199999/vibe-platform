@@ -662,6 +662,10 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         "source_origin": bundle.origin,
         "source_warnings": bundle.warnings,
         "ui_history": list(request.ui_history),
+        # Token 优化：START 节点据此决定是否压缩历史
+        "history_summary": "",
+        "history_tokens_before": 0,
+        "history_tokens_after": 0,
         "threshold": request.options.confidence_threshold,
         "max_rounds": request.options.max_clarification_rounds,
         "round": 0,
