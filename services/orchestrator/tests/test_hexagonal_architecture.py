@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 
 from ai_core.adapters.checkpoint import MemoryCheckpointerProvider
+from ai_core.adapters.editor import AnchorCodeEditor, FileCreator, TreeSitterEditor
 from ai_core.adapters.model import DeepSeekClient
 from ai_core.adapters.rag import ChromaRAGProvider, MarkdownRAGProvider
 from ai_core.adapters.sandbox import LocalDockerSandbox
@@ -27,6 +28,7 @@ from ai_core.domain.common import CamelModel
 from ai_core.domain.skills import SkillDescriptor
 from ai_core.domain.state import AgentState, ArchitectState
 from ai_core.ports.checkpoint import CheckpointerProvider
+from ai_core.ports.editor import CodeEditor
 from ai_core.ports.model import ModelClient
 from ai_core.ports.rag import RAGProvider
 from ai_core.ports.sandbox import SandboxProvider
@@ -121,7 +123,10 @@ class PortBoundaryTest(unittest.TestCase):
         self.assertTrue(issubclass(LocalDockerSandbox, SandboxProvider))
         self.assertTrue(issubclass(MarkdownRAGProvider, RAGProvider))
         self.assertTrue(issubclass(ChromaRAGProvider, RAGProvider))
-        # Checkpointer 使用 Protocol 结构化校验，不强制继承。
+        # Editor 与 Checkpointer 使用 Protocol 结构化校验，不强制继承。
+        self.assertIsInstance(AnchorCodeEditor(), CodeEditor)
+        self.assertIsInstance(FileCreator(), CodeEditor)
+        self.assertIsInstance(TreeSitterEditor(), CodeEditor)
         self.assertIsInstance(MemoryCheckpointerProvider(), CheckpointerProvider)
 
 
@@ -143,6 +148,7 @@ class CompatibilityShimTest(unittest.TestCase):
         self.assertIs(LegacyArchitectState, ArchitectState)
 
     def test_legacy_provider_paths_point_to_ports_and_adapters(self) -> None:
+        from ai_core.editor.anchor import AnchorCodeEditor as LegacyAnchor
         from ai_core.rag.base import RAGProvider as LegacyRAGProvider
         from ai_core.sandbox.base import SandboxProvider as LegacySandboxProvider
         from ai_core.sandbox.local_docker import LocalDockerSandbox as LegacySandbox
@@ -150,6 +156,7 @@ class CompatibilityShimTest(unittest.TestCase):
         self.assertIs(LegacyRAGProvider, RAGProvider)
         self.assertIs(LegacySandboxProvider, SandboxProvider)
         self.assertIs(LegacySandbox, LocalDockerSandbox)
+        self.assertIs(LegacyAnchor, AnchorCodeEditor)
 
     def test_domain_objects_are_shared_language(self) -> None:
         self.assertTrue(issubclass(AnnotationEnvelope, CamelModel))

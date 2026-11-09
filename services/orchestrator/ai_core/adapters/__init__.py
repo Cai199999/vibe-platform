@@ -4,7 +4,8 @@
   - ``adapters.model``：DeepSeek / OpenAI 兼容模型调用；
   - ``adapters.sandbox``：本地 Docker 沙盒；
   - ``adapters.rag``：Markdown BM25 / Chroma 检索；
-  - ``adapters.checkpoint``：LangGraph Memory / Redis checkpoint。
+  - ``adapters.checkpoint``：LangGraph Memory / Redis checkpoint；
+  - ``adapters.editor``：Anchor / 整文件 / Tree-sitter 编辑器。
 
 应用层（agent / architect / supervisor）不得直接构造这些实现。
 """

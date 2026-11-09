@@ -20,7 +20,7 @@ React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.1
 - Skill：Markdown 挂载 `ui.accessibility`，动态注入 Coder
 - MCP：标准 stdio 子集 + `get_current_time` 示例
 - 六边形重构：`AnnotationEnvelope/ArchitectContract/State` 入 domain；
-  `ModelClient/Sandbox/RAG/Checkpoint` 入 ports；DeepSeek/Docker/Markdown/Chroma 入 adapters
+  `ModelClient/Sandbox/RAG/Checkpoint/Editor` 入 ports；DeepSeek/Docker/Markdown/Chroma/Editor 入 adapters
 - Eval 10/10；单测 138 passed
 
 ## 真 / 假边界

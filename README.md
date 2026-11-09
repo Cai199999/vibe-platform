@@ -33,7 +33,7 @@ apps/platform-bff/                    Java 21 + Spring Boot 3.3 BFF
 services/orchestrator/                Python 3.12 + FastAPI + LangGraph AI Core
 services/orchestrator/ai_core/domain/    纯领域层（标注 / 契约 / 会话状态 / Skill）
 services/orchestrator/ai_core/ports/     应用层端口（模型 / 沙盒 / RAG / Checkpoint / Editor）
-services/orchestrator/ai_core/adapters/  适配器（DeepSeek / Docker 沙盒 / Markdown·Chroma / Checkpoint）
+services/orchestrator/ai_core/adapters/  适配器（DeepSeek / Docker 沙盒 / Markdown·Chroma / Checkpoint / Editor）
 services/orchestrator/ai_core/agent/     应用层：ui_graph 编排
 services/orchestrator/ai_core/architect/ 应用层：architect_graph 编排
 services/orchestrator/ai_core/supervisor/ 应用层：Supervisor 路由与 Handoff
