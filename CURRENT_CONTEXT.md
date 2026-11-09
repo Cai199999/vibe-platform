@@ -14,7 +14,7 @@ React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.1
 - Architect 形态判别 + 动态澄清 + BM25 契约
 - 多 Tab、zip/HTML/图片导入、预览、`/admin` 看板
 - Token 降本：模型分级、历史摘要、错误截断、同错终止
-- Eval 双引擎 10/10；单测 108 passed
+- Eval 双引擎 10/10；单测 109 passed
 
 ## 真 / 假边界
 

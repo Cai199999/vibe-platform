@@ -92,7 +92,8 @@ class ModelRouter:
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
-        self._clients: dict[str, ChatOpenAI] = {}
+        # key = (model, temperature)；reasoner 不含 temperature 时用 None。
+        self._clients: dict[tuple[str, float | None], ChatOpenAI] = {}
 
     # ------------------------------------------------------------
     # 解析
@@ -135,9 +136,18 @@ class ModelRouter:
     # 客户端
     # ------------------------------------------------------------
     def build(self, task: str) -> ChatOpenAI:
-        """获取（并缓存）任务对应的 ChatOpenAI 客户端。"""
+        """获取（并缓存）任务对应的 ChatOpenAI 客户端。
+
+        缓存键必须包含 temperature：FAST / STRONG 可能共用同一个模型名，
+        但温度不同；只按 model 缓存会让后一个任务静默复用前一个温度。
+        """
         profile = self.resolve(task)
-        cached = self._clients.get(profile.model)
+        supports_temperature = "reasoner" not in profile.model.lower()
+        cache_key = (
+            profile.model,
+            profile.temperature if supports_temperature else None,
+        )
+        cached = self._clients.get(cache_key)
         if cached is not None:
             return cached
 
@@ -153,11 +163,11 @@ class ModelRouter:
         }
         # deepseek-reasoner 不接受 temperature / top_p 等采样参数；
         # 显式省略，避免切换到推理模型时 400。
-        if "reasoner" not in profile.model.lower():
+        if supports_temperature:
             kwargs["temperature"] = profile.temperature
 
         client = ChatOpenAI(**kwargs)  # type: ignore[arg-type]
-        self._clients[profile.model] = client
+        self._clients[cache_key] = client
         return client
 
     def clear_cache(self) -> None:

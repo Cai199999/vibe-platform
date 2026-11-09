@@ -80,6 +80,21 @@ class ModelRouterTest(unittest.TestCase):
         self.assertIn("summary", described)
         self.assertEqual(described["coder"]["model"], "coder-override")
 
+    def test_client_cache_separates_temperatures(self) -> None:
+        router = ModelRouter(
+            Settings(
+                deepseek_api_key="test-key",
+                deepseek_model="deepseek-chat",
+                model_fast_name="same-model",
+                model_strong_name="same-model",
+            )
+        )
+        planner = router.build("planner")
+        coder = router.build("coder")
+        # 同名模型但温度不同，必须拿到不同客户端。
+        self.assertIsNot(planner, coder)
+        self.assertEqual(len(router._clients), 2)
+
 
 class HistoryCompressionTest(unittest.TestCase):
     @staticmethod
