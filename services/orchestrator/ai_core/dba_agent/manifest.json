@@ -1,0 +1,133 @@
+{
+  "agent_id": "dba_agent",
+  "name": "数据库工程师（预留）",
+  "description": "未来根据实施契约生成 MySQL DDL、索引设计、Flyway 迁移与回滚脚本，并在沙盒中做结构与约束校验。",
+  "version": "0.0.0",
+  "status": "reserved",
+  "graph": "DbaAgentGraph",
+  "capabilities": [
+    {
+      "id": "database_schema_design",
+      "description": "把契约中的数据实体映射为 InnoDB / utf8mb4 表结构、字段类型、默认值与注释。"
+    },
+    {
+      "id": "sql_migration_generation",
+      "description": "生成可重复执行的 up / down 迁移脚本，并校验与现有 schema 的兼容性。"
+    },
+    {
+      "id": "index_and_performance_review",
+      "description": "根据查询路径给出索引、联合索引与慢查询优化建议，禁止无依据堆索引。"
+    }
+  ],
+  "supported_tools": [
+    "read_contract",
+    "read_entity_model",
+    "create_file",
+    "run_sql_sandbox",
+    "validate_schema",
+    "explain_query",
+    "git_commit"
+  ],
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "DbaAgentInput",
+    "type": "object",
+    "required": ["projectId", "contract"],
+    "properties": {
+      "projectId": {"type": "string"},
+      "contract": {"type": "object"},
+      "engine": {
+        "type": "string",
+        "enum": ["mysql", "postgresql"],
+        "default": "mysql"
+      },
+      "existingSchema": {
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+      },
+      "options": {"type": "object"}
+    }
+  },
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "DbaAgentOutput",
+    "type": "object",
+    "required": ["runId", "status", "files"],
+    "properties": {
+      "runId": {"type": "string"},
+      "status": {
+        "type": "string",
+        "enum": ["SUCCEEDED", "FAILED", "CANCELLED"]
+      },
+      "files": {
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+      },
+      "ddl": {"type": ["string", "null"]},
+      "validation": {
+        "type": ["object", "null"],
+        "properties": {
+          "valid": {"type": "boolean"},
+          "issues": {"type": "array", "items": {"type": "string"}}
+        }
+      },
+      "commitHash": {"type": ["string", "null"]}
+    }
+  },
+  "skills": [
+    {
+      "skill_id": "dba.mysql_ddl",
+      "name": "MySQL DDL 生成",
+      "description": "按实体与关系生成建表语句，统一 InnoDB、utf8mb4、时间字段与逻辑删除约定。",
+      "prompt_ref": "prompts/dba/mysql_ddl.md",
+      "rag_refs": ["knowledge/dba/mysql"],
+      "tools": ["read_contract", "create_file", "validate_schema"],
+      "metadata": {"stage": "M4-reserved"}
+    },
+    {
+      "skill_id": "dba.migration_rollback",
+      "name": "迁移与回滚",
+      "description": "生成 Flyway 迁移与对应回滚脚本，保证重复执行安全与向后兼容。",
+      "prompt_ref": "prompts/dba/migration_rollback.md",
+      "rag_refs": ["knowledge/dba/migration"],
+      "tools": ["read_contract", "create_file", "run_sql_sandbox", "git_commit"],
+      "metadata": {"stage": "M4-reserved"}
+    },
+    {
+      "skill_id": "dba.index_review",
+      "name": "索引与性能评审",
+      "description": "结合 API 查询路径分析执行计划，给出索引调整建议与风险说明。",
+      "prompt_ref": "prompts/dba/index_review.md",
+      "rag_refs": ["knowledge/dba/performance"],
+      "tools": ["run_sql_sandbox", "explain_query"],
+      "metadata": {"stage": "M4-reserved"}
+    },
+    {
+      "skill_id": "dba.seed_data",
+      "name": "种子数据生成",
+      "description": "为本地开发与 E2E 生成可重复、可清理的种子数据，不包含真实用户隐私。",
+      "prompt_ref": "prompts/dba/seed_data.md",
+      "rag_refs": ["knowledge/dba/seed"],
+      "tools": ["read_contract", "create_file", "run_sql_sandbox"],
+      "metadata": {"stage": "M4-reserved"}
+    }
+  ],
+  "keywords": [
+    "数据库",
+    "ddl",
+    "表结构",
+    "建表",
+    "索引",
+    "迁移",
+    "flyway",
+    "mysql",
+    "慢查询",
+    "种子数据"
+  ],
+  "metadata": {
+    "manifest_version": 1,
+    "owner": "platform",
+    "contract_only": true,
+    "activation": "M4"
+  }
+}

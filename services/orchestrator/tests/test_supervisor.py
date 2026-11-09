@@ -209,8 +209,80 @@ class RegistryTest(unittest.TestCase):
             registry.require("architect_graph").status,
             "available",
         )
-        self.assertEqual(registry.require("backend_coder").status, "reserved")
-        self.assertEqual(registry.require("script_agent").status, "reserved")
+        self.assertEqual(registry.require("supervisor").status, "available")
+        for agent_id in (
+            "backend_coder",
+            "script_agent",
+            "dba_agent",
+            "integration_verifier",
+            "devops_agent",
+        ):
+            self.assertEqual(registry.require(agent_id).status, "reserved")
+
+    def test_supervisor_is_listed_but_never_dispatchable(self) -> None:
+        """Supervisor 属于编排层：状态 available，但不能被派发为子 Agent。"""
+        registry = AgentRegistry()
+        descriptor = registry.require("supervisor")
+        self.assertEqual(descriptor.status, "available")
+        self.assertFalse(descriptor.routable)
+        with self.assertRaises(AgentNotAvailableError):
+            registry.require_routable("supervisor")
+
+        with self.assertRaises(AgentNotAvailableError):
+            RuleBasedIntentClassifier().classify(
+                _request(options={"targetAgent": "supervisor"}),
+                registry,
+            )
+
+    def test_reserved_team_agents_are_declared_but_not_routable(self) -> None:
+        registry = AgentRegistry()
+        for agent_id in (
+            "backend_coder",
+            "script_agent",
+            "dba_agent",
+            "integration_verifier",
+            "devops_agent",
+        ):
+            descriptor = registry.require(agent_id)
+            self.assertFalse(descriptor.routable)
+            self.assertTrue(descriptor.capabilities)
+            self.assertTrue(descriptor.skills)
+            with self.assertRaises(AgentNotAvailableError):
+                registry.require_routable(agent_id)
+
+    def test_full_dev_team_capabilities_and_skills(self) -> None:
+        """8 个虚拟研发团队成员都必须有可执行语义的 capabilities 与 skills。"""
+        registry = AgentRegistry()
+        expected = {
+            "supervisor": ("intent_routing", "supervisor.intent_routing"),
+            "architect_graph": (
+                "global_architecture",
+                "architect.fullstack_contract",
+            ),
+            "ui_graph": ("ui_local_edit", "ui.style_edit"),
+            "script_agent": ("script_automation", "script.web_scraper"),
+            "backend_coder": ("backend_generation", "backend.fastapi_crud"),
+            "dba_agent": ("database_schema_design", "dba.mysql_ddl"),
+            "integration_verifier": (
+                "e2e_integration_test",
+                "verify.contract_conformance",
+            ),
+            "devops_agent": ("containerization", "devops.github_actions"),
+        }
+        builtin_ids = {
+            item.agent_id for item in registry.list_agents() if item.source == "builtin"
+        }
+        self.assertEqual(builtin_ids, set(expected))
+
+        all_skill_ids = {item.skill_id for item in registry.list_skills()}
+        for agent_id, (capability_id, skill_id) in expected.items():
+            descriptor = registry.require(agent_id)
+            self.assertIn(
+                capability_id,
+                {item["id"] for item in descriptor.capabilities},
+            )
+            self.assertIn(skill_id, {item.skill_id for item in descriptor.skills})
+            self.assertIn(skill_id, all_skill_ids)
 
     def test_custom_manifest_is_loaded_but_not_executable(self) -> None:
         self._write_manifest(
@@ -269,10 +341,14 @@ class RegistryTest(unittest.TestCase):
     def test_builtin_agents_are_loaded_from_manifests(self) -> None:
         registry = AgentRegistry()
         expected = {
+            "supervisor": "supervisor/manifest.json",
             "ui_graph": "agent/manifest.json",
             "architect_graph": "architect/manifest.json",
             "backend_coder": "backend_coder/manifest.json",
             "script_agent": "script_agent/manifest.json",
+            "dba_agent": "dba_agent/manifest.json",
+            "integration_verifier": "integration_verifier/manifest.json",
+            "devops_agent": "devops_agent/manifest.json",
         }
         for agent_id, manifest_path in expected.items():
             descriptor = registry.require(agent_id)
@@ -294,8 +370,15 @@ class RegistryTest(unittest.TestCase):
         skill_ids = {item.skill_id for item in skills}
         self.assertIn("ui.style_edit", skill_ids)
         self.assertIn("architect.fullstack_contract", skill_ids)
+        self.assertIn("supervisor.intent_routing", skill_ids)
         self.assertIn("backend.spring_boot_crud", skill_ids)
+        self.assertIn("backend.fastapi_crud", skill_ids)
         self.assertIn("script.scheduled_job", skill_ids)
+        self.assertIn("script.web_scraper", skill_ids)
+        self.assertIn("script.data_cleaning", skill_ids)
+        self.assertIn("dba.mysql_ddl", skill_ids)
+        self.assertIn("verify.api_e2e", skill_ids)
+        self.assertIn("devops.dockerfile", skill_ids)
         self.assertEqual(len(skills), len(skill_ids))
         # 每个 Skill 都能反查到所属 Agent。
         ui_skill = registry.skill_registry.get("ui.style_edit")
@@ -462,6 +545,24 @@ class DispatchTest(unittest.TestCase):
         )
         self.architect_runs["fake_architect_graph"] = _FakeArchitectRun(
             status="CANCELLED"
+        )
+        with self.assertRaises(SupervisorGateAbortedError):
+            self.service.release_gate(response.gate.gate_id)
+        self.assertEqual(
+            self.service.get_gate(response.gate.gate_id).gate.status,
+            "FAILED",
+        )
+
+    def test_cancelling_architect_aborts_gate_immediately(self) -> None:
+        """取消已受理但线程未退出时，不能误报“契约未确认”。"""
+        response = self.service.dispatch(
+            _request(
+                message="把按钮改蓝，同时规划全栈后端",
+                annotations=[_annotation()],
+            )
+        )
+        self.architect_runs["fake_architect_graph"] = _FakeArchitectRun(
+            status="CANCELLING"
         )
         with self.assertRaises(SupervisorGateAbortedError):
             self.service.release_gate(response.gate.gate_id)

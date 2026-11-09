@@ -1,0 +1,141 @@
+{
+  "agent_id": "devops_agent",
+  "name": "DevOps 工程师（预留）",
+  "description": "未来根据实施契约生成 Dockerfile、Compose、CI/CD 流水线与部署配置，并做构建与配置校验。",
+  "version": "0.0.0",
+  "status": "reserved",
+  "graph": "DevopsAgentGraph",
+  "capabilities": [
+    {
+      "id": "containerization",
+      "description": "为前端、Java / Python 服务生成多阶段 Dockerfile 与最小运行镜像配置。"
+    },
+    {
+      "id": "ci_cd_pipeline",
+      "description": "生成构建、测试、镜像推送与部署流水线，区分 PR 校验与主干发布。"
+    },
+    {
+      "id": "deployment_configuration",
+      "description": "生成环境变量、Compose / K8s 清单与健康检查，禁止把密钥写入仓库。"
+    },
+    {
+      "id": "observability_bootstrap",
+      "description": "补齐日志、指标、健康检查与基础告警配置，保证部署后可观测。"
+    }
+  ],
+  "supported_tools": [
+    "read_contract",
+    "read_file",
+    "create_file",
+    "run_docker_build",
+    "run_compose",
+    "validate_pipeline",
+    "git_commit"
+  ],
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "DevopsAgentInput",
+    "type": "object",
+    "required": ["projectId", "contract"],
+    "properties": {
+      "projectId": {"type": "string"},
+      "contract": {"type": "object"},
+      "targetEnv": {
+        "type": "string",
+        "enum": ["local", "staging", "production"],
+        "default": "local"
+      },
+      "registry": {"type": ["string", "null"]},
+      "options": {"type": "object"}
+    }
+  },
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "DevopsAgentOutput",
+    "type": "object",
+    "required": ["runId", "status", "files"],
+    "properties": {
+      "runId": {"type": "string"},
+      "status": {
+        "type": "string",
+        "enum": ["SUCCEEDED", "FAILED", "CANCELLED"]
+      },
+      "files": {
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+      },
+      "buildReport": {"type": ["object", "null"]},
+      "deployPlan": {
+        "type": ["array", "null"],
+        "items": {"type": "string"}
+      },
+      "commitHash": {"type": ["string", "null"]}
+    }
+  },
+  "skills": [
+    {
+      "skill_id": "devops.dockerfile",
+      "name": "容器镜像构建",
+      "description": "生成多阶段 Dockerfile、.dockerignore 与构建参数，控制镜像体积与非 root 运行。",
+      "prompt_ref": "prompts/devops/dockerfile.md",
+      "rag_refs": ["knowledge/devops/docker"],
+      "tools": ["read_contract", "create_file", "run_docker_build"],
+      "metadata": {"stage": "M4-reserved"}
+    },
+    {
+      "skill_id": "devops.compose_stack",
+      "name": "本地服务编排",
+      "description": "生成前端、后端与依赖的 Compose 编排，复用已有中间件，不重复部署基础设施。",
+      "prompt_ref": "prompts/devops/compose_stack.md",
+      "rag_refs": ["knowledge/devops/compose"],
+      "tools": ["read_contract", "create_file", "run_compose"],
+      "metadata": {"stage": "M4-reserved"}
+    },
+    {
+      "skill_id": "devops.github_actions",
+      "name": "CI/CD 流水线",
+      "description": "生成 PR 校验、构建测试、镜像推送与发布流水线，失败即阻断。",
+      "prompt_ref": "prompts/devops/github_actions.md",
+      "rag_refs": ["knowledge/devops/ci"],
+      "tools": ["read_contract", "create_file", "validate_pipeline"],
+      "metadata": {"stage": "M4-reserved"}
+    },
+    {
+      "skill_id": "devops.deploy_manifest",
+      "name": "部署清单与环境配置",
+      "description": "生成 Compose / K8s 部署清单、健康检查、资源限制与环境变量模板。",
+      "prompt_ref": "prompts/devops/deploy_manifest.md",
+      "rag_refs": ["knowledge/devops/deploy"],
+      "tools": ["read_contract", "create_file", "validate_pipeline", "git_commit"],
+      "metadata": {"stage": "M4-reserved"}
+    },
+    {
+      "skill_id": "devops.observability",
+      "name": "可观测性初始化",
+      "description": "补齐结构化日志、指标端点、健康检查与基础告警规则。",
+      "prompt_ref": "prompts/devops/observability.md",
+      "rag_refs": ["knowledge/devops/observability"],
+      "tools": ["read_file", "create_file", "validate_pipeline"],
+      "metadata": {"stage": "M4-reserved"}
+    }
+  ],
+  "keywords": [
+    "dockerfile",
+    "docker",
+    "compose",
+    "ci/cd",
+    "流水线",
+    "部署",
+    "发布",
+    "容器",
+    "k8s",
+    "kubernetes",
+    "镜像",
+    "可观测"
+  ],
+  "metadata": {
+    "manifest_version": 1,
+    "owner": "platform",
+    "activation": "M4"
+  }
+}

@@ -373,7 +373,7 @@ class SupervisorService:
             contract_status = getattr(contract, "status", None)
             if status == "CONFIRMED" and contract_status == "CONFIRMED":
                 return
-            if status in {"CANCELLED", "FAILED"}:
+            if status in {"CANCELLED", "CANCELLING", "FAILED"}:
                 message = f"Architect 已处于 {status}，门控中止"
                 self._gates.fail(gate.gate_id, message)
                 raise SupervisorGateAbortedError(message)
@@ -398,7 +398,9 @@ class SupervisorService:
             self._gates.fail(gate.gate_id, "Architect Run 已不存在")
             return
         status = getattr(active, "status", None)
-        if status in {"CANCELLED", "FAILED"}:
+        if status in {"CANCELLED", "CANCELLING", "FAILED"}:
+            # CANCELLING 表示取消请求已受理但执行线程尚未退出；此时契约
+            # 已不可能再确认，必须立即中止门控，否则会误报“契约未确认”。
             self._gates.fail(gate.gate_id, f"Architect 已处于 {status}")
 
     def _ui_handoff(self, *, order: int) -> AgentHandoff:

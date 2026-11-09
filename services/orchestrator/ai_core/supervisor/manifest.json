@@ -1,0 +1,134 @@
+{
+  "agent_id": "supervisor",
+  "name": "总调度 Supervisor",
+  "description": "虚拟研发团队的总入口：识别意图、拆分任务、路由到 UI / Architect / both 或企业 Agent，并维护多 Agent 门控、事件流与统一结果。",
+  "version": "1.0.0",
+  "status": "available",
+  "graph": "SupervisorGraphRunner",
+  "capabilities": [
+    {
+      "id": "intent_routing",
+      "description": "结合消息、画布标注、源码与作用域提示判断用户意图，输出可解释的路由计划。"
+    },
+    {
+      "id": "multi_agent_dispatch",
+      "description": "按路由计划派发一个或多个专家 Agent，聚合子 Run、SSE 事件与最终结果。"
+    },
+    {
+      "id": "hitl_gate_coordination",
+      "description": "在 both 场景下协调 Architect 契约确认与 UI 执行门控，契约未确认前禁止 UI 落地。"
+    }
+  ],
+  "supported_tools": [
+    "read_agent_registry",
+    "classify_intent",
+    "route_agent",
+    "dispatch_subgraph",
+    "manage_gate",
+    "emit_event"
+  ],
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "SupervisorInput",
+    "type": "object",
+    "required": ["projectId"],
+    "properties": {
+      "projectId": {"type": "string"},
+      "projectName": {"type": "string"},
+      "message": {"type": "string"},
+      "annotations": {
+        "type": "array",
+        "maxItems": 3,
+        "items": {"type": "object"}
+      },
+      "scopeHint": {
+        "type": "string",
+        "enum": ["ui", "architect", "both", "auto"]
+      },
+      "options": {"type": "object"}
+    }
+  },
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "SupervisorOutput",
+    "type": "object",
+    "required": ["taskType", "target", "dispatchable"],
+    "properties": {
+      "taskType": {"type": "string"},
+      "target": {
+        "type": "string",
+        "enum": ["ui_graph", "architect_graph", "both", "custom", "none"]
+      },
+      "confidence": {"type": "number"},
+      "reason": {"type": "string"},
+      "signals": {"type": "array", "items": {"type": "string"}},
+      "dispatchable": {"type": "boolean"},
+      "missingInputs": {"type": "array", "items": {"type": "string"}},
+      "handoffs": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "agentId": {"type": "string"},
+            "runId": {"type": ["string", "null"]},
+            "streamPath": {"type": ["string", "null"]}
+          }
+        }
+      },
+      "gateId": {"type": ["string", "null"]}
+    }
+  },
+  "skills": [
+    {
+      "skill_id": "supervisor.intent_routing",
+      "name": "意图识别与路由",
+      "description": "确定性规则优先，LLM 分类兜底；输出 taskType、target、置信度与命中的信号。",
+      "prompt_ref": "prompts/supervisor/intent_routing.md",
+      "rag_refs": ["knowledge/supervisor/routing"],
+      "tools": ["read_agent_registry", "classify_intent", "route_agent"],
+      "metadata": {"stage": "M2.5"}
+    },
+    {
+      "skill_id": "supervisor.task_decomposition",
+      "name": "任务拆分与依赖排序",
+      "description": "把复合需求拆成架构、UI、后端、数据、联调、部署等子任务，并标注执行顺序与依赖。",
+      "prompt_ref": "prompts/supervisor/task_decomposition.md",
+      "rag_refs": ["knowledge/supervisor/planning"],
+      "tools": ["read_agent_registry", "route_agent"],
+      "metadata": {"stage": "M4-preview"}
+    },
+    {
+      "skill_id": "supervisor.gate_coordination",
+      "name": "多 Agent 门控协调",
+      "description": "both 场景下等待 Architect 契约确认后再放行 UI；处理取消、失败与超时。",
+      "prompt_ref": "prompts/supervisor/gate_coordination.md",
+      "rag_refs": ["knowledge/supervisor/gates"],
+      "tools": ["manage_gate", "dispatch_subgraph", "emit_event"],
+      "metadata": {"stage": "M2.5"}
+    },
+    {
+      "skill_id": "supervisor.custom_agent_dispatch",
+      "name": "企业 Agent 派发",
+      "description": "依据 CustomAgent Manifest 生成受控路由计划，运行时隔离执行并只接收结构化结果。",
+      "prompt_ref": "prompts/supervisor/custom_agent_dispatch.md",
+      "rag_refs": ["knowledge/supervisor/custom_agents"],
+      "tools": ["read_agent_registry", "dispatch_subgraph"],
+      "metadata": {"stage": "M3-preview"}
+    }
+  ],
+  "keywords": [
+    "调度",
+    "编排",
+    "总控",
+    "多智能体",
+    "研发团队",
+    "分工",
+    "拆任务"
+  ],
+  "metadata": {
+    "manifest_version": 1,
+    "owner": "platform",
+    "role": "orchestrator",
+    "dispatchable": false
+  }
+}

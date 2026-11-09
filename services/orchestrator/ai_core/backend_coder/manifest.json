@@ -1,14 +1,18 @@
 {
   "agent_id": "backend_coder",
   "name": "后端工程师（预留）",
-  "description": "未来根据已确认的实施契约生成 Spring Boot 后端、测试与迁移脚本。",
+  "description": "未来根据已确认的实施契约生成 Java Spring Boot 或 Python FastAPI 后端、测试与迁移脚本。",
   "version": "0.0.0",
   "status": "reserved",
   "graph": "BackendCoderGraph",
   "capabilities": [
     {
       "id": "backend_generation",
-      "description": "读取《全栈实施契约》，生成 Spring Boot Controller / Service / Repository 与测试。"
+      "description": "读取《全栈实施契约》，按技术栈生成 Controller / Service / Repository 或 FastAPI Router / Service / Repository 与测试。"
+    },
+    {
+      "id": "api_contract_implementation",
+      "description": "把契约中的 API 路由、请求响应模型、状态码与错误码落地为可运行接口，并回写实现清单。"
     }
   ],
   "supported_tools": [
@@ -17,6 +21,7 @@
     "create_file",
     "apply_code_edit",
     "run_maven_test",
+    "run_pytest",
     "git_commit"
   ],
   "input_schema": {
@@ -27,6 +32,11 @@
     "properties": {
       "projectId": {"type": "string"},
       "contract": {"type": "object"},
+      "stack": {
+        "type": "string",
+        "enum": ["spring_boot", "fastapi"],
+        "default": "spring_boot"
+      },
       "sandboxId": {"type": ["string", "null"]},
       "files": {
         "type": "object",
@@ -51,6 +61,17 @@
         "additionalProperties": {"type": "string"}
       },
       "testReport": {"type": ["object", "null"]},
+      "endpointManifest": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "method": {"type": "string"},
+            "path": {"type": "string"},
+            "handler": {"type": "string"}
+          }
+        }
+      },
       "commitHash": {"type": ["string", "null"]}
     }
   },
@@ -58,25 +79,46 @@
     {
       "skill_id": "backend.spring_boot_crud",
       "name": "Spring Boot CRUD 生成",
-      "description": "按契约中的实体与 API 路由生成分层后端代码和测试。",
+      "description": "按契约中的实体与 API 路由生成 Controller / Service / Repository 分层代码和单元测试。",
       "prompt_ref": "prompts/backend/spring_boot_crud.md",
       "rag_refs": ["knowledge/backend/spring"],
       "tools": ["read_contract", "create_file", "run_maven_test"],
       "metadata": {"stage": "M3-preview"}
     },
     {
+      "skill_id": "backend.fastapi_crud",
+      "name": "FastAPI CRUD 生成",
+      "description": "按契约生成 FastAPI Router / Service / SQLAlchemy Repository，并补齐 pytest 用例。",
+      "prompt_ref": "prompts/backend/fastapi_crud.md",
+      "rag_refs": ["knowledge/backend/fastapi"],
+      "tools": ["read_contract", "create_file", "run_pytest"],
+      "metadata": {"stage": "M4-preview"}
+    },
+    {
       "skill_id": "backend.db_migration",
       "name": "数据库迁移生成",
-      "description": "根据契约 DDL 生成 Flyway 迁移并验证 up / down。",
+      "description": "根据契约 DDL 生成 Flyway / Alembic 迁移并验证 up / down。",
       "prompt_ref": "prompts/backend/db_migration.md",
       "rag_refs": ["knowledge/backend/mysql"],
-      "tools": ["read_contract", "create_file", "run_maven_test", "git_commit"],
+      "tools": ["read_contract", "create_file", "run_maven_test", "run_pytest", "git_commit"],
+      "metadata": {"stage": "M3-preview"}
+    },
+    {
+      "skill_id": "backend.api_test",
+      "name": "接口测试生成",
+      "description": "为每个契约路由生成正常、边界与错误码用例，输出可重复执行的测试报告。",
+      "prompt_ref": "prompts/backend/api_test.md",
+      "rag_refs": ["knowledge/backend/testing"],
+      "tools": ["read_contract", "create_file", "run_maven_test", "run_pytest"],
       "metadata": {"stage": "M3-preview"}
     }
   ],
   "keywords": [
     "后端代码",
+    "restful",
+    "api",
     "spring boot",
+    "fastapi",
     "controller",
     "service",
     "repository",
@@ -85,6 +127,7 @@
   "metadata": {
     "manifest_version": 1,
     "owner": "platform",
-    "contract_only": true
+    "contract_only": true,
+    "activation": "M3"
   }
 }

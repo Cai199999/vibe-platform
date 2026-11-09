@@ -71,7 +71,17 @@ class AgentDescriptor:
 
     @property
     def routable(self) -> bool:
-        """只有 available 与 custom 可以被 Supervisor 选中。"""
+        """只有可派发的 available / custom Agent 可以被 Supervisor 选中。
+
+        ``supervisor`` 自身在团队清单中标记为 available，以便前端展示其
+        调度能力；但它属于编排层，不能被当成子 Agent 再次派发。因此额外
+        尊重 Manifest 的 ``role=orchestrator`` 与 ``dispatchable=false``
+        声明，避免自调用或把编排器当执行器。
+        """
+        if self.metadata.get("role") == "orchestrator":
+            return False
+        if self.metadata.get("dispatchable") is False:
+            return False
         return self.status in {"available", "custom"}
 
     def supports(self, task_type: str) -> bool:
@@ -229,9 +239,13 @@ class AgentRegistry:
     def require_routable(self, agent_id: str) -> AgentDescriptor:
         descriptor = self.require(agent_id)
         if not descriptor.routable:
-            raise AgentNotAvailableError(
-                f"Agent 当前不可用（{descriptor.status}）: {agent_id}"
-            )
+            if descriptor.metadata.get("role") == "orchestrator":
+                reason = "orchestrator"
+            elif descriptor.metadata.get("dispatchable") is False:
+                reason = "not_dispatchable"
+            else:
+                reason = descriptor.status
+            raise AgentNotAvailableError(f"Agent 当前不可派发（{reason}）: {agent_id}")
         return descriptor
 
     def list_agents(self) -> list[AgentDescriptor]:

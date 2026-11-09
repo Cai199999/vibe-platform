@@ -1,0 +1,136 @@
+{
+  "agent_id": "integration_verifier",
+  "name": "联调测试工程师（预留）",
+  "description": "未来在沙盒内启动前端、后端与数据库依赖，执行契约一致性、API、UI 端到端与回归测试，并输出可复现的失败证据。",
+  "version": "0.0.0",
+  "status": "reserved",
+  "graph": "IntegrationVerifierGraph",
+  "capabilities": [
+    {
+      "id": "e2e_integration_test",
+      "description": "在多服务沙盒中执行 API + UI 端到端用例，验证真实请求、状态流转与预览可用性。"
+    },
+    {
+      "id": "contract_conformance_check",
+      "description": "核对实现与《全栈实施契约》的 API 路由、字段、状态码与数据库结构是否一致。"
+    },
+    {
+      "id": "self_heal_diagnosis",
+      "description": "对失败用例做日志归因与最小复现，输出修复建议或直接进入受限自愈流程。"
+    }
+  ],
+  "supported_tools": [
+    "read_contract",
+    "start_sandbox_stack",
+    "run_api_tests",
+    "run_playwright",
+    "collect_logs",
+    "report_findings",
+    "git_commit"
+  ],
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "IntegrationVerifierInput",
+    "type": "object",
+    "required": ["projectId", "contract"],
+    "properties": {
+      "projectId": {"type": "string"},
+      "contract": {"type": "object"},
+      "services": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {"type": "string"},
+            "healthUrl": {"type": "string"}
+          }
+        }
+      },
+      "previewUrl": {"type": ["string", "null"]},
+      "options": {"type": "object"}
+    }
+  },
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "IntegrationVerifierOutput",
+    "type": "object",
+    "required": ["runId", "status", "checks"],
+    "properties": {
+      "runId": {"type": "string"},
+      "status": {
+        "type": "string",
+        "enum": ["SUCCEEDED", "FAILED", "BLOCKED", "CANCELLED"]
+      },
+      "checks": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {"type": "string"},
+            "status": {"type": "string"},
+            "detail": {"type": "string"}
+          }
+        }
+      },
+      "report": {"type": ["object", "null"]},
+      "evidence": {
+        "type": "array",
+        "items": {"type": "string"}
+      },
+      "failedStep": {"type": ["string", "null"]}
+    }
+  },
+  "skills": [
+    {
+      "skill_id": "verify.api_e2e",
+      "name": "API 端到端验证",
+      "description": "启动服务栈，按契约逐条执行 REST 用例，校验状态码、响应结构与错误码。",
+      "prompt_ref": "prompts/verify/api_e2e.md",
+      "rag_refs": ["knowledge/verify/api"],
+      "tools": ["read_contract", "start_sandbox_stack", "run_api_tests", "collect_logs"],
+      "metadata": {"stage": "M4-reserved"}
+    },
+    {
+      "skill_id": "verify.ui_e2e",
+      "name": "UI 端到端验证",
+      "description": "用 Playwright 覆盖关键用户路径，校验页面渲染、交互与前后端联调结果。",
+      "prompt_ref": "prompts/verify/ui_e2e.md",
+      "rag_refs": ["knowledge/verify/playwright"],
+      "tools": ["start_sandbox_stack", "run_playwright", "collect_logs"],
+      "metadata": {"stage": "M4-reserved"}
+    },
+    {
+      "skill_id": "verify.contract_conformance",
+      "name": "契约一致性检查",
+      "description": "比对契约与实现，输出缺失路由、字段漂移、DDL 不一致等确定性报告。",
+      "prompt_ref": "prompts/verify/contract_conformance.md",
+      "rag_refs": ["knowledge/verify/contract"],
+      "tools": ["read_contract", "run_api_tests", "report_findings"],
+      "metadata": {"stage": "M4-reserved"}
+    },
+    {
+      "skill_id": "verify.failure_triage",
+      "name": "失败归因与最小复现",
+      "description": "聚合构建、运行与浏览器日志，定位首个失败点并生成可复现步骤与修复建议。",
+      "prompt_ref": "prompts/verify/failure_triage.md",
+      "rag_refs": ["knowledge/verify/triage"],
+      "tools": ["collect_logs", "report_findings", "git_commit"],
+      "metadata": {"stage": "M4-reserved"}
+    }
+  ],
+  "keywords": [
+    "联调",
+    "端到端",
+    "e2e",
+    "集成测试",
+    "冒烟",
+    "回归",
+    "playwright",
+    "契约一致性"
+  ],
+  "metadata": {
+    "manifest_version": 1,
+    "owner": "platform",
+    "activation": "M4"
+  }
+}

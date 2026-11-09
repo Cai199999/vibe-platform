@@ -1,7 +1,7 @@
 {
   "agent_id": "script_agent",
   "name": "脚本工程师（预留）",
-  "description": "未来生成与验证后台自动化脚本，并在受限沙盒中执行。",
+  "description": "未来生成与验证自动化脚本（爬虫、数据清洗、定时任务、批处理），并在受限沙盒中执行。",
   "version": "0.0.0",
   "status": "reserved",
   "graph": "ScriptAgentGraph",
@@ -9,6 +9,14 @@
     {
       "id": "script_automation",
       "description": "根据任务描述生成定时 / 批处理脚本，并在独立沙盒中验证输入输出。"
+    },
+    {
+      "id": "web_scraping",
+      "description": "按目标站点结构生成受限爬虫，处理分页、限速、重试与结构化落盘，不绕过鉴权与反爬策略。"
+    },
+    {
+      "id": "data_cleaning",
+      "description": "对 CSV / JSON / Excel 等输入做字段标准化、去重、缺失值处理与质量校验，输出可复现清洗报告。"
     }
   ],
   "supported_tools": [
@@ -16,6 +24,8 @@
     "read_file",
     "create_file",
     "run_script_sandbox",
+    "fetch_url",
+    "validate_output",
     "git_commit"
   ],
   "input_schema": {
@@ -77,6 +87,24 @@
       "rag_refs": ["knowledge/script/automation"],
       "tools": ["read_contract", "create_file", "run_script_sandbox", "git_commit"],
       "metadata": {"stage": "M3-preview"}
+    },
+    {
+      "skill_id": "script.web_scraper",
+      "name": "网页爬虫",
+      "description": "生成带分页、限速与重试的采集脚本，输出结构化数据与采集日志；仅处理公开或已授权页面。",
+      "prompt_ref": "prompts/script/web_scraper.md",
+      "rag_refs": ["knowledge/script/scraping"],
+      "tools": ["read_file", "create_file", "fetch_url", "run_script_sandbox"],
+      "metadata": {"stage": "M4-reserved"}
+    },
+    {
+      "skill_id": "script.data_cleaning",
+      "name": "数据清洗",
+      "description": "生成字段映射、去重、缺失值与异常值处理脚本，并输出清洗前后统计与质量报告。",
+      "prompt_ref": "prompts/script/data_cleaning.md",
+      "rag_refs": ["knowledge/script/cleaning"],
+      "tools": ["read_file", "create_file", "run_script_sandbox", "validate_output"],
+      "metadata": {"stage": "M4-reserved"}
     }
   ],
   "keywords": [
@@ -84,7 +112,12 @@
     "定时任务",
     "批处理",
     "自动化",
-    "cron"
+    "cron",
+    "爬虫",
+    "抓取",
+    "数据清洗",
+    "清洗",
+    "etl"
   ],
   "metadata": {
     "manifest_version": 1,
