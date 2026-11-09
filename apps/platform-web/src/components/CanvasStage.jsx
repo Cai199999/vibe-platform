@@ -130,7 +130,7 @@ function measureCoverage(pageRoot, selectionRect) {
  *  - 没命中叶子 / 圈远大于节点 → ADD，目标是最近的容器型 data-source 父级，
  *    并给出圈相对该父级的归一化坐标，供模型决定插入位置。
  */
-function analyzeSelection(pageRoot, selectionRect, centerPoint) {
+function analyzeSelection(pageRoot, selectionRect, centerPoint, scale = 1) {
   const { selectionArea, nodes } = measureCoverage(pageRoot, selectionRect)
   const leaves = nodes.filter((item) => !item.isContainer && item.target)
   const best = leaves.sort((a, b) => {
@@ -191,7 +191,12 @@ function analyzeSelection(pageRoot, selectionRect, centerPoint) {
   if (parentTarget && parentNode) {
     const parentRect = parentNode.getBoundingClientRect()
     if (parentRect.width > 0 && parentRect.height > 0) {
+      // 画布可能被缩放（viewport.scale），getBoundingClientRect 返回的是
+      // 屏幕像素。归一化比例不受缩放影响，但 relativeX/Y 等像素字段必须
+      // 除以 scale，才能得到 iframe / 预览视口里的真实 CSS 像素。
+      const safeScale = scale > 0 ? scale : 1
       relativeRect = {
+        // 兼容字段：相对父容器的归一化坐标（0~1）。
         x: Number(
           ((selectionRect.left - parentRect.left) / parentRect.width).toFixed(6),
         ),
@@ -200,6 +205,18 @@ function analyzeSelection(pageRoot, selectionRect, centerPoint) {
         ),
         width: Number((selectionRect.width / parentRect.width).toFixed(6)),
         height: Number((selectionRect.height / parentRect.height).toFixed(6)),
+        // 开发者级字段：相对父容器左上角的 CSS 像素偏移 + 父容器真实尺寸。
+        // 模型据此使用 flex/grid/absolute 精确落位，而不是猜测插入顺序。
+        relativeX: Number(
+          ((selectionRect.left - parentRect.left) / safeScale).toFixed(2),
+        ),
+        relativeY: Number(
+          ((selectionRect.top - parentRect.top) / safeScale).toFixed(2),
+        ),
+        widthPx: Number((selectionRect.width / safeScale).toFixed(2)),
+        heightPx: Number((selectionRect.height / safeScale).toFixed(2)),
+        parentWidth: Number((parentRect.width / safeScale).toFixed(2)),
+        parentHeight: Number((parentRect.height / safeScale).toFixed(2)),
       }
     }
   }
@@ -317,6 +334,10 @@ function AnnotationPopover({
   )
   const history = annotation.chatHistory ?? []
   const [answers, setAnswers] = useState({})
+  // 预设选项之外的“自定义”折叠栏：按 questionId 记录展开状态与草稿。
+  // 主输入栏始终保留，用户不必在“点选项”和“写补充说明”之间二选一。
+  const [customOpen, setCustomOpen] = useState({})
+  const [customText, setCustomText] = useState({})
   const [confirmingClose, setConfirmingClose] = useState(false)
   const sending = Boolean(submitting && pending)
   // 关闭确认按项目级 submitting 判定：单圈 / 批量提交都要保护。
@@ -351,15 +372,27 @@ function AnnotationPopover({
   useEffect(() => {
     if (!clarification) {
       setAnswers({})
+      setCustomOpen({})
+      setCustomText({})
       return
     }
     const initial = {}
+    const initialOpen = {}
     clarification.questions?.forEach((question) => {
       if (question.defaultValue !== undefined && question.defaultValue !== null) {
         initial[question.questionId] = question.defaultValue
       }
+      // 没有预设选项 / 自由文本题：直接展开文本域，不再藏一层输入框。
+      if (
+        question.type === 'free_text' ||
+        (question.options?.length ?? 0) === 0
+      ) {
+        initialOpen[question.questionId] = true
+      }
     })
     setAnswers(initial)
+    setCustomOpen(initialOpen)
+    setCustomText({})
   }, [clarification?.clarificationId])
 
   if (!style) return null
@@ -390,16 +423,64 @@ function AnnotationPopover({
     clarification?.questions?.every((question) => {
       if (!question.required) return true
       const value = answers[question.questionId]
-      if (Array.isArray(value)) return value.length > 0
-      return value !== undefined && value !== null && String(value).trim() !== ''
+      const extra = String(customText[question.questionId] ?? '').trim()
+      if (Array.isArray(value)) return value.length > 0 || extra !== ''
+      return (
+        (value !== undefined && value !== null && String(value).trim() !== '') ||
+        extra !== ''
+      )
     }),
   )
 
-  const submitClarification = () => {
-    if (!clarification || !clarificationComplete) return
+  // 全部为可选问题时，“完整”不代表有内容；至少要有一条答案或补充说明，
+  // 否则后端会以“至少回答一个澄清问题”拒绝。
+  const clarificationHasInput = Boolean(
+    annotation.intent.trim() ||
+      clarification?.questions?.some((question) => {
+        const value = answers[question.questionId]
+        const extra = String(customText[question.questionId] ?? '').trim()
+        if (Array.isArray(value)) return value.length > 0 || extra !== ''
+        return (
+          (value !== undefined &&
+            value !== null &&
+            String(value).trim() !== '') ||
+          extra !== ''
+        )
+      }),
+  )
+
+  const toggleCustom = (questionId) => {
+    const next = !customOpen[questionId]
+    setCustomOpen((previous) => ({ ...previous, [questionId]: next }))
+    // 进入自定义模式时清空预设答案，避免单选框仍显示旧选项。
+    setAnswers((previous) => ({ ...previous, [questionId]: '' }))
+    if (!next) {
+      setCustomText((previous) => ({ ...previous, [questionId]: '' }))
+    }
+  }
+
+  const updateCustomText = (question, text) => {
+    setCustomText((previous) => ({ ...previous, [question.questionId]: text }))
+    if (question.type !== 'multi_choice') {
+      setAnswer(question.questionId, text)
+    }
+  }
+
+  const submitClarification = (comment = '') => {
+    if (!clarification || !clarificationComplete || !clarificationHasInput) return
     const payload = clarification.questions
       .map((question) => {
-        const value = answers[question.questionId]
+        const extra = String(customText[question.questionId] ?? '').trim()
+        let value = answers[question.questionId]
+        if (question.type === 'multi_choice') {
+          const selected = Array.isArray(value) ? value : []
+          const merged = extra && !selected.includes(extra)
+            ? [...selected, extra]
+            : selected
+          value = merged
+        } else if (extra && (!value || String(value).trim() === '')) {
+          value = extra
+        }
         if (Array.isArray(value)) {
           return value.length > 0
             ? { questionId: question.questionId, value }
@@ -411,7 +492,14 @@ function AnnotationPopover({
         return { questionId: question.questionId, value }
       })
       .filter(Boolean)
-    onClarificationAnswer?.(annotation.id, clarification, payload)
+    // 主输入栏的补充说明作为 comment 一起提交，不强制用户把长文本
+    // 拆成一个个问题答案。
+    onClarificationAnswer?.(
+      annotation.id,
+      clarification,
+      payload,
+      String(comment || '').trim(),
+    )
   }
 
   return (
@@ -442,8 +530,12 @@ function AnnotationPopover({
       }}
       onSubmit={(event) => {
         event.preventDefault()
-        // 澄清挂起期间禁止再次触发 Run，否则会撞上后端 RUN_BUSY。
-        if (clarificationPending) return
+        // 澄清挂起期间，主输入栏不再关闭：发送时把当前问答 + 输入栏
+        // 补充说明一起提交，而不是启动一个新 Run（否则会撞 RUN_BUSY）。
+        if (clarificationPending) {
+          submitClarification(annotation.intent)
+          return
+        }
         onSend?.(annotation.id)
       }}
     >
@@ -590,10 +682,14 @@ function AnnotationPopover({
               // entity_fields / schema_fields 暂未提供结构化表单，
               // 降级为自由文本，保证 M2 不会因为未知题型卡死。
               const freeText = question.type === 'free_text' || !hasOptions
+              const custom = Boolean(customOpen[question.questionId])
               const inputValue =
                 typeof value === 'string' || typeof value === 'number'
                   ? String(value)
                   : ''
+              const customValue = freeText
+                ? inputValue
+                : String(customText[question.questionId] ?? '')
               return (
                 <div className="clarification-question" key={question.questionId}>
                   <p className="clarification-label">
@@ -610,7 +706,7 @@ function AnnotationPopover({
                       {question.options.map((option) => {
                         const selected = multi
                           ? Array.isArray(value) && value.includes(option.value)
-                          : value === option.value
+                          : value === option.value && !custom
                         return (
                           <button
                             key={option.value}
@@ -618,34 +714,69 @@ function AnnotationPopover({
                             className={`clarification-option ${selected ? 'is-selected' : ''}`}
                             aria-pressed={selected}
                             disabled={submitting}
-                            onClick={() =>
-                              multi
-                                ? toggleMultiAnswer(question.questionId, option.value)
-                                : setAnswer(question.questionId, option.value)
-                            }
+                            onClick={() => {
+                              // 点击预设选项只更新答案，不关闭主输入栏；
+                              // 用户仍可继续写补充说明。
+                              if (custom) {
+                                setCustomOpen((previous) => ({
+                                  ...previous,
+                                  [question.questionId]: false,
+                                }))
+                                setCustomText((previous) => ({
+                                  ...previous,
+                                  [question.questionId]: '',
+                                }))
+                              }
+                              if (multi) {
+                                toggleMultiAnswer(question.questionId, option.value)
+                              } else {
+                                setAnswer(question.questionId, option.value)
+                              }
+                            }}
                           >
                             {option.label}
                           </button>
                         )
                       })}
+                      <button
+                        type="button"
+                        className={`clarification-option is-custom ${custom ? 'is-selected' : ''}`}
+                        aria-pressed={custom}
+                        disabled={submitting}
+                        onClick={() => toggleCustom(question.questionId)}
+                      >
+                        自定义
+                      </button>
                     </div>
                   )}
 
-                  {freeText && (
-                    <input
+                  {/* 自由文本题默认展开；选项题在点击“自定义”后平滑展开。
+                      使用 textarea 允许开发者输入多行、较长的补充说明。 */}
+                  <div
+                    className={`clarification-expand ${freeText || custom ? 'is-open' : ''}`}
+                    aria-hidden={!(freeText || custom)}
+                  >
+                    <textarea
                       className="clarification-input"
-                      type="text"
-                      value={inputValue}
-                      maxLength={200}
+                      rows={2}
+                      value={customValue}
+                      maxLength={800}
+                      tabIndex={freeText || custom ? 0 : -1}
                       placeholder={
-                        hasOptions ? '也可以直接补充说明…' : '输入你的回答…'
+                        freeText
+                          ? '输入你的回答，支持多行…'
+                          : '补充自定义说明，支持多行…'
                       }
                       disabled={submitting}
-                      onChange={(event) =>
-                        setAnswer(question.questionId, event.target.value)
-                      }
+                      onChange={(event) => {
+                        if (freeText) {
+                          setAnswer(question.questionId, event.target.value)
+                        } else {
+                          updateCustomText(question, event.target.value)
+                        }
+                      }}
                     />
-                  )}
+                  </div>
                 </div>
               )
             })}
@@ -654,13 +785,15 @@ function AnnotationPopover({
             <button
               className="clarification-submit"
               type="button"
-              disabled={submitting || !clarificationComplete}
-              onClick={submitClarification}
+              disabled={
+                submitting || !clarificationComplete || !clarificationHasInput
+              }
+              onClick={() => submitClarification(annotation.intent)}
             >
               {submitting ? (
                 <span className="mini-spinner" aria-label="执行中" />
               ) : (
-                '确认并继续'
+                '发送并继续'
               )}
             </button>
           )}
@@ -677,10 +810,12 @@ function AnnotationPopover({
             blocked
               ? '请先在上方处理待审批的修改…'
               : clarificationPending
-                ? '请先回答上方问题…'
+                ? clarification
+                  ? '补充说明（可选），随确认一起提交…'
+                  : '其他标注有待确认的问题…'
                 : '描述修改意图...'
           }
-          disabled={blocked || submitting || clarificationPending}
+          disabled={blocked || submitting}
           onChange={(event) => onChange?.(annotation.id, event.target.value)}
         />
         <button
@@ -689,10 +824,15 @@ function AnnotationPopover({
           disabled={
             blocked ||
             submitting ||
-            clarificationPending ||
-            !annotation.intent.trim()
+            (clarificationPending
+              ? !clarificationComplete || !clarificationHasInput
+              : !annotation.intent.trim())
           }
-          title="只对当前圈执行一次增量修改"
+          title={
+            clarificationPending
+              ? '把当前回答与输入栏说明一起提交'
+              : '只对当前圈执行一次增量修改'
+          }
         >
           {sending ? <span className="mini-spinner" aria-label="执行中" /> : '发送'}
         </button>
@@ -886,10 +1026,15 @@ export default function CanvasStage({
         height: rect.height * VIEWPORT_BASE_HEIGHT * viewport.scale,
       }
       const pageRoot = stageRef.current.querySelector('.mock-page')
-      const analysis = analyzeSelection(pageRoot, screenRect, {
-        x: left + screenRect.width / 2,
-        y: top + screenRect.height / 2,
-      })
+      const analysis = analyzeSelection(
+        pageRoot,
+        screenRect,
+        {
+          x: left + screenRect.width / 2,
+          y: top + screenRect.height / 2,
+        },
+        viewport.scale,
+      )
       onAnnotationAdd?.({ rect, ...analysis })
     }
     startTargetRef.current = null

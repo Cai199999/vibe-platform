@@ -274,7 +274,7 @@ function ProjectWorkspaceInner({
               onChange={(event) => onModelProviderChange?.(event.target.value)}
             >
               <option value="auto">DeepSeek V3</option>
-              <option value="mock">本地预览</option>
+              <option value="mock">Mock（本地）</option>
             </select>
           </label>
         </div>
@@ -495,6 +495,7 @@ function ProjectWorkspaceInner({
             <RuntimePanel
               run={run}
               projectName={project.name}
+              modelProvider={modelProvider}
               expanded
               visible={active && previewVisible}
               onRetry={submitReady ? onRetry : undefined}

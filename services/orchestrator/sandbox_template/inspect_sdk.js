@@ -129,6 +129,18 @@
     }
   }
 
+  function round2(value) {
+    return Math.round(value * 100) / 100
+  }
+
+  /**
+   * 相对父容器的几何信息。
+   *
+   * SDK 运行在预览 iframe 内，rect / containerRect 已经是 1280×720 设计
+   * 视口下的 CSS 像素，因此这里不需要再除 scale。归一化字段用于兼容旧
+   * 契约；relativeX/Y 等像素字段供模型做精确落位（absolute / margin /
+   * grid 偏移）。
+   */
   function relativeRect(rect, containerRect) {
     if (!containerRect || containerRect.width <= 0 || containerRect.height <= 0) {
       return null
@@ -138,6 +150,12 @@
       y: (rect.y - containerRect.y) / containerRect.height,
       width: rect.width / containerRect.width,
       height: rect.height / containerRect.height,
+      relativeX: round2(rect.x - containerRect.x),
+      relativeY: round2(rect.y - containerRect.y),
+      widthPx: round2(rect.width),
+      heightPx: round2(rect.height),
+      parentWidth: round2(containerRect.width),
+      parentHeight: round2(containerRect.height),
     }
   }
 

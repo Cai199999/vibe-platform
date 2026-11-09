@@ -1596,6 +1596,20 @@ class RunExecutionService:
             raise ClarificationAnswersRequiredError(
                 f"缺少必填澄清回答: {sorted(missing)}"
             )
+
+        # 开发者可在主输入栏 / 自定义折叠栏补充大段说明。服务端把 comment
+        # 作为一条伪回答并入上下文：它不参与必填校验，但会随 answers 进入
+        # Planner Prompt，并被 _augment_context_with_answers 写回标注指令，
+        # 确保 Coder 也能看到。
+        comment = (request.comment or "").strip()
+        if comment:
+            answers.append(
+                {
+                    "questionId": "__developer_comment__",
+                    "value": comment,
+                    "text": None,
+                }
+            )
         return answers
 
     # --------------------------------------------------------

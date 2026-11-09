@@ -56,6 +56,11 @@ def main() -> int:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1600, "height": 1000})
+        # 几何契约测试必须使用 Mock 模型，避免真实 DeepSeek 因“按钮文案”
+        # 触发 HITL 澄清，导致结果不确定。
+        context.add_init_script(
+            "window.localStorage.setItem('vibe.llmProvider', 'mock')"
+        )
         page = context.new_page()
         sandbox_id: str | None = None
         route_payloads: list[dict] = []
@@ -121,11 +126,11 @@ def main() -> int:
             if selector != '[data-source="card"]':
                 fail(f"ADD 目标不是 card 父容器: {selector}")
             relative = annotation.get("relativeTarget") or {}
-            if relative.get("coordinateSpace") != "parent-normalized":
+            if relative.get("coordinateSpace") != "parent-relative":
                 fail(f"relativeTarget 坐标系错误: {relative}")
             if relative.get("parentSelector") != selector:
                 fail(f"relativeTarget.parentSelector 不匹配: {relative}")
-            # 圈位于卡片右下角：x/y 应明显大于 0.5，且宽度/高度为正。
+            # 圈位于卡片右下角：归一化 x/y 应明显大于 0.5。
             if not (0.5 <= relative.get("x", -1) <= 0.75):
                 fail(f"relativeTarget.x 不在右下区域: {relative}")
             if not (0.6 <= relative.get("y", -1) <= 0.85):
@@ -134,6 +139,35 @@ def main() -> int:
                 fail(f"relativeTarget.width 非法: {relative}")
             if not (0 < relative.get("height", 0) <= 1):
                 fail(f"relativeTarget.height 非法: {relative}")
+
+            # 新增开发者级像素坐标：必须齐全、非负，且归一化比例与像素
+            # 比例一致（证明 CanvasStage 已正确除以 viewport.scale）。
+            pixel_keys = (
+                "relativeX",
+                "relativeY",
+                "widthPx",
+                "heightPx",
+                "parentWidth",
+                "parentHeight",
+            )
+            for key in pixel_keys:
+                value = relative.get(key)
+                if not isinstance(value, (int, float)):
+                    fail(f"relativeTarget.{key} 缺失或非数字: {relative}")
+                if value < 0:
+                    fail(f"relativeTarget.{key} 为负数: {relative}")
+            if relative["parentWidth"] <= 0 or relative["parentHeight"] <= 0:
+                fail(f"父容器尺寸非法: {relative}")
+            ratio_x = relative["relativeX"] / relative["parentWidth"]
+            ratio_y = relative["relativeY"] / relative["parentHeight"]
+            if abs(ratio_x - relative.get("x", 0)) > 0.02:
+                fail(f"像素 x 与归一化 x 不一致: {relative}")
+            if abs(ratio_y - relative.get("y", 0)) > 0.02:
+                fail(f"像素 y 与归一化 y 不一致: {relative}")
+            if relative["relativeX"] + relative["widthPx"] > relative["parentWidth"] + 1:
+                fail(f"圈选超出父容器右边界: {relative}")
+            if relative["relativeY"] + relative["heightPx"] > relative["parentHeight"] + 1:
+                fail(f"圈选超出父容器下边界: {relative}")
             print(
                 "   契约校验通过: "
                 f"action={annotation['action']} target={selector} "

@@ -143,11 +143,20 @@ def render_vibe_context(
         if annotation.action == "ADD":
             lines.extend(["", "**新节点相对父容器的位置（ADD）**", ""])
             if relative:
+                # 归一化字段用于判断“上/中/下、左/中/右”这类粗粒度位置；
+                # 像素字段用于 absolute / margin 精确落位。两者都提供给
+                # 模型，避免只有比例时把按钮插到错误行。
                 for key in (
                     "x",
                     "y",
                     "width",
                     "height",
+                    "relativeX",
+                    "relativeY",
+                    "widthPx",
+                    "heightPx",
+                    "parentWidth",
+                    "parentHeight",
                     "coordinateSpace",
                     "parentSelector",
                 ):

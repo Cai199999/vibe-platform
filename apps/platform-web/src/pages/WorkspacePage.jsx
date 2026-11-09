@@ -325,8 +325,10 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
           `按指令修改${target?.label || '目标组件'}：${instruction}`,
           '其余布局、文案与交互保持不变',
         ]
-  // relativeTarget 只在 ADD 时有意义：x/y/width/height 都是相对父容器的
-  // 归一化坐标（0~1），模型据此判断插入顺序与左右分栏。
+  // relativeTarget 只在 ADD 时有意义：
+  //  - x/y/width/height 为兼容字段（相对父容器的归一化坐标 0~1）；
+  //  - relativeX/Y 与 widthPx/heightPx/parentWidth/parentHeight 为开发者级
+  //    像素坐标，模型据此用 flex/grid/absolute/margin 精确落位。
   const relative = action === 'ADD' ? entry.relativeRect : null
   return {
     version: 1,
@@ -349,7 +351,13 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
             y: relative?.y ?? 0,
             width: relative?.width ?? 1,
             height: relative?.height ?? 1,
-            coordinateSpace: 'parent-normalized',
+            relativeX: relative?.relativeX ?? null,
+            relativeY: relative?.relativeY ?? null,
+            widthPx: relative?.widthPx ?? null,
+            heightPx: relative?.heightPx ?? null,
+            parentWidth: relative?.parentWidth ?? null,
+            parentHeight: relative?.parentHeight ?? null,
+            coordinateSpace: 'parent-relative',
             parentSelector: target?.selector ?? null,
             parentMarker: target?.marker ?? null,
           }
@@ -1166,6 +1174,20 @@ export default function WorkspacePage() {
       source: inspectSource = null,
     },
   ) => {
+    // 开发者详情面板需要 file:line:column。Inspect 模式由 SDK 直接给出；
+    // 圈选模式用入口源码 + data-source 标记反查行号，便于在 IDE 中跳转。
+    const project = projects.find((item) => item.id === projectId)
+    const anchored = inspectSource || addTarget || target
+    let astPath = null
+    if (inspectSource?.file) {
+      astPath = `${inspectSource.file}:${inspectSource.line ?? 1}:${inspectSource.column ?? 1}`
+    } else if (project && anchored?.marker) {
+      const entryFile = projectEntryFile(project)
+      const sourceCode =
+        project.template === 'vibe-react' ? INITIAL_APP : projectSourceFile(project)
+      astPath = `${entryFile}:${findTargetLine(sourceCode, anchored.marker)}:1`
+    }
+
     patchRun(projectId, (previous) => {
       if (previous.annotations.length >= MAX_ANNOTATIONS) return previous
       const autoAction =
@@ -1195,6 +1217,7 @@ export default function WorkspacePage() {
             // 圈选模式仍从空输入框开始。
             intent: presetIntent,
             inspectSource,
+            astPath,
             createdAt: new Date().toISOString(),
             // 每个标注 = 一个独立 Agent thread，后续对话复用同一个 id。
             threadId: newId('thread'),
@@ -2006,6 +2029,7 @@ export default function WorkspacePage() {
     annotationId,
     clarification,
     answers,
+    comment = '',
   ) => {
     const run = runStates[projectId] ?? EMPTY_RUN
     if (
@@ -2034,7 +2058,13 @@ export default function WorkspacePage() {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${session?.token ?? ''}`,
           },
-          body: JSON.stringify({ answers, expectedVersion: clarification.round }),
+          body: JSON.stringify({
+            answers,
+            // 主输入栏 / 自定义文本域里的补充说明随澄清一起提交；服务端
+            // 把它作为开发者注释并入标注上下文，不会丢失。
+            comment: String(comment || '').trim() || null,
+            expectedVersion: clarification.round,
+          }),
         },
       )
       if (!response.ok) {
@@ -2574,12 +2604,18 @@ export default function WorkspacePage() {
                 onAnnotationSend={(annotationId) =>
                   handleAnnotationSend(project.id, annotationId)
                 }
-                onClarificationAnswer={(annotationId, clarification, answers) =>
+                onClarificationAnswer={(
+                  annotationId,
+                  clarification,
+                  answers,
+                  comment,
+                ) =>
                   handleClarificationAnswer(
                     project.id,
                     annotationId,
                     clarification,
                     answers,
+                    comment,
                   )
                 }
                 onAnnotationRollback={(annotationId, message) =>

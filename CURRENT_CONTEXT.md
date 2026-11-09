@@ -26,7 +26,11 @@ React 18 + Vite → Java 21 + Spring Boot 3.3.5 BFF（WebClient）→ Python 3.1
   只向 Architect 投影 `architectHistory`，UI 只收画布标注；State 字段边界测试固化
 - 序列化：Annotation / chatHistory 的 `createdAt` 统一 ISO 8601；Prompt 与 SSE
   `json.dumps` 加 `default=str` 兜底，修复 datetime 导致的后端 500
-- Eval 10/10；单测 152 passed（含隔离 10 项 + 序列化 4 项）
+- 开发者工具化：ADD 的 `relativeTarget` 增加 CSS 像素坐标（relativeX/Y、
+  widthPx/heightPx、parentW/H），Prompt 按 flex/grid/absolute 精确落位；
+  澄清期间主输入栏常驻 + 自定义 textarea + comment 入上下文；预览底部
+  状态栏与抽屉展示模型/沙盒/AST 路径/Diff/LangGraph 时间轴
+- Eval 10/10；单测 159 passed（含隔离 10 + 序列化 4 + 相对坐标 4 + 澄清 3）
 
 ## 真 / 假边界
 

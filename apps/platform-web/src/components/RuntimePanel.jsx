@@ -302,22 +302,56 @@ function IdleState({ hasAnnotation }) {
           <span />
           <span />
         </div>
-        <strong>还没有预览</strong>
-        <p>{hasAnnotation ? '填写修改意图后提交。' : '圈选一个组件开始。'}</p>
+        <strong>IDLE · 等待 Run</strong>
+        <p>
+          {hasAnnotation
+            ? '标注已就绪，填写意图并发送即可启动沙盒。'
+            : '在画布圈选区域，或在预览中精准选择元素。'}
+        </p>
       </div>
     </div>
   )
 }
 
-function RunDetails({ result, onClose }) {
-  const verify = result.verifyResult
-  const diffLines = result.generatedPatch ? result.generatedPatch.split('\n').length : 0
+const MODEL_LABELS = {
+  auto: 'DeepSeek V3',
+  deepseek: 'DeepSeek V3',
+  mock: 'Mock 引擎',
+}
+
+/** 标注对应的 AST 路径：Inspect 有精确 file:line:column；圈选模式回退到
+ * 入口文件 + 标记行号（由发送时写入的 astPath 提供）。 */
+function annotationAstPath(annotation, index) {
+  if (annotation.astPath) return annotation.astPath
+  const source = annotation.inspectSource
+  if (source?.file) {
+    return `${source.file}:${source.line ?? 1}:${source.column ?? 1}`
+  }
+  const target = annotation.action === 'ADD' ? annotation.addTarget : annotation.target
+  return target?.selector ? `${target.selector}（行号未解析）` : `标注 ${index + 1}`
+}
+
+/** 开发者详情抽屉：底部状态栏拉起，执行中也可查看。 */
+function RunDetails({
+  result,
+  annotations = [],
+  timeline = [],
+  modelProvider = 'auto',
+  sandboxLabel = '未启动',
+  previewStatus = 'idle',
+  onClose,
+}) {
+  const verify = result?.verifyResult
+  const diffLines = result?.generatedPatch
+    ? result.generatedPatch.split('\n').length
+    : 0
+  const modelLabel = MODEL_LABELS[modelProvider] ?? modelProvider
 
   return (
-    <div className="runtime-drawer" role="dialog" aria-label="Run 执行详情">
+    <div className="runtime-drawer" role="dialog" aria-label="开发者执行详情">
       <div className="runtime-drawer-head">
         <div>
-          <span className="eyebrow">Run Detail</span>
+          <span className="eyebrow">Developer Detail</span>
           <strong>执行详情</strong>
         </div>
         <button className="ghost-button" type="button" onClick={onClose}>
@@ -328,39 +362,93 @@ function RunDetails({ result, onClose }) {
       <div className="runtime-drawer-body">
         <div className="runtime-meta">
           <span>
-            Run <code>{result.runId}</code>
+            模型 <code>{modelLabel}</code>
           </span>
           <span>
-            构建 <code>{verify?.durationMs ? `${verify.durationMs} ms` : '—'}</code>
+            预览 <code>{previewStatus}</code>
+          </span>
+          <span>
+            沙盒 <code>{sandboxLabel}</code>
+          </span>
+          <span>
+            Run <code>{result?.runId ?? '—'}</code>
+          </span>
+          <span>
+            构建{' '}
+            <code>{verify?.durationMs ? `${verify.durationMs} ms` : '—'}</code>
           </span>
           <span>
             退出码 <code>{verify ? verify.exitCode : '—'}</code>
           </span>
-          <span>
-            沙盒 <code>{result.sandboxId}</code>
-          </span>
         </div>
 
-        {result.error && <div className="error-box">{result.error}</div>}
+        {result?.error && <div className="error-box">{result.error}</div>}
+
+        <details className="runtime-fold" open>
+          <summary>
+            目标元素 AST 路径
+            <span>{annotations.length} 个标注</span>
+          </summary>
+          {annotations.length === 0 ? (
+            <p className="muted">当前没有标注。</p>
+          ) : (
+            <ul className="ast-path-list">
+              {annotations.map((annotation, index) => {
+                const path = annotationAstPath(annotation, index)
+                const intent = annotation.intent?.trim()
+                return (
+                  <li key={annotation.id}>
+                    <span className={`ast-action is-${annotation.action || 'MODIFY'}`}>
+                      {annotation.action === 'ADD' ? 'ADD' : 'MODIFY'}
+                    </span>
+                    <button
+                      className="ast-path"
+                      type="button"
+                      title="点击复制路径"
+                      onClick={() => {
+                        navigator.clipboard?.writeText(path)?.catch(() => {})
+                      }}
+                    >
+                      {path}
+                    </button>
+                    {intent && <p>{intent}</p>}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </details>
+
+        <details className="runtime-fold" open>
+          <summary>
+            LangGraph 节点流转
+            <span>{timeline.length} 个节点</span>
+          </summary>
+          {timeline.length > 0 ? (
+            <Timeline items={timeline} />
+          ) : (
+            <p className="muted">暂无节点事件；发起 Run 后会实时记录。</p>
+          )}
+        </details>
 
         {diffLines > 0 && (
           <details className="runtime-fold" open>
             <summary>
-              查看本次生成的代码 Diff
+              原始代码 Diff
               <span>{diffLines} 行</span>
             </summary>
             <DiffView patch={result.generatedPatch} title="Generated Patch" />
           </details>
         )}
 
-        {!result.status?.includes('APPROVAL') && verify?.errorLogs && (
+        {!result?.status?.includes('APPROVAL') && verify?.errorLogs && (
           <details className="runtime-fold">
             <summary>最终构建日志</summary>
             <pre className="log-view">{verify.errorLogs}</pre>
           </details>
         )}
 
-        {result.messages?.length > 0 && (
+        {result?.messages?.length > 0 && (
           <details className="runtime-fold">
             <summary>
               Agent 执行轨迹
@@ -448,6 +536,7 @@ function usePreviewConnection(previewUrl, active) {
 export default function RuntimePanel({
   run,
   projectName,
+  modelProvider = 'auto',
   expanded = false,
   visible = true,
   onRetry,
@@ -479,6 +568,20 @@ export default function RuntimePanel({
   const diffLines = result?.generatedPatch ? result.generatedPatch.split('\n').length : 0
   const connection = usePreviewConnection(previewUrl, visible && !submitting)
   const previewOffline = connection === 'offline'
+  const modelLabel = MODEL_LABELS[modelProvider] ?? modelProvider
+  // 沙盒实时状态：运行中 > 预览探活结果 > 是否有 sandboxId。
+  const sandboxState = submitting
+    ? { label: '运行中', tone: 'busy' }
+    : result?.sandboxId
+      ? connection === 'offline'
+        ? { label: '预览离线', tone: 'offline' }
+        : connection === 'checking'
+          ? { label: '探测中', tone: 'checking' }
+          : { label: '在线', tone: 'online' }
+      : { label: '未启动', tone: 'idle' }
+  const sandboxLabel = result?.sandboxId
+    ? `${sandboxState.label} · ${result.sandboxId.slice(0, 14)}`
+    : sandboxState.label
   // 只有真正的“执行”可以取消；回滚 / 审批决策提交中不显示取消。
   const cancellable = Boolean(onCancelRun) && pendingAction !== 'rollback'
 
@@ -526,6 +629,15 @@ export default function RuntimePanel({
           <i />
           {stateLabel}
         </span>
+        <div className="runtime-chrome-meta">
+          <span className="runtime-chip" title="当前模型">
+            {modelLabel}
+          </span>
+          <span className={`runtime-chip is-sandbox is-${sandboxState.tone}`}>
+            <i />
+            沙盒 {sandboxLabel}
+          </span>
+        </div>
       </div>
 
       <div className="runtime-stage">
@@ -666,8 +778,47 @@ export default function RuntimePanel({
           </div>
         )}
 
-        {detailsOpen && result && (
-          <RunDetails result={result} onClose={() => setDetailsOpen(false)} />
+        {/* 开发者状态栏：始终可见，点击右侧拉起底部详情抽屉。执行中也能
+            查看模型、预览探活、沙盒 ID 与节点时间轴。 */}
+        <div className="runtime-statusbar" role="status">
+          <div className="runtime-statusbar-left">
+            <span className="runtime-status-chip">
+              模型 <strong>{modelLabel}</strong>
+            </span>
+            <span className={`runtime-status-chip is-${sandboxState.tone}`}>
+              沙盒 <strong>{sandboxState.label}</strong>
+            </span>
+            <span className="runtime-status-chip">
+              预览 <strong>{connection}</strong>
+            </span>
+            <span className="runtime-status-chip">
+              标注 <strong>{annotations.length}</strong>
+            </span>
+            {result?.sandboxId && (
+              <code className="runtime-status-id">{result.sandboxId}</code>
+            )}
+          </div>
+          <button
+            className={`runtime-statusbar-toggle ${detailsOpen ? 'is-open' : ''}`}
+            type="button"
+            onClick={() => setDetailsOpen((previous) => !previous)}
+            aria-expanded={detailsOpen}
+          >
+            {detailsOpen ? '收起详情' : '开发者详情'}
+            <span aria-hidden="true">⌃</span>
+          </button>
+        </div>
+
+        {detailsOpen && (
+          <RunDetails
+            result={result}
+            annotations={annotations}
+            timeline={timeline}
+            modelProvider={modelProvider}
+            sandboxLabel={sandboxLabel}
+            previewStatus={connection}
+            onClose={() => setDetailsOpen(false)}
+          />
         )}
       </div>
     </aside>
