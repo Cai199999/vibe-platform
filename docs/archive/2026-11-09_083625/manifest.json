@@ -1,0 +1,144 @@
+{
+  "timestamp": "2026-11-09_083625",
+  "createdAt": "2026-11-09T08:36:25",
+  "rule": {
+    "days": 7,
+    "minChars": 2000,
+    "documents": 19
+  },
+  "entries": [
+    {
+      "original": "docs/memory/2026-11-04_M1_add_component.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-04_M1_add_component.md",
+      "reason": "增量文档：2026 字",
+      "chars": 2026,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-04_M1_batch_annotations_deepseek.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-04_M1_batch_annotations_deepseek.md",
+      "reason": "增量文档：3105 字",
+      "chars": 3105,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-04_M1_full_chain.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-04_M1_full_chain.md",
+      "reason": "增量文档：2431 字",
+      "chars": 2431,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-04_M1_git_undo_rollback.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-04_M1_git_undo_rollback.md",
+      "reason": "增量文档：3940 字",
+      "chars": 3940,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-04_M1_multiturn_world_coords.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-04_M1_multiturn_world_coords.md",
+      "reason": "增量文档：3043 字",
+      "chars": 3043,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-04_UX_phase2_workspace.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-04_UX_phase2_workspace.md",
+      "reason": "增量文档：2403 字",
+      "chars": 2403,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-04_UX_phase3_viewport_lifecycle.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-04_UX_phase3_viewport_lifecycle.md",
+      "reason": "增量文档：3492 字",
+      "chars": 3492,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-04_UX_phase4_view_modes.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-04_UX_phase4_view_modes.md",
+      "reason": "增量文档：6198 字",
+      "chars": 6198,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-04_project_export.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-04_project_export.md",
+      "reason": "增量文档：2410 字",
+      "chars": 2410,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-05_Agent_OS_data_management_architecture.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-05_Agent_OS_data_management_architecture.md",
+      "reason": "增量文档：2997 字",
+      "chars": 2997,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-05_M2_5_agent_manifest_skill.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-05_M2_5_agent_manifest_skill.md",
+      "reason": "增量文档：2531 字",
+      "chars": 2531,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-05_M2_5_app_shape_contract.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-05_M2_5_app_shape_contract.md",
+      "reason": "增量文档：4465 字",
+      "chars": 4465,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-05_M2_5_demo_visualization_custom_agent.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-05_M2_5_demo_visualization_custom_agent.md",
+      "reason": "增量文档：2062 字",
+      "chars": 2062,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-05_M2_5_supervisor_frontend_gate.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-05_M2_5_supervisor_frontend_gate.md",
+      "reason": "增量文档：3596 字",
+      "chars": 3596,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-05_M2_5_supervisor_multi_agent.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-05_M2_5_supervisor_multi_agent.md",
+      "reason": "增量文档：3391 字",
+      "chars": 3391,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-05_M3A_diff_approval_cancel.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-05_M3A_diff_approval_cancel.md",
+      "reason": "增量文档：3443 字",
+      "chars": 3443,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-05_M3B_code_editor_abstraction.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-05_M3B_code_editor_abstraction.md",
+      "reason": "增量文档：2522 字",
+      "chars": 2522,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-05_M3_1_admin_console_metrics.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-05_M3_1_admin_console_metrics.md",
+      "reason": "增量文档：2051 字",
+      "chars": 2051,
+      "mtime": "2026-11-09T08:36:21"
+    },
+    {
+      "original": "docs/memory/2026-11-05_manual_approval_setting.md",
+      "archived": "docs/archive/2026-11-09_083625/memory/2026-11-05_manual_approval_setting.md",
+      "reason": "增量文档：2211 字",
+      "chars": 2211,
+      "mtime": "2026-11-09T08:36:21"
+    }
+  ]
+}
