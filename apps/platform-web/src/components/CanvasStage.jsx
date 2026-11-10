@@ -1013,11 +1013,6 @@ function CanvasStage({
   // 固定 1440×900 的视口节点：所有屏幕 → 世界坐标换算都以它的
   // getBoundingClientRect 为准，自动包含滚动偏移与 zoom transform。
   const viewportRef = useRef(null)
-  // iframe 内的 inspect SDK 是否已就绪；未就绪时不拦截滚轮，
-  // 让浏览器先处理外层容器的原生滚动。
-  const liveReadyRef = useRef(false)
-  // 最近一次 iframe 滚动快照：滚轮到边界时把剩余滚动交还外层容器。
-  const liveScrollRef = useRef(null)
   const onFrameScrollRef = useRef(onFrameScroll)
   const onFrameInteractionRef = useRef(onFrameInteraction)
   onFrameScrollRef.current = onFrameScroll
@@ -1062,6 +1057,13 @@ function CanvasStage({
     recalc: recalcViewport,
   } = useFillViewport(stageRef)
   // 画布自己的平移 / 缩放状态，保存在 ProjectWorkspace 级别的 ViewportContext。
+  // 焦点模型：
+  //   - 画布态（标注态）：普通滚轮 = 缩放画布；
+  //   - 浏览态（iframe 接管指针）：普通滚轮 = 滚动网页内部内容。
+  // 因此 zoomOnWheel 与 liveInteractive 严格互斥，且 mode 变化后仍能
+  // 正确回退（mock / 空白画布始终使用滚轮缩放）。
+  const canvasFocused =
+    mode !== 'live' || interactionMode !== 'interact' || Boolean(inspectMode)
   const viewport = usePanZoom({
     containerRef: stageRef,
     panel: 'canvas',
@@ -1070,6 +1072,7 @@ function CanvasStage({
     baseOffsetY,
     contentWidth: designWidth,
     contentHeight: designHeight,
+    zoomOnWheel: canvasFocused,
   })
 
   // 非激活 Tab 用 display:none / content-visibility 休眠，期间 ResizeObserver
@@ -1199,8 +1202,6 @@ function CanvasStage({
       if (!data || data.channel !== 'vibe-inspect') return
       if (data.type === 'ready') {
         // iframe 重载（HMR / 首次加载）后重新下发 Inspect 开关。
-        liveReadyRef.current = true
-        liveScrollRef.current = data.payload?.scroll ?? null
         inspectModeRef.current &&
           frame.contentWindow?.postMessage(
             { channel: 'vibe-inspect', type: 'enable', enabled: true },
@@ -1210,8 +1211,7 @@ function CanvasStage({
         return
       }
       if (data.type === 'scroll') {
-        // 页面内部滚动位置：用于驱动右侧预览同步与滚轮边界判断。
-        liveScrollRef.current = data.payload ?? null
+        // 页面内部滚动位置：用于驱动右侧预览同步。
         onFrameScrollRef.current?.(data.payload)
         return
       }
@@ -1230,9 +1230,12 @@ function CanvasStage({
         if (data.payload?.ok) {
           onInspectPickRef.current?.(data.payload)
           // Inspect 的点击同样换算成一次视觉反馈，让预览区知道用户点了哪。
+          // synthetic=true：这是“选中元素”而非业务点击，预览侧只画涟漪，
+          // 不能重放 click 触发页面动作。
           onFrameInteractionRef.current?.({
             ...data.payload,
             type: 'click',
+            synthetic: true,
             source: data.payload.source ?? null,
           })
         }
@@ -1294,68 +1297,13 @@ function CanvasStage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inspectMode, liveUrl, refreshNonce, mode, suspended])
 
-  // iframe 重载后 SDK 需要重新握手，先撤销 ready 标记。
-  useEffect(() => {
-    liveReadyRef.current = false
-    liveScrollRef.current = null
-  }, [liveUrl, refreshNonce, mode, suspended])
-
   /*
-   * 标注态下 iframe 设置了 pointer-events: none，滚轮事件到不了页面内部。
-   * 为了让滚轮像真实浏览器一样滚动页面，这里把 delta 通过 postMessage
-   * 转发给 SDK；只有 Ctrl / Cmd + 滚轮才留给 usePanZoom 做缩放。
-   *
-   * 交互态 iframe 自己消费滚轮，无需也不应重复转发。
+   * 滚轮不再由画布转发。
+   *  - 画布态：iframe 设置 pointer-events:none，wheel 落到 stage，由
+   *    usePanZoom 直接缩放画布；
+   *  - 浏览态：iframe 接管指针，浏览器原生滚动其内部文档。
+   * 两条路径互斥，因此不需要也不应该再手动 postMessage 转发 delta。
    */
-  useEffect(() => {
-    const node = stageRef.current
-    if (!node) return undefined
-
-    const onWheel = (event) => {
-      if (event.ctrlKey || event.metaKey) return
-      if (mode !== 'live' || liveInteractive) return
-      const frame = liveFrameRef.current
-      if (!frame?.contentWindow || !liveReadyRef.current) return
-
-      const unit =
-        event.deltaMode === 1
-          ? 16
-          : event.deltaMode === 2
-            ? node.clientHeight
-            : 1
-      const dx = event.deltaX * unit
-      const dy = event.deltaY * unit
-      // 边界链式滚动：页面还能滚就滚页面；页面已到顶 / 到底，
-      // 剩余滚轮交还外层画布容器（用于查看 1440×900 视口的其余部分）。
-      const snapshot = liveScrollRef.current
-      if (!snapshot) return
-      const scrollX = Number(snapshot.scrollX) || 0
-      const scrollY = Number(snapshot.scrollY) || 0
-      const maxX = Number(snapshot.maxX) || 0
-      const maxY = Number(snapshot.maxY) || 0
-      const canScrollX =
-        dx < 0 ? scrollX > 0.5 : dx > 0 ? scrollX < maxX - 0.5 : false
-      const canScrollY =
-        dy < 0 ? scrollY > 0.5 : dy > 0 ? scrollY < maxY - 0.5 : false
-      if (!canScrollX && !canScrollY) return
-
-      event.preventDefault()
-      frame.contentWindow.postMessage(
-        {
-          channel: 'vibe-inspect',
-          type: 'scroll-by',
-          payload: {
-            dx: canScrollX ? dx : 0,
-            dy: canScrollY ? dy : 0,
-          },
-        },
-        '*',
-      )
-    }
-
-    node.addEventListener('wheel', onWheel, { passive: false })
-    return () => node.removeEventListener('wheel', onWheel)
-  }, [mode, liveInteractive])
 
   const flashLimitNotice = () => {
     setLimitNotice(true)
@@ -1601,7 +1549,7 @@ function CanvasStage({
 
       <div
         ref={stageRef}
-        className={`canvas-stage ${disabled || blocked ? 'is-disabled' : ''} ${drawing ? 'is-drawing' : ''} ${liveInteractive ? 'is-interacting' : ''} ${viewport.spaceHeld ? 'is-pan-ready' : ''} ${viewport.panning ? 'is-panning' : ''}`}
+        className={`canvas-stage ${disabled || blocked ? 'is-disabled' : ''} ${drawing ? 'is-drawing' : ''} ${liveInteractive ? 'is-interacting' : ''} ${mode === 'live' ? (liveInteractive ? 'is-web-focus' : 'is-canvas-focus') : ''} ${viewport.spaceHeld ? 'is-pan-ready' : ''} ${viewport.panning ? 'is-panning' : ''}`}
         data-canvas-interaction={mode === 'live' ? interactionMode : undefined}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -1669,7 +1617,10 @@ function CanvasStage({
           )}
 
           {mode === 'live' && (
-            <div className="canvas-live-page" data-canvas-live>
+            <div
+              className={`canvas-live-page ${liveInteractive ? 'is-web-focus' : 'is-canvas-focus'}`}
+              data-canvas-live
+            >
               {liveUrl && !suspended ? (
                 <iframe
                   key={`${liveUrl}:${refreshNonce}`}
@@ -1970,8 +1921,8 @@ function CanvasStage({
               aria-pressed={liveInteractive}
               title={
                 liveInteractive
-                  ? '回到标注态：圈选页面、平移和缩放'
-                  : '浏览页面：让指针穿透到 iframe，可点击页面内按钮'
+                  ? '回到画布焦点：滚轮恢复缩放，可继续圈选'
+                  : '浏览网页：指针穿透到 iframe，滚轮滚动页面内部内容'
               }
               onClick={() =>
                 setInteractionMode((current) =>
@@ -2006,10 +1957,10 @@ function CanvasStage({
                   ? '松开鼠标完成圈选'
                   : mode === 'live'
                     ? liveInteractive
-                      ? '浏览中 · 点击灰色空白回到标注 · 中键平移'
-                      : '标注中 · 单击页面进入浏览 · 拖拽圈选 · 中键平移'
+                      ? '网页焦点 · 滚轮滚动页面 · 点击灰色空白回到画布 · 中键平移'
+                      : '画布焦点 · 滚轮缩放画布 · 单击页面进入浏览 · 拖拽圈选 · 中键平移'
                     : interactive
-                      ? '圈选页面区域 · 滚轮滚动页面 · Ctrl+滚轮缩放 · 空格/中键平移'
+                      ? '圈选页面区域 · 滚轮缩放画布 · 空格/中键平移'
                       : ''}
         </div>
       </div>

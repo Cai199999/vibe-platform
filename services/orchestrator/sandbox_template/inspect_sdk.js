@@ -24,6 +24,8 @@
   var CHANNEL = 'vibe-inspect'
   var enabled = false
   var overlay = null
+  // 预览侧重放点击时置位，避免把重放产生的新 click 再回传父页面。
+  var replayingClick = false
   var CONTAINER_TAGS = {
     div: true,
     section: true,
@@ -436,6 +438,51 @@
      *  - scroll-to：右侧预览对齐画布的滚动位置。
      * 两者都限制在文档可滚动范围内，避免负值或越界。
      */
+    /*
+     * 预览侧点击重放。
+     * ------------------------------------------------------------------
+     * 画布与预览是两个独立的 iframe / React 实例，状态不共享。用户在
+     * 画布里点击按钮后，父页面把同一视口坐标发给预览，这里在预览自己
+     * 的 DOM 上重放一次 click：
+     *   - 计数器 +1、弹窗打开、Tab 切换等 React 状态变化会真实发生；
+     *   - 不需要序列化整棵 DOM，也不会破坏组件内部状态；
+     *   - 依赖滚动已同步，保证 elementFromPoint 命中同一个元素。
+     * 重放期间置位 replayingClick，阻止 click 监听器再次回传形成回环。
+     */
+    if (data.type === 'replay-click') {
+      var clickBody = bodyOf(data)
+      var clickX = readNumber(data, clickBody, 'x')
+      var clickY = readNumber(data, clickBody, 'y')
+      var target = document.elementFromPoint(clickX, clickY)
+      if (
+        !target ||
+        target === document.documentElement ||
+        target === document.body
+      ) {
+        return
+      }
+      replayingClick = true
+      try {
+        if (typeof target.click === 'function') {
+          target.click()
+        } else {
+          target.dispatchEvent(
+            new MouseEvent('click', {
+              bubbles: true,
+              cancelable: true,
+              clientX: clickX,
+              clientY: clickY,
+              view: window,
+            }),
+          )
+        }
+      } catch (error) {
+        // 重放失败不影响预览自身继续使用。
+      } finally {
+        replayingClick = false
+      }
+      return
+    }
     if (data.type === 'scroll-by') {
       var scrollByBody = bodyOf(data)
       var dx = readNumber(data, scrollByBody, 'dx')
@@ -530,7 +577,7 @@
   document.addEventListener(
     'click',
     function (event) {
-      if (enabled) return
+      if (enabled || replayingClick) return
       var target = event.target
       if (!target || typeof target.getBoundingClientRect !== 'function') return
       var sourceNode = target.closest

@@ -19,7 +19,7 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒；中间�
 - **防脑补骨架**：抽象目标（如“做个工作台”）在 `skeleton_gate` 被确定性拦截，完全不调用 LLM；契约标记 `skeletonMode=true`，组件仅 `isPlaceholder=true`；FrontendCoder 只渲染 Header + Sidebar + Main、响应式 Grid、Welcome 与唯一占位。E2E 已跑通。
 - **体验断层修复（六项）**：契约确认后对话栏常驻、可追加需求并走同一契约 REVISE；Inspect 在 live 画布可用；全栈前后端共用 collectionPath（不再猜 `/stream`）；侧边栏按路由真实切换内容；拖拽痕仅在画布、展示区渲染最终代码；移动改为 `move_component` Tool，只写 `transform: translate3d`，拖拽仅转自然语言指令。
 - **企业级升级（五问题）**：画布完整 flex 链 + 自适应缩放，Tab 激活强制重算并重载 iframe；`管理 Agent` 支持内置锁定、AgentBuilder 新建/删除、知识库 `.md/.txt` 上传；Architect 强制交互澄清，前端按契约生成真实 onClick + Loading/Error/Success；新增 `ConsistencyVerifier`，在沙盒构建前比对前端 Method/Path/Payload 与后端 `api-routes.json`，不一致即阻断并输出差异报告。
-- **Phase B 交互闭环**：画布/预览固定 1440×900 + 原生滚动，普通滚轮滚页面、Ctrl/Meta+滚轮缩放、中键/空格平移；SDK 补发真实滚动快照（Resize/MutationObserver），双屏同步 scroll-by/scroll-to 并绘制点击涟漪；Architect 双 Tab（架构确认/影子助手），影子 LLM 只读问答 + 顶部不可关闭待答 Banner + 生成门禁。
+- **Phase B 交互闭环**：画布/预览固定 1440×900 + 文档原生滚动；焦点模型——点击页面进网页焦点（滚轮滚页面），点击画布空白回画布焦点（滚轮缩放），中键/空格始终平移；SDK 补发真实滚动快照，双屏同步 scroll-to，并在预览重放 click 使 React 状态一致；Architect 双 Tab（架构确认/影子助手），影子 LLM 只读问答 + 顶部不可关闭待答 Banner + 生成门禁。
 
 ## 真假边界
 

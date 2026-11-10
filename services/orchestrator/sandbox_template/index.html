@@ -13,6 +13,15 @@
         box-sizing: border-box;
       }
 
+      /* 文档根节点承担滚动条：body / #root 保持 100% 高度但不要各自
+         再开一个内层滚动容器，否则 window.scrollY 会恒为 0，双屏同步
+         与 SDK 滚动快照都会失效。 */
+      html {
+        overflow-y: auto;
+        overflow-x: hidden;
+        scrollbar-gutter: stable;
+      }
+
       html,
       body,
       #root {

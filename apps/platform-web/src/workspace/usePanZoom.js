@@ -13,6 +13,30 @@ const MIN_VISIBLE_PX = 96
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
 
 /**
+ * 判断滚轮事件是否落在画布内部的可滚动 UI 上（标注浮层的聊天记录、
+ * 输入框等）。这些区域必须保留原生滚动，不能被画布缩放抢走滚轮。
+ */
+const isScrollableTarget = (target, boundary) => {
+  let node = target
+  while (node && node !== boundary) {
+    if (node.nodeType === 1) {
+      const tag = node.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+      const style = window.getComputedStyle(node)
+      const overflowY = style.overflowY
+      if (
+        (overflowY === 'auto' || overflowY === 'scroll') &&
+        node.scrollHeight > node.clientHeight + 1
+      ) {
+        return true
+      }
+    }
+    node = node.parentElement
+  }
+  return false
+}
+
+/**
  * 单轴平移边界：只做「至少保留 MIN_VISIBLE_PX 可见」的硬保护，绝不居中。
  *
  * Cover 基准在 100% 时会让其中一个方向恰好等于容器尺寸，若该方向强制居中，
@@ -30,9 +54,10 @@ const clampAxis = (translate, contentSize, containerSize) => {
 /**
  * 画布 / 预览共用的平移缩放交互。
  *
- *  - 普通滚轮：完全交还给浏览器，用于滚动页面 / 容器；
- *  - Ctrl / Cmd + 滚轮：以鼠标指针为中心缩放（先求指针下方的世界坐标，
- *    再反算新的平移）；
+ *  - 普通滚轮：
+ *      · zoomOnWheel=false（预览 / 浏览态）：交还浏览器滚动页面；
+ *      · zoomOnWheel=true（画布焦点态）：直接缩放画布；
+ *  - Ctrl / Cmd + 滚轮：无论焦点在哪都以鼠标指针为中心缩放；
  *  - 中键拖拽 / 空格 + 左键拖拽：平移；
  *  - 缩放边界 0.25x ~ 3x（相对初始铺满比例）；
  *  - 平移边界保证画面至少保留 96px 可见；
@@ -48,6 +73,9 @@ export default function usePanZoom({
   // 平移边界必须按「真实内容尺寸」计算，而不是容器实测尺寸。
   contentWidth,
   contentHeight,
+  // 画布焦点态为 true：普通滚轮直接缩放；浏览态传 false，让 iframe
+  // 自己消费滚轮做原生滚动。
+  zoomOnWheel = false,
 }) {
   const { views, updateViewport, resetViewport } = useViewportState()
   const view = views[panel] ?? { zoom: 1, panX: 0, panY: 0 }
@@ -157,17 +185,22 @@ export default function usePanZoom({
     [containerRef],
   )
 
-  // 原生 wheel 监听：默认完全交还给浏览器 / 页面滚动。
-  // 只有按住 Ctrl（Windows/Linux）或 Cmd（macOS）时才进入画布缩放。
+  /*
+   * 原生 wheel 监听。
+   *
+   *  - 画布焦点态（zoomOnWheel=true）：普通滚轮直接缩放画布；
+   *  - 浏览态（zoomOnWheel=false）：不拦截，让 iframe 自己原生滚动；
+   *  - Ctrl / Cmd + 滚轮：始终缩放（预览面板也保留这个快捷方式）；
+   *  - 指针落在标注浮层 / 输入框等可滚动控件上时，交还原生滚动。
+   */
   useEffect(() => {
     const node = containerRef.current
     if (!node) return undefined
 
     const onWheel = (event) => {
-      const zoomGesture = event.ctrlKey || event.metaKey
-      // 普通滚轮 = 真实网页手感：不 preventDefault，让滚轮作用于
-      // 容器滚动或由画布转发给 iframe 内部页面。
+      const zoomGesture = event.ctrlKey || event.metaKey || zoomOnWheel
       if (!zoomGesture) return
+      if (isScrollableTarget(event.target, node)) return
 
       event.preventDefault()
       const rect = node.getBoundingClientRect()
@@ -202,7 +235,7 @@ export default function usePanZoom({
 
     node.addEventListener('wheel', onWheel, { passive: false })
     return () => node.removeEventListener('wheel', onWheel)
-  }, [containerRef, panel, updateViewport, clampView])
+  }, [containerRef, panel, updateViewport, clampView, zoomOnWheel])
 
   const startPan = useCallback((event) => {
     const middleButton = event.button === 1

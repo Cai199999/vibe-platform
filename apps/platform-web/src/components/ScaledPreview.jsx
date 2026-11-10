@@ -206,6 +206,33 @@ export default function ScaledPreview({
   }, [syncScroll?.nonce])
 
   /*
+   * 画布点击 → 预览重放。
+   * ------------------------------------------------------------------
+   * 画布与预览是两个独立 iframe，React 状态互不影响。父页面把画布的
+   * 点击坐标转发给 SDK，预览在自己的 DOM 上重放一次 click：
+   *   - 计数器 +1、弹窗打开、Tab 切换等状态变化会真实发生；
+   *   - 先对齐滚动位置，保证 elementFromPoint 命中同一元素；
+   *   - Inspect 的“选中元素”点击标记为 synthetic，只画涟漪不重放。
+   */
+  useEffect(() => {
+    if (!interactionFeedback || interactionFeedback.synthetic) return
+    if (!readyRef.current) return
+    const x = Number(interactionFeedback.x)
+    const y = Number(interactionFeedback.y)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return
+    sendInspect(
+      message('scroll-to', {
+        x: Number(interactionFeedback.scrollX) || 0,
+        y: Number(interactionFeedback.scrollY) || 0,
+        behavior: 'auto',
+      }),
+    )
+    sendInspect(message('replay-click', { x, y }))
+    // sendInspect 只做 postMessage；按 nonce 触发一次重放。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactionFeedback?.nonce])
+
+  /*
    * 预览和画布一样恢复真实浏览器的滚轮手感：
    * 普通滚轮滚动 iframe 内部页面，Ctrl / Cmd + 滚轮才缩放画布。
    * 透明手势层会拦截原生滚动，因此必须手动转发给 SDK。

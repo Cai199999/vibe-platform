@@ -133,6 +133,10 @@ function ProjectWorkspaceInner({
       x: payload.x,
       y: payload.y,
       rect: payload.rect,
+      // 点击发生时的滚动位置：预览先对齐再重放 click，确保命中同一元素。
+      scrollX: payload.scrollX,
+      scrollY: payload.scrollY,
+      synthetic: Boolean(payload.synthetic),
       nonce: clickNonceRef.current,
     })
   }
