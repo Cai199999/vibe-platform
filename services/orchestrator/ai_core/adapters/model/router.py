@@ -37,6 +37,7 @@ TaskName = Literal[
     "coder",
     "architect_analyze",
     "architect_contract",
+    "architect_helper",
 ]
 
 # 任务 -> 能力层级。新增节点时必须显式登记，避免默默落到昂贵模型。
@@ -58,6 +59,8 @@ TASK_CAPABILITY: dict[str, Capability] = {
     "architect_analyze": "fast",
     # 契约起草 / 修订是长上下文 + 结构化输出，质量优先。
     "architect_contract": "strong",
+    # 影子助手是只读解释，短输出，走廉价模型即可。
+    "architect_helper": "fast",
 }
 
 # 任务级环境变量对应的 Settings 字段。
@@ -70,6 +73,7 @@ TASK_SETTING_FIELD: dict[str, str] = {
     "coder": "model_coder_name",
     "architect_analyze": "model_architect_analyze_name",
     "architect_contract": "model_architect_contract_name",
+    "architect_helper": "model_architect_helper_name",
 }
 
 

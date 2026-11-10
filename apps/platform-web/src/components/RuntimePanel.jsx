@@ -636,6 +636,9 @@ export default function RuntimePanel({
   onPlacementConfirm,
   onPlacementDismiss,
   refreshNonce = 0,
+  // 双屏同步：画布滚动位置 / 点击反馈，仅展示模式传入。
+  syncScroll = null,
+  interactionFeedback = null,
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [deployOpen, setDeployOpen] = useState(false)
@@ -751,6 +754,8 @@ export default function RuntimePanel({
             visible={visible && !submitting}
             inspectMode={inspectMode}
             onInspectPick={onInspectPick}
+            syncScroll={syncScroll}
+            interactionFeedback={interactionFeedback}
           />
         )}
 

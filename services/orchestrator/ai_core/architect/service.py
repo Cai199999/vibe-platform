@@ -23,7 +23,9 @@ from ai_core.architect.graph import (
     ArchitectGraphRunner,
     ArchitectRunCancelledError,
 )
+from ai_core.adapters.rag import get_rag_provider
 from ai_core.architect.llm import (
+    ArchitectContext,
     ArchitectLLM,
     ArchitectLLMError,
     build_architect_llm,
@@ -33,12 +35,15 @@ from ai_core.domain.architect import (
     ArchitectAnswersRequest,
     ArchitectCancelRequest,
     ArchitectCancelResponse,
+    ArchitectCitation,
     ArchitectClarification,
     ArchitectClarificationStatus,
     ArchitectContract,
     ArchitectContractStatus,
     ArchitectDecisionRequest,
     ArchitectDecisionResponse,
+    ArchitectHelperRequest,
+    ArchitectHelperResponse,
     ArchitectRunRequest,
     ArchitectRunStatus,
     ArchitectSnapshotResponse,
@@ -46,6 +51,7 @@ from ai_core.domain.architect import (
 from ai_core.architect.source import collect_source
 from ai_core.config import Settings, get_settings
 from ai_core.domain.scope import scoped_checkpoint_key
+from ai_core.ports.rag import RAGProviderError
 from ai_core.ports.sandbox import SandboxProvider
 
 logger = logging.getLogger(__name__)
@@ -561,6 +567,89 @@ class ArchitectService:
         return _decision_response(active, contract, now)
 
     # --------------------------------------------------------
+    # 影子助手（只读）
+    # --------------------------------------------------------
+    def helper(
+        self,
+        run_id: str,
+        request: ArchitectHelperRequest,
+    ) -> ArchitectHelperResponse:
+        """回答用户的自由提问，绝不推进主架构状态机。
+
+        与 ``answer_clarification`` 的关键区别：
+          - 不修改 active 的任何字段（status / clarification / contract 等）；
+          - 不启动 Graph、不写 checkpoint、不发 ``architect.*`` 事件；
+          - 只读取当前快照与知识库，返回一段解释文本 + 引用列表。
+
+        LLM 调用是慢操作，必须先复制快照、释放锁，再在锁外调用模型，
+        避免 Helper 阻塞主流程的澄清 / 决策请求。
+        """
+        active = _require_run(run_id)
+        with _ACTIVE_LOCK:
+            state = dict(active.state or {})
+            snapshot_text = _architecture_snapshot(active)
+            llm = active.llm
+            project_id = active.request.project_id
+            project_name = active.request.project_name
+            project_summary = active.request.project_summary
+            latest_changes = active.request.latest_changes
+            source_hash = active.source_hash
+            app_shape = active.app_shape
+            round_no = active.round
+            threshold = active.threshold
+            provider_name = active.request.options.llm_provider
+            rag_provider_name = (
+                state.get("rag_provider") or active.request.options.rag_provider
+            )
+            rag_top_k = max(1, int(state.get("rag_top_k") or 5))
+            ui_history = list(
+                state.get("ui_history") or active.request.ui_history or []
+            )[-12:]
+
+        # 知识库检索失败不影响问答：降级为无引用回答并记录日志。
+        chunks: list[Any] = []
+        if request.use_knowledge_base:
+            try:
+                provider = get_rag_provider(rag_provider_name or None)
+                chunks = provider.retrieve(
+                    request.question.strip(),
+                    top_k=rag_top_k,
+                )
+            except RAGProviderError as exc:
+                logger.warning("architect helper rag retrieve failed: %s", exc)
+
+        context = ArchitectContext(
+            project_id=project_id,
+            project_name=project_name,
+            # Helper 只看架构快照，不回灌整份源码，控制延迟与成本。
+            source_files={},
+            ui_history=ui_history,
+            slots=dict(state.get("slots") or {}),
+            app_shape=app_shape,
+            round=round_no,
+            threshold=threshold,
+            retrieved_chunks=[
+                {**chunk.to_citation(), "content": chunk.content} for chunk in chunks
+            ],
+            source_hash=source_hash,
+            project_summary=project_summary,
+            latest_changes=latest_changes,
+            architecture_snapshot=snapshot_text,
+        )
+        history = [item.model_dump(by_alias=True) for item in request.history]
+        answer = llm.answer_helper(context, request.question, history)
+        citations = [
+            ArchitectCitation.model_validate(chunk.to_citation()) for chunk in chunks
+        ]
+        return ArchitectHelperResponse(
+            run_id=run_id,
+            answer=answer,
+            citations=citations,
+            read_only=True,
+            model=provider_name,
+        )
+
+    # --------------------------------------------------------
     # 取消 / 查询
     # --------------------------------------------------------
     def cancel(
@@ -811,6 +900,45 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         "error": "",
         "error_code": "",
     }
+
+
+def _architecture_snapshot(active: ActiveArchitectRun) -> str:
+    """构造 Helper Agent 的只读架构快照。
+
+    只包含已确认槽位、待答问题与当前契约，不包含源码全文；这样 Helper
+    的回答始终与主状态机一致，又不会因为源码过大拖慢响应。
+    """
+    slots = active.state.get("slots") or {}
+    lines = [
+        f"- 项目：{active.request.project_name}（{active.request.project_id}）",
+        f"- 当前状态：{active.status}",
+        f"- 应用形态：{active.app_shape or '尚未确定'}",
+        f"- 澄清轮次：{active.round}/{active.max_rounds}",
+        (f"- 置信度：{active.confidence_score:.2f}" f"（阈值 {active.threshold:.2f}）"),
+        f"- 已确认槽位：{json.dumps(slots, ensure_ascii=False, default=str)}",
+    ]
+    clarification = active.clarification
+    if clarification is not None and clarification.questions:
+        lines.append("- 当前待确认的关键问题：")
+        for question in clarification.questions:
+            lines.append(
+                f"  · [{question.slot}] {question.prompt}"
+                f"{'（必填）' if question.required else '（可选）'}"
+            )
+    contract = active.contract
+    if contract is not None:
+        lines.extend(
+            [
+                f"- 契约状态：{contract.status}",
+                (
+                    "- 技术栈："
+                    f"{json.dumps(contract.tech_stack, ensure_ascii=False, default=str)}"
+                ),
+                ("- 数据库：" f"{contract.database_engine or '无 / 非全栈'}"),
+                f"- 契约 Markdown（截断）：\n{contract.contract_markdown[:6000]}",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def _clarification_from_interrupt(

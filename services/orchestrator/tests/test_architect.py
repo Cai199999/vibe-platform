@@ -35,13 +35,19 @@ from ai_core.architect.skeleton import (
     should_use_skeleton,
 )
 from ai_core.architect.slots import infer_app_shape, infer_slots
+from ai_core.architect import service as architect_service_module
+from ai_core.architect.service import ActiveArchitectRun, ArchitectService
 from ai_core.architect.schemas import (
     ArchitectAnalysis,
     ArchitectApiRoute,
     ArchitectImplementationPhase,
 )
 from ai_core.config import Settings
-from ai_core.domain.architect import ArchitectQuestion
+from ai_core.domain.architect import (
+    ArchitectHelperRequest,
+    ArchitectQuestion,
+    ArchitectRunRequest,
+)
 
 SHAPES = ("lightweight_web", "script_automation", "full_stack_system")
 
@@ -818,6 +824,88 @@ class ContractTierValidationTest(unittest.TestCase):
         validation = validate_draft("mobile_app", draft)
         self.assertFalse(validation.valid)
         self.assertTrue(any("未知应用形态" in issue for issue in validation.issues))
+
+
+class ArchitectHelperTest(unittest.TestCase):
+    """影子 LLM：只读问答，绝不触碰主架构状态机。"""
+
+    def _register_active_run(self) -> ActiveArchitectRun:
+        run_id = f"helper_{uuid.uuid4().hex[:10]}"
+        request = ArchitectRunRequest.model_validate(
+            {
+                "projectId": "project_helper_test",
+                "projectName": "影子助手测试项目",
+                "options": {
+                    "llmProvider": "mock",
+                    "ragProvider": "markdown",
+                },
+            }
+        )
+        active = ActiveArchitectRun(
+            run_id=run_id,
+            fingerprint="helper-test",
+            request=request,
+            llm=MockArchitectLLM(),
+            buffer=RunEventBuffer(run_id),
+            status="AWAITING_CLARIFICATION",
+            state={
+                "slots": {
+                    "app.shape": "full_stack_system",
+                    "backend.framework": "Java Spring Boot",
+                    "database.engine": "MySQL",
+                },
+                "rag_provider": "markdown",
+                "rag_top_k": 3,
+                "ui_history": [{"role": "user", "content": "做一个订单管理系统"}],
+            },
+            source_hash="helper_source_hash",
+            app_shape="full_stack_system",
+            round=1,
+            max_rounds=5,
+            confidence_score=0.72,
+            threshold=0.85,
+        )
+        with architect_service_module._ACTIVE_LOCK:
+            architect_service_module._ACTIVE_RUNS[run_id] = active
+        self.addCleanup(lambda: architect_service_module._ACTIVE_RUNS.pop(run_id, None))
+        return active
+
+    def test_helper_answers_without_mutating_state(self) -> None:
+        active = self._register_active_run()
+        service = ArchitectService(llm=MockArchitectLLM())
+        before_state = dict(active.state)
+        before_clarification = active.clarification
+        before_contract = active.contract
+        request = ArchitectHelperRequest.model_validate(
+            {
+                "question": "为什么要用 Node.js？",
+                "history": [
+                    {"role": "user", "content": "当前用什么后端？"},
+                    {"role": "assistant", "content": "当前记录的是 Java。"},
+                ],
+                # 关闭知识库，避免测试依赖 RAG 实现。
+                "useKnowledgeBase": False,
+            }
+        )
+
+        response = service.helper(active.run_id, request)
+
+        self.assertTrue(response.answer.strip())
+        self.assertTrue(response.read_only)
+        self.assertEqual(response.run_id, active.run_id)
+        # 只读铁律：状态、状态机字段与契约引用都必须原样保留。
+        self.assertEqual(active.state, before_state)
+        self.assertEqual(active.status, "AWAITING_CLARIFICATION")
+        self.assertIs(active.clarification, before_clarification)
+        self.assertIs(active.contract, before_contract)
+
+    def test_helper_requires_existing_run(self) -> None:
+        service = ArchitectService(llm=MockArchitectLLM())
+        request = ArchitectHelperRequest.model_validate(
+            {"question": "为什么这样分层？", "useKnowledgeBase": False}
+        )
+        with self.assertRaises(Exception):
+            service.helper("arc_missing_helper_run", request)
 
 
 if __name__ == "__main__":

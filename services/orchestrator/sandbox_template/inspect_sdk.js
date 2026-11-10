@@ -4,11 +4,16 @@
  * 该脚本由 vite 插件注入到沙盒 index.html 中。平台预览 iframe 与沙盒
  * 跨域，父页面无法直接访问 DOM，因此双方通过 postMessage 通信：
  *
- *   parent -> iframe: { channel:'vibe-inspect', type:'enable'|'move'|'pick'|'clear'|'measure' }
- *   iframe -> parent: { channel:'vibe-inspect', type:'ready'|'hover'|'picked'|'measured' }
+ *   parent -> iframe: { channel:'vibe-inspect',
+ *                       type:'enable'|'move'|'pick'|'clear'|'measure'|
+ *                            'scroll-by'|'scroll-to' }
+ *   iframe -> parent: { channel:'vibe-inspect',
+ *                       type:'ready'|'hover'|'picked'|'measured'|
+ *                            'scroll'|'click' }
  *
- * 坐标全部使用 iframe 内部视口 CSS 像素（1280×720 设计视口），
+ * 坐标全部使用 iframe 内部视口 CSS 像素（1440×900 设计视口），
  * 由父页面根据 iframe 的 transform scale 反算后传入。
+ * 滚动位置使用 window.scrollX / scrollY（文档坐标），双屏据此同步。
  *
  * 安全边界：只读取 DOM 属性与 rect，不读取 cookie / storage，不执行
  * 父页面传入的任何代码。
@@ -37,9 +42,63 @@
   function reply(source, origin, type, payload) {
     if (!source || typeof source.postMessage !== 'function') return
     source.postMessage(
-      { channel: CHANNEL, type: type, payload: payload },
+      { channel: CHANNEL, type: type, payload: payload || {} },
       origin || '*',
     )
+  }
+
+  /** 统一向父页面发送消息（滚动 / 点击等主动事件）。 */
+  function post(type, payload) {
+    try {
+      window.parent.postMessage(
+        { channel: CHANNEL, type: type, payload: payload || {} },
+        '*',
+      )
+    } catch (error) {
+      // iframe 被移除或浏览器策略拦截时静默降级。
+    }
+  }
+
+  /**
+   * 读取消息体。
+   *
+   * 历史协议里存在两种写法：inspect 指令（move/pick）把参数平铺在消息
+   * 顶层，而滚动指令（scroll-by/scroll-to）统一放在 payload 里。这里
+   * 同时兼容 `data.payload.xxx` 与 `data.xxx`，避免父页面升级消息结构
+   * 后 iframe 静默不滚动。
+   */
+  function bodyOf(data) {
+    return data && data.payload && typeof data.payload === 'object'
+      ? data.payload
+      : {}
+  }
+
+  function readNumber(data, body, key) {
+    var value = data[key] !== undefined && data[key] !== null ? data[key] : body[key]
+    var number = Number(value)
+    return isFinite(number) ? number : 0
+  }
+
+  /** 当前文档滚动快照；父页面用它驱动右侧预览同步。 */
+  function scrollSnapshot() {
+    var maxX = Math.max(
+      0,
+      (document.documentElement.scrollWidth || 0) - window.innerWidth,
+    )
+    var maxY = Math.max(
+      0,
+      (document.documentElement.scrollHeight || 0) - window.innerHeight,
+    )
+    return {
+      scrollX: window.scrollX || 0,
+      scrollY: window.scrollY || 0,
+      maxX: maxX,
+      maxY: maxY,
+      width: window.innerWidth,
+      height: window.innerHeight,
+      scrollWidth: document.documentElement.scrollWidth || window.innerWidth,
+      scrollHeight: document.documentElement.scrollHeight || window.innerHeight,
+    }
   }
 
   function ensureOverlay() {
@@ -371,7 +430,132 @@
       measured.requestId = data.requestId || ''
       reply(event.source, event.origin, 'measured', measured)
     }
+    /*
+     * 双屏滚动同步 + 标注态滚轮转发。
+     *  - scroll-by：父页面把 wheel delta 转进来，等价于真实浏览器滚动；
+     *  - scroll-to：右侧预览对齐画布的滚动位置。
+     * 两者都限制在文档可滚动范围内，避免负值或越界。
+     */
+    if (data.type === 'scroll-by') {
+      var scrollByBody = bodyOf(data)
+      var dx = readNumber(data, scrollByBody, 'dx')
+      var dy = readNumber(data, scrollByBody, 'dy')
+      try {
+        window.scrollBy({ left: dx, top: dy, behavior: 'auto' })
+      } catch (error) {
+        window.scrollBy(dx, dy)
+      }
+      return
+    }
+    if (data.type === 'scroll-to') {
+      var scrollToBody = bodyOf(data)
+      var snapshot = scrollSnapshot()
+      var targetX = Math.max(
+        0,
+        Math.min(snapshot.maxX, readNumber(data, scrollToBody, 'x')),
+      )
+      var targetY = Math.max(
+        0,
+        Math.min(snapshot.maxY, readNumber(data, scrollToBody, 'y')),
+      )
+      var smooth =
+        (data.behavior || scrollToBody.behavior) === 'smooth'
+      try {
+        window.scrollTo({
+          left: targetX,
+          top: targetY,
+          behavior: smooth ? 'smooth' : 'auto',
+        })
+      } catch (error) {
+        window.scrollTo(targetX, targetY)
+      }
+      return
+    }
   })
+
+  /*
+   * 滚动事件：rAF 节流后把位置回传父页面。
+   * 画布收到后驱动“展示模式”的预览 iframe 同步滚动；预览自身收到
+   * scroll-to 也会触发本事件，但父页面只在画布侧消费，不会形成回环。
+   */
+  var scrollFrame = 0
+  // 上一次广播的快照指纹：DOM 观察器会频繁触发，只有尺寸 / 位置真正
+  // 变化时才通知父页面，避免无关的重渲染造成预览同步抖动。
+  var lastScrollKey = ''
+
+  function scrollKey(snapshot) {
+    return [
+      snapshot.scrollX,
+      snapshot.scrollY,
+      snapshot.maxX,
+      snapshot.maxY,
+      snapshot.width,
+      snapshot.height,
+      snapshot.scrollWidth,
+      snapshot.scrollHeight,
+    ].join(':')
+  }
+
+  function publishScroll() {
+    var snapshot = scrollSnapshot()
+    var key = scrollKey(snapshot)
+    if (key === lastScrollKey) return
+    lastScrollKey = key
+    post('scroll', snapshot)
+  }
+
+  function flushScroll() {
+    scrollFrame = 0
+    var snapshot = scrollSnapshot()
+    lastScrollKey = scrollKey(snapshot)
+    post('scroll', snapshot)
+  }
+  window.addEventListener(
+    'scroll',
+    function () {
+      if (scrollFrame) return
+      scrollFrame = window.requestAnimationFrame
+        ? window.requestAnimationFrame(flushScroll)
+        : window.setTimeout(flushScroll, 50)
+    },
+    { passive: true },
+  )
+
+  /*
+   * 页面内真实点击：无论是否处于 Inspect，都把点击位置与命中元素回传。
+   * 父页面在预览区同位置绘制涟漪，形成画布 / 预览的实时视觉联动。
+   * 注意：Inspect 模式下的点击由上面的捕获监听处理为 picked，这里只负责
+   * 普通浏览态，避免一次点击产生两条反馈。
+   */
+  document.addEventListener(
+    'click',
+    function (event) {
+      if (enabled) return
+      var target = event.target
+      if (!target || typeof target.getBoundingClientRect !== 'function') return
+      var sourceNode = target.closest
+        ? target.closest(
+            '[data-source-file], [data-source], [data-vibe-target]',
+          )
+        : null
+      var rect = rectOf(sourceNode || target)
+      var source = sourceNode ? readSource(sourceNode) : null
+      post('click', {
+        x: round2(event.clientX),
+        y: round2(event.clientY),
+        rect: rect,
+        source: source,
+        label:
+          (source && (source.component || source.tag)) ||
+          String(target.tagName || '').toLowerCase(),
+        tag: String(target.tagName || '').toLowerCase(),
+        role: target.getAttribute ? target.getAttribute('role') || '' : '',
+        scrollX: window.scrollX || 0,
+        scrollY: window.scrollY || 0,
+      })
+    },
+    true,
+  )
 
   // 兜底：如果父页面的透明层没有拦截到点击，这里阻止默认行为并回传。
   document.addEventListener(
@@ -460,17 +644,49 @@
     true,
   )
 
-  // 通知父页面 SDK 已就绪；父页面收到后再下发 enable，避免首次点击丢失。
-  try {
-    window.parent.postMessage(
-      {
-        channel: CHANNEL,
-        type: 'ready',
-        payload: { url: window.location.href },
-      },
-      '*',
-    )
-  } catch (error) {
-    // 跨域 / 沙盒限制下 postMessage 仍可用，这里只防御极端环境。
+  /*
+   * 文档尺寸观察。
+   * ------------------------------------------------------------------
+   * SDK 在 <head> 里执行时 React 还没挂载，首次 ready 快照的
+   * scrollHeight 只有 900；如果之后不补发，父页面会一直认为“页面不可
+   * 滚动”，普通滚轮就被错误地交还给外层容器。
+   *
+   * ResizeObserver 只能看到元素自身的盒子尺寸变化，documentElement 的
+   * 尺寸恒等于视口，所以再配合 MutationObserver 监听 React 渲染 / HMR
+   * 造成的 DOM 变化，用 120ms 防抖 + 指纹去重补发快照。
+   */
+  var snapshotTimer = 0
+  function scheduleScrollSnapshot() {
+    if (snapshotTimer) return
+    snapshotTimer = window.setTimeout(function () {
+      snapshotTimer = 0
+      publishScroll()
+    }, 120)
   }
+
+  if (typeof window.ResizeObserver === 'function') {
+    var resizeObserver = new window.ResizeObserver(scheduleScrollSnapshot)
+    resizeObserver.observe(document.documentElement)
+    if (document.body) resizeObserver.observe(document.body)
+  }
+  if (typeof window.MutationObserver === 'function') {
+    var mutationObserver = new window.MutationObserver(scheduleScrollSnapshot)
+    mutationObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    })
+  }
+  window.addEventListener('resize', scheduleScrollSnapshot)
+  window.addEventListener('load', scheduleScrollSnapshot)
+
+  // 通知父页面 SDK 已就绪；父页面收到后再下发 enable，避免首次点击丢失。
+  post('ready', {
+    url: window.location.href,
+    scroll: scrollSnapshot(),
+  })
+  // 首次绘制完成后再补几次滚动快照，覆盖字体 / 图片 / 异步渲染撑开
+  // 文档的情况。每次 publishScroll 内部会做指纹去重。
+  ;[0, 60, 300, 1000, 2500].forEach(function (delay) {
+    window.setTimeout(publishScroll, delay)
+  })
 })()

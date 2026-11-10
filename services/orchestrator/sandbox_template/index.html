@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vibe Sandbox</title>
     <style>
-      /* 预览由外层等比缩放呈现，沙盒页面自身永远不出现原生滚动条。 */
+      /* 画布 / 预览使用固定 1440×900 逻辑视口；页面内容更高时
+         必须允许文档真实滚动，否则底部内容永远看不到。 */
       *,
       *::before,
       *::after {
@@ -20,7 +21,6 @@
         min-height: 100%;
         margin: 0;
         padding: 0;
-        overflow: hidden;
         background: #0f172a;
         color: #e2e8f0;
       }

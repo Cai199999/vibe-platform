@@ -63,6 +63,9 @@ class ArchitectContext:
     # 快照保存时生成的项目摘要 + 本次改动说明；两者可为空（首次启动）。
     project_summary: str = ""
     latest_changes: str = ""
+    # 影子 LLM 专用的只读架构快照（包含当前澄清问题 / 契约摘要）。
+    # 主流程的 analyze / draft 不读取该字段。
+    architecture_snapshot: str = ""
 
 
 @dataclass(frozen=True)
@@ -113,6 +116,18 @@ class ArchitectLLM:
 
     def summarize_history(self, text: str, max_chars: int = 200) -> str:
         """把长对话压缩为核心需求与约束。子类必须实现。"""
+        raise NotImplementedError
+
+    def answer_helper(
+        self,
+        context: ArchitectContext,
+        question: str,
+        history: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """影子助手：基于只读架构上下文回答问题。
+
+        实现方不得写入 slots / contract，也不得触发任何状态推进。
+        """
         raise NotImplementedError
 
 
@@ -213,6 +228,67 @@ class MockArchitectLLM(ArchitectLLM):
     def summarize_history(self, text: str, max_chars: int = 200) -> str:
         """Mock 用确定性截取，保证离线链路可验证。"""
         return fallback_summary(text, max_chars)
+
+    def answer_helper(
+        self,
+        context: ArchitectContext,
+        question: str,
+        history: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """离线影子助手：基于当前槽位做确定性解释。
+
+        只读：不修改 context，也不触碰主 Architect 状态机。答案明确标注
+        “只读”，避免用户误以为在这里提问会推进架构流程。
+        """
+        shape = context.app_shape or context.slots.get("app.shape")
+        shape_label = APP_SHAPE_LABELS.get(shape, shape or "尚未确定")
+        backend = str(
+            context.slots.get("backend.framework")
+            or context.slots.get("script.runtime")
+            or "尚未确定"
+        )
+        database = (
+            normalize_database_engine(context.slots.get("database.engine"))
+            or "尚未确定"
+        )
+        prompt = str(question or "").strip()
+        parts: list[str] = [f"当前架构形态：{shape_label}。"]
+
+        if (
+            "数据库" in prompt
+            or "mysql" in prompt.lower()
+            or "sqlite" in prompt.lower()
+        ):
+            parts.append(
+                f"当前数据库选型是 {database}。MySQL / PostgreSQL 用于生产，"
+                "SQLite 只用于本地与沙盒预览；这样能保证预览与部署环境尽量"
+                "一致，同时避免把测试数据库带上线。"
+            )
+        if "node" in prompt.lower() or "后端" in prompt or "java" in prompt.lower():
+            parts.append(
+                f"当前记录的后端 / 运行时选型是 {backend}。平台的核心业务更"
+                "看重类型安全、事务边界与长期可维护性；如果你希望换成 "
+                "Node.js，需要在【架构确认】里提出修订，影子助手不会直接改。"
+            )
+        if not parts[1:]:
+            stack = "、".join(
+                f"{key}={value}"
+                for key, value in context.slots.items()
+                if value not in (None, "", [])
+            )
+            parts.append(
+                "当前已确认的架构信息："
+                + (stack or "尚无槽位，仍需在架构确认中补齐关键问题。")
+            )
+
+        if context.retrieved_chunks:
+            titles = "；".join(
+                str(chunk.get("title") or chunk.get("docId") or "知识库")
+                for chunk in context.retrieved_chunks[:3]
+            )
+            parts.append(f"知识库参考：{titles}。")
+        parts.append("以上为只读解释，不会修改或推进主架构状态机。")
+        return "\n\n".join(parts)
 
     def _lightweight_contract(self, context: ArchitectContext) -> ContractDraft:
         flow = str(context.slots.get("ui.primary_flow") or "展示内容并响应交互").strip()
@@ -929,6 +1005,37 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             summary = summary[:max_chars]
         return summary
 
+    def answer_helper(
+        self,
+        context: ArchitectContext,
+        question: str,
+        history: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """影子助手：只读问答，不参与主图状态推进。
+
+        使用 fast 档模型即可；答案要求直接、简短，并明确区分“已确认”
+        与“尚未确认”，禁止替主流程做决定。
+        """
+        system = (
+            "你是 Vibe 平台的“影子架构助手（Helper Agent）”。你的唯一职责是"
+            "解释当前架构方案、回答用户疑问、引用知识库片段。\n\n"
+            "【只读铁律 · 最高优先级】\n"
+            "- 你没有任何写入权限：不能修改 slots、契约、源码，也不能推进或"
+            "结束主架构流程；\n"
+            "- 用户让你“直接改成 Node.js / 直接开始生成”时，明确说明这必须"
+            "在“架构确认”页签中操作，你只提供分析与建议；\n"
+            "- 只依据提供的架构快照、项目摘要与知识库回答；信息不足时直接说"
+            "“当前方案尚未确认这一点”，禁止编造技术选型、实体或接口；\n"
+            "- 不要重复整份契约，不要输出 JSON，不要使用 Markdown 代码围栏。\n\n"
+            "回答风格：先给结论，再给 1-3 条理由；总长度控制在 300 字以内；"
+            "如果引用了知识库，在句末标注 [文档标题]。"
+        )
+        human = _helper_human(context, question, history or [])
+        answer = self._invoke("architect_helper", system, human).strip()
+        if not answer:
+            raise ArchitectLLMError("Helper Agent 未返回有效回答")
+        return answer
+
     def _invoke(self, task: str, system: str, human: str) -> str:
         try:
             return self._client.generate(task, system, human)
@@ -1053,6 +1160,36 @@ def _analysis_human(context: ArchitectContext) -> str:
         f"{_summary_block(context)}\n"
         f"RAG 规范片段：\n{_format_chunks(context.retrieved_chunks)}\n\n"
         f"当前源码：\n{format_source(context.source_files, 42000)}"
+    )
+
+
+def _helper_human(
+    context: ArchitectContext,
+    question: str,
+    history: list[dict[str, Any]],
+) -> str:
+    """影子助手的 Human Prompt：只读快照 + 知识库 + 最近问答。"""
+    snapshot = str(context.architecture_snapshot or "").strip() or (
+        f"应用形态：{context.app_shape or '尚未确定'}\n"
+        f"已确认槽位：{json.dumps(context.slots, ensure_ascii=False, default=str)}"
+    )
+    recent = history[-8:]
+    history_text = (
+        "\n".join(
+            f"{'用户' if item.get('role') == 'user' else '助手'}："
+            f"{str(item.get('content') or '')[:600]}"
+            for item in recent
+        )
+        or "（无）"
+    )
+    return (
+        f"项目：{context.project_name}（{context.project_id}）\n\n"
+        f"## 当前架构快照（只读）\n{snapshot}\n\n"
+        f"## 项目摘要\n{str(context.project_summary or '（无）')[:4000]}\n\n"
+        f"## 本次改动\n{str(context.latest_changes or '（无）')[:2000]}\n\n"
+        f"## 知识库片段\n{_format_chunks(context.retrieved_chunks)}\n\n"
+        f"## 最近问答\n{history_text}\n\n"
+        f"## 用户问题\n{question.strip()}"
     )
 
 

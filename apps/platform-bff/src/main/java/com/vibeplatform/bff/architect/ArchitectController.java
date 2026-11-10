@@ -82,6 +82,15 @@ public class ArchitectController {
         return architectService.decideContract(runId, contractId, body);
     }
 
+    /** 影子 LLM：只读解释架构决策，不推进主状态机。 */
+    @PostMapping("/runs/{runId}/helper")
+    public ResponseEntity<JsonNode> askHelper(
+            @PathVariable String runId,
+            @RequestBody(required = false) JsonNode body
+    ) {
+        return architectService.askHelper(runId, body);
+    }
+
     /** 取消架构澄清。 */
     @PostMapping("/runs/{runId}/cancel")
     public ResponseEntity<JsonNode> cancel(

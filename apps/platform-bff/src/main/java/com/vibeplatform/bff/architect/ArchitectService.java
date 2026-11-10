@@ -29,6 +29,8 @@ public class ArchitectService {
                     + "{contractId}/decision";
     private static final String CANCEL_PATH =
             "/api/v1/internal/architect/runs/{runId}/cancel";
+    private static final String HELPER_PATH =
+            "/api/v1/internal/architect/runs/{runId}/helper";
 
     private final RestClient aiCoreRunRestClient;
     private final ObjectMapper objectMapper;
@@ -71,6 +73,11 @@ public class ArchitectService {
 
     public ResponseEntity<JsonNode> cancel(String runId, JsonNode body) {
         return postJson(CANCEL_PATH, body, "architect cancel", runId);
+    }
+
+    /** 影子助手只读问答；不改变主架构状态。 */
+    public ResponseEntity<JsonNode> askHelper(String runId, JsonNode body) {
+        return postJson(HELPER_PATH, body, "architect helper", runId);
     }
 
     public ResponseEntity<JsonNode> snapshot(String runId) {

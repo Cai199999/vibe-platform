@@ -221,6 +221,34 @@ export async function fetchArchitectCancel(runId, reason, token) {
   return response.json()
 }
 
+/**
+ * 影子助手只读问答。
+ *
+ * 与 answers / decision 接口完全分离：服务端不会修改主状态机，
+ * 因此这里也不需要 SSE，直接等待一次 JSON 响应即可。
+ */
+export async function fetchArchitectHelper(runId, question, history, token) {
+  const response = await fetch(
+    `/api/v1/architect/runs/${encodeURIComponent(runId)}/helper`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token ?? ''}`,
+      },
+      body: JSON.stringify({
+        question,
+        history: Array.isArray(history) ? history.slice(-12) : [],
+        useKnowledgeBase: true,
+      }),
+    },
+  )
+  if (!response.ok) {
+    throw new Error(await responseError(response))
+  }
+  return response.json()
+}
+
 export async function fetchArchitectAnswers(
   runId,
   clarificationId,

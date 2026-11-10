@@ -3,6 +3,7 @@ import {
   fetchArchitectAnswers,
   fetchArchitectCancel,
   fetchArchitectDecision,
+  fetchArchitectHelper,
   streamArchitect,
 } from './architectStream.js'
 import { streamFullstack } from './fullstackStream.js'
@@ -73,6 +74,40 @@ const FULLSTACK_NODE_LABELS = {
 
 const FULLSTACK_OUTPUT_LIMIT = 40
 
+/**
+ * 影子助手（Helper Agent）的本地会话状态。
+ *
+ * 与主架构状态完全隔离：这里只保存“随意提问”的问答记录，
+ * 既不写入 messages，也不会触发 Graph / SSE / 契约状态变更。
+ */
+export const EMPTY_HELPER = {
+  messages: [],
+  pending: false,
+  error: null,
+}
+
+/**
+ * 统计主流程中仍需用户确认的关键问题数量。
+ *
+ * 画布顶部 Banner 与“生成”入口拦截共用同一口径：
+ *  - 只有 AWAITING_CLARIFICATION 才算“必须回答”；
+ *  - clarification.questions 优先，缺失时回退到 missingSlots；
+ *  - 无法解析具体数量时至少按 1 个处理，避免误放行。
+ */
+export function countPendingKeyQuestions(architectState) {
+  if (!architectState?.runId) return 0
+  if (architectState.status !== 'AWAITING_CLARIFICATION') return 0
+  const clarification = architectState.clarification
+  const questions = clarification?.questions
+  if (Array.isArray(questions) && questions.length > 0) {
+    const required = questions.filter((question) => question.required !== false)
+    return Math.max(1, required.length)
+  }
+  const missing = clarification?.missingSlots
+  if (Array.isArray(missing) && missing.length > 0) return missing.length
+  return 1
+}
+
 export const EMPTY_ARCHITECT = {
   open: false,
   runId: null,
@@ -96,6 +131,8 @@ export const EMPTY_ARCHITECT = {
   decisionSubmitting: false,
   cancelRequested: false,
   updatedAt: null,
+  // 影子助手的独立会话：只读问答，不影响主状态机。
+  helper: EMPTY_HELPER,
   // 契约确认后的全栈生成状态；与 Architect Run 生命周期解耦。
   fullstack: EMPTY_FULLSTACK,
 }
@@ -120,6 +157,14 @@ function loadStates() {
         decisionSubmitting: false,
         cancelRequested: Boolean(saved.cancelRequested),
         messages: Array.isArray(saved.messages) ? saved.messages : [],
+        helper: {
+          messages: Array.isArray(saved.helper?.messages)
+            ? saved.helper.messages.slice(-40)
+            : [],
+          // 刷新后不可能还有在途请求，统一收敛为可重试状态。
+          pending: false,
+          error: null,
+        },
         fullstack: {
           ...EMPTY_FULLSTACK,
           ...(saved.fullstack && typeof saved.fullstack === 'object'
@@ -582,6 +627,8 @@ export function useArchitect({ token } = {}) {
   // 同步防重入：点击处理里会先 await 门控释放，这段时间 React 状态
   // 还未变成 RUNNING，仅靠 statesRef 无法阻止双击启动两个 Run。
   const fullstackStartingRef = useRef(new Set())
+  // 影子助手单飞锁：状态更新是异步的，靠 pending 字段无法阻止双击双发。
+  const helperPendingRef = useRef(new Set())
 
   useEffect(() => {
     statesRef.current = states
@@ -613,6 +660,12 @@ export function useArchitect({ token } = {}) {
           errorCode: state.errorCode ?? null,
           cancelRequested: state.cancelRequested,
           updatedAt: state.updatedAt,
+          // 影子助手只保留最近 20 条：足够恢复上下文，又不会撑爆 sessionStorage。
+          helper: {
+            messages: Array.isArray(state.helper?.messages)
+              ? state.helper.messages.slice(-20)
+              : [],
+          },
           // 只持久化可恢复字段：节点输出体积大且刷新后无法继续追加，丢弃。
           fullstack: state.fullstack
             ? {
@@ -990,6 +1043,104 @@ export function useArchitect({ token } = {}) {
     [connect, patch, token],
   )
 
+  /**
+   * 影子助手：只读提问。
+   *
+   * 设计约束：
+   *  1. 绝不改写 state.messages / clarification / contract，主流程只能由
+   *     answer / decide 推进；
+   *  2. 复用当前 Run 的架构快照与知识库（服务端只读），前端只负责把
+   *     “最近若干轮问答”作为 history 传过去；
+   *  3. 请求失败只影响 helper.error，不污染主面板错误条。
+   *
+   * @returns {Promise<boolean>} 是否成功拿到回答
+   */
+  const askHelper = useCallback(
+    async (projectId, question) => {
+      const trimmed = String(question ?? '').trim()
+      if (!trimmed) return false
+      const current = statesRef.current[projectId] ?? EMPTY_ARCHITECT
+      if (!current.runId) {
+        patch(projectId, (previous) => ({
+          ...previous,
+          helper: {
+            ...(previous.helper ?? EMPTY_HELPER),
+            error: '影子助手需要先有一个正在进行的架构设计。',
+          },
+        }))
+        return false
+      }
+      // 同步单飞：避免 Enter 与点击在同一帧内触发两次请求。
+      if (helperPendingRef.current.has(projectId)) return false
+      helperPendingRef.current.add(projectId)
+
+      const history = (current.helper?.messages ?? [])
+        .filter((message) => message.role === 'user' || message.role === 'assistant')
+        .map((message) => ({ role: message.role, content: message.content }))
+
+      const userMessage = {
+        id: `helper-user:${Date.now()}`,
+        role: 'user',
+        content: trimmed,
+        createdAt: new Date().toISOString(),
+      }
+      patch(projectId, (previous) => ({
+        ...previous,
+        helper: {
+          ...(previous.helper ?? EMPTY_HELPER),
+          messages: [...(previous.helper?.messages ?? []), userMessage].slice(-40),
+          pending: true,
+          error: null,
+        },
+      }))
+
+      try {
+        const response = await fetchArchitectHelper(
+          current.runId,
+          trimmed,
+          history,
+          token,
+        )
+        const answer = String(response?.answer ?? '').trim()
+        patch(projectId, (previous) => ({
+          ...previous,
+          helper: {
+            ...(previous.helper ?? EMPTY_HELPER),
+            messages: [
+              ...(previous.helper?.messages ?? []),
+              {
+                id: `helper-assistant:${Date.now()}`,
+                role: 'assistant',
+                content: answer || '助手没有返回内容，请换个问法再试。',
+                citations: Array.isArray(response?.citations)
+                  ? response.citations
+                  : [],
+                model: response?.model ?? '',
+                createdAt: new Date().toISOString(),
+              },
+            ].slice(-40),
+            pending: false,
+            error: null,
+          },
+        }))
+        return true
+      } catch (cause) {
+        patch(projectId, (previous) => ({
+          ...previous,
+          helper: {
+            ...(previous.helper ?? EMPTY_HELPER),
+            pending: false,
+            error: `影子助手回答失败：${cause?.message || cause}`,
+          },
+        }))
+        return false
+      } finally {
+        helperPendingRef.current.delete(projectId)
+      }
+    },
+    [patch, token],
+  )
+
   const cancel = useCallback(
     async (projectId) => {
       const current = statesRef.current[projectId]
@@ -1085,6 +1236,7 @@ export function useArchitect({ token } = {}) {
     toggleOpen,
     answer,
     decide,
+    askHelper,
     cancel,
     generateFullstack,
     abort,

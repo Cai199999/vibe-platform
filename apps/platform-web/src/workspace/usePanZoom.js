@@ -30,7 +30,9 @@ const clampAxis = (translate, contentSize, containerSize) => {
 /**
  * 画布 / 预览共用的平移缩放交互。
  *
- *  - 滚轮：以鼠标指针为中心缩放（先求指针下方的世界坐标，再反算新的平移）；
+ *  - 普通滚轮：完全交还给浏览器，用于滚动页面 / 容器；
+ *  - Ctrl / Cmd + 滚轮：以鼠标指针为中心缩放（先求指针下方的世界坐标，
+ *    再反算新的平移）；
  *  - 中键拖拽 / 空格 + 左键拖拽：平移；
  *  - 缩放边界 0.25x ~ 3x（相对初始铺满比例）；
  *  - 平移边界保证画面至少保留 96px 可见；
@@ -42,6 +44,10 @@ export default function usePanZoom({
   baseScale,
   baseOffsetX,
   baseOffsetY,
+  // 固定设计基准尺寸（1440×900）。容器现在允许原生滚动，
+  // 平移边界必须按「真实内容尺寸」计算，而不是容器实测尺寸。
+  contentWidth,
+  contentHeight,
 }) {
   const { views, updateViewport, resetViewport } = useViewportState()
   const view = views[panel] ?? { zoom: 1, panX: 0, panY: 0 }
@@ -50,8 +56,20 @@ export default function usePanZoom({
 
   const spaceRef = useRef(false)
   const panRef = useRef(null)
-  const baseRef = useRef({ baseScale, baseOffsetX, baseOffsetY })
-  baseRef.current = { baseScale, baseOffsetX, baseOffsetY }
+  const baseRef = useRef({
+    baseScale,
+    baseOffsetX,
+    baseOffsetY,
+    contentWidth,
+    contentHeight,
+  })
+  baseRef.current = {
+    baseScale,
+    baseOffsetX,
+    baseOffsetY,
+    contentWidth,
+    contentHeight,
+  }
 
   // 空格是“临时抓手”修饰键；只有输入类控件不拦截，避免无法输入空格。
   // 按钮 / 链接不排除：刚点过工具栏按钮时焦点仍在 button 上，若排除会导致
@@ -101,36 +119,62 @@ export default function usePanZoom({
   const clampView = useCallback(
     (next) => {
       const node = containerRef.current
-      const { baseScale: scaleBase, baseOffsetX: ox, baseOffsetY: oy } =
-        baseRef.current
+      const {
+        baseScale: scaleBase,
+        baseOffsetX: ox,
+        baseOffsetY: oy,
+        contentWidth: designWidth,
+        contentHeight: designHeight,
+      } = baseRef.current
       if (!node || scaleBase <= 0) return next
 
       const width = node.clientWidth
       const height = node.clientHeight
-      // 基准状态下逻辑视口刚好铺满容器，因此内容尺寸就是容器尺寸 × zoom。
-      // 不再依赖固定的 1280×720，窗口 resize / 工具栏高度变化后同样成立。
-      const contentWidth = width * next.zoom
-      const contentHeight = height * next.zoom
+      const totalScale = scaleBase * next.zoom
+      // 内容尺寸 = 固定设计基准 × 总缩放比，与容器实测尺寸解耦。
+      const contentPxWidth =
+        (designWidth || node.scrollWidth || width) * totalScale
+      const contentPxHeight =
+        (designHeight || node.scrollHeight || height) * totalScale
 
-      // X / Y 各自独立计算，任何布局模式（对比 / 展示）都不锁轴。
-      const translateX = clampAxis(ox + next.panX, contentWidth, width)
-      const translateY = clampAxis(oy + next.panY, contentHeight, height)
+      // 容器可原生滚动后，transform 的平移发生在滚动内容坐标系里。
+      // 先换算到当前可视视口，再 clamp，最后加回 scrollLeft/Top。
+      const translateX =
+        clampAxis(
+          ox + next.panX - node.scrollLeft,
+          contentPxWidth,
+          width,
+        ) + node.scrollLeft
+      const translateY =
+        clampAxis(
+          oy + next.panY - node.scrollTop,
+          contentPxHeight,
+          height,
+        ) + node.scrollTop
 
       return { ...next, panX: translateX - ox, panY: translateY - oy }
     },
     [containerRef],
   )
 
-  // 原生 wheel 监听必须非 passive，才能 preventDefault 阻止页面滚动。
+  // 原生 wheel 监听：默认完全交还给浏览器 / 页面滚动。
+  // 只有按住 Ctrl（Windows/Linux）或 Cmd（macOS）时才进入画布缩放。
   useEffect(() => {
     const node = containerRef.current
     if (!node) return undefined
 
     const onWheel = (event) => {
+      const zoomGesture = event.ctrlKey || event.metaKey
+      // 普通滚轮 = 真实网页手感：不 preventDefault，让滚轮作用于
+      // 容器滚动或由画布转发给 iframe 内部页面。
+      if (!zoomGesture) return
+
       event.preventDefault()
       const rect = node.getBoundingClientRect()
-      const pointerX = event.clientX - rect.left
-      const pointerY = event.clientY - rect.top
+      // 容器可滚动时，指针相对「内容原点」的坐标还要加上 scrollLeft/Top，
+      // 否则滚动后再缩放会出现指针下方的锚点漂移。
+      const pointerX = event.clientX - rect.left + node.scrollLeft
+      const pointerY = event.clientY - rect.top + node.scrollTop
       const {
         baseScale: scaleBase,
         baseOffsetX: ox,
@@ -142,7 +186,7 @@ export default function usePanZoom({
         const currentScale = scaleBase * current.zoom
         if (currentScale <= 0) return current
 
-        // 指针下方的世界坐标（当前动态设计视口坐标系）。
+        // 指针下方的世界坐标（固定设计基准坐标系）。
         const worldX = (pointerX - (ox + current.panX)) / currentScale
         const worldY = (pointerY - (oy + current.panY)) / currentScale
         const nextZoom = clamp(current.zoom * factor, MIN_ZOOM, MAX_ZOOM)

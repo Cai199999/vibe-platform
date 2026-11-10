@@ -71,6 +71,7 @@ function ProjectWorkspaceInner({
   onArchitectClose,
   onArchitectAnswer,
   onArchitectDecide,
+  onArchitectAskHelper,
   onArchitectCancel,
   onFullstackGenerate,
   onReleaseGate,
@@ -86,6 +87,90 @@ function ProjectWorkspaceInner({
   // 顶部工具栏的「更多」折叠菜单：清空标注 / 保存快照 / 导出 / Agent 目录。
   const [moreOpen, setMoreOpen] = useState(false)
   const moreRef = useRef(null)
+  // 双屏同步：画布 iframe 的滚动位置与点击反馈。
+  // nonce 保证即使位置相同也会重新下发（iframe 重载后需要再次对齐）。
+  const [scrollSync, setScrollSync] = useState(null)
+  const [clickFeedback, setClickFeedback] = useState(null)
+  const syncNonceRef = useRef(0)
+  const clickNonceRef = useRef(0)
+  // 画布最新滚动位置：即使当前是单屏模式也要记录，否则从单屏切换到
+  // 双屏时预览只能从 0 开始，与用户已经滚到的位置脱节。
+  const canvasScrollRef = useRef(null)
+
+  const publishScrollSync = (payload) => {
+    if (!payload) return
+    syncNonceRef.current += 1
+    setScrollSync({
+      scrollX: Number(payload.scrollX) || 0,
+      scrollY: Number(payload.scrollY) || 0,
+      nonce: syncNonceRef.current,
+    })
+  }
+
+  const handleFrameScroll = (payload) => {
+    if (!payload) return
+    canvasScrollRef.current = payload
+    // 单屏模式不驱动右侧预览，但位置必须留到切换双屏时立即对齐。
+    if (viewMode !== 'dual') return
+    publishScrollSync(payload)
+  }
+
+  // 进入双屏：预览 iframe 可能刚挂载、还没有收到画布的 scroll 事件，
+  // 这里用最近一次快照补一次对齐，避免右侧停留在页面顶部。
+  useEffect(() => {
+    if (viewMode !== 'dual') return
+    publishScrollSync(canvasScrollRef.current)
+    // publishScrollSync 只依赖 ref 与 setState，不需要进入依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode])
+
+  const handleFrameInteraction = (payload) => {
+    if (viewMode !== 'dual' || !payload?.rect) return
+    clickNonceRef.current += 1
+    // 保留点击点（iframe 视口坐标），预览据此画小涟漪；rect 仅作为
+    // Inspect / 旧 SDK 没有 x/y 时的回退锚点。
+    setClickFeedback({
+      x: payload.x,
+      y: payload.y,
+      rect: payload.rect,
+      nonce: clickNonceRef.current,
+    })
+  }
+
+  /*
+   * 关键问题计数：只统计 required 问题；后端未标注 required 时退化为
+   * clarification.questions 全量。用于顶部不可关闭 Banner 与生成拦截。
+   */
+  const pendingKeyQuestions = (() => {
+    if (!architectState?.runId) return 0
+    if (architectState.status !== 'AWAITING_CLARIFICATION') return 0
+    const questions = architectState.clarification?.questions
+    if (Array.isArray(questions) && questions.length > 0) {
+      const required = questions.filter((question) => question.required !== false)
+      return Math.max(1, required.length)
+    }
+    const missing = architectState.clarification?.missingSlots
+    return Array.isArray(missing) && missing.length > 0 ? missing.length : 1
+  })()
+
+  const architectIncomplete =
+    Boolean(architectState?.runId) &&
+    !['CONFIRMED', 'CANCELLED'].includes(architectState.status)
+
+  const architectBannerText = (() => {
+    if (!architectIncomplete) return ''
+    const status = architectState.status
+    if (status === 'AWAITING_CLARIFICATION') {
+      return `架构设计尚未完成，请确认剩余 ${pendingKeyQuestions} 个关键问题`
+    }
+    if (status === 'AWAITING_CONTRACT_CONFIRMATION') {
+      return '架构设计尚未完成，请确认实施契约'
+    }
+    if (status === 'FAILED') {
+      return '架构设计尚未完成：上一次分析失败，请重新发起架构对话'
+    }
+    return '架构设计尚未完成，Architect 正在整理方案…'
+  })()
 
   useEffect(() => {
     if (!moreOpen) return undefined
@@ -186,8 +271,9 @@ function ProjectWorkspaceInner({
     const rect = payload.rect ?? { x: 0, y: 0, width: 0, height: 0 }
     // SDK 的 rect 相对当前 iframe 逻辑视口；视口会随画布尺寸扩展，
     // 因此必须使用 payload 里的真实 innerWidth / innerHeight 归一化。
-    const viewportWidth = Number(payload.viewport?.width) || 1280
-    const viewportHeight = Number(payload.viewport?.height) || 720
+    // inspect SDK 上报的逻辑视口固定为 1440×900；缺失时按同一基准兜底。
+    const viewportWidth = Number(payload.viewport?.width) || 1440
+    const viewportHeight = Number(payload.viewport?.height) || 900
     const toWorld = (value, total) =>
       Math.min(1, Math.max(0, Number(value || 0) / total))
     const worldRect = {
@@ -294,6 +380,28 @@ function ProjectWorkspaceInner({
       className={`tab-window ${active ? 'is-active' : 'is-hidden'}`}
       aria-hidden={!active}
     >
+      {/* 不可关闭的架构待办 Banner：只要主流程未确认就常驻页面最顶部，
+          点击后直接打开 Architect 面板处理关键问题。 */}
+      {architectIncomplete && (
+        <div
+          className={`architect-pending-banner ${architectState.status === 'AWAITING_CLARIFICATION' ? 'is-attention' : ''}`}
+          role="alert"
+          data-architect-pending-banner
+        >
+          <span className="architect-pending-mark" aria-hidden="true">
+            ⚠️
+          </span>
+          <span className="architect-pending-text">{architectBannerText}</span>
+          <button
+            type="button"
+            className="architect-pending-action"
+            onClick={onArchitectOpen}
+          >
+            {pendingKeyQuestions > 0 ? '去确认' : '查看进度'}
+          </button>
+        </div>
+      )}
+
       <div className="project-toolbar">
         <div className="project-toolbar-left">
           {annotations.length > 0 && (
@@ -599,6 +707,8 @@ function ProjectWorkspaceInner({
               onClarificationAnswer={onClarificationAnswer}
               inspectMode={inspectMode && canvasVisible && !inspectBlocked}
               onInspectPick={handleInspectPick}
+              onFrameScroll={handleFrameScroll}
+              onFrameInteraction={handleFrameInteraction}
               clarification={run.clarification}
               onAnnotationRollback={onAnnotationRollback}
               pendingAnnotationId={run.pendingAnnotationId}
@@ -676,6 +786,10 @@ function ProjectWorkspaceInner({
               onInspectDraftCancel={() => setInspectDraft(null)}
               onInspectDraftSubmit={handleInspectDraftSubmit}
               refreshNonce={frameSyncNonce}
+              syncScroll={viewMode === 'dual' ? scrollSync : null}
+              interactionFeedback={
+                viewMode === 'dual' ? clickFeedback : null
+              }
             />
           </ErrorBoundary>
         </div>
@@ -690,6 +804,7 @@ function ProjectWorkspaceInner({
           onRestart={onArchitectRestart}
           onAnswer={onArchitectAnswer}
           onDecide={onArchitectDecide}
+          onAskHelper={onArchitectAskHelper}
           onCancel={onArchitectCancel}
           onFullstackGenerate={onFullstackGenerate}
           onFrontendBootstrap={onFrontendBootstrap}

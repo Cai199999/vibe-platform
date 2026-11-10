@@ -238,7 +238,7 @@ function analyzeSelection(pageRoot, selectionRect, centerPoint, scale = 1) {
 }
 
 /**
- * 浮层与圈使用同一套“世界坐标”（动态设计视口，最小 1280×720）。
+ * 浮层与圈使用同一套“世界坐标”（固定 1440×900 逻辑视口）。
  *
  * 浮层是 annotation-layer 的普通子元素，和页面共享父级 translate + scale，
  * 不做任何 1/scale 反向补偿：缩放画布时圆角、字号、输入框与浮层一起等比
@@ -953,7 +953,7 @@ function AnnotationPopover({
 /**
  * 画布 Stage：
  *  - 展示一个与沙盒初始源码一致的 Mock 页面；
- *  - 鼠标 / 触控拖拽圈选组件，坐标转换为动态世界坐标（最小 1280×720）；
+ *  - 鼠标 / 触控拖拽圈选组件，坐标转换为固定 1440×900 世界坐标；
  *  - 页面与标注层使用同一 transform，平移 / 缩放后圈不会漂移；
  *  - 每个圈拥有独立多轮 Chatbox，可单独发送增量修改。
  */
@@ -1005,8 +1005,23 @@ function CanvasStage({
   // 因此缩放 / 平移后仍与真实 DOM 严格对齐。
   inspectMode = false,
   onInspectPick,
+  // 画布内的页面滚动 / 点击由 SDK 回传，父级据此同步右侧预览。
+  onFrameScroll,
+  onFrameInteraction,
 }) {
   const stageRef = useRef(null)
+  // 固定 1440×900 的视口节点：所有屏幕 → 世界坐标换算都以它的
+  // getBoundingClientRect 为准，自动包含滚动偏移与 zoom transform。
+  const viewportRef = useRef(null)
+  // iframe 内的 inspect SDK 是否已就绪；未就绪时不拦截滚轮，
+  // 让浏览器先处理外层容器的原生滚动。
+  const liveReadyRef = useRef(false)
+  // 最近一次 iframe 滚动快照：滚轮到边界时把剩余滚动交还外层容器。
+  const liveScrollRef = useRef(null)
+  const onFrameScrollRef = useRef(onFrameScroll)
+  const onFrameInteractionRef = useRef(onFrameInteraction)
+  onFrameScrollRef.current = onFrameScroll
+  onFrameInteractionRef.current = onFrameInteraction
   const startTargetRef = useRef(null)
   const inputRefs = useRef(new Map())
   const focusedAnnotationRef = useRef(null)
@@ -1036,8 +1051,8 @@ function CanvasStage({
   const [moveOffset, setMoveOffset] = useState({ x: 0, y: 0 })
   const moveDragRef = useRef(null)
 
-  // 与沙盒预览共用动态设计视口：最小 1280×720，多余空间直接扩展逻辑宽高，
-  // 保证画面铺满且不会把页面上下裁切。
+  // 与沙盒预览共用固定 1440×900 逻辑视口：画布容器自身滚动，
+  // 不再用外层 scale 强行适配屏幕，页面内容可以完整滚动查看。
   const {
     scale: baseScale,
     offsetX: baseOffsetX,
@@ -1053,6 +1068,8 @@ function CanvasStage({
     baseScale,
     baseOffsetX,
     baseOffsetY,
+    contentWidth: designWidth,
+    contentHeight: designHeight,
   })
 
   // 非激活 Tab 用 display:none / content-visibility 休眠，期间 ResizeObserver
@@ -1182,12 +1199,25 @@ function CanvasStage({
       if (!data || data.channel !== 'vibe-inspect') return
       if (data.type === 'ready') {
         // iframe 重载（HMR / 首次加载）后重新下发 Inspect 开关。
+        liveReadyRef.current = true
+        liveScrollRef.current = data.payload?.scroll ?? null
         inspectModeRef.current &&
           frame.contentWindow?.postMessage(
             { channel: 'vibe-inspect', type: 'enable', enabled: true },
             '*',
           )
         setInspectHover(null)
+        return
+      }
+      if (data.type === 'scroll') {
+        // 页面内部滚动位置：用于驱动右侧预览同步与滚轮边界判断。
+        liveScrollRef.current = data.payload ?? null
+        onFrameScrollRef.current?.(data.payload)
+        return
+      }
+      if (data.type === 'click') {
+        // 真实页面内的点击，父级在预览区绘制同位置的点击涟漪。
+        onFrameInteractionRef.current?.(data.payload)
         return
       }
       if (data.type === 'hover') {
@@ -1197,7 +1227,15 @@ function CanvasStage({
       }
       if (data.type === 'picked') {
         setInspectHover(null)
-        if (data.payload?.ok) onInspectPickRef.current?.(data.payload)
+        if (data.payload?.ok) {
+          onInspectPickRef.current?.(data.payload)
+          // Inspect 的点击同样换算成一次视觉反馈，让预览区知道用户点了哪。
+          onFrameInteractionRef.current?.({
+            ...data.payload,
+            type: 'click',
+            source: data.payload.source ?? null,
+          })
+        }
         return
       }
       if (data.type === 'pan-start') {
@@ -1227,14 +1265,16 @@ function CanvasStage({
 
   /** 把父页面指针坐标映射为 iframe 内部逻辑坐标（未受父层 transform 缩放）。 */
   const toLiveFramePoint = (event) => {
-    const node = stageRef.current
+    const viewportNode = viewportRef.current
     const frame = liveFrameRef.current
-    if (!node || !frame || viewport.scale <= 0) return null
-    const box = node.getBoundingClientRect()
+    if (!viewportNode || !frame || viewport.scale <= 0) return null
+    // viewport 自己的 rect 已包含 scroll 与 transform，无需再手动加减
+    // stage.scrollTop / translate，避免两套偏移量重复计算。
+    const box = viewportNode.getBoundingClientRect()
     const width = frame.clientWidth || designWidth
     const height = frame.clientHeight || designHeight
-    const x = (event.clientX - box.left - viewport.translateX) / viewport.scale
-    const y = (event.clientY - box.top - viewport.translateY) / viewport.scale
+    const x = (event.clientX - box.left) / viewport.scale
+    const y = (event.clientY - box.top) / viewport.scale
     if (x < 0 || y < 0 || x > width || y > height) return null
     return { x, y }
   }
@@ -1254,6 +1294,69 @@ function CanvasStage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inspectMode, liveUrl, refreshNonce, mode, suspended])
 
+  // iframe 重载后 SDK 需要重新握手，先撤销 ready 标记。
+  useEffect(() => {
+    liveReadyRef.current = false
+    liveScrollRef.current = null
+  }, [liveUrl, refreshNonce, mode, suspended])
+
+  /*
+   * 标注态下 iframe 设置了 pointer-events: none，滚轮事件到不了页面内部。
+   * 为了让滚轮像真实浏览器一样滚动页面，这里把 delta 通过 postMessage
+   * 转发给 SDK；只有 Ctrl / Cmd + 滚轮才留给 usePanZoom 做缩放。
+   *
+   * 交互态 iframe 自己消费滚轮，无需也不应重复转发。
+   */
+  useEffect(() => {
+    const node = stageRef.current
+    if (!node) return undefined
+
+    const onWheel = (event) => {
+      if (event.ctrlKey || event.metaKey) return
+      if (mode !== 'live' || liveInteractive) return
+      const frame = liveFrameRef.current
+      if (!frame?.contentWindow || !liveReadyRef.current) return
+
+      const unit =
+        event.deltaMode === 1
+          ? 16
+          : event.deltaMode === 2
+            ? node.clientHeight
+            : 1
+      const dx = event.deltaX * unit
+      const dy = event.deltaY * unit
+      // 边界链式滚动：页面还能滚就滚页面；页面已到顶 / 到底，
+      // 剩余滚轮交还外层画布容器（用于查看 1440×900 视口的其余部分）。
+      const snapshot = liveScrollRef.current
+      if (!snapshot) return
+      const scrollX = Number(snapshot.scrollX) || 0
+      const scrollY = Number(snapshot.scrollY) || 0
+      const maxX = Number(snapshot.maxX) || 0
+      const maxY = Number(snapshot.maxY) || 0
+      const canScrollX =
+        dx < 0 ? scrollX > 0.5 : dx > 0 ? scrollX < maxX - 0.5 : false
+      const canScrollY =
+        dy < 0 ? scrollY > 0.5 : dy > 0 ? scrollY < maxY - 0.5 : false
+      if (!canScrollX && !canScrollY) return
+
+      event.preventDefault()
+      frame.contentWindow.postMessage(
+        {
+          channel: 'vibe-inspect',
+          type: 'scroll-by',
+          payload: {
+            dx: canScrollX ? dx : 0,
+            dy: canScrollY ? dy : 0,
+          },
+        },
+        '*',
+      )
+    }
+
+    node.addEventListener('wheel', onWheel, { passive: false })
+    return () => node.removeEventListener('wheel', onWheel)
+  }, [mode, liveInteractive])
+
   const flashLimitNotice = () => {
     setLimitNotice(true)
     if (limitTimerRef.current) window.clearTimeout(limitTimerRef.current)
@@ -1272,17 +1375,15 @@ function CanvasStage({
 
   /**
    * Screen -> World：先减去画布在屏幕上的左上角与当前 translate，再除以
-   * 当前 scale，最后归一化到当前动态设计视口（最小 1280×720）。这样无论怎么平移 / 缩放，
+   * 当前 scale，最后归一化到固定 1440×900 逻辑视口。这样无论怎么平移 / 缩放，
    * 圈记录的都是页面内容坐标，而不是屏幕坐标。
    */
   const toPoint = (event) => {
-    const node = stageRef.current
+    const node = viewportRef.current
     if (!node || viewport.scale <= 0) return { x: 0, y: 0 }
     const box = node.getBoundingClientRect()
-    const worldX =
-      (event.clientX - box.left - viewport.translateX) / viewport.scale
-    const worldY =
-      (event.clientY - box.top - viewport.translateY) / viewport.scale
+    const worldX = (event.clientX - box.left) / viewport.scale
+    const worldY = (event.clientY - box.top) / viewport.scale
     return {
       x: clamp01(worldX / designWidth),
       y: clamp01(worldY / designHeight),
@@ -1390,11 +1491,11 @@ function CanvasStage({
     if (rect.width > 0.02 && rect.height > 0.02) {
       // 把归一化选区还原为屏幕坐标，直接测量 DOM 节点的真实覆盖面积。
       // 不再只看“中心点命中谁”，否则空白区域会被误判成修改父容器。
-      const box = stageRef.current.getBoundingClientRect()
-      const left =
-        box.left + viewport.translateX + rect.x * designWidth * viewport.scale
-      const top =
-        box.top + viewport.translateY + rect.y * designHeight * viewport.scale
+      // 直接使用视口元素的屏幕矩形：滚动偏移与 zoom transform 都已包含，
+      // 因此无论容器滚到哪里、缩放多少，选区的屏幕坐标都准确。
+      const box = viewportRef.current.getBoundingClientRect()
+      const left = box.left + rect.x * designWidth * viewport.scale
+      const top = box.top + rect.y * designHeight * viewport.scale
       const screenRect = {
         left,
         top,
@@ -1510,6 +1611,7 @@ function CanvasStage({
       >
         {/* 页面层与标注层共享同一个 transform：两者“长在一起”。 */}
         <div
+          ref={viewportRef}
           className="canvas-viewport"
           style={{
             width: `${designWidth}px`,
@@ -1907,7 +2009,7 @@ function CanvasStage({
                       ? '浏览中 · 点击灰色空白回到标注 · 中键平移'
                       : '标注中 · 单击页面进入浏览 · 拖拽圈选 · 中键平移'
                     : interactive
-                      ? '圈选页面区域 · 空格/中键平移 · 滚轮缩放'
+                      ? '圈选页面区域 · 滚轮滚动页面 · Ctrl+滚轮缩放 · 空格/中键平移'
                       : ''}
         </div>
       </div>

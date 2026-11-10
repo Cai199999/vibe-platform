@@ -3,14 +3,17 @@ import useFillViewport from '../workspace/useFillViewport.js'
 import usePanZoom from '../workspace/usePanZoom.js'
 
 /**
- * 沙盒预览使用「最小 1280×720 逻辑视口 + 自适应铺满 + 用户视口变换」：
+ * 沙盒预览使用「固定 1440×900 逻辑视口 + 真实页面滚动 + 用户视口变换」：
  *
- *  1. iframe 的逻辑宽高由容器尺寸反推（最小 1280×720），页面按桌面版式排版；
- *  2. useFillViewport 计算统一 scale，使逻辑视口恰好铺满容器，不裁切；
- *  3. 用户滚轮缩放、中键 / 空格 + 左键平移叠加在同一组 transform 上；
+ *  1. iframe 固定为 1440×900 基准，与画布完全一致，保证双屏版式不漂移；
+ *  2. 不再通过外层 scale 强行适配容器：容器本身 overflow:auto，
+ *     滚轮优先滚动容器，页面内容 100% 可达；
+ *  3. Ctrl / Meta + 滚轮缩放、中键 / 空格 + 左键平移叠加在同一组 transform 上；
  *  4. iframe 上方覆盖一层透明手势层：iframe 会吞掉指针与滚轮事件，只有
  *     通过手势层才能在预览内容任意位置进行缩放和平移；
  *  5. 视口状态存放在 ViewportContext，切换画布 / 预览不会重置。
+ *  6. 展示模式下接收画布的 scroll / click postMessage，实时同步滚动并
+ *     在点击位置绘制涟漪反馈。
  *
  * Inspect 模式（精准点击选择）：
  *  - iframe 是跨域的，父页面不能直接访问 DOM，因此通过 postMessage 把
@@ -38,11 +41,21 @@ export default function ScaledPreview({
   placement = null,
   onPlacementConfirm,
   onPlacementDismiss,
+  // 双屏同步：{ scrollX, scrollY, nonce }，由画布的 SDK scroll 事件驱动。
+  syncScroll = null,
+  // 画布中的点击反馈：{ rect, nonce }，在预览同位置画一个短暂涟漪。
+  interactionFeedback = null,
 }) {
   const screenRef = useRef(null)
   const iframeRef = useRef(null)
   const onPickRef = useRef(onInspectPick)
   const inspectModeRef = useRef(inspectMode)
+  // SDK 是否已握手；未就绪时不拦截滚轮、不强制滚动。
+  const readyRef = useRef(false)
+  // 最近一次预览 iframe 滚动快照，用于滚轮边界链式滚动。
+  const scrollStateRef = useRef(null)
+  const syncScrollRef = useRef(syncScroll)
+  syncScrollRef.current = syncScroll
   const [hover, setHover] = useState(null)
   // 新组件测量结果 + 用户拖拽产生的 iframe 坐标偏移。
   const [measurement, setMeasurement] = useState(null)
@@ -66,6 +79,8 @@ export default function ScaledPreview({
     baseScale,
     baseOffsetX,
     baseOffsetY,
+    contentWidth: designWidth,
+    contentHeight: designHeight,
   })
 
   useEffect(() => {
@@ -114,11 +129,24 @@ export default function ScaledPreview({
       const data = event.data
       if (!data || data.channel !== 'vibe-inspect') return
       if (data.type === 'ready') {
+        readyRef.current = true
+        scrollStateRef.current = data.payload?.scroll ?? null
         sendInspect(message('enable', { enabled: inspectModeRef.current }))
         // iframe 重载（HMR / 首次加载）后重新测量拖拽目标。
         setMeasurement(null)
         measurementRef.current = null
         setMeasureFailed(false)
+        // 预览加载前画布可能已经滚动过，这里补一次对齐。
+        const pending = syncScrollRef.current
+        if (pending) {
+          sendInspect(
+            message('scroll-to', {
+              x: pending.scrollX ?? 0,
+              y: pending.scrollY ?? 0,
+              behavior: 'auto',
+            }),
+          )
+        }
         return
       }
       if (data.type === 'measured') {
@@ -143,6 +171,11 @@ export default function ScaledPreview({
         if (data.payload && data.payload.ok) {
           onPickRef.current?.(data.payload)
         }
+        return
+      }
+      if (data.type === 'scroll') {
+        // 预览自身滚动快照：只用于滚轮边界判断，不反向驱动画布。
+        scrollStateRef.current = data.payload ?? null
       }
     }
     window.addEventListener('message', handler)
@@ -151,9 +184,74 @@ export default function ScaledPreview({
 
   // 模式切换或 iframe src 变化时重新下发 enable（iframe 重载会丢状态）。
   useEffect(() => {
+    readyRef.current = false
+    scrollStateRef.current = null
     sendInspect(message('enable', { enabled: inspectMode }))
     if (!inspectMode) setHover(null)
   }, [inspectMode, src])
+
+  // 画布滚动 → 预览同步。nonce 保证相同的滚动位置也会再次下发
+  // （例如预览 iframe 刚重载，需要重新对齐）。
+  useEffect(() => {
+    if (!syncScroll || !readyRef.current) return
+    sendInspect(
+      message('scroll-to', {
+        x: syncScroll.scrollX ?? 0,
+        y: syncScroll.scrollY ?? 0,
+        behavior: 'auto',
+      }),
+    )
+    // sendInspect 只做 postMessage，无需进入依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncScroll?.nonce])
+
+  /*
+   * 预览和画布一样恢复真实浏览器的滚轮手感：
+   * 普通滚轮滚动 iframe 内部页面，Ctrl / Cmd + 滚轮才缩放画布。
+   * 透明手势层会拦截原生滚动，因此必须手动转发给 SDK。
+   */
+  useEffect(() => {
+    const node = screenRef.current
+    if (!node) return undefined
+
+    const onWheel = (event) => {
+      if (event.ctrlKey || event.metaKey) return
+      if (!readyRef.current) return
+      const unit =
+        event.deltaMode === 1
+          ? 16
+          : event.deltaMode === 2
+            ? node.clientHeight
+            : 1
+      const dx = event.deltaX * unit
+      const dy = event.deltaY * unit
+      // 页面滚到边界后，剩余滚轮交还外层容器。
+      const snapshot = scrollStateRef.current
+      if (!snapshot) return
+      const scrollX = Number(snapshot.scrollX) || 0
+      const scrollY = Number(snapshot.scrollY) || 0
+      const maxX = Number(snapshot.maxX) || 0
+      const maxY = Number(snapshot.maxY) || 0
+      const canScrollX =
+        dx < 0 ? scrollX > 0.5 : dx > 0 ? scrollX < maxX - 0.5 : false
+      const canScrollY =
+        dy < 0 ? scrollY > 0.5 : dy > 0 ? scrollY < maxY - 0.5 : false
+      if (!canScrollX && !canScrollY) return
+
+      event.preventDefault()
+      sendInspect(
+        message('scroll-by', {
+          dx: canScrollX ? dx : 0,
+          dy: canScrollY ? dy : 0,
+        }),
+      )
+    }
+
+    node.addEventListener('wheel', onWheel, { passive: false })
+    return () => node.removeEventListener('wheel', onWheel)
+    // sendInspect 只做 postMessage；readyRef 自行维护。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   /** 把浏览器指针坐标映射到 iframe 内部当前逻辑视口坐标。 */
   const toFramePoint = (event) => {
@@ -285,6 +383,25 @@ export default function ScaledPreview({
     sendInspect(message('pick', point))
   }
 
+  /*
+   * 点击反馈锚点。
+   *  - SDK 的 click 事件带 clientX / clientY（iframe 视口坐标）；
+   *  - Inspect 的 picked 事件只有元素 rect，回退到元素中心。
+   * 只绘制一个固定世界尺寸的小涟漪，而不是整个元素矩形——点击 <main>
+   * 这类大容器时，按 rect 绘制会得到覆盖整页的巨型光斑且可能滚出视口。
+   */
+  const feedbackRect = interactionFeedback?.rect ?? null
+  const feedbackHasPoint =
+    Number.isFinite(Number(interactionFeedback?.x)) &&
+    Number.isFinite(Number(interactionFeedback?.y))
+  const feedbackX = feedbackHasPoint
+    ? Number(interactionFeedback.x)
+    : (feedbackRect?.x ?? 0) + (feedbackRect?.width ?? 0) / 2
+  const feedbackY = feedbackHasPoint
+    ? Number(interactionFeedback.y)
+    : (feedbackRect?.y ?? 0) + (feedbackRect?.height ?? 0) / 2
+  const feedbackSize = Math.max(10, 44 * viewport.scale)
+
   return (
     <div ref={screenRef} className="runtime-preview-screen">
       <iframe
@@ -293,7 +410,6 @@ export default function ScaledPreview({
         src={src}
         title={title}
         sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
-        scrolling="no"
         onLoad={() => {
           setHover(null)
           sendInspect(message('enable', { enabled: inspectModeRef.current }))
@@ -346,6 +462,29 @@ export default function ScaledPreview({
             : '滚轮缩放 · 中键或空格+左键平移 · 双击重置'
         }
       />
+
+      {/* 画布点击 → 预览视觉反馈：在点击点绘制一次短促的涟漪。
+          坐标使用 iframe 内视口 CSS 像素，和 iframe 共享同一 transform，
+          因此缩放 / 平移 / 双屏滚动后仍然严格对齐。 */}
+      {interactionFeedback && (feedbackHasPoint || feedbackRect) && (
+        <div
+          key={`click-${interactionFeedback.nonce}`}
+          className="preview-click-feedback"
+          data-preview-click-feedback
+          aria-hidden="true"
+          style={{
+            left: `${
+              viewport.translateX + feedbackX * viewport.scale - feedbackSize / 2
+            }px`,
+            top: `${
+              viewport.translateY + feedbackY * viewport.scale - feedbackSize / 2
+            }px`,
+            width: `${feedbackSize}px`,
+            height: `${feedbackSize}px`,
+            borderRadius: '50%',
+          }}
+        />
+      )}
 
       {/* 蓝色高亮框按 transform 映射回屏幕坐标，与 iframe 内容严格对齐。 */}
       {inspectMode && hover?.rect && (

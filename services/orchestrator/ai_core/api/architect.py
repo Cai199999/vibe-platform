@@ -14,6 +14,8 @@ from ai_core.domain.architect import (
     ArchitectCancelResponse,
     ArchitectDecisionRequest,
     ArchitectDecisionResponse,
+    ArchitectHelperRequest,
+    ArchitectHelperResponse,
     ArchitectRunRequest,
     ArchitectSnapshotResponse,
 )
@@ -98,6 +100,22 @@ def decide_architect_contract(
     service = ArchitectService()
     try:
         return service.decide_contract(run_id, contract_id, request)
+    except Exception as exc:  # noqa: BLE001
+        _raise_http(exc)
+
+
+@router.post(
+    "/runs/{run_id}/helper",
+    response_model=ArchitectHelperResponse,
+)
+def ask_architect_helper(
+    run_id: str,
+    request: ArchitectHelperRequest,
+) -> ArchitectHelperResponse:
+    """影子 LLM：只读问答，不推进主架构状态机。"""
+    service = ArchitectService()
+    try:
+        return service.helper(run_id, request)
     except Exception as exc:  # noqa: BLE001
         _raise_http(exc)
 

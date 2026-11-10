@@ -706,6 +706,144 @@ function ContractActions({ contract, submitting, onDecide }) {
   )
 }
 
+const HELPER_SUGGESTIONS = [
+  '为什么要选择当前技术栈？',
+  '这个架构以后怎么扩展？',
+  '数据库表和接口是怎么对应的？',
+]
+
+/**
+ * 影子 LLM 对话区（只读）。
+ *
+ * 这里刻意不复用主对话的 messages：
+ *  - 主对话是状态机的“事实记录”，会驱动澄清与契约；
+ *  - 这里是旁路问答，只把当前架构快照作为上下文，回答不会推进流程。
+ */
+function HelperConversation({ helper, pending, error, onAsk }) {
+  const [draft, setDraft] = useState('')
+  const scrollRef = useRef(null)
+  const messages = helper?.messages ?? []
+
+  useEffect(() => {
+    const node = scrollRef.current
+    if (!node) return
+    node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' })
+  }, [messages.length, pending])
+
+  const send = (text) => {
+    const value = String(text ?? draft).trim()
+    if (!value || pending) return
+    setDraft('')
+    onAsk?.(value)
+  }
+
+  return (
+    <div className="architect-helper" data-architect-helper>
+      <div className="architect-helper-scroll" ref={scrollRef}>
+        {messages.length === 0 && !pending && (
+          <div className="architect-helper-empty">
+            <span aria-hidden="true">◇</span>
+            <p>
+              这里可以随时追问架构决策，例如“为什么用 Node.js？”。
+              助手拥有当前架构与知识库的<strong>只读</strong>权限，
+              回答不会推进或修改主架构流程。
+            </p>
+            <div className="architect-helper-suggestions">
+              {HELPER_SUGGESTIONS.map((suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  onClick={() => send(suggestion)}
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {messages.map((message) => (
+          <article
+            key={message.id}
+            className={`architect-helper-message role-${message.role}`}
+            data-helper-role={message.role}
+          >
+            <span className="architect-helper-role">
+              {message.role === 'assistant' ? '影子助手' : '你'}
+            </span>
+            <div className="architect-helper-body">{message.content}</div>
+            {Array.isArray(message.citations) && message.citations.length > 0 && (
+              <ul className="architect-helper-citations">
+                {message.citations.slice(0, 3).map((citation, index) => (
+                  <li
+                    key={`${citation.docId ?? citation.title}-${index}`}
+                    title={citation.section || citation.path || ''}
+                  >
+                    📚 {citation.title}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </article>
+        ))}
+
+        {pending && (
+          <div className="architect-helper-thinking" role="status">
+            <span className="mini-spinner" aria-hidden="true" />
+            影子助手正在查阅架构上下文…
+          </div>
+        )}
+
+        {error && (
+          <div className="architect-helper-error" role="alert">
+            {error}
+          </div>
+        )}
+      </div>
+
+      <form
+        className="architect-helper-form"
+        onSubmit={(event) => {
+          event.preventDefault()
+          send()
+        }}
+      >
+        <textarea
+          rows={2}
+          value={draft}
+          data-helper-input
+          placeholder="随意提问，例如：为什么选这个数据库？会影响主流程吗？"
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault()
+              send()
+            }
+          }}
+        />
+        <button
+          type="submit"
+          className="architect-primary"
+          data-helper-send
+          disabled={!draft.trim() || pending}
+        >
+          {pending ? (
+            <>
+              <span className="mini-spinner" aria-label="回答中" />
+              思考中…
+            </>
+          ) : (
+            '提问'
+          )}
+        </button>
+      </form>
+      <p className="architect-helper-disclaimer">
+        只读模式：助手不会修改契约、技术栈或任何架构状态。
+      </p>
+    </div>
+  )
+}
+
 export default function ArchitectPanel({
   projectName,
   state,
@@ -713,6 +851,7 @@ export default function ArchitectPanel({
   onStart,
   onAnswer,
   onDecide,
+  onAskHelper,
   onCancel,
   onRestart,
   onFullstackGenerate,
@@ -723,6 +862,8 @@ export default function ArchitectPanel({
 }) {
   const scrollRef = useRef(null)
   const contractRef = useRef(null)
+  // confirm：推进主状态机的必答区；helper：只读的随意提问。
+  const [tab, setTab] = useState('confirm')
   const [confirmCancel, setConfirmCancel] = useState(false)
   // 新建项目的第一条输入：纯自然语言目标，不再要求先做形态选择。
   const [goal, setGoal] = useState('')
@@ -734,6 +875,39 @@ export default function ArchitectPanel({
   const messages = state?.messages ?? []
   const clarification = state?.clarification
   const contract = state?.contract
+  const helper = state?.helper ?? { messages: [], pending: false, error: null }
+  // 与画布 Banner 同一口径：只有“必须回答”的澄清问题才计入。
+  const pendingQuestions = (() => {
+    if (status !== 'AWAITING_CLARIFICATION') return 0
+    const questions = clarification?.questions
+    if (Array.isArray(questions) && questions.length > 0) {
+      return Math.max(
+        1,
+        questions.filter((question) => question.required !== false).length,
+      )
+    }
+    const missing = clarification?.missingSlots
+    return Array.isArray(missing) && missing.length > 0 ? missing.length : 1
+  })()
+
+  // 新的必答节点出现时自动切回确认 Tab：避免用户在随意提问里
+  // 错过“必须回答”的关键问题。
+  useEffect(() => {
+    if (!state?.runId) return
+    if (
+      status === 'AWAITING_CLARIFICATION' ||
+      status === 'AWAITING_CONTRACT_CONFIRMATION' ||
+      status === 'CONFIRMED' ||
+      status === 'FAILED'
+    ) {
+      setTab('confirm')
+    }
+  }, [
+    state?.runId,
+    status,
+    clarification?.clarificationId,
+    contract?.contractId,
+  ])
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -910,6 +1084,42 @@ export default function ArchitectPanel({
           </div>
         )}
 
+        {state?.runId && (
+          <div className="architect-tabs" role="tablist" aria-label="架构师视图">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === 'confirm'}
+              className={`architect-tab ${tab === 'confirm' ? 'is-active' : ''}`}
+              data-architect-tab="confirm"
+              onClick={() => setTab('confirm')}
+            >
+              架构确认
+              <span className="architect-tab-hint">必须回答</span>
+              {pendingQuestions > 0 && (
+                <span className="architect-tab-badge" aria-label={`${pendingQuestions} 个待确认问题`}>
+                  {pendingQuestions}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === 'helper'}
+              className={`architect-tab ${tab === 'helper' ? 'is-active' : ''}`}
+              data-architect-tab="helper"
+              onClick={() => setTab('helper')}
+            >
+              随意提问
+              <span className="architect-tab-hint">只读</span>
+              {helper.pending && (
+                <span className="mini-spinner" aria-label="助手回答中" />
+              )}
+            </button>
+          </div>
+        )}
+
+        {tab === 'confirm' && (
         <div className="architect-panel-scroll" ref={scrollRef}>
           {state?.error && (
             <div className="architect-error" role="alert">
@@ -1091,10 +1301,21 @@ export default function ArchitectPanel({
             </div>
           )}
         </div>
+        )}
 
-        {(WORKING_STATUSES.has(status) ||
-          status === 'AWAITING_CLARIFICATION' ||
-          status === 'FAILED') &&
+        {tab === 'helper' && state?.runId && (
+          <HelperConversation
+            helper={helper}
+            pending={Boolean(helper.pending)}
+            error={helper.error}
+            onAsk={(question) => onAskHelper?.(question)}
+          />
+        )}
+
+        {tab === 'confirm' &&
+          (WORKING_STATUSES.has(status) ||
+            status === 'AWAITING_CLARIFICATION' ||
+            status === 'FAILED') &&
           !contract && (
             <footer className="architect-panel-footer">
               {WORKING_STATUSES.has(status) ? (

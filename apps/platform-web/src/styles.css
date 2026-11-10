@@ -761,14 +761,42 @@ code {
   width: 100%;
   min-width: 0;
   height: clamp(420px, 56vh, 640px);
-  /* 这里是“画布视口”而不是内容容器：内部 page 会按 useFillViewport
-     计算的 scale 严格铺满，因此 overflow 只负责圈选时的绘制边界；
-     父级布局链不再用它来硬裁内容。 */
-  overflow: hidden;
+  /* 真实浏览器模型：内部固定 1440×900，容器不够大时出现原生滚动条。
+     滚轮默认滚动页面，Ctrl + 滚轮才缩放画布。 */
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   cursor: crosshair;
   touch-action: none;
   user-select: none;
   background: var(--screen-bg);
+}
+
+/* 深色细滚动条，避免默认亮色滚动条破坏画布观感。 */
+.canvas-stage,
+.runtime-preview-screen {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+}
+
+.canvas-stage::-webkit-scrollbar,
+.runtime-preview-screen::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.canvas-stage::-webkit-scrollbar-thumb,
+.runtime-preview-screen::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.42);
+  background-clip: padding-box;
+}
+
+.canvas-stage::-webkit-scrollbar-thumb:hover,
+.runtime-preview-screen::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.62);
+  background-clip: padding-box;
 }
 
 .canvas-stage.is-disabled {
@@ -796,7 +824,8 @@ body.is-viewport-panning * {
   cursor: grabbing !important;
 }
 
-/* 与 iframe 内页面使用完全相同的逻辑视口：1024px 宽，左上角缩放。 */
+/* 固定 1440×900 的逻辑视口：页面、标注、浮层共享同一坐标系。
+   transform 只负责用户主动 Ctrl+滚轮产生的 zoom，不再负责铺满容器。 */
 .canvas-viewport {
   position: absolute;
   top: 0;
@@ -3318,6 +3347,60 @@ body.is-viewport-panning * {
   justify-content: flex-end;
 }
 
+/* 架构待办 Banner：不可关闭，常驻页面最顶部。
+   使用负 margin 抵消 tab-window 内边距，形成整条通栏警示带。 */
+.architect-pending-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -18px -18px 14px;
+  padding: 11px 18px;
+  border-bottom: 1px solid rgba(251, 191, 36, 0.32);
+  border-radius: 23px 23px 0 0;
+  background:
+    linear-gradient(90deg, rgba(251, 191, 36, 0.16), rgba(249, 115, 22, 0.08)),
+    rgba(2, 6, 23, 0.72);
+  color: #fde68a;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.architect-pending-banner.is-attention {
+  border-bottom-color: rgba(248, 113, 113, 0.4);
+  background:
+    linear-gradient(90deg, rgba(248, 113, 113, 0.2), rgba(251, 191, 36, 0.1)),
+    rgba(2, 6, 23, 0.78);
+  color: #fecaca;
+}
+
+.architect-pending-mark {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.architect-pending-text {
+  min-width: 0;
+}
+
+.architect-pending-action {
+  margin-left: auto;
+  flex: none;
+  padding: 5px 12px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.16s ease;
+}
+
+.architect-pending-action:hover {
+  background: rgba(251, 191, 36, 0.16);
+}
+
 /* ------------------------------------------------------------------ */
 /* Single viewport toolbar & segmented control                        */
 /* ------------------------------------------------------------------ */
@@ -4007,16 +4090,17 @@ body.is-viewport-panning * {
   background: var(--screen-bg);
 }
 
-/* 预览屏幕 = 浏览器 chrome 下方的全部可用空间，绝不做 flex 居中或加 padding。 */
+/* 预览屏幕 = 浏览器 chrome 下方的全部可用空间；与画布一样允许原生滚动。
+   固定 1440×900 基准下，窗口不够大时用户可以直接滚动查看完整页面。 */
 .runtime-preview-screen {
   position: absolute;
   inset: 0;
-  overflow: hidden;
+  overflow: auto;
+  overscroll-behavior: contain;
   background: var(--screen-bg);
 }
 
-/* iframe 以 1024px 逻辑宽度排版，再由 JS 计算 scale 后从左上角铺满屏幕：
-   scale 后宽高严格等于 .runtime-preview-screen，不存在任何留白或黑边。 */
+/* iframe 固定按 1440×900 逻辑视口排版，用户 zoom 只叠加 transform。 */
 .runtime-preview-frame {
   display: block;
   position: absolute;
@@ -5290,6 +5374,259 @@ body.is-viewport-panning * {
   padding: 18px 22px 26px;
   scrollbar-width: thin;
   scrollbar-color: rgba(148, 163, 184, 0.3) transparent;
+}
+
+/* ── 架构确认 / 随意提问 双 Tab ────────────────────────────────────── */
+
+.architect-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 10px 22px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.10);
+  background: rgba(2, 6, 23, 0.18);
+}
+
+.architect-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 14px 11px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--faint);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease;
+}
+
+.architect-tab:hover {
+  color: #cbd5e1;
+}
+
+.architect-tab.is-active {
+  border-bottom-color: #38bdf8;
+  color: #e2e8f0;
+}
+
+.architect-tab-hint {
+  color: var(--faint);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.architect-tab.is-active .architect-tab-hint {
+  color: rgba(125, 211, 252, 0.75);
+}
+
+.architect-tab-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.18);
+  border: 1px solid rgba(251, 191, 36, 0.36);
+  color: #fcd34d;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.architect-tab .mini-spinner {
+  width: 11px;
+  height: 11px;
+}
+
+/* ── 影子 LLM 只读问答 ─────────────────────────────────────────────── */
+
+.architect-helper {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.architect-helper-scroll {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  padding: 16px 22px 10px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.3) transparent;
+}
+
+.architect-helper-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: auto 0;
+  padding: 22px;
+  border: 1px dashed rgba(129, 140, 248, 0.28);
+  border-radius: 16px;
+  background: rgba(30, 27, 75, 0.16);
+  text-align: center;
+}
+
+.architect-helper-empty > span {
+  font-size: 24px;
+  color: #a5b4fc;
+}
+
+.architect-helper-empty p {
+  margin: 0;
+  color: #c7d2fe;
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+
+.architect-helper-empty strong {
+  color: #e0e7ff;
+}
+
+.architect-helper-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 7px;
+}
+
+.architect-helper-suggestions button {
+  padding: 6px 11px;
+  border: 1px solid rgba(129, 140, 248, 0.28);
+  border-radius: 999px;
+  background: rgba(49, 46, 129, 0.22);
+  color: #c7d2fe;
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.architect-helper-suggestions button:hover {
+  border-color: rgba(165, 180, 252, 0.55);
+  background: rgba(67, 56, 202, 0.3);
+}
+
+.architect-helper-message {
+  max-width: 90%;
+  padding: 9px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 12px;
+  border-bottom-left-radius: 4px;
+  background: rgba(15, 23, 42, 0.48);
+}
+
+.architect-helper-message.role-user {
+  align-self: flex-end;
+  border-color: rgba(56, 189, 248, 0.26);
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 4px;
+  background: rgba(14, 116, 144, 0.16);
+}
+
+.architect-helper-role {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.architect-helper-body {
+  color: #dbe4f0;
+  font-size: 11.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.architect-helper-citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.architect-helper-citations li {
+  padding: 3px 8px;
+  border: 1px solid rgba(52, 211, 153, 0.24);
+  border-radius: 999px;
+  background: rgba(6, 78, 59, 0.16);
+  color: #6ee7b7;
+  font-size: 9.5px;
+}
+
+.architect-helper-thinking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  padding: 8px 12px;
+  border: 1px dashed rgba(129, 140, 248, 0.3);
+  border-radius: 12px;
+  color: #c7d2fe;
+  font-size: 10.5px;
+}
+
+.architect-helper-error {
+  padding: 9px 12px;
+  border: 1px solid rgba(248, 113, 113, 0.32);
+  border-radius: 12px;
+  background: rgba(127, 29, 29, 0.18);
+  color: #fecaca;
+  font-size: 11px;
+}
+
+.architect-helper-form {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  padding: 10px 22px 4px;
+  border-top: 1px solid rgba(148, 163, 184, 0.1);
+  background: rgba(2, 6, 23, 0.24);
+}
+
+.architect-helper-form textarea {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  padding: 9px 11px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.5);
+  color: #e2e8f0;
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.architect-helper-form textarea:focus {
+  outline: none;
+  border-color: rgba(56, 189, 248, 0.5);
+}
+
+.architect-helper-form .architect-primary {
+  flex: none;
+  min-width: 74px;
+}
+
+.architect-helper-disclaimer {
+  margin: 0;
+  padding: 4px 22px 12px;
+  color: var(--faint);
+  font-size: 9.5px;
+  background: rgba(2, 6, 23, 0.24);
 }
 
 .architect-error {
@@ -8440,6 +8777,34 @@ body.is-viewport-panning * {
 
 .preview-gesture-layer.is-inspecting {
   cursor: crosshair;
+}
+
+/* 画布点击 → 预览点击涟漪：与 iframe 共享 transform，位置严格对齐。 */
+.preview-click-feedback {
+  position: absolute;
+  z-index: 6;
+  pointer-events: none;
+  border: 2px solid rgba(56, 189, 248, 0.9);
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.24);
+  box-shadow: 0 0 0 2px rgba(2, 6, 23, 0.35),
+    0 0 26px rgba(56, 189, 248, 0.65);
+  animation: preview-click-ripple 620ms ease-out forwards;
+}
+
+@keyframes preview-click-ripple {
+  0% {
+    opacity: 0.95;
+    transform: scale(0.82);
+  }
+  55% {
+    opacity: 0.65;
+    transform: scale(1.04);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.12);
+  }
 }
 
 /* 高亮框绘制在父页面，按 iframe transform 映射，pointer-events 必须关闭。 */

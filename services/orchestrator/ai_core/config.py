@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     model_coder_name: str = ""
     model_architect_analyze_name: str = ""
     model_architect_contract_name: str = ""
+    model_architect_helper_name: str = ""
 
     # 复用宿主机 Docker Redis；当前骨架不主动连接。
     redis_host: str = "127.0.0.1"

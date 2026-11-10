@@ -17,7 +17,11 @@ import WorkspaceTabs from '../components/WorkspaceTabs.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { useSettings } from '../settings/SettingsContext.jsx'
 import { useWorkspace } from '../workspace/useWorkspace.js'
-import { EMPTY_ARCHITECT, useArchitect } from '../workspace/useArchitect.js'
+import {
+  EMPTY_ARCHITECT,
+  countPendingKeyQuestions,
+  useArchitect,
+} from '../workspace/useArchitect.js'
 import { createFrameBatcher, streamRun } from '../workspace/runStream.js'
 import { importProjectFile } from '../workspace/importClient.js'
 import {
@@ -2326,12 +2330,27 @@ export default function WorkspacePage() {
   }
 
   /**
+   * 主流程仍有必答问题时，拦截“跳过对话直接生成”。
+   *
+   * Banner 只是提醒，用户仍可能从其它入口直接点生成；这里做最后一道
+   * 前端门禁：打开架构面板并提示剩余数量，绝不带着半成品架构进入生成。
+   */
+  const blockGenerateUntilAnswered = (projectId) => {
+    const pending = countPendingKeyQuestions(architectStates[projectId])
+    if (pending <= 0) return false
+    architect.openPanel(projectId)
+    showToast('info', `请先回答关键问题（还剩 ${pending} 个）`)
+    return true
+  }
+
+  /**
    * 契约确认 -> 全栈代码生成。
    *
    * 复用当前项目的沙盒；导入 / 纯前端项目没有 sandboxId 时，把当前入口
    * 源码作为 source.files 兜底，服务端会先创建一个沙盒再写入代码。
    */
   const handleFullstackGenerate = async (projectId) => {
+    if (blockGenerateUntilAnswered(projectId)) return
     const project = projects.find((item) => item.id === projectId)
     const architectState = architectStates[projectId]
     const contract = architectState?.contract
@@ -2433,6 +2452,8 @@ export default function WorkspacePage() {
    * 新项目没有源码和沙盒，服务端会用内置 React/Vite 模板新建沙盒。
    */
   const handleFrontendBootstrap = (projectId, { manual = false } = {}) => {
+    // 手动重试也必须等必答问题解决；自动触发只在 CONFIRMED 后发生。
+    if (manual && blockGenerateUntilAnswered(projectId)) return
     const project = projects.find((item) => item.id === projectId)
     const architectState = architectStates[projectId]
     const contract = architectState?.contract
@@ -3639,6 +3660,7 @@ export default function WorkspacePage() {
       architectClose: architect.closePanel,
       architectAnswer: architect.answer,
       architectDecide: architect.decide,
+      architectAskHelper: architect.askHelper,
       architectCancel: architect.cancel,
     }
   })
@@ -3707,6 +3729,8 @@ export default function WorkspacePage() {
             decision,
             comment,
           ),
+        onArchitectAskHelper: (question) =>
+          workspaceActionsRef.current?.architectAskHelper(projectId, question),
         onArchitectCancel: () =>
           workspaceActionsRef.current?.architectCancel(projectId),
         onFullstackGenerate: () => call('handleFullstackGenerate'),

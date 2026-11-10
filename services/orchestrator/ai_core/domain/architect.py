@@ -354,6 +354,33 @@ class ArchitectCancelRequest(CamelModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+class ArchitectHelperMessage(CamelModel):
+    """影子 LLM 的对话记录（只读问答，不参与主状态机）。"""
+
+    role: Literal["user", "assistant"] = "user"
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class ArchitectHelperRequest(CamelModel):
+    """向 Helper Agent 提一个问题。
+
+    严格限制历史长度，避免把整段架构对话无限回灌；Helper 只能读取
+    当前 Run 的快照与 RAG 知识库，不接受任何写入 / 推进指令。
+    """
+
+    question: str = Field(min_length=1, max_length=2000)
+    history: list[ArchitectHelperMessage] = Field(default_factory=list, max_length=12)
+    use_knowledge_base: bool = True
+
+
+class ArchitectHelperResponse(CamelModel):
+    run_id: str
+    answer: str
+    citations: list[ArchitectCitation] = Field(default_factory=list)
+    read_only: bool = True
+    model: str = ""
+
+
 class ArchitectClarificationStatus(CamelModel):
     clarification_id: str
     status: Literal["ANSWERED"]
