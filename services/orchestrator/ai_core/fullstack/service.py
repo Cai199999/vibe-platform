@@ -7,7 +7,7 @@
       -> 复用 / 创建沙盒
       -> 后台线程执行 FullstackGraph
       -> SSE 输出 DBACoder / BackendCoder / FrontendCoder / InfraCoder /
-         构建 / 重启
+         接口一致性检查 / 构建 / 重启
       -> fullstack.completed | fullstack.failed（终态）
 
 事件 seq 由 ``RunEventBuffer`` 唯一分配；BFF 与前端只透传 / 重放。
@@ -39,6 +39,8 @@ from ai_core.fullstack.coders import (
     extract_table_name,
 )
 from ai_core.fullstack.graph import (
+    FRONTEND_NODE_ORDER,
+    FULLSTACK_NODE_ORDER,
     FullstackGenerationError,
     FullstackGraphRunner,
     FullstackState,
@@ -198,18 +200,7 @@ class FullstackService:
             _ACTIVE_RUNS[run_id] = active
 
         mode = request.options.mode
-        nodes = (
-            ["FrontendCoder", "BuildVerifier", "SandboxRestart"]
-            if mode == "frontend"
-            else [
-                "DBACoder",
-                "BackendCoder",
-                "FrontendCoder",
-                "InfraCoder",
-                "BuildVerifier",
-                "SandboxRestart",
-            ]
-        )
+        nodes = FRONTEND_NODE_ORDER if mode == "frontend" else FULLSTACK_NODE_ORDER
         active.buffer.emit(
             "fullstack.started",
             {

@@ -2,6 +2,7 @@ package com.vibeplatform.bff.supervisor;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -66,5 +67,45 @@ public class SupervisorController {
     @PostMapping("/agents/reload")
     public ResponseEntity<JsonNode> reloadAgents() {
         return supervisorService.reloadAgents();
+    }
+
+    /** 根据自然语言需求创建企业自定义 Agent。 */
+    @PostMapping("/agents")
+    public ResponseEntity<JsonNode> createAgent(
+            @RequestBody JsonNode body
+    ) {
+        return supervisorService.createAgent(body);
+    }
+
+    /** 删除自定义 Agent；内置 Agent 由 AI Core 侧拒绝。 */
+    @DeleteMapping("/agents/{agentId}")
+    public ResponseEntity<JsonNode> deleteAgent(@PathVariable String agentId) {
+        return supervisorService.deleteAgent(agentId);
+    }
+
+    /** 列出某个自定义 Agent 的知识文件。 */
+    @GetMapping("/agents/{agentId}/knowledge")
+    public ResponseEntity<JsonNode> agentKnowledge(
+            @PathVariable String agentId
+    ) {
+        return supervisorService.agentKnowledge(agentId);
+    }
+
+    /** 上传 .md/.txt 知识文件（JSON 文本，避免 BFF 维护 multipart 链路）。 */
+    @PostMapping("/agents/{agentId}/knowledge")
+    public ResponseEntity<JsonNode> uploadAgentKnowledge(
+            @PathVariable String agentId,
+            @RequestBody JsonNode body
+    ) {
+        return supervisorService.uploadAgentKnowledge(agentId, body);
+    }
+
+    /** 删除单个知识文件。 */
+    @DeleteMapping("/agents/{agentId}/knowledge/{fileName}")
+    public ResponseEntity<JsonNode> deleteAgentKnowledge(
+            @PathVariable String agentId,
+            @PathVariable String fileName
+    ) {
+        return supervisorService.deleteAgentKnowledge(agentId, fileName);
     }
 }

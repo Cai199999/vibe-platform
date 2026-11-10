@@ -3,7 +3,7 @@
 拓扑::
 
     START -> DBACoder -> BackendCoder -> FrontendCoder -> InfraCoder
-          -> BuildVerifier -> SandboxRestart -> END
+          -> ConsistencyVerifier -> BuildVerifier -> SandboxRestart -> END
 
 设计说明：
 
@@ -13,6 +13,9 @@
     保证离线、Mock 与真实模型环境行为一致；
   - DBACoder 生成 Sequelize ORM（生产走 DATABASE_URL，沙盒回退 SQLite）；
   - InfraCoder 生成 Dockerfile / render.yaml / .env.example 等一键部署配置；
+  - ConsistencyVerifier 在全部代码生成后、进入沙盒构建前比对前端请求
+    与后端路由；不一致时直接阻断，并把 Method / Path / Payload 差异报告
+    交给 Coder 修复；
   - 构建校验与沙盒重启放在图内，失败会带节点名进入 ``fullstack.failed``，
     前端可准确定位是“代码生成失败”还是“服务启动失败”。
 """
@@ -36,12 +39,17 @@ from ai_core.fullstack.coders import (
     generate_frontend_skeleton_bundle,
     generate_infra_bundle,
 )
+from ai_core.fullstack.consistency import (
+    ConsistencyError,
+    ConsistencyReport,
+    ensure_consistency,
+)
 from ai_core.ports.sandbox import SandboxProvider
 
 logger = logging.getLogger(__name__)
 
 # 节点总数用于日志与 SSE 的 index/total；新增节点时只需改这一处。
-GRAPH_NODE_TOTAL = 6
+GRAPH_NODE_TOTAL = 7
 # 对话前置模式的初始前端骨架只执行三个节点。
 FRONTEND_GRAPH_NODE_TOTAL = 3
 FULLSTACK_NODE_ORDER = [
@@ -49,6 +57,7 @@ FULLSTACK_NODE_ORDER = [
     "BackendCoder",
     "FrontendCoder",
     "InfraCoder",
+    "ConsistencyVerifier",
     "BuildVerifier",
     "SandboxRestart",
 ]
@@ -59,6 +68,7 @@ NODE_LABELS = {
     "BackendCoder": "后端工程师",
     "FrontendCoder": "前端工程师",
     "InfraCoder": "部署配置工程师",
+    "ConsistencyVerifier": "接口一致性检查",
     "BuildVerifier": "构建校验",
     "SandboxRestart": "沙盒重启",
 }
@@ -79,6 +89,16 @@ class FullstackBuildError(FullstackGenerationError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, node="BuildVerifier")
+
+
+class FullstackConsistencyError(FullstackGenerationError):
+    """前后端接口契约不一致；携带结构化差异报告。"""
+
+    code = "FULLSTACK_CONSISTENCY_FAILED"
+
+    def __init__(self, report: ConsistencyReport) -> None:
+        super().__init__(report.failure_message(), node="ConsistencyVerifier")
+        self.report = report
 
 
 class FullstackState(TypedDict, total=False):
@@ -159,11 +179,14 @@ class FullstackGraphRunner:
         builder.add_node("DBACoder", self._dba_coder)
         builder.add_node("BackendCoder", self._backend_coder)
         builder.add_node("InfraCoder", self._infra_coder)
+        builder.add_node("ConsistencyVerifier", self._consistency_verifier)
         builder.add_edge(START, "DBACoder")
         builder.add_edge("DBACoder", "BackendCoder")
         builder.add_edge("BackendCoder", "FrontendCoder")
         builder.add_edge("FrontendCoder", "InfraCoder")
-        builder.add_edge("InfraCoder", "BuildVerifier")
+        # 全部代码生成完毕、进入沙盒构建前，先做跨端接口一致性校验。
+        builder.add_edge("InfraCoder", "ConsistencyVerifier")
+        builder.add_edge("ConsistencyVerifier", "BuildVerifier")
         builder.add_edge("BuildVerifier", "SandboxRestart")
         builder.add_edge("SandboxRestart", END)
         return builder.compile()
@@ -283,6 +306,62 @@ class FullstackGraphRunner:
             raise FullstackGenerationError(
                 f"InfraCoder 生成失败: {exc}", node="InfraCoder"
             ) from exc
+
+    # --------------------------------------------------------
+    # 节点：ConsistencyVerifier
+    # --------------------------------------------------------
+    def _consistency_verifier(self, state: FullstackState) -> dict[str, Any]:
+        """比对前端请求与后端路由；不一致时阻断进入沙盒。
+
+        读取顺序即“最终事实”：
+          1. 前端：``src/App.jsx`` 的 INTERACTIONS + ``src/fullstack-api.jsx``
+             的 COLLECTION_PATH；
+          2. 后端：``server/api-routes.json``（BackendCoder 生成）。
+        校验只做静态解析，不启动服务，因此失败不会产生半启动的沙盒。
+        """
+        contract = state["contract"]
+        sandbox_id = state["sandbox_id"]
+        started = time.monotonic()
+        self._node_started("ConsistencyVerifier", state)
+        snapshot: dict[str, str] = {}
+        for path in (
+            "src/App.jsx",
+            "src/fullstack-api.jsx",
+            "server/api-routes.json",
+            "server/index.js",
+        ):
+            content = self._read_optional(sandbox_id, path)
+            if content is not None:
+                snapshot[path] = content
+
+        try:
+            report = ensure_consistency(snapshot, contract)
+        except ConsistencyError as exc:
+            # 差异报告单独推送一次，前端可以直接渲染 issue 列表。
+            self._emit(
+                "fullstack.consistency.report",
+                {"runId": state["run_id"], **exc.report.to_dict()},
+            )
+            self._node_failed("ConsistencyVerifier", state, exc)
+            raise FullstackConsistencyError(exc.report) from exc
+        except Exception as exc:
+            self._node_failed("ConsistencyVerifier", state, exc)
+            raise FullstackGenerationError(
+                f"接口一致性检查失败: {exc}", node="ConsistencyVerifier"
+            ) from exc
+
+        self._emit(
+            "fullstack.consistency.report",
+            {"runId": state["run_id"], **report.to_dict()},
+        )
+        self._node_completed(
+            "ConsistencyVerifier",
+            state,
+            report.summary(),
+            [],
+            started,
+        )
+        return {}
 
     # --------------------------------------------------------
     # 节点：BuildVerifier
@@ -514,6 +593,7 @@ class FullstackGraphRunner:
 __all__ = [
     "GRAPH_NODE_TOTAL",
     "FullstackBuildError",
+    "FullstackConsistencyError",
     "FullstackGenerationError",
     "FullstackGraphRunner",
     "FullstackState",

@@ -720,7 +720,8 @@ export default function FullstackDataPanel() {
           Accept: 'application/json',
           'Idempotency-Key': `ui-${Date.now()}`,
         },
-        body: JSON.stringify({ name: name.trim() || `新${ENTITY}` }),
+        // 提交字段必须与 DDL 可写列一致，避免后端静默丢弃请求体。
+        body: JSON.stringify({ __PAYLOAD_KEY__: name.trim() || `新${ENTITY}` }),
       })
       if (!response.ok) {
         throw new Error(`POST ${COLLECTION_PATH} -> HTTP ${response.status}`)
@@ -880,7 +881,17 @@ const APP_NAME = __APP_NAME__
 const ROUTES = __ROUTES__
 const LAYOUT = __LAYOUT__
 const COMPONENTS = __COMPONENTS__
+// 契约里已确认的组件交互；没有交互的组件保持静态，不生成假按钮。
+const INTERACTIONS = __INTERACTIONS__
 const SKELETON_MODE = __SKELETON_MODE__
+
+// 生产前后端通常分域部署：构建时注入 VITE_API_BASE_URL；
+// 沙盒未配置时为空字符串，继续走 Vite 同源 /api 代理。
+const API_BASE = String(import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+
+function apiUrl(path) {
+  return `${API_BASE}${path}`
+}
 
 const SECTIONS = COMPONENTS.reduce((groups, component) => {
   const name = component.section || '核心工作区'
@@ -1095,6 +1106,99 @@ const GLOBAL_CSS = `
     background:
       linear-gradient(90deg, rgba(56, 189, 248, 0.35), rgba(148, 163, 184, 0.12));
   }
+  .interaction-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: auto;
+    padding-top: 10px;
+    border-top: 1px solid rgba(148, 163, 184, 0.14);
+  }
+  .interaction-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .interaction-input {
+    flex: 1 1 150px;
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    border-radius: 9px;
+    background: rgba(2, 6, 23, 0.62);
+    color: #e2e8f0;
+    font: inherit;
+    font-size: 12.5px;
+  }
+  .interaction-input:focus {
+    outline: none;
+    border-color: rgba(56, 189, 248, 0.62);
+    box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.14);
+  }
+  .interaction-button {
+    flex: none;
+    padding: 8px 14px;
+    border: 1px solid rgba(56, 189, 248, 0.45);
+    border-radius: 9px;
+    background: rgba(14, 116, 144, 0.42);
+    color: #e0f2fe;
+    font-size: 12.5px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.16s ease, border-color 0.16s ease;
+  }
+  .interaction-button:hover:not(:disabled) {
+    border-color: rgba(125, 211, 252, 0.72);
+    background: rgba(14, 116, 144, 0.64);
+  }
+  .interaction-button:disabled {
+    opacity: 0.6;
+    cursor: wait;
+  }
+  .interaction-button.is-delete {
+    border-color: rgba(248, 113, 113, 0.45);
+    background: rgba(127, 29, 29, 0.4);
+    color: #fecaca;
+  }
+  .interaction-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    padding: 7px 9px;
+    border-radius: 8px;
+    background: rgba(148, 163, 184, 0.1);
+    color: #cbd5e1;
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+  .interaction-status.is-success {
+    background: rgba(6, 78, 59, 0.36);
+    color: #6ee7b7;
+  }
+  .interaction-status.is-error {
+    background: rgba(127, 29, 29, 0.32);
+    color: #fca5a5;
+  }
+  .interaction-status button {
+    padding: 3px 8px;
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font-size: 10.5px;
+    cursor: pointer;
+  }
+  .interaction-route {
+    overflow: hidden;
+    color: #475569;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .placeholder-card {
     display: flex;
     flex-direction: column;
@@ -1155,6 +1259,177 @@ const GLOBAL_CSS = `
     .welcome-panel { min-height: 0; padding: 24px; }
   }
 `
+
+function hasInteractions(componentId) {
+  return INTERACTIONS.some((item) => item.componentId === componentId)
+}
+
+/**
+ * 契约交互面板：把 componentInteractions 渲染成真实按钮 + fetch。
+ *
+ * 状态机严格区分 idle / loading / success / error：
+ *  - loading 时按钮禁用并显示“处理中…”，防止重复提交；
+ *  - 失败展示后端 message / HTTP 状态，并提供“重试”；
+ *  - 成功展示后端返回的 message 或记录条数。
+ * 纯前端交互（apiRoute 为空）只触发本地状态，不伪造网络请求。
+ */
+function InteractionPanel({ component }) {
+  const actions = INTERACTIONS.filter(
+    (item) => item.componentId === component.id,
+  )
+  const [state, setState] = useState('idle')
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const [value, setValue] = useState('')
+  const [lastAction, setLastAction] = useState(null)
+  if (actions.length === 0) return null
+
+  const needsInput = actions.some(
+    (item) => item.params.length > 0 || item.payloadKey,
+  )
+  const inputLabel =
+    actions[0].params.length > 0
+      ? '记录 ID'
+      : actions[0].payloadKey || '输入内容'
+
+  async function run(action) {
+    if (!action || state === 'loading') return
+    setLastAction(action)
+    setError('')
+    setMessage('')
+    if (action.method === 'LOCAL') {
+      setState('success')
+      setMessage(action.logic || '本地交互已触发')
+      return
+    }
+    const needsValue = action.params.length > 0 || action.payloadKey
+    if (needsValue && !value.trim()) {
+      setState('error')
+      setError(
+        action.params.length > 0
+          ? '请先填写记录 ID'
+          : `请先填写 ${action.payloadKey}`,
+      )
+      return
+    }
+    setState('loading')
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), 15000)
+    try {
+      let path = action.apiRoute
+      action.params.forEach((name) => {
+        path = path.replace(`:${name}`, encodeURIComponent(value.trim()))
+      })
+      const options = {
+        method: action.method,
+        signal: controller.signal,
+        headers: { Accept: 'application/json' },
+      }
+      if (!['GET', 'HEAD'].includes(action.method)) {
+        options.headers['Content-Type'] = 'application/json'
+        options.body = JSON.stringify(
+          action.payloadKey ? { [action.payloadKey]: value.trim() } : {},
+        )
+      }
+      const response = await fetch(apiUrl(path), options)
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(
+          payload?.message ||
+            payload?.code ||
+            `${action.method} ${path} -> HTTP ${response.status}`,
+        )
+      }
+      setState('success')
+      const rows = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.items)
+          ? payload.items
+          : null
+      setMessage(
+        payload?.message ||
+          `${action.method} ${path} 成功${rows ? `（${rows.length} 条）` : ''}`,
+      )
+    } catch (cause) {
+      setState('error')
+      setError(
+        cause?.name === 'AbortError'
+          ? `请求超时：${action.method} ${action.apiRoute}`
+          : String(cause?.message || cause),
+      )
+    } finally {
+      window.clearTimeout(timer)
+    }
+  }
+
+  return (
+    <div
+      className="interaction-panel"
+      data-interaction-panel
+      data-source={`interaction-${component.id}`}
+      data-source-kind="container"
+    >
+      <div className="interaction-row">
+        {needsInput && (
+          <input
+            className="interaction-input"
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+            placeholder={inputLabel}
+            aria-label={inputLabel}
+            disabled={state === 'loading'}
+          />
+        )}
+        {actions.map((action, index) => (
+          <button
+            key={`${action.event}-${index}`}
+            type="button"
+            className={`interaction-button${action.method === 'DELETE' ? ' is-delete' : ''}`}
+            data-interaction-run={action.method}
+            data-interaction-route={action.apiRoute}
+            onClick={() => run(action)}
+            disabled={state === 'loading'}
+            aria-disabled={state === 'loading'}
+          >
+            {state === 'loading' ? '处理中…' : action.label}
+          </button>
+        ))}
+      </div>
+      {state === 'loading' && (
+        <p className="interaction-status" role="status" aria-live="polite">
+          正在请求后端，请稍候…
+        </p>
+      )}
+      {state === 'success' && (
+        <p
+          className="interaction-status is-success"
+          role="status"
+          aria-live="polite"
+          data-interaction-status="success"
+        >
+          {message}
+        </p>
+      )}
+      {state === 'error' && (
+        <p
+          className="interaction-status is-error"
+          role="alert"
+          data-interaction-status="error"
+        >
+          {error}
+          <button type="button" onClick={() => run(lastAction)}>
+            重试
+          </button>
+        </p>
+      )}
+      <span className="interaction-route">
+        {actions[0].method === 'LOCAL'
+          ? '本地交互 · 无网络请求'
+          : `${actions[0].method} ${actions[0].apiRoute}`}
+      </span>
+    </div>
+  )
+}
 
 function Placeholder({ title, description, id }) {
   return (
@@ -1371,7 +1646,11 @@ export default function App() {
                             >
                               {component.description || '等待接入具体数据与交互。'}
                             </p>
-                            <div className="card-bar" />
+                            {hasInteractions(component.id) ? (
+                              <InteractionPanel component={component} />
+                            ) : (
+                              <div className="card-bar" />
+                            )}
                           </article>
                         </div>
                       </section>
@@ -1528,12 +1807,246 @@ def _skeleton_components(contract: ArchitectContract) -> list[dict[str, Any]]:
     return components
 
 
+# ------------------------------------------------------------
+# 契约交互 → 前端事件 / 网络请求
+# ------------------------------------------------------------
+# 常见动作关键词：只用于在没有显式 method 时推断 HTTP 方法。
+_DELETE_HINTS = ("删除", "移除", "delete", "remove", "destroy")
+_READ_HINTS = (
+    "加载",
+    "查询",
+    "搜索",
+    "获取",
+    "列表",
+    "刷新",
+    "load",
+    "list",
+    "fetch",
+    "query",
+    "search",
+    "get",
+)
+_UPDATE_HINTS = ("更新", "修改", "编辑", "update", "edit", "patch", "rename")
+_CREATE_HINTS = (
+    "提交",
+    "新增",
+    "创建",
+    "保存",
+    "添加",
+    "create",
+    "submit",
+    "save",
+    "add",
+    "post",
+)
+
+
+def _interaction_value(item: Any, name: str) -> str:
+    """同时兼容 Pydantic 模型与原始 dict 的字段读取。"""
+    if isinstance(item, dict):
+        return str(item.get(name) or "").strip()
+    return str(getattr(item, name, "") or "").strip()
+
+
+def _route_shape(path: str) -> tuple[str, ...]:
+    """把 ``{id}`` / ``:id`` 统一为 ``:param``，用于契约路由匹配。"""
+    raw = str(path or "").split("?", 1)[0].strip().strip("/")
+    if not raw:
+        return ()
+    segments: list[str] = []
+    for segment in raw.split("/"):
+        if segment.startswith("{") or segment.startswith(":"):
+            segments.append(":param")
+        elif segment:
+            segments.append(segment)
+    return tuple(segments)
+
+
+def _route_param_names(path: str) -> list[str]:
+    """提取路由中的参数名，前端用输入值替换后再发起真实请求。"""
+    return [
+        brace or colon
+        for brace, colon in re.findall(r"\{(\w+)\}|:([A-Za-z_]\w*)", str(path or ""))
+        if brace or colon
+    ]
+
+
+def _infer_interaction_method(event: str, logic: str, path: str) -> str:
+    """按事件与逻辑文本推断 HTTP 方法；契约显式声明时以声明为准。
+
+    顺序很重要：``"提交后保存并刷新列表"`` 同时包含“提交”和“刷新”，
+    必须判定为 POST；只有纯加载 / 查询事件才判定为 GET。
+    """
+    text = f"{event} {logic}".casefold()
+    normalized_event = str(event or "").strip().casefold()
+    if any(hint in text for hint in _DELETE_HINTS):
+        return "DELETE"
+    if any(hint in text for hint in _UPDATE_HINTS):
+        return "PUT"
+    if any(hint in text for hint in _CREATE_HINTS):
+        return "POST"
+    if normalized_event in {
+        "load",
+        "fetch",
+        "query",
+        "search",
+        "refresh",
+        "change",
+    } or any(hint in text for hint in _READ_HINTS):
+        return "GET"
+    # 默认：带路径参数视为更新，否则视为提交。
+    return "PUT" if _route_param_names(path) else "POST"
+
+
+def _resolve_interaction_method(
+    contract: ArchitectContract,
+    event: str,
+    logic: str,
+    path: str,
+    declared_method: str = "",
+) -> str:
+    """优先采用契约 api_routes 中与路径形状一致的声明方法。
+
+    历史契约可能把 ``api_route`` 写成 ``"GET /api/v1/todos"``；显式方法
+    优先，其次采用同形路由的声明方法，最后才按动作语义推断。
+    这样前端请求的 Method 与后端 Express 注册的方法天然一致；找不到
+    同形路由时才交给 ConsistencyVerifier 做最终阻断。
+    """
+    inferred = declared_method or _infer_interaction_method(event, logic, path)
+    shape = _route_shape(path)
+    methods = [
+        str(route.method or "GET").upper()
+        for route in (contract.api_routes or [])
+        if _route_shape(route.path) == shape
+    ]
+    if not methods:
+        return inferred
+    if inferred in methods:
+        return inferred
+    if inferred == "GET" and "GET" in methods:
+        return "GET"
+    # 同形路由同时存在 GET/POST 时，写入动作优先 POST。
+    if inferred != "GET" and "POST" in methods:
+        return "POST"
+    return methods[0]
+
+
+def _interaction_payload_key(contract: ArchitectContract, method: str) -> str:
+    """选择 POST/PUT/PATCH 的默认写入字段。
+
+    BackendCoder 的 ``buildValues`` 只接收 DDL 中的可写列；前端必须用
+    同一个列名提交，否则请求体结构会与后端 DTO 不一致。
+    """
+    if method not in {"POST", "PUT", "PATCH"}:
+        return ""
+    columns = [name for name, _ in extract_column_defs(contract.database_ddl)]
+    writable = [
+        column
+        for column in columns
+        if column.lower()
+        not in {"id", "tenant_id", "created_at", "updated_at", "deleted_at", "status"}
+    ]
+    if not writable:
+        return ""
+    for preferred in ("name", "title", "label"):
+        if preferred in (column.lower() for column in writable):
+            return next(column for column in writable if column.lower() == preferred)
+    return writable[0]
+
+
+def _interaction_label(method: str, event: str) -> str:
+    if method == "LOCAL":
+        return "执行"
+    if method == "GET":
+        return "加载数据"
+    if method == "DELETE":
+        return "删除"
+    if method in {"PUT", "PATCH"}:
+        return "保存"
+    if method == "POST":
+        return "提交"
+    return event or "执行"
+
+
+def _skeleton_interactions(
+    contract: ArchitectContract,
+    components: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """把 componentInteractions 翻译成可直接渲染的事件描述。
+
+    规则：
+      - 只接受用户在澄清阶段确认过的交互；
+      - 占位组件永远不生成交互，保持静态；
+      - apiRoute 为空表示纯前端交互（弹窗 / 切换 / 本地校验），
+        前端仍生成真实 onClick，但不发网络请求；
+      - apiRoute 非空时保留参数名，前端用输入值替换后 fetch。
+    """
+    lookup: dict[str, dict[str, Any]] = {}
+    for component in components:
+        lookup[_slug(component.get("name", ""), component.get("id", ""))] = component
+        lookup[str(component.get("name", "")).casefold()] = component
+    interactions: list[dict[str, Any]] = []
+    for raw in contract.component_interactions or []:
+        name = _interaction_value(raw, "component")
+        if not name:
+            continue
+        component = lookup.get(_slug(name, name)) or lookup.get(name.casefold())
+        # 未匹配到组件或组件是占位符：不伪造交互，保持静态。
+        if component is None or component.get("isPlaceholder"):
+            continue
+        event = _interaction_value(raw, "event") or "click"
+        raw_route = _interaction_value(raw, "api_route")
+        logic = _interaction_value(raw, "logic")
+        # 兼容 "GET /api/v1/todos" 这类把方法写进 api_route 的历史契约。
+        method_match = re.match(
+            r"^(GET|POST|PUT|PATCH|DELETE)\s+(/\S*)$",
+            raw_route,
+            re.IGNORECASE,
+        )
+        declared_method = method_match.group(1).upper() if method_match else ""
+        api_route = method_match.group(2).strip() if method_match else raw_route
+        local_only = not api_route or not api_route.startswith("/api/")
+        method = (
+            "LOCAL"
+            if local_only
+            else _resolve_interaction_method(
+                contract,
+                event,
+                logic,
+                api_route,
+                declared_method,
+            )
+        )
+        route_template = re.sub(r"\{(\w+)\}", r":\1", api_route)
+        params = _route_param_names(route_template)
+        interactions.append(
+            {
+                "componentId": component.get("id"),
+                "component": name,
+                "event": event,
+                "method": method,
+                "apiRoute": route_template,
+                "params": params,
+                "payloadKey": (
+                    "" if local_only else _interaction_payload_key(contract, method)
+                ),
+                "logic": logic,
+                "label": _interaction_label(method, event),
+            }
+        )
+    return interactions
+
+
 def generate_frontend_skeleton_bundle(contract: ArchitectContract) -> GeneratedBundle:
     """根据契约生成初始 React 前端骨架（不依赖后端 API）。
 
     输出只有 ``src/App.jsx``：沙盒模板已提供 main.jsx / vite.config.js /
     package.json。所有导航、页面标题与组件卡片都来自契约的一级字段，
     并写入 ``data-source`` 供 Inspect SDK 精确定位源码。
+
+    ``componentInteractions`` 中已确认的交互会被翻译成真实的 onClick +
+    fetch（含 Loading / Error / Success 三态）；没有交互或占位组件只渲染
+    静态卡片，绝不生成假的点击行为。
     """
     app_name = (
         contract.tech_stack.get("frontendTitle")
@@ -1543,6 +2056,10 @@ def generate_frontend_skeleton_bundle(contract: ArchitectContract) -> GeneratedB
     routes = _skeleton_routes(contract)
     layout = _skeleton_layout(contract)
     components = _skeleton_components(contract)
+    # 骨架模式是“空白骨架”保险丝：不渲染任何交互。
+    interactions = (
+        [] if contract.skeleton_mode else _skeleton_interactions(contract, components)
+    )
     content = (
         _FRONTEND_SKELETON_TEMPLATE.replace(
             "__APP_NAME__", json.dumps(str(app_name), ensure_ascii=False)
@@ -1550,6 +2067,10 @@ def generate_frontend_skeleton_bundle(contract: ArchitectContract) -> GeneratedB
         .replace("__ROUTES__", json.dumps(routes, ensure_ascii=False, indent=2))
         .replace("__LAYOUT__", json.dumps(layout, ensure_ascii=False, indent=2))
         .replace("__COMPONENTS__", json.dumps(components, ensure_ascii=False, indent=2))
+        .replace(
+            "__INTERACTIONS__",
+            json.dumps(interactions, ensure_ascii=False, indent=2),
+        )
         .replace("__SKELETON_MODE__", "true" if contract.skeleton_mode else "false")
     )
     return GeneratedBundle(
@@ -1559,11 +2080,12 @@ def generate_frontend_skeleton_bundle(contract: ArchitectContract) -> GeneratedB
             f"{len(routes)} 个路由、{len(components)} 个占位/业务组件"
             if contract.skeleton_mode
             else f"按契约生成 React 骨架：{len(routes)} 个路由、"
-            f"{len(components)} 个组件"
+            f"{len(components)} 个组件、{len(interactions)} 个真实交互"
         ),
         metadata={
             "routes": len(routes),
             "components": len(components),
+            "interactions": len(interactions),
             "mode": "frontend",
             "skeletonMode": contract.skeleton_mode,
         },
@@ -1586,10 +2108,13 @@ def generate_frontend_bundle(
     entity = _entity_label(contract, table)
     _assert_route_pair(base, _express_path(item_path(routes, base)))
 
+    # 面板的提交字段同样取自 DDL：没有 name 列时退回 title / label / 首个可写列。
+    payload_key = _interaction_payload_key(contract, "POST") or "name"
     panel = (
         _FRONTEND_PANEL.replace("__COLLECTION_PATH__", base)
         .replace("__ENTITY__", entity)
         .replace("__TABLE__", table)
+        .replace("__PAYLOAD_KEY__", payload_key)
     )
     files: dict[str, str] = {
         "src/fullstack-api.jsx": panel,

@@ -934,6 +934,10 @@ export default function WorkspacePage() {
   const [previewFocus, setPreviewFocus] = useState({})
   // 快照回滚后递增：RuntimePanel 用它作为 iframe key，强制重载最新构建。
   const [previewRefresh, setPreviewRefresh] = useState({})
+  // 每次切换到某个项目 Tab 时递增：即使沙盒 URL 完全相同（例如两个项目
+  // 共用同一预览端口 / HMR 缓存），也强制 iframe 以新 key 重建，确保
+  // 画布与预览展示的是当前 Tab 对应的项目数据。
+  const [tabActivation, setTabActivation] = useState({})
   // 右侧“版本历史”抽屉。
   const [snapshotDrawer, setSnapshotDrawer] = useState({
     open: false,
@@ -3485,6 +3489,10 @@ export default function WorkspacePage() {
   const handleSelectProjectTab = (projectId) => {
     setActiveSnapshotId(null)
     setActiveTab(projectId)
+    setTabActivation((previous) => ({
+      ...previous,
+      [projectId]: (previous[projectId] ?? 0) + 1,
+    }))
   }
 
   const handleCloseSnapshotTab = (id) => {
@@ -3866,11 +3874,13 @@ export default function WorkspacePage() {
                 exporting={exportingProjectId === project.id}
                 canSaveSnapshot={Boolean(run.result?.sandboxId)}
                 previewRefreshNonce={previewRefresh[project.id] ?? 0}
+                tabActivationNonce={tabActivation[project.id] ?? 0}
                 architectState={
                   architectStates[project.id] ?? EMPTY_ARCHITECT
                 }
                 supervisorGate={gateStates[project.id] ?? null}
                 agentCatalog={agentCatalog}
+                agentToken={session?.token}
                 previewFocusNonce={previewFocus[project.id] ?? 0}
                 // 稳定回调：内部通过 ref 调用最新闭包，允许 memo 跳过无关重渲染。
                 {...projectActions.get(project.id)}

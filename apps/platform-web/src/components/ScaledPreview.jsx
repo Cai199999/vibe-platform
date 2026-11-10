@@ -90,11 +90,20 @@ export default function ScaledPreview({
     dragRef.current = null
   }, [placement?.annotationId])
 
-  // visibility / display 切换后补一帧，确保拿到舞台的最终尺寸。
+  // visibility / display 切换后补两帧，确保拿到舞台的最终尺寸。
+  // 预览可能刚从 display:none / content-visibility:hidden 的休眠 Tab
+  // 恢复，单帧测量有时仍会读到旧 flex 高度。
   useLayoutEffect(() => {
     if (!visible) return undefined
-    const frame = window.requestAnimationFrame(recalc)
-    return () => window.cancelAnimationFrame(frame)
+    const first = window.requestAnimationFrame(() => {
+      recalc()
+      window.requestAnimationFrame(recalc)
+    })
+    const timer = window.setTimeout(recalc, 120)
+    return () => {
+      window.cancelAnimationFrame(first)
+      window.clearTimeout(timer)
+    }
   }, [visible, recalc])
 
   // 跨域 iframe <-> 父页面消息桥。

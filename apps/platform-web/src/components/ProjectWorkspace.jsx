@@ -55,9 +55,12 @@ function ProjectWorkspaceInner({
   onSaveSnapshot,
   canSaveSnapshot = false,
   previewRefreshNonce = 0,
+  // 项目 Tab 每次被选中时递增，用于强制同步 / 重载两侧 iframe。
+  tabActivationNonce = 0,
   architectState,
   supervisorGate,
   agentCatalog,
+  agentToken,
   onRefreshAgents,
   previewFocusNonce = 0,
   onArchitectOpen,
@@ -107,6 +110,9 @@ function ProjectWorkspaceInner({
   useEffect(() => {
     if (previewFocusNonce > 0) setMode('preview')
   }, [previewFocusNonce])
+  // iframe 的复合 nonce：快照回滚 / Run 完成后的增量与 Tab 激活增量合并。
+  // 使用字符串避免两个递增计数器数值相同时（如 1 + 1 与 2 + 0）key 冲突。
+  const frameSyncNonce = `${previewRefreshNonce}:${tabActivationNonce}`
   const annotations = run.annotations
   const submitting = run.submitting
   const previewReady = Boolean(run.result?.previewUrl)
@@ -548,6 +554,7 @@ function ProjectWorkspaceInner({
                     loading={Boolean(agentCatalog?.loading)}
                     error={agentCatalog?.error ?? null}
                     onRefresh={onRefreshAgents}
+                    token={agentToken}
                   />
                 </div>
               </div>
@@ -574,7 +581,7 @@ function ProjectWorkspaceInner({
             <CanvasStage
               mode={canvasMode}
               liveUrl={run.result?.previewUrl ?? ''}
-              refreshNonce={previewRefreshNonce}
+              refreshNonce={frameSyncNonce}
               // 非激活 Tab 销毁 iframe：隐藏 Tab 的 Vite/HMR 进程不再常驻。
               // 切回 Tab 时按同一 URL 重新挂载，沙盒状态在服务端不会丢。
               suspended={!active}
@@ -668,7 +675,7 @@ function ProjectWorkspaceInner({
               onInspectDraftChange={handleInspectDraftChange}
               onInspectDraftCancel={() => setInspectDraft(null)}
               onInspectDraftSubmit={handleInspectDraftSubmit}
-              refreshNonce={previewRefreshNonce}
+              refreshNonce={frameSyncNonce}
             />
           </ErrorBoundary>
         </div>

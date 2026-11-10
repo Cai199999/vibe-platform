@@ -42,6 +42,20 @@ async function postJson(path, payload, token, signal) {
   return response.json()
 }
 
+async function deleteJson(path, token, signal) {
+  const response = await fetch(path, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token ?? ''}` },
+    signal,
+  })
+  if (!response.ok) {
+    throw await responseError(response)
+  }
+  // 204 或空响应体时返回 null，调用方无需重复判断。
+  const text = await response.text()
+  return text ? JSON.parse(text) : null
+}
+
 export async function routeSupervisor(payload, token, signal) {
   return postJson('/api/v1/supervisor/route', payload, token, signal)
 }
@@ -67,6 +81,61 @@ export async function fetchSupervisorAgents(token) {
     throw await responseError(response)
   }
   return response.json()
+}
+
+export async function createSupervisorAgent(payload, token, signal) {
+  return postJson('/api/v1/supervisor/agents', payload, token, signal)
+}
+
+export async function deleteSupervisorAgent(agentId, token, signal) {
+  return deleteJson(
+    `/api/v1/supervisor/agents/${encodeURIComponent(agentId)}`,
+    token,
+    signal,
+  )
+}
+
+export async function fetchAgentKnowledge(agentId, token, signal) {
+  const response = await fetch(
+    `/api/v1/supervisor/agents/${encodeURIComponent(agentId)}/knowledge`,
+    {
+      headers: { Authorization: `Bearer ${token ?? ''}` },
+      signal,
+    },
+  )
+  if (!response.ok) {
+    throw await responseError(response)
+  }
+  return response.json()
+}
+
+/**
+ * 上传 .md / .txt 到自定义 Agent 的知识库。
+ *
+ * 文件内容由浏览器读成 UTF-8 文本后以 JSON 提交：BFF 无需维护
+ * multipart 转发链路，后端仍会做大小、扩展名与文件名安全校验。
+ */
+export async function uploadAgentKnowledge(agentId, file, token, signal) {
+  if (!file) throw new Error('请选择 .md 或 .txt 知识文件')
+  if (!/\.(md|txt)$/i.test(file.name)) {
+    throw new Error('仅支持 .md / .txt 文件')
+  }
+  const content = await file.text()
+  if (!content.trim()) throw new Error('知识文件内容为空')
+  return postJson(
+    `/api/v1/supervisor/agents/${encodeURIComponent(agentId)}/knowledge`,
+    { fileName: file.name, content },
+    token,
+    signal,
+  )
+}
+
+export async function deleteAgentKnowledge(agentId, fileName, token, signal) {
+  return deleteJson(
+    `/api/v1/supervisor/agents/${encodeURIComponent(agentId)}/knowledge/${encodeURIComponent(fileName)}`,
+    token,
+    signal,
+  )
 }
 
 export async function fetchSupervisorGate(gateId, token) {

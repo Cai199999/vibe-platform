@@ -15,6 +15,12 @@ if [ "$(id -u)" = "0" ]; then
   mkdir -p /app/data/project_memory
   chown -R app:app /app/data
 
+  # 自定义 Agent 需要运行时新建 Manifest / Prompt / 知识文件；
+  # 镜像内 config 由 root 拷贝，这里统一交给 app，避免 PermissionError。
+  if [ -d /app/config/custom_agents ]; then
+    chown -R app:app /app/config/custom_agents
+  fi
+
   # 保留非 root 附加组（尤其是 docker 组），同时避免 app 继续拥有 root 组。
   GROUPS="$(id -G | tr ' ' '\n' | grep -v '^0$' | paste -sd, - || true)"
   if [ -n "${GROUPS}" ]; then

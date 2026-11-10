@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 import unittest
 import uuid
@@ -35,7 +36,7 @@ from ai_core.fullstack.coders import (
     generate_infra_bundle,
     item_path,
 )
-from ai_core.fullstack.graph import FullstackGraphRunner
+from ai_core.fullstack.graph import FullstackConsistencyError, FullstackGraphRunner
 from ai_core.fullstack.service import FullstackService
 from ai_core.ports.sandbox import SandboxHandle, SandboxProvider, VerifyResult
 
@@ -310,6 +311,27 @@ class CoderTests(unittest.TestCase):
         self.assertIn(f"const COLLECTION_PATH = '{collection}'", panel)
         self.assertNotIn("/stream", panel)
 
+    def test_frontend_panel_payload_key_follows_ddl(self) -> None:
+        """数据面板必须提交 DDL 中真实存在的可写列。"""
+        contract = _contract(
+            databaseDdl=(
+                "CREATE TABLE articles (\n"
+                "  id BIGINT PRIMARY KEY AUTO_INCREMENT,\n"
+                "  title VARCHAR(200) NOT NULL,\n"
+                "  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP\n"
+                ");"
+            )
+        )
+        frontend = generate_frontend_bundle(
+            contract,
+            existing_main="import App from './App.jsx'\n<App />",
+            existing_vite="export default { server: { port: 5173 } }",
+            existing_package="{}",
+        )
+        panel = frontend.files["src/fullstack-api.jsx"]
+        self.assertIn("title: name.trim()", panel)
+        self.assertNotIn("name: name.trim()", panel)
+
     def test_contract_database_engine_normalizes_and_defaults(self) -> None:
         self.assertEqual(contract_database_engine(_contract()), "mysql")
         postgres = _contract(
@@ -443,6 +465,74 @@ class CoderTests(unittest.TestCase):
         self.assertIn("activeComponents", app)
         self.assertIn("data-route-path", app)
         self.assertIn("routePaths[hash % routePaths.length]", app)
+
+    def test_frontend_skeleton_generates_real_interactions(self) -> None:
+        """已确认交互必须生成 onClick + fetch，并带 Loading / Error 三态。"""
+        contract = _contract(
+            contractId="ctr_interaction_test",
+            components=[
+                {"name": "TodoList", "section": "核心工作区"},
+                {"name": "SubmitButton", "role": "button", "section": "核心工作区"},
+                {
+                    "name": "PendingArea",
+                    "section": "主内容区",
+                    "isPlaceholder": True,
+                },
+            ],
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="TodoList",
+                    event="load",
+                    api_route="GET /api/v1/todos",
+                    logic="加载列表并渲染",
+                ),
+                ArchitectComponentInteraction(
+                    component="SubmitButton",
+                    event="click",
+                    api_route="/api/v1/todos",
+                    logic="提交后保存到数据库并刷新列表",
+                ),
+                # 占位组件的交互必须被丢弃，不能生成假按钮。
+                ArchitectComponentInteraction(
+                    component="PendingArea",
+                    event="click",
+                    api_route="/api/v1/todos",
+                    logic="需求未确认",
+                ),
+            ],
+        )
+        bundle = generate_frontend_skeleton_bundle(contract)
+        app = bundle.files["src/App.jsx"]
+
+        self.assertEqual(bundle.metadata["interactions"], 2)
+        self.assertIn("function InteractionPanel", app)
+        self.assertIn('"method": "GET"', app)
+        self.assertIn('"method": "POST"', app)
+        self.assertIn('"apiRoute": "/api/v1/todos"', app)
+        self.assertIn('"payloadKey": "name"', app)
+        self.assertIn("data-interaction-run", app)
+        self.assertIn("处理中…", app)
+        self.assertIn('role="alert"', app)
+        self.assertIn("重试", app)
+        self.assertNotIn('"component": "PendingArea"', app)
+
+    def test_frontend_skeleton_without_interactions_stays_static(self) -> None:
+        """没有交互的契约只渲染静态卡片，不伪造 onClick。"""
+        contract = _frontend_contract(
+            contractId="ctr_static_skeleton",
+            components=[{"name": "StaticPanel", "section": "主内容区"}],
+            componentInteractions=[],
+        )
+        bundle = generate_frontend_skeleton_bundle(contract)
+        app = bundle.files["src/App.jsx"]
+
+        self.assertEqual(bundle.metadata["interactions"], 0)
+        self.assertIn("const INTERACTIONS = []", app)
+        self.assertIn("StaticPanel", app)
+        # InteractionPanel 渲染函数始终随模板输出，这里断言没有注入任何交互数据，
+        # 且卡片分支走静态占位，不会伪造按钮 / onClick。
+        self.assertNotIn('"apiRoute"', app)
+        self.assertNotIn('"componentId"', app)
 
     def test_skeleton_mode_renders_clean_shell_and_single_placeholder(self) -> None:
         """骨架模式必须只渲染 Header + Sidebar + Main 与一个占位组件。"""
@@ -586,6 +676,7 @@ class GraphTests(unittest.TestCase):
                 "BackendCoder",
                 "FrontendCoder",
                 "InfraCoder",
+                "ConsistencyVerifier",
                 "BuildVerifier",
                 "SandboxRestart",
             ],
@@ -612,6 +703,76 @@ class GraphTests(unittest.TestCase):
         )
         # 本次 graph 不发送终态事件，终态由 Service 统一 emit。
         self.assertNotIn("fullstack.completed", [event.type for event in events])
+
+    def test_consistency_failure_blocks_build_before_sandbox(self) -> None:
+        """前端请求与后端路由不一致时，必须停在 ConsistencyVerifier。"""
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        sandbox.files["src/App.jsx"] = (
+            "const INTERACTIONS = "
+            + json.dumps(
+                [
+                    {
+                        "component": "TaskStream",
+                        "method": "GET",
+                        # 前端订阅长连接路径，后端实际只注册了 /api/v1/todos。
+                        "apiRoute": "/api/v1/tasks/stream",
+                        "payloadKey": "",
+                    }
+                ],
+                ensure_ascii=False,
+            )
+            + "\nexport default function App() { return <main /> }\n"
+        )
+        buffer = RunEventBuffer("fsk_consistency_failed")
+        runner = FullstackGraphRunner(sandbox, event_sink=buffer)
+
+        with self.assertRaises(FullstackConsistencyError) as ctx:
+            runner.run(
+                {
+                    "run_id": "fsk_consistency_failed",
+                    "project_id": "proj_fullstack",
+                    "sandbox_id": sandbox.handle.sandbox_id,
+                    "preview_url": sandbox.handle.preview_url,
+                    "contract": _contract(),
+                    "files": [],
+                }
+            )
+
+        self.assertEqual(ctx.exception.node, "ConsistencyVerifier")
+        # 未通过一致性检查前不得进入构建或重启沙盒。
+        self.assertEqual(sandbox.verified, [])
+        self.assertEqual(sandbox.restarts, [])
+
+        events = buffer.snapshot()
+        started_nodes = [
+            event.payload["node"]
+            for event in events
+            if event.type == "fullstack.node.started"
+        ]
+        self.assertEqual(
+            started_nodes,
+            [
+                "DBACoder",
+                "BackendCoder",
+                "FrontendCoder",
+                "InfraCoder",
+                "ConsistencyVerifier",
+            ],
+        )
+        self.assertTrue(
+            any(
+                event.type == "fullstack.node.failed"
+                and event.payload["node"] == "ConsistencyVerifier"
+                for event in events
+            )
+        )
+        report_event = next(
+            event for event in events if event.type == "fullstack.consistency.report"
+        )
+        self.assertFalse(report_event.payload["ok"])
+        self.assertEqual(report_event.payload["issues"][0]["kind"], "path")
+        self.assertIn("/api/v1/todos", report_event.payload["issues"][0]["suggestion"])
 
     def test_frontend_mode_runs_three_nodes_and_probes_root(self) -> None:
         """契约确认后的前端初始化只生成 App.jsx，不写后端 / 部署文件。"""

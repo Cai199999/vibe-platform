@@ -36,9 +36,11 @@ export const EMPTY_FULLSTACK = {
   lastSeq: 0,
   sandboxId: null,
   previewUrl: null,
-  // 固定五个节点：DBACoder / BackendCoder / FrontendCoder /
-  // BuildVerifier / SandboxRestart。
+  // 固定七个节点：DBACoder / BackendCoder / FrontendCoder / InfraCoder /
+  // ConsistencyVerifier / BuildVerifier / SandboxRestart。
   steps: [],
+  // 接口一致性检查的结构化报告（通过 / 差异列表）。
+  consistency: null,
   activeNode: null,
   // 节点输出日志（文件级），只保留最近若干条，避免撑爆 sessionStorage。
   outputs: [],
@@ -54,6 +56,7 @@ const FULLSTACK_NODES = [
   'BackendCoder',
   'FrontendCoder',
   'InfraCoder',
+  'ConsistencyVerifier',
   'BuildVerifier',
   'SandboxRestart',
 ]
@@ -63,6 +66,7 @@ const FULLSTACK_NODE_LABELS = {
   BackendCoder: '后端工程师',
   FrontendCoder: '前端工程师',
   InfraCoder: '部署配置工程师',
+  ConsistencyVerifier: '接口一致性检查',
   BuildVerifier: '构建校验',
   SandboxRestart: '沙盒重启',
 }
@@ -484,6 +488,21 @@ function reduceFullstack(state, event) {
           files: Array.isArray(payload.files) ? payload.files : [],
           durationMs: payload.durationMs ?? 0,
           error: null,
+        }),
+      }
+    case 'fullstack.consistency.report':
+      // 报告既保留在结构化字段里，也追加到节点日志，失败的差异可被直接阅读。
+      return {
+        ...base,
+        consistency: payload,
+        outputs: appendFullstackOutput(current.outputs, {
+          id: `ConsistencyVerifier:report:${event.seq}`,
+          node: 'ConsistencyVerifier',
+          path: 'server/consistency-report.json',
+          language: 'json',
+          content: JSON.stringify(payload, null, 2),
+          truncated: false,
+          bytes: 0,
         }),
       }
     case 'fullstack.node.failed':

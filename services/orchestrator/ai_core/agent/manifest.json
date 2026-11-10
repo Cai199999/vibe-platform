@@ -204,6 +204,26 @@
         "format": "markdown",
         "priority": 30
       }
+    },
+    {
+      "skill_id": "ui.interaction_states",
+      "name": "交互状态完整性",
+      "description": "所有按钮 / 表单 / 异步动作必须具备 Loading、Success、Error 三态，禁止生成点了没反应的静态按钮。",
+      "prompt_ref": "interaction_states.skill.md",
+      "rag_refs": [],
+      "tools": [
+        "read_file",
+        "apply_code_edit",
+        "create_file",
+        "run_build"
+      ],
+      "metadata": {
+        "stage": "M3",
+        "external": true,
+        "skillFile": "config/skills/interaction_states.skill.md",
+        "format": "markdown",
+        "priority": 25
+      }
     }
   ],
   "keywords": [

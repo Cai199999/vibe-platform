@@ -1,0 +1,291 @@
+"""ConsistencyVerifier：跨端 Method / Path / Payload 一致性测试。
+
+全部为纯静态测试，不依赖网络、Docker 或模型；重点覆盖：
+
+  1. 正常生成的前后端（面板 + 契约交互）必须通过；
+  2. 前端路径漂移（如 ``/api/v1/tasks/stream`` vs ``/api/tasks``）
+     必须被识别，并给出可执行的后端路由建议；
+  3. Method 不一致与 Payload 字段不在 DDL 中必须分别报告；
+  4. ``LOCAL`` 交互与非 ``/api/`` 路径不参与比对。
+"""
+
+from __future__ import annotations
+
+import json
+import unittest
+
+from ai_core.domain.architect import (
+    ArchitectApiRoute,
+    ArchitectComponentInteraction,
+    ArchitectContract,
+)
+from ai_core.fullstack.coders import (
+    generate_backend_bundle,
+    generate_frontend_skeleton_bundle,
+)
+from ai_core.fullstack.consistency import (
+    ConsistencyError,
+    ensure_consistency,
+    extract_backend_routes,
+    extract_frontend_calls,
+    verify_consistency,
+)
+
+DDL = """CREATE TABLE tasks (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  tenant_id VARCHAR(64) NOT NULL,
+  name VARCHAR(200) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'todo',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deleted_at TIMESTAMP NULL
+);"""
+
+
+def _contract(
+    *,
+    routes: list[ArchitectApiRoute] | None = None,
+    interactions: list[ArchitectComponentInteraction] | None = None,
+) -> ArchitectContract:
+    return ArchitectContract.model_validate(
+        {
+            "contractId": "ctr_consistency_test",
+            "runId": "arc_consistency_test",
+            "appShape": "full_stack_system",
+            "status": "CONFIRMED",
+            "confidenceScore": 0.93,
+            "contractMarkdown": "# 任务系统全栈契约",
+            "techStack": {
+                "backend": "node_express",
+                "databaseEngine": "mysql",
+                "orm": "sequelize",
+            },
+            "apiRoutes": (
+                routes
+                if routes is not None
+                else [
+                    ArchitectApiRoute(method="GET", path="/api/v1/tasks"),
+                    ArchitectApiRoute(method="POST", path="/api/v1/tasks"),
+                    ArchitectApiRoute(method="GET", path="/api/v1/tasks/:id"),
+                    ArchitectApiRoute(method="DELETE", path="/api/v1/tasks/:id"),
+                ]
+            ),
+            "databaseDdl": DDL,
+            "components": [
+                {"name": "TaskList", "section": "主内容区"},
+                {"name": "SubmitButton", "role": "button", "section": "主内容区"},
+            ],
+            "componentInteractions": (
+                interactions
+                if interactions is not None
+                else [
+                    ArchitectComponentInteraction(
+                        component="TaskList",
+                        event="load",
+                        api_route="GET /api/v1/tasks",
+                        logic="加载任务列表",
+                    ),
+                    ArchitectComponentInteraction(
+                        component="SubmitButton",
+                        event="click",
+                        api_route="POST /api/v1/tasks",
+                        logic="提交后保存并刷新列表",
+                    ),
+                ]
+            ),
+        }
+    )
+
+
+def _app_with_interactions(interactions: list[dict[str, object]]) -> str:
+    return (
+        "import { useState } from 'react'\n"
+        f"const INTERACTIONS = {json.dumps(interactions, ensure_ascii=False, indent=2)}\n"
+        "export default function App() { return <main /> }\n"
+    )
+
+
+class ConsistencyTest(unittest.TestCase):
+    def test_generated_fullstack_frontend_matches_backend(self) -> None:
+        contract = _contract()
+        backend = generate_backend_bundle(contract)
+        skeleton = generate_frontend_skeleton_bundle(contract)
+        # 模拟“先初始化前端骨架、再生成全栈”的真实沙盒状态。
+        files = {**backend.files, **skeleton.files}
+
+        report = verify_consistency(files, contract)
+
+        self.assertTrue(report.ok, report.failure_message())
+        # 骨架里的 load / submit 两个交互；全栈数据面板另行覆盖。
+        self.assertEqual(report.calls_checked, 2)
+        routes = {(route.method, route.path) for route in report.backend_routes}
+        self.assertIn(("GET", "/api/v1/tasks"), routes)
+        self.assertIn(("POST", "/api/v1/tasks"), routes)
+        self.assertIn(("DELETE", "/api/v1/tasks/:id"), routes)
+
+    def test_path_mismatch_blocks_and_suggests_backend_route(self) -> None:
+        contract = _contract(
+            interactions=[
+                ArchitectComponentInteraction(
+                    component="TaskList",
+                    event="load",
+                    api_route="/api/v1/tasks/stream",
+                    logic="订阅任务流",
+                )
+            ]
+        )
+        backend = generate_backend_bundle(contract)
+        skeleton = generate_frontend_skeleton_bundle(contract)
+        files = {**backend.files, **skeleton.files}
+
+        with self.assertRaises(ConsistencyError) as ctx:
+            ensure_consistency(files, contract)
+
+        report = ctx.exception.report
+        self.assertFalse(report.ok)
+        self.assertEqual(len(report.issues), 1)
+        issue = report.issues[0]
+        self.assertEqual(issue.kind, "path")
+        self.assertEqual(issue.path, "/api/v1/tasks/stream")
+        self.assertIn("/api/v1/tasks", issue.suggestion)
+        self.assertIn("修复建议", str(ctx.exception))
+
+    def test_method_mismatch_lists_allowed_methods(self) -> None:
+        contract = _contract(
+            routes=[ArchitectApiRoute(method="GET", path="/api/v1/tasks")]
+        )
+        backend = generate_backend_bundle(contract)
+        files = {
+            **backend.files,
+            "src/App.jsx": _app_with_interactions(
+                [
+                    {
+                        "component": "SubmitButton",
+                        "method": "DELETE",
+                        "apiRoute": "/api/v1/tasks",
+                        "payloadKey": "",
+                    }
+                ]
+            ),
+        }
+
+        report = verify_consistency(files, contract)
+
+        self.assertFalse(report.ok)
+        issue = report.issues[0]
+        self.assertEqual(issue.kind, "method")
+        self.assertIn("GET", issue.message)
+        self.assertIn("DELETE", issue.message)
+
+    def test_payload_key_must_exist_in_ddl(self) -> None:
+        contract = _contract()
+        backend = generate_backend_bundle(contract)
+        files = {
+            **backend.files,
+            "src/App.jsx": _app_with_interactions(
+                [
+                    {
+                        "component": "SubmitButton",
+                        "method": "POST",
+                        "apiRoute": "/api/v1/tasks",
+                        # tasks 表没有 priority 列，前端却提交了该字段。
+                        "payloadKey": "priority",
+                    }
+                ]
+            ),
+        }
+
+        report = verify_consistency(files, contract)
+
+        self.assertFalse(report.ok)
+        issue = report.issues[0]
+        self.assertEqual(issue.kind, "payload")
+        self.assertIn("priority", issue.message)
+        self.assertIn("name", issue.suggestion)
+
+    def test_local_interactions_are_ignored(self) -> None:
+        contract = _contract()
+        backend = generate_backend_bundle(contract)
+        files = {
+            **backend.files,
+            "src/App.jsx": _app_with_interactions(
+                [
+                    {
+                        "component": "SubmitButton",
+                        "method": "LOCAL",
+                        "apiRoute": "",
+                        "payloadKey": "",
+                    },
+                    {
+                        "component": "TaskList",
+                        "method": "GET",
+                        "apiRoute": "/api/v1/tasks",
+                        "payloadKey": "",
+                    },
+                ]
+            ),
+        }
+
+        report = verify_consistency(files, contract)
+        self.assertTrue(report.ok, report.failure_message())
+        self.assertEqual(report.calls_checked, 1)
+
+    def test_route_manifest_is_the_source_of_truth(self) -> None:
+        """即使契约路径不同，也以后端实际落盘的 api-routes.json 为准。"""
+        contract = _contract()
+        manifest = {
+            "prefix": "/api",
+            "collection": "/api/tasks",
+            "item": "/api/tasks/:id",
+        }
+        routes = extract_backend_routes(
+            {"server/api-routes.json": json.dumps(manifest)},
+            contract,
+        )
+        shapes = {(route.method, route.path) for route in routes}
+        self.assertIn(("GET", "/api/tasks"), shapes)
+        self.assertIn(("DELETE", "/api/tasks/:id"), shapes)
+        self.assertNotIn(("GET", "/api/v1/tasks"), shapes)
+
+    def test_parameter_names_do_not_affect_matching(self) -> None:
+        contract = _contract()
+        backend = generate_backend_bundle(contract)
+        files = {
+            **backend.files,
+            "src/App.jsx": _app_with_interactions(
+                [
+                    {
+                        "component": "TaskList",
+                        "method": "DELETE",
+                        "apiRoute": "/api/v1/tasks/:taskId",
+                        "payloadKey": "",
+                    }
+                ]
+            ),
+        }
+
+        report = verify_consistency(files, contract)
+        self.assertTrue(report.ok, report.failure_message())
+
+    def test_extract_frontend_calls_reads_panel_collection_path(self) -> None:
+        contract = _contract()
+        backend = generate_backend_bundle(contract)
+        panel = (
+            "const COLLECTION_PATH = '/api/v1/tasks'\n"
+            "async function load() { await fetch(apiUrl(COLLECTION_PATH)) }\n"
+            "async function submit() {\n"
+            "  await fetch(apiUrl(COLLECTION_PATH), { method: 'POST',"
+            " body: JSON.stringify({ name: value }) })\n"
+            "}\n"
+        )
+        calls, checked = extract_frontend_calls(
+            {**backend.files, "src/fullstack-api.jsx": panel}
+        )
+        pairs = {(call.method, call.path) for call in calls}
+        self.assertIn(("GET", "/api/v1/tasks"), pairs)
+        self.assertIn(("POST", "/api/v1/tasks"), pairs)
+        self.assertEqual(checked, ["src/fullstack-api.jsx"])
+
+
+if __name__ == "__main__":
+    unittest.main()

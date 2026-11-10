@@ -203,6 +203,48 @@ class AgentListResponse(CamelModel):
     custom_agents_dir: str | None = None
 
 
+class AgentCreateRequest(CamelModel):
+    """“新建 Agent”对话框的入参。
+
+    ``requirement`` 是用户在对话框里输入的自然语言需求；其余字段可选，
+    用于显式指定名称 / id / 能力标识，未提供时由 AgentBuilder 推导。
+    """
+
+    requirement: str = Field(min_length=4, max_length=4000)
+    display_name: str | None = Field(default=None, max_length=128)
+    agent_id: str | None = Field(default=None, max_length=64)
+    task_types: list[str] = Field(default_factory=list, max_length=20)
+    keywords: list[str] = Field(default_factory=list, max_length=50)
+
+
+class AgentKnowledgeDocument(CamelModel):
+    """知识库中的单个文档。"""
+
+    file_name: str
+    size_bytes: int
+    updated_at: str
+    extension: str = ""
+
+
+class AgentKnowledgeListResponse(CamelModel):
+    """某个 Agent 的知识库清单。"""
+
+    agent_id: str
+    knowledge_dir: str | None = None
+    documents: list[AgentKnowledgeDocument] = Field(default_factory=list)
+
+
+class AgentKnowledgeUploadRequest(CamelModel):
+    """知识文件上传：前端读取 .md/.txt 文本后以 JSON 提交。
+
+    使用 JSON 而不是 multipart，避免 BFF 额外维护 multipart 转发链路；
+    文本文件本身很小，UTF-8 编码后的 JSON 传输足够稳定。
+    """
+
+    file_name: str = Field(min_length=1, max_length=160)
+    content: str = Field(min_length=1, max_length=2_000_000)
+
+
 class SupervisorToolListResponse(CamelModel):
     """Supervisor Tool 网关列表。"""
 

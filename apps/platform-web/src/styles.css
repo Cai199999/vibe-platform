@@ -68,31 +68,39 @@ code {
     height: 100vh;
     height: 100dvh;
     min-height: 0;
-    overflow: hidden;
+    /* 兜底滚动而不是硬裁切：正常情况下 flex 链会让画布吃掉剩余高度，
+       只有浏览器缩放 / 极矮视口导致内容确实放不下时才出现滚动条。 */
+    overflow: auto;
   }
 
   .app-shell-workspace .workspace {
-    flex: 1;
+    flex: 1 1 0%;
+    width: 100%;
+    min-width: 0;
     min-height: 0;
   }
 
   .app-shell-workspace .workspace-body {
     display: flex;
-    flex: 1;
+    flex: 1 1 0%;
+    min-width: 0;
     min-height: 0;
-    overflow: hidden;
+    overflow: auto;
   }
 
   .app-shell-workspace .tab-window {
     display: flex;
-    flex: 1;
+    flex: 1 1 0%;
     flex-direction: column;
+    min-width: 0;
     min-height: 0;
   }
 
   .app-shell-workspace .project-viewport {
-    flex: 1;
-    min-height: 0;
+    flex: 1 1 auto;
+    /* 视口可以随窗口缩放，但保留下限；低于下限时由 workspace-body
+       滚动而不是把画布底部裁掉。 */
+    min-height: 240px;
     height: auto;
   }
 }
@@ -705,6 +713,8 @@ code {
 /* Canvas                                                              */
 /* ------------------------------------------------------------------ */
 .canvas-frame {
+  min-width: 0;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 18px;
@@ -748,7 +758,12 @@ code {
 
 .canvas-stage {
   position: relative;
+  width: 100%;
+  min-width: 0;
   height: clamp(420px, 56vh, 640px);
+  /* 这里是“画布视口”而不是内容容器：内部 page 会按 useFillViewport
+     计算的 scale 严格铺满，因此 overflow 只负责圈选时的绘制边界；
+     父级布局链不再用它来硬裁内容。 */
   overflow: hidden;
   cursor: crosshair;
   touch-action: none;
@@ -2874,6 +2889,8 @@ body.is-viewport-panning * {
 .workspace {
   display: flex;
   flex-direction: column;
+  width: 100%;
+  min-width: 0;
   gap: 12px;
 }
 
@@ -3259,10 +3276,13 @@ body.is-viewport-panning * {
 /* Tab window                                                          */
 /* ------------------------------------------------------------------ */
 .workspace-body {
+  min-width: 0;
   min-height: 420px;
 }
 
 .tab-window {
+  min-width: 0;
+  min-height: 0;
   /* 单视口高度：画布与预览共用，切换时外层尺寸保持不变。 */
   --viewport-h: clamp(480px, 62vh, 760px);
   padding: 18px;
@@ -3383,6 +3403,8 @@ body.is-viewport-panning * {
 /* ------------------------------------------------------------------ */
 .project-viewport {
   position: relative;
+  width: 100%;
+  min-width: 0;
   height: var(--viewport-h);
   overflow: hidden;
   border: 1px solid rgba(148, 163, 184, 0.2);
@@ -3433,7 +3455,9 @@ body.is-viewport-panning * {
   inset: 0;
   display: flex;
   flex-direction: column;
+  width: 100%;
   height: auto;
+  min-width: 0;
   min-height: 0;
   border: 0;
   border-radius: 0;
@@ -3441,8 +3465,10 @@ body.is-viewport-panning * {
 }
 
 .viewport-pane .canvas-stage {
-  flex: 1;
+  flex: 1 1 auto;
+  width: 100%;
   height: auto;
+  min-width: 0;
   min-height: 0;
 }
 
@@ -7046,6 +7072,311 @@ body.is-viewport-panning * {
   color: var(--faint);
   font-size: 9.5px;
   line-height: 1.55;
+}
+
+/* ---------------- 管理 Agent：新建 / 删除 / 知识库 ---------------- */
+
+/* 面板内容比旧版“只读目录”更多，允许更高的滚动区域。 */
+.agent-catalog-popover {
+  width: min(460px, 88vw);
+  max-height: min(72vh, 600px);
+}
+
+.agent-catalog-head .agent-catalog-head-actions {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-catalog-create {
+  padding: 5px 9px;
+  border: 1px solid rgba(192, 132, 252, 0.48);
+  border-radius: 8px;
+  background: rgba(88, 28, 135, 0.42);
+  color: #f5f3ff;
+  font-size: 10.5px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.agent-catalog-create:hover {
+  border-color: rgba(216, 180, 254, 0.7);
+  background: rgba(107, 33, 168, 0.55);
+}
+
+.agent-catalog-state.is-success {
+  color: #6ee7b7;
+}
+
+.agent-catalog-section {
+  margin-top: 12px;
+}
+
+.agent-catalog-section h4 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.agent-catalog-section-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.16);
+  color: var(--muted);
+  font-size: 9.5px;
+}
+
+.agent-catalog-item.is-locked {
+  border-color: rgba(148, 163, 184, 0.22);
+  background: rgba(15, 23, 42, 0.4);
+}
+
+.agent-catalog-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 7px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 999px;
+  background: rgba(51, 65, 85, 0.36);
+  color: #cbd5e1;
+  font-size: 9.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.agent-catalog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.agent-catalog-actions button {
+  padding: 4px 8px;
+  border-radius: 7px;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.agent-knowledge-toggle {
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  background: rgba(8, 47, 73, 0.36);
+  color: #bae6fd;
+}
+
+.agent-knowledge-toggle:hover {
+  background: rgba(8, 47, 73, 0.58);
+}
+
+.agent-delete {
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  background: rgba(69, 10, 10, 0.34);
+  color: #fca5a5;
+}
+
+.agent-delete:hover {
+  background: rgba(69, 10, 10, 0.56);
+}
+
+.agent-delete-confirm {
+  border: 1px solid rgba(248, 113, 113, 0.62);
+  background: rgba(153, 27, 27, 0.58);
+  color: #fee2e2;
+}
+
+.agent-delete-cancel {
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  background: rgba(15, 23, 42, 0.72);
+  color: #cbd5e1;
+}
+
+.agent-catalog-actions button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.agent-knowledge-panel {
+  margin-top: 8px;
+  padding: 9px 10px;
+  border: 1px dashed rgba(148, 163, 184, 0.24);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.5);
+}
+
+.agent-knowledge-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.agent-knowledge-upload {
+  position: relative;
+  flex: none;
+  padding: 4px 8px;
+  border: 1px solid rgba(192, 132, 252, 0.42);
+  border-radius: 7px;
+  background: rgba(88, 28, 135, 0.34);
+  color: #e9d5ff;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.agent-knowledge-upload.is-busy {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.agent-knowledge-upload input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.agent-knowledge-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-knowledge-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px;
+  border-radius: 7px;
+  background: rgba(148, 163, 184, 0.08);
+  font-size: 10px;
+}
+
+.agent-knowledge-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: #e2e8f0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-knowledge-size {
+  flex: none;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-knowledge-delete {
+  flex: none;
+  padding: 2px 6px;
+  border: 1px solid rgba(248, 113, 113, 0.28);
+  border-radius: 5px;
+  background: transparent;
+  color: #fca5a5;
+  font-size: 9.5px;
+  cursor: pointer;
+}
+
+.agent-knowledge-delete:hover {
+  background: rgba(69, 10, 10, 0.5);
+}
+
+/* 新建 Agent 对话框（面板内视图，避免浮层嵌套 modal） */
+.agent-create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.agent-create-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: #cbd5e1;
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.agent-create-form input,
+.agent-create-form textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 9px;
+  background: rgba(2, 6, 23, 0.68);
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.agent-create-form input:focus,
+.agent-create-form textarea:focus {
+  outline: none;
+  border-color: rgba(192, 132, 252, 0.62);
+  box-shadow: 0 0 0 3px rgba(147, 51, 234, 0.16);
+}
+
+.agent-create-form label em {
+  align-self: flex-end;
+  color: var(--faint);
+  font-size: 9.5px;
+  font-style: normal;
+}
+
+.agent-create-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.agent-create-submit {
+  padding: 7px 14px;
+  border: 1px solid rgba(192, 132, 252, 0.55);
+  border-radius: 9px;
+  background: linear-gradient(180deg, #7e22ce, #6b21a8);
+  color: #faf5ff;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.agent-create-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.agent-create-cancel {
+  padding: 7px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 9px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #cbd5e1;
+  font-size: 11px;
+  cursor: pointer;
 }
 
 @media (max-width: 900px) {

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.vibeplatform.bff.admin.AdminMetricsService;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,6 +16,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
+import org.springframework.web.util.UriUtils;
 
 /**
  * Supervisor 非流式接口代理。
@@ -91,6 +93,54 @@ public class SupervisorProxyService {
         return postJson(RELOAD_PATH, null, "supervisor agents reload");
     }
 
+    public ResponseEntity<JsonNode> createAgent(JsonNode body) {
+        return postJson(AGENTS_PATH, body, "supervisor agent create");
+    }
+
+    public ResponseEntity<JsonNode> deleteAgent(String agentId) {
+        return deleteJson(
+                AGENTS_PATH + "/" + encodePathSegment(agentId),
+                "supervisor agent delete"
+        );
+    }
+
+    public ResponseEntity<JsonNode> agentKnowledge(String agentId) {
+        return getJson(
+                AGENTS_PATH + "/" + encodePathSegment(agentId) + "/knowledge",
+                "supervisor agent knowledge list"
+        );
+    }
+
+    public ResponseEntity<JsonNode> uploadAgentKnowledge(
+            String agentId,
+            JsonNode body
+    ) {
+        return postJson(
+                AGENTS_PATH + "/" + encodePathSegment(agentId) + "/knowledge",
+                body,
+                "supervisor agent knowledge upload"
+        );
+    }
+
+    public ResponseEntity<JsonNode> deleteAgentKnowledge(
+            String agentId,
+            String fileName
+    ) {
+        return deleteJson(
+                AGENTS_PATH + "/" + encodePathSegment(agentId)
+                        + "/knowledge/" + encodePathSegment(fileName),
+                "supervisor agent knowledge delete"
+        );
+    }
+
+    /** 路径参数编码：中文文件名与空格必须转义后再交给 RestClient。 */
+    private static String encodePathSegment(String value) {
+        return UriUtils.encodePathSegment(
+                value == null ? "" : value,
+                StandardCharsets.UTF_8
+        );
+    }
+
     private ResponseEntity<JsonNode> postJson(
             String path,
             JsonNode body,
@@ -120,6 +170,46 @@ public class SupervisorProxyService {
                                     "EMPTY_AI_CORE_RESPONSE",
                                     "AI Core 返回了空响应"
                             );
+                        }
+                        return ResponseEntity.status(clientResponse.getStatusCode())
+                                .body(responseBody);
+                    });
+            log.info(
+                    "{} proxy completed status={} elapsedMs={}",
+                    operation,
+                    response.getStatusCode(),
+                    elapsedMillis(startedAt)
+            );
+            return response;
+        } catch (RestClientException ex) {
+            long elapsedMs = elapsedMillis(startedAt);
+            log.error(
+                    "{} proxy failed elapsedMs={}: {}",
+                    operation,
+                    elapsedMs,
+                    ex.getMessage()
+            );
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(errorBody(
+                            "AI_CORE_UNAVAILABLE",
+                            "调用 AI Core 失败（" + elapsedMs + "ms）: "
+                                    + ex.getMessage()
+                    ));
+        }
+    }
+
+    private ResponseEntity<JsonNode> deleteJson(String path, String operation) {
+        long startedAt = System.nanoTime();
+        try {
+            ResponseEntity<JsonNode> response = aiCoreRunRestClient.delete()
+                    .uri(path)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .exchange((clientRequest, clientResponse) -> {
+                        JsonNode responseBody = clientResponse.bodyTo(JsonNode.class);
+                        // DELETE 成功但无响应体（如 204）时补一个空对象，
+                        // 保证前端始终能解析 JSON。
+                        if (responseBody == null) {
+                            responseBody = objectMapper.createObjectNode();
                         }
                         return ResponseEntity.status(clientResponse.getStatusCode())
                                 .body(responseBody);

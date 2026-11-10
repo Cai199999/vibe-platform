@@ -1044,6 +1044,7 @@ function CanvasStage({
     offsetY: baseOffsetY,
     designWidth,
     designHeight,
+    recalc: recalcViewport,
   } = useFillViewport(stageRef)
   // 画布自己的平移 / 缩放状态，保存在 ProjectWorkspace 级别的 ViewportContext。
   const viewport = usePanZoom({
@@ -1053,6 +1054,24 @@ function CanvasStage({
     baseOffsetX,
     baseOffsetY,
   })
+
+  // 非激活 Tab 用 display:none / content-visibility 休眠，期间 ResizeObserver
+  // 读到的是 0×0。切回时必须主动补测，否则画布会沿用切走前的旧比例，
+  // 表现为内容被截断或只占据左上角。
+  useEffect(() => {
+    if (suspended) return undefined
+    const first = window.requestAnimationFrame(() => {
+      recalcViewport()
+      window.requestAnimationFrame(recalcViewport)
+    })
+    // 真实浏览器里 tab-window 的 flex 高度可能比 React 提交晚一帧，
+    // 再加一个短延迟兜底，覆盖字体 / HMR / 沙盒 iframe 加载造成的回流。
+    const timer = window.setTimeout(recalcViewport, 120)
+    return () => {
+      window.cancelAnimationFrame(first)
+      window.clearTimeout(timer)
+    }
+  }, [suspended, mode, recalcViewport])
 
   // 新增标注后自动展开浮层并聚焦它的输入框；编辑已有标注不会抢焦点。
   useEffect(() => {
