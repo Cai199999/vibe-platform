@@ -82,6 +82,7 @@ function ProjectWorkspaceInner({
   onArchitectDecide,
   onArchitectAskHelper,
   onArchitectCancel,
+  onArchitectExport,
   onFullstackGenerate,
   onReleaseGate,
 }) {
@@ -878,6 +879,8 @@ function ProjectWorkspaceInner({
           onCancel={onArchitectCancel}
           onFullstackGenerate={onFullstackGenerate}
           onFrontendBootstrap={onFrontendBootstrap}
+          onExport={onArchitectExport}
+          exporting={exporting}
           autoBootstrap={project.bootstrap !== 'ready'}
           gate={supervisorGate}
           onReleaseGate={onReleaseGate}

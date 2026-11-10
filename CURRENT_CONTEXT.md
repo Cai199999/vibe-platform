@@ -22,6 +22,7 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒；中间�
 - **Phase B 交互闭环**：画布/预览固定 1440×900 + 文档原生滚动；焦点模型——点击页面进网页焦点（滚轮滚页面），点击画布空白回画布焦点（滚轮缩放），中键/空格始终平移；SDK 补发真实滚动快照，双屏同步 scroll-to，并在预览重放 click 使 React 状态一致；Architect 双 Tab（架构确认/影子助手），影子 LLM 只读问答 + 顶部不可关闭待答 Banner + 生成门禁。
 - **直接拖拽静默同步**：SDK 接管 pointer 手势，拖拽期间只写内联 `translate`；宿主 500ms 防抖合并后以 `action=MOVE`（携带 dx/dy/selector）静默派发 `ui_graph`，后端确定性调用 `move_component` 只写 `transform: translate3d` 并经 Vite HMR 生效；成功后清内联位移与记录，失败/超时回滚到拖前位置并 Toast；同步期间保持画布焦点与拖拽模式。E2E 覆盖防抖累计、二次叠加与失败回滚。
 - **全栈语义路由自愈**：BackendCoder 为契约每个业务动作（抓取/改写/投递/对话等）注册独立 Express 路由并生成 Mock 处理，不再折叠为通用 CRUD；`api-routes.json.routes` 记录全部实际路由；一致性 FixAction 只让后端补路由，绝不改前端到无关接口；LangGraph `ConsistencyVerifier -> BackendCoder -> ConsistencyVerifier` 自愈最多 2 次。280 tests 通过，真实 Node 服务四端点均 201。
+- **Architect 面板收尾**：移除架构确认/随意提问双 Tab，主状态机与影子助手问答合并为统一时间轴，正式提问高亮；底部双输入严格隔离（大框只读 RAG，小框按状态走 answer/revise/start）；全栈 SUCCEEDED 且一致性通过后成功卡提供一键导出 tar.gz。E2E 覆盖路由隔离与真实下载。
 
 ## 真假边界
 

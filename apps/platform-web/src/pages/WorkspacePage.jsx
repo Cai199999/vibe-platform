@@ -3457,14 +3457,22 @@ export default function WorkspacePage() {
   }
 
   /**
-   * 导出当前项目的 tar.gz：
-   *  - 优先走 GET /api/v1/runs/{runId}/export?sandboxId=...（BFF 记录映射）；
-   *  - 旧会话没有 runId 时直接走 GET /api/v1/sandboxes/{sandboxId}/export；
-   *  - 用 Blob + <a download> 触发浏览器原生下载，不依赖弹窗或新标签页。
+   * 导出当前项目的 tar.gz。
+   *
+   * @param {string} projectId
+   * @param {{sandboxId?: string, runId?: string}} [target]
+   *   Architect 面板会显式传入全栈生成得到的沙盒；未传时回退到最近一次
+   *   Agent Run 的结果，兼容顶部工具栏的原有入口。
+   *
+   * 路由策略：
+   *  - 显式 sandboxId（Architect 全栈生成）直接走沙盒导出，不依赖 BFF
+   *    内存里的 runId 映射；
+   *  - 有普通 runId 时优先 /runs/{runId}/export 并带上 sandboxId；
+   *  - 旧会话两者缺失时提示先执行 Agent。
    */
-  const handleExport = async (projectId) => {
+  const exportProject = async (projectId, target = {}) => {
     const run = runStates[projectId]
-    const sandboxId = run?.result?.sandboxId
+    const sandboxId = target.sandboxId || run?.result?.sandboxId
     if (!sandboxId) {
       setExportNotice({
         kind: 'error',
@@ -3476,11 +3484,13 @@ export default function WorkspacePage() {
 
     setExportingProjectId(projectId)
     setExportNotice(null)
-    const runId = run?.result?.runId
+    const runId = target.runId || run?.result?.runId
     // sandboxId 显式带上：BFF 重启后进程内 runId 映射会丢失，前端仍能导出。
-    const url = runId
-      ? `/api/v1/runs/${encodeURIComponent(runId)}/export?sandboxId=${encodeURIComponent(sandboxId)}`
-      : `/api/v1/sandboxes/${encodeURIComponent(sandboxId)}/export`
+    const url = target.sandboxId
+      ? `/api/v1/sandboxes/${encodeURIComponent(sandboxId)}/export`
+      : runId
+        ? `/api/v1/runs/${encodeURIComponent(runId)}/export?sandboxId=${encodeURIComponent(sandboxId)}`
+        : `/api/v1/sandboxes/${encodeURIComponent(sandboxId)}/export`
 
     try {
       const response = await fetch(url, {
@@ -3513,6 +3523,15 @@ export default function WorkspacePage() {
       setExportingProjectId(null)
     }
   }
+
+  const handleExport = (projectId) => exportProject(projectId)
+
+  /**
+   * Architect 成功卡片的一键导出：直接使用全栈 Run 的沙盒，避免等待
+   * fullstack.completed 同步到 runStates 的时序差。
+   */
+  const handleArchitectExport = (projectId, target = {}) =>
+    exportProject(projectId, target ?? {})
 
   /**
    * 预览沙盒失联后，用最近一次指令重新执行。
@@ -4019,6 +4038,7 @@ export default function WorkspacePage() {
       handleSubmit,
       handleRetry,
       handleExport,
+      handleArchitectExport,
       openSnapshotSave,
       loadAgentCatalog,
       handleOpenArchitect,
@@ -4081,6 +4101,8 @@ export default function WorkspacePage() {
         onSubmit: () => call('handleSubmit'),
         onRetry: () => call('handleRetry'),
         onExport: () => call('handleExport'),
+        onArchitectExport: (target) =>
+          call('handleArchitectExport', target),
         onSaveSnapshot: () => call('openSnapshotSave'),
         onRefreshAgents: () => workspaceActionsRef.current?.loadAgentCatalog(),
         onArchitectOpen: () => call('handleOpenArchitect'),

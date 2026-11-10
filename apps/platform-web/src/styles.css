@@ -5387,12 +5387,251 @@ body.is-viewport-panning * {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 22px 26px;
+  padding: 18px 22px 20px;
   scrollbar-width: thin;
   scrollbar-color: rgba(148, 163, 184, 0.3) transparent;
 }
 
-/* ── 架构确认 / 随意提问 双 Tab ────────────────────────────────────── */
+/* ── 统一聊天流：架构师正式提问高亮 + 影子助手弱化 ─────────────────── */
+
+.architect-message.is-formal {
+  max-width: 95%;
+  border-color: rgba(56, 189, 248, 0.42);
+  border-left: 3px solid #38bdf8;
+  background: linear-gradient(
+    135deg,
+    rgba(8, 47, 73, 0.55),
+    rgba(15, 23, 42, 0.62)
+  );
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.08), 0 10px 30px rgba(2, 6, 23, 0.35);
+}
+
+.architect-message.is-formal .architect-message-role {
+  color: #7dd3fc;
+}
+
+.architect-formal-icon {
+  margin-right: 5px;
+  color: #38bdf8;
+}
+
+.architect-formal-tag {
+  display: inline-block;
+  margin-bottom: 6px;
+  padding: 2px 8px;
+  border: 1px solid rgba(56, 189, 248, 0.34);
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.12);
+  color: #7dd3fc;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.architect-message.is-helper {
+  max-width: 86%;
+  border-style: dashed;
+  border-color: rgba(129, 140, 248, 0.22);
+  background: rgba(49, 46, 129, 0.14);
+}
+
+.architect-message.is-helper.role-user {
+  border-style: solid;
+  border-color: rgba(129, 140, 248, 0.26);
+  background: rgba(67, 56, 202, 0.16);
+}
+
+.architect-message.is-helper .architect-message-role {
+  color: rgba(165, 180, 252, 0.78);
+}
+
+/* ── 常驻双输入 dock ───────────────────────────────────────────────── */
+
+.architect-input-dock {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 22px 14px;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(2, 6, 23, 0.92);
+  box-shadow: 0 -14px 30px rgba(2, 6, 23, 0.4);
+}
+
+.architect-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.architect-input-group.is-architect {
+  padding-top: 10px;
+  border-top: 1px dashed rgba(56, 189, 248, 0.2);
+}
+
+.architect-input-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.architect-input-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #cbd5e1;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.architect-input-group.is-helper .architect-input-label {
+  color: #c7d2fe;
+}
+
+.architect-input-group.is-architect .architect-input-label {
+  color: #7dd3fc;
+}
+
+.architect-input-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #a5b4fc;
+  font-size: 9.5px;
+}
+
+.architect-input-badge {
+  padding: 2px 8px;
+  border: 1px solid rgba(251, 191, 36, 0.36);
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.14);
+  color: #fcd34d;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.architect-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.architect-input-row textarea,
+.architect-input-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.55);
+  color: #e2e8f0;
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.architect-input-row textarea {
+  resize: none;
+}
+
+.architect-input-row.is-helper textarea:focus {
+  outline: none;
+  border-color: rgba(129, 140, 248, 0.55);
+}
+
+.architect-input-row.is-architect input {
+  padding: 8px 11px;
+  border-color: rgba(56, 189, 248, 0.26);
+  font-size: 11px;
+}
+
+.architect-input-row.is-architect input:focus {
+  outline: none;
+  border-color: rgba(56, 189, 248, 0.6);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.15);
+}
+
+.architect-input-row input:disabled,
+.architect-input-row textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.architect-input-row button {
+  flex: none;
+  min-width: 86px;
+  white-space: nowrap;
+}
+
+.architect-input-hint {
+  margin: 0;
+  color: var(--faint);
+  font-size: 9.5px;
+  line-height: 1.5;
+}
+
+/* ── 全栈生成成功卡片：一键导出 ───────────────────────────────────── */
+
+.architect-export-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid rgba(52, 211, 153, 0.4);
+  border-radius: 14px;
+  background: linear-gradient(
+    135deg,
+    rgba(6, 78, 59, 0.42),
+    rgba(15, 23, 42, 0.6)
+  );
+}
+
+.architect-export-copy {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.architect-export-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(52, 211, 153, 0.45);
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.16);
+  color: #6ee7b7;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.architect-export-copy strong {
+  display: block;
+  color: #d1fae5;
+  font-size: 12px;
+}
+
+.architect-export-copy p {
+  margin: 4px 0 0;
+  color: #94a3b8;
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.architect-export-button {
+  flex: none;
+  min-width: 148px;
+  box-shadow: 0 10px 24px rgba(16, 185, 129, 0.25);
+}
+
+/* 历史 Tab 样式保留用于兼容旧快照，当前面板已改为统一聊天流。 */
 
 .architect-tabs {
   display: flex;
