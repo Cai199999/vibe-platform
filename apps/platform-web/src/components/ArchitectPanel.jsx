@@ -772,7 +772,7 @@ const HELPER_SUGGESTIONS = [
  * 统一聊天流中的一条消息。
  *
  * 主状态机消息与影子助手问答共用同一条时间轴，但通过 source / 样式区分：
- *  - 架构师的正式提问（澄清 / 契约）高亮，并提示用户到“架构补充栏”回答；
+ *  - 架构师的正式提问（澄清 / 契约）高亮，并提示用户使用正文里的表单；
  *  - 影子助手消息保持只读的弱化样式，避免被误认为需要推进状态机。
  */
 function FlowMessage({ item }) {
@@ -815,8 +815,8 @@ function FlowMessage({ item }) {
       {formal && (
         <span className="architect-formal-tag">
           {item.kind === 'contract'
-            ? '可在契约卡片直接确认，或在下方补充修订意见'
-            : '请在下方的「架构补充栏」回答'}
+            ? '可在契约卡片直接确认，或提交修订意见'
+            : '请在下方澄清表单中回答'}
         </span>
       )}
       <div className="architect-message-body">{item.content}</div>
@@ -837,13 +837,14 @@ function FlowMessage({ item }) {
 }
 
 /**
- * 常驻双输入区。
+ * 常驻影子助手输入区（只读）。
  *
- * 事件路由是硬边界：
- *  - 大输入框只调用 onAskHelper（影子助手，只读 RAG），绝不推进状态机；
- *  - 小输入框只调用 onSubmitArchitect（架构 Agent），由父组件按当前状态
- *    路由到 answer / decide / start。
- * 两者互不复用 draft，避免用户在大框里提问时误触发契约修订。
+ * 事件路由是硬边界：这里只调用 onAskHelper（只读 RAG），绝不推进
+ * 澄清、契约或全栈状态机。需要推进流程时使用正文里的
+ * “追加修改需求…”（契约确认后）或澄清 / 契约决策表单。
+ *
+ * 不渲染标题行：顶部已经有正式流程入口，重复标题只会增加噪音；
+ * 保留快捷提问胶囊，降低首次使用成本。
  */
 function ArchitectInputDock({
   helperMessages,
@@ -851,31 +852,16 @@ function ArchitectInputDock({
   helperError,
   helperDisabled,
   onAskHelper,
-  architectStatus,
-  architectBusy,
-  architectCanSubmit,
-  architectHint,
-  pendingQuestions,
-  onSubmitArchitect,
 }) {
   const [helperDraft, setHelperDraft] = useState('')
-  const [architectDraft, setArchitectDraft] = useState('')
-  const helperReady = helperDraft.trim().length > 0 && !helperPending && !helperDisabled
-  const architectReady =
-    architectDraft.trim().length > 0 && architectCanSubmit && !architectBusy
+  const helperReady =
+    helperDraft.trim().length > 0 && !helperPending && !helperDisabled
 
   const askHelper = (text) => {
     const value = String(text ?? helperDraft).trim()
     if (!value || helperPending || helperDisabled) return
     setHelperDraft('')
     onAskHelper?.(value)
-  }
-
-  const submitArchitect = () => {
-    const value = architectDraft.trim()
-    if (!value || !architectCanSubmit || architectBusy) return
-    setArchitectDraft('')
-    onSubmitArchitect?.(value)
   }
 
   return (
@@ -887,17 +873,6 @@ function ArchitectInputDock({
           askHelper()
         }}
       >
-        <div className="architect-input-head">
-          <span className="architect-input-label">
-            <span aria-hidden="true">◇</span> 影子助手 · 只读问答
-          </span>
-          {helperPending && (
-            <span className="architect-input-status" role="status">
-              <span className="mini-spinner" aria-hidden="true" />
-              查阅架构上下文…
-            </span>
-          )}
-        </div>
         {helperMessages.length === 0 && !helperPending && !helperError && (
           <div className="architect-helper-suggestions">
             {HELPER_SUGGESTIONS.map((suggestion) => (
@@ -948,64 +923,6 @@ function ArchitectInputDock({
           </div>
         )}
       </form>
-
-      <form
-        className="architect-input-group is-architect"
-        data-architect-status={architectStatus}
-        onSubmit={(event) => {
-          event.preventDefault()
-          submitArchitect()
-        }}
-      >
-        <div className="architect-input-head">
-          <span className="architect-input-label">
-            <span aria-hidden="true">◈</span> 架构补充栏 · 推进流程
-          </span>
-          {pendingQuestions > 0 && (
-            <span className="architect-input-badge">
-              {pendingQuestions} 个待答问题
-            </span>
-          )}
-        </div>
-        <div className="architect-input-row is-architect">
-          <input
-            type="text"
-            value={architectDraft}
-            data-architect-input
-            disabled={!architectCanSubmit || architectBusy}
-            placeholder={
-              architectCanSubmit
-                ? '输入架构确认信息或补充需求...'
-                : '架构师正在处理，请稍候...'
-            }
-            onChange={(event) => setArchitectDraft(event.target.value)}
-            onKeyDown={(event) => {
-              // 小输入框是单行语义：Enter 直接提交，Shift+Enter 留给输入法。
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault()
-                submitArchitect()
-              }
-            }}
-          />
-          <button
-            type="button"
-            className="architect-primary"
-            data-architect-input-send
-            disabled={!architectReady}
-            onClick={submitArchitect}
-          >
-            {architectBusy ? (
-              <>
-                <span className="mini-spinner" aria-label="提交中" />
-                提交中…
-              </>
-            ) : (
-              '提交给架构师'
-            )}
-          </button>
-        </div>
-        <p className="architect-input-hint">{architectHint}</p>
-      </form>
     </div>
   )
 }
@@ -1042,25 +959,12 @@ export default function ArchitectPanel({
   const clarification = state?.clarification
   const contract = state?.contract
   const helper = state?.helper ?? { messages: [], pending: false, error: null }
-  // 与画布 Banner 同一口径：只有“必须回答”的澄清问题才计入。
-  const pendingQuestions = (() => {
-    if (status !== 'AWAITING_CLARIFICATION') return 0
-    const questions = clarification?.questions
-    if (Array.isArray(questions) && questions.length > 0) {
-      return Math.max(
-        1,
-        questions.filter((question) => question.required !== false).length,
-      )
-    }
-    const missing = clarification?.missingSlots
-    return Array.isArray(missing) && missing.length > 0 ? missing.length : 1
-  })()
 
   /**
    * 统一聊天流：主状态机消息与影子助手问答按时间合并。
    *
-   * 影子消息只来自 helper.messages，绝不会反向写入主 messages；这里仅做
-   * 展示层合并，事件路由仍由下方两个输入框严格区分。
+   * 影子消息只来自 helper.messages，绝不会反向写入主 messages；正式推进
+   * 仍由正文里的“追加需求并修订”或澄清 / 契约决策表单负责。
    */
   const flowItems = useMemo(() => {
     const items = []
@@ -1078,60 +982,6 @@ export default function ArchitectPanel({
       return left.order - right.order
     })
   }, [messages, helper.messages])
-
-  const architectBusy = Boolean(
-    state?.submitting || state?.answerSubmitting || state?.decisionSubmitting,
-  )
-  const architectCanSubmit =
-    !architectBusy &&
-    (status === 'AWAITING_CLARIFICATION' ||
-      status === 'AWAITING_CONTRACT_CONFIRMATION' ||
-      status === 'CONFIRMED' ||
-      status === 'IDLE' ||
-      status === 'FAILED' ||
-      status === 'CANCELLED')
-  const architectHint =
-    status === 'AWAITING_CLARIFICATION'
-      ? '提交后会作为本轮澄清的补充说明，架构师将继续推进。'
-      : status === 'AWAITING_CONTRACT_CONFIRMATION'
-        ? '提交后会作为修订意见重新生成契约，不会直接确认。'
-        : status === 'CONFIRMED'
-          ? '提交后会在当前契约上追加需求并生成新版本。'
-          : status === 'FAILED' || status === 'CANCELLED'
-            ? '输入目标会重新开始一次架构设计。'
-            : status === 'IDLE'
-              ? '输入目标会启动架构设计。'
-              : '架构师正在处理，完成后可继续补充。'
-
-  /**
-   * 架构补充栏的唯一出口：按当前状态机状态路由到正确的正式动作。
-   * 绝不在这里调用 helper，避免“提问”误推进澄清或契约。
-   */
-  const submitArchitect = (text) => {
-    const value = String(text ?? '').trim()
-    if (!value || !architectCanSubmit) return
-    if (status === 'AWAITING_CLARIFICATION' && clarification) {
-      // comment-only：服务端允许“只给补充说明”的正式回答。
-      onAnswer?.([], value)
-      return
-    }
-    if (status === 'AWAITING_CONTRACT_CONFIRMATION' && contract) {
-      onDecide?.('REVISE', value)
-      return
-    }
-    if (status === 'CONFIRMED' && contract) {
-      onDecide?.('REVISE', value)
-      return
-    }
-    if (
-      !state?.runId ||
-      status === 'IDLE' ||
-      status === 'FAILED' ||
-      status === 'CANCELLED'
-    ) {
-      onStart?.(value)
-    }
-  }
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -1548,7 +1398,7 @@ export default function ArchitectPanel({
             </footer>
           )}
 
-        {/* 常驻双输入 dock：上方只读问答，下方正式推进状态机。 */}
+        {/* 底部只保留影子助手输入；正式推进统一走正文里的追加需求 / 决策表单。 */}
         {state?.runId && (
           <ArchitectInputDock
             helperMessages={helper.messages ?? []}
@@ -1556,12 +1406,6 @@ export default function ArchitectPanel({
             helperError={helper.error}
             helperDisabled={!state?.runId}
             onAskHelper={(question) => onAskHelper?.(question)}
-            architectStatus={status}
-            architectBusy={architectBusy}
-            architectCanSubmit={architectCanSubmit}
-            architectHint={architectHint}
-            pendingQuestions={pendingQuestions}
-            onSubmitArchitect={submitArchitect}
           />
         )}
       </aside>

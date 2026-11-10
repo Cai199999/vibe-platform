@@ -210,15 +210,17 @@ def test_unified_flow_and_input_routing(page: Page) -> None:
     expect(flow.locator('[data-flow-source="helper"]')).to_have_count(2)
     expect(flow.locator('[data-formal-question="true"]')).to_have_count(1)
 
-    # 2) 两个输入框文案与常驻位置。
+    # 2) 只保留影子助手输入；架构补充栏及标题行已删除。
     helper_input = page.locator("[data-helper-input]")
-    architect_input = page.locator("[data-architect-input]")
     expect(helper_input).to_have_attribute("placeholder", "有什么不懂的随时问我...")
-    expect(architect_input).to_have_attribute(
-        "placeholder", "输入架构确认信息或补充需求..."
+    expect(page.locator("[data-architect-input]")).to_have_count(0)
+    expect(page.get_by_text("架构补充栏", exact=False)).to_have_count(0)
+    expect(page.get_by_text("影子助手 · 只读问答", exact=False)).to_have_count(0)
+    expect(page.locator("[data-architect-input-dock]")).to_contain_text(
+        "只读模式：不会修改契约、技术栈或任何架构状态。"
     )
 
-    # 3) 大输入框只走 helper：回答出现在流里，但绝不触发 answers。
+    # 3) 助手提问只走 helper：回答出现在流里，但绝不触发 answers。
     helper_input.fill("为什么用 MySQL？")
     page.locator("[data-helper-send]").click()
     expect(
@@ -227,16 +229,7 @@ def test_unified_flow_and_input_routing(page: Page) -> None:
     assert len(helper_calls) == 1, helper_calls
     assert answer_calls == [], "影子助手提问竟然触发了架构回答接口"
     expect(page.locator(".architect-status")).to_contain_text("等待回答")
-
-    # 4) 小输入框走架构 Agent：以 comment-only 正式回答当前澄清。
-    architect_input.fill("目标用户是 3-10 人的招聘团队")
-    page.locator("[data-architect-input-send]").click()
-    expect(page.locator("[data-architect-input]")).to_have_count(1)
-    page.wait_for_timeout(600)
-    assert len(answer_calls) == 1, answer_calls
-    assert answer_calls[0].get("answers") == []
-    assert "招聘团队" in (answer_calls[0].get("comment") or "")
-    print("  unified flow + input routing: OK")
+    print("  unified flow + helper isolation: OK")
 
 
 def confirmed_contract() -> dict:
@@ -259,8 +252,10 @@ def confirmed_contract() -> dict:
     }
 
 
-def test_success_export_button(page: Page) -> None:
+def test_success_export_and_append(page: Page) -> None:
     export_requests: list[str] = []
+    helper_calls: list[dict] = []
+    decision_calls: list[dict] = []
 
     def handle_export(route):
         export_requests.append(route.request.url)
@@ -274,8 +269,61 @@ def test_success_export_button(page: Page) -> None:
         )
 
     page.route("**/api/v1/sandboxes/sbx_architect_e2e/export", handle_export)
+    page.route(
+        "**/api/v1/architect/runs/*/helper",
+        lambda route: (
+            helper_calls.append(json.loads(route.request.post_data or "{}")),
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {"answer": "只读回答：不会改动契约。", "citations": []}
+                ),
+            ),
+        ),
+    )
+    page.route(
+        "**/api/v1/architect/runs/*/contracts/*/decision",
+        lambda route: (
+            decision_calls.append(json.loads(route.request.post_data or "{}")),
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "contractId": "ctr_e2e",
+                        "decision": "REVISE",
+                        "status": "REVISING",
+                    }
+                ),
+            ),
+        ),
+    )
 
     open_panel(page)
+
+    # 1) 契约确认后：正文的“追加修改需求…”是唯一的正式推进入口。
+    append = page.locator("[data-contract-append]")
+    expect(append).to_be_visible()
+    expect(append).to_contain_text("追加修改需求")
+    expect(page.locator("[data-architect-input]")).to_have_count(0)
+    helper_input = page.locator("[data-helper-input]")
+    expect(helper_input).to_be_visible()
+
+    # 2) 助手提问只增加问答气泡，绝不触发契约决策。
+    helper_input.fill("这份契约还能怎么扩展？")
+    page.locator("[data-helper-send]").click()
+    expect(page.get_by_text("只读回答：不会改动契约。")).to_be_visible(timeout=5_000)
+    assert len(helper_calls) == 1, helper_calls
+    assert decision_calls == [], "影子助手提问竟然触发了契约决策"
+
+    # 3) 追加需求走正式架构状态机：REVISE + 用户原文。
+    append.locator("textarea").fill("再增加一个导出按钮")
+    append.locator("button.architect-primary").click()
+    page.wait_for_timeout(600)
+    assert len(decision_calls) == 1, decision_calls
+    assert decision_calls[0].get("decision") == "REVISE"
+    assert "导出按钮" in (decision_calls[0].get("comment") or "")
 
     card = page.locator("[data-architect-export]")
     expect(card).to_be_visible(timeout=10_000)
@@ -291,7 +339,7 @@ def test_success_export_button(page: Page) -> None:
     ), download.suggested_filename
     assert len(export_requests) == 1, export_requests
     assert "sbx_architect_e2e" in export_requests[0]
-    print("  success card export: OK")
+    print("  append routing + success export: OK")
 
 
 def main() -> int:
@@ -363,7 +411,7 @@ def main() -> int:
             )
             context.add_init_script(seed_script(state))
             page = context.new_page()
-            test_success_export_button(page)
+            test_success_export_and_append(page)
             context.close()
         finally:
             if owned:
