@@ -88,6 +88,9 @@ class ContractDraft:
         default_factory=list
     )
     assumptions: list[str] = field(default_factory=list)
+    # 用户只给出抽象目标时，契约只描述空白骨架；FrontendCoder 据此
+    # 渲染欢迎页与占位组件，不得生成任何猜测出来的业务 UI。
+    skeleton_mode: bool = False
 
 
 class ArchitectLLM:
@@ -698,7 +701,18 @@ class DeepSeekArchitectLLM(ArchitectLLM):
         system = (
             "你是平台级软件架构师，处于“架构师对话前置”模式。用户会先用自然"
             "语言描述目标，你必须主动从目标、用户群体与核心功能中判断应用形态，"
-            "禁止把“全栈 / 轻量 / 脚本”做成三选一问题丢回给用户。\n"
+            "禁止把“全栈 / 轻量 / 脚本”做成三选一问题丢回给用户。\n\n"
+            "【防脑补铁律 · 最高优先级】\n"
+            "- 在需求不明确时，绝对禁止自行脑补具体业务组件。用户没提登录，"
+            "绝对不能生成 LoginForm；没提简历，绝对不能生成 ResumeUploader；"
+            "没提职位，绝对不能生成 JDdetail。\n"
+            "- 用户只输入“工作台 / 仪表盘 / 管理后台 / 系统”等抽象词，且没有"
+            "说明业务对象、核心操作或数据字段时，视为“空白骨架”需求：不得列出"
+            "任何业务实体、API、表单或业务组件，只能确认 Header + 侧边栏 + "
+            "空白主内容区。\n"
+            "- business_flows / entities / slots 只能来自用户明确说出的名词与"
+            "动作；不确定时宁可留空，禁止猜测。\n"
+            "- 每次追问最多只提出 3 个最核心的问题，禁止一次抛出整份需求问卷。\n\n"
             "应用形态只有三种：\n"
             "- lightweight_web：纯前端网页工具，使用 LocalStorage / IndexedDB "
             "或 Serverless；不需要独立后端与数据库；\n"
@@ -788,10 +802,22 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             '"frontend_routes":[{"path":"/","name":"页面名","description":""}],'
             '"page_layout":[{"region":"header|main|sidebar","title":"",'
             '"description":""}],"components":[{"name":"","role":"",'
-            '"section":"","description":""}],"ui_logic":[{}],'
-            '"frontend_data_model":[{}],"script_spec":{},'
+            '"section":"","description":"","is_placeholder":false}],'
+            '"ui_logic":[{}],"frontend_data_model":[{}],"script_spec":{},'
             '"implementation_path":[{"phase":"","title":"","tasks":[]}],'
-            '"assumptions":[]}\n\n'
+            '"assumptions":[],"skeleton_mode":false}\n\n'
+            "【防脑补铁律 · 最高优先级】\n"
+            "- components 只能来自历史对话或 slots 中用户明确说出的业务名词与"
+            "动作；禁止自行补出 LoginForm、ResumeUploader、JDdetail、数据表格等"
+            "用户没有要求的组件或表单；\n"
+            "- 如果当前需求只是“工作台 / 仪表盘 / 后台 / 系统”等抽象目标，"
+            "skeleton_mode 必须为 true：page_layout 只给 header + sidebar + "
+            'main，components 只给一个 {"name":"待定区域",'
+            '"role":"placeholder","is_placeholder":true}，禁止生成任何业务卡片；\n'
+            "- 某个区域的需求还没聊透时，只生成一个占位组件："
+            '{"name":"待定区域","role":"placeholder","section":"主内容区",'
+            '"description":"需求未明确，等待补充","is_placeholder":true}，'
+            "禁止猜测里面该放什么表单；\n\n"
             "分级规则：\n"
             "- lightweight_web：api_routes 必须为空、database_ddl 必须为空；"
             "契约只包含 UI 交互、状态管理、前端数据模型、验收标准；\n"
@@ -832,7 +858,10 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "请严格根据校验反馈修复，不要扩写无关内容；仍然只输出契约 JSON。\n"
             "必须遵守应用形态分级规则：lightweight_web 不含 API/DDL；"
             "script_automation 不含 UI/API/DDL；full_stack_system 必须包含 "
-            "API/DDL/交互。"
+            "API/DDL/交互。\n"
+            "防脑补铁律：不得新增用户未明确要求的业务组件或表单；需求未聊透"
+            "的区域只保留一个 is_placeholder:true 的占位组件；如果原契约是抽象"
+            "骨架，除非用户反馈中明确给出业务对象，否则继续只输出空白骨架。"
         )
         human = (
             f"{_contract_human(context)}\n\n"
@@ -1170,6 +1199,7 @@ def _parse_contract_draft(payload: dict[str, Any]) -> ContractDraft:
             )
             if str(item).strip()
         ][:12],
+        skeleton_mode=bool(payload.get("skeleton_mode") or payload.get("skeletonMode")),
     )
 
 
@@ -1192,6 +1222,7 @@ def _draft_to_payload(draft: ContractDraft) -> dict[str, Any]:
             item.model_dump(by_alias=True) for item in draft.implementation_path
         ],
         "assumptions": draft.assumptions,
+        "skeletonMode": draft.skeleton_mode,
     }
 
 

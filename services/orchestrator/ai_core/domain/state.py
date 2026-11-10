@@ -195,6 +195,8 @@ class ArchitectState(TypedDict, total=False):
     round: int
     status: str
     app_shape: str
+    # 用户只给出抽象目标时为 True：跳过 LLM，直接产出空白骨架契约。
+    skeleton_mode: bool
     slots: dict[str, Any]
     confidence_score: float
     missing_slots: list[str]

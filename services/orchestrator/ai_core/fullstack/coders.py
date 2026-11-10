@@ -742,14 +742,16 @@ export default function FullstackDataPanel() {
 # 不依赖后端 API，只把契约中的路由 / 布局 / 组件渲染成真实页面，
 # 让用户在沙盒里立刻看到可圈选、可 Inspect 的产品雏形。
 _FRONTEND_SKELETON_TEMPLATE = r"""// 由 FrontendCoder 根据《架构实施契约》生成。
-// 该文件是初始前端骨架：路由、页面布局与组件清单全部来自契约，
-// 后续用户可在真实页面上圈选 / Inspect 发起增量修改。
+// 该文件是初始前端骨架：路由、页面布局与组件清单全部来自契约。
+// 骨架模式（skeletonMode=true）只渲染 Header + Sidebar + 空白主区域，
+// 绝不猜测用户没有要求的业务表单或卡片。
 import { useMemo, useState } from 'react'
 
 const APP_NAME = __APP_NAME__
 const ROUTES = __ROUTES__
 const LAYOUT = __LAYOUT__
 const COMPONENTS = __COMPONENTS__
+const SKELETON_MODE = __SKELETON_MODE__
 
 const SECTIONS = COMPONENTS.reduce((groups, component) => {
   const name = component.section || '核心工作区'
@@ -759,118 +761,290 @@ const SECTIONS = COMPONENTS.reduce((groups, component) => {
   return groups
 }, [])
 
-const styles = {
-  page: {
-    // 最外层铺满沙盒视口：不写死宽度、不 margin:auto 居中。
-    width: '100%',
-    minHeight: '100vh',
+// 用真实 CSS 媒体查询实现响应式 Grid：手机 1 列、平板 2 列、桌面 3 列。
+// 生成代码不依赖 Tailwind，避免沙盒模板没有安装样式框架时“类名生效但
+// 视觉不变”的假成功。
+const GLOBAL_CSS = `
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body, #root { min-height: 100%; margin: 0; }
+  body {
     background:
-      'radial-gradient(circle at top left, #1e293b 0%, #0f172a 42%, #020617 100%)',
-    color: '#e2e8f0',
-    fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
-    boxSizing: 'border-box',
-    padding: '0 0 48px',
-  },
-  header: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: '24px',
-    padding: '20px 36px',
-    borderBottom: '1px solid rgba(148, 163, 184, 0.18)',
-    background: 'rgba(2, 6, 23, 0.55)',
-    backdropFilter: 'blur(14px)',
-    position: 'sticky',
-    top: 0,
-    zIndex: 5,
-  },
-  brand: { fontSize: '18px', fontWeight: 800, letterSpacing: '-0.02em' },
-  nav: { display: 'flex', gap: '8px', flexWrap: 'wrap' },
-  navButton: {
-    border: '1px solid transparent',
-    background: 'transparent',
-    color: '#94a3b8',
-    borderRadius: '999px',
-    padding: '8px 16px',
-    cursor: 'pointer',
-    fontSize: '13px',
-    fontWeight: 600,
-  },
-  navButtonActive: {
-    borderColor: 'rgba(56, 189, 248, 0.55)',
-    background: 'rgba(56, 189, 248, 0.14)',
-    color: '#e0f2fe',
-  },
-  main: { maxWidth: '1180px', margin: '0 auto', padding: '36px 28px 0' },
-  hero: {
-    padding: '32px',
-    borderRadius: '24px',
-    border: '1px solid rgba(148, 163, 184, 0.2)',
+      radial-gradient(circle at top left, #1e293b 0%, #0f172a 42%, #020617 100%);
+  }
+  .app-shell {
+    display: flex;
+    width: 100%;
+    min-height: 100vh;
+    color: #e2e8f0;
+    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  }
+  .app-sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    width: 240px;
+    flex: 0 0 240px;
+    height: 100vh;
+    max-height: 100vh;
+    overflow-y: auto;
+    padding: 24px 18px;
+    border-right: 1px solid rgba(148, 163, 184, 0.16);
+    background: rgba(2, 6, 23, 0.72);
+  }
+  .sidebar-kicker {
+    color: #38bdf8;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.18em;
+  }
+  .sidebar-title { margin-top: 6px; font-size: 17px; font-weight: 800; }
+  .sidebar-nav { display: flex; flex-direction: column; gap: 6px; }
+  .nav-button {
+    width: 100%;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: transparent;
+    color: #94a3b8;
+    padding: 10px 12px;
+    text-align: left;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .nav-button:hover { background: rgba(148, 163, 184, 0.08); color: #e2e8f0; }
+  .nav-button.is-active {
+    border-color: rgba(56, 189, 248, 0.38);
+    background: rgba(56, 189, 248, 0.12);
+    color: #e0f2fe;
+  }
+  .sidebar-foot {
+    margin-top: auto;
+    color: #475569;
+    font-size: 11px;
+    line-height: 1.6;
+  }
+  .app-content {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 100vh;
+  }
+  .app-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 16px 32px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+    background: rgba(2, 6, 23, 0.82);
+  }
+  .app-brand { font-size: 17px; font-weight: 800; letter-spacing: -0.02em; }
+  .header-meta { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .header-hint {
+    overflow: hidden;
+    color: #64748b;
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .header-chip {
+    flex: none;
+    border: 1px solid rgba(56, 189, 248, 0.28);
+    border-radius: 999px;
+    background: rgba(56, 189, 248, 0.1);
+    color: #7dd3fc;
+    padding: 5px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+  }
+  .app-main {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 32px;
+  }
+  .content-wrap { width: 100%; max-width: 1180px; margin: 0 auto; }
+  .welcome-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-height: calc(100vh - 160px);
+    padding: 36px;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 24px;
     background:
-      'linear-gradient(135deg, rgba(30, 41, 59, 0.92), rgba(15, 23, 42, 0.82))',
-    boxShadow: '0 24px 80px rgba(2, 6, 23, 0.35)',
-  },
-  kicker: {
-    margin: 0,
-    color: '#38bdf8',
-    fontSize: '11px',
-    fontWeight: 800,
-    letterSpacing: '0.18em',
-  },
-  title: { margin: '10px 0 8px', fontSize: '34px', lineHeight: 1.15 },
-  copy: { margin: 0, color: '#94a3b8', fontSize: '15px', lineHeight: 1.7 },
-  section: { marginTop: '28px' },
-  sectionHead: {
-    display: 'flex',
-    alignItems: 'baseline',
-    justifyContent: 'space-between',
-    gap: '12px',
-    marginBottom: '14px',
-  },
-  sectionTitle: { margin: 0, fontSize: '18px' },
-  sectionHint: { color: '#64748b', fontSize: '12px' },
-  grid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))',
-    gap: '16px',
-  },
-  card: {
-    minHeight: '150px',
-    padding: '20px',
-    borderRadius: '18px',
-    border: '1px solid rgba(148, 163, 184, 0.18)',
-    background: 'rgba(15, 23, 42, 0.78)',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '8px',
-  },
-  cardRole: {
-    alignSelf: 'flex-start',
-    padding: '3px 8px',
-    borderRadius: '999px',
-    background: 'rgba(56, 189, 248, 0.12)',
-    color: '#7dd3fc',
-    fontSize: '10px',
-    fontWeight: 700,
-    letterSpacing: '0.08em',
-    textTransform: 'uppercase',
-  },
-  cardTitle: { margin: 0, fontSize: '16px' },
-  cardCopy: { margin: 0, color: '#94a3b8', fontSize: '13px', lineHeight: 1.65 },
-  placeholder: {
-    marginTop: 'auto',
-    height: '8px',
-    borderRadius: '999px',
+      linear-gradient(135deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.82));
+  }
+  .kicker {
+    margin: 0;
+    color: #38bdf8;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.18em;
+  }
+  .welcome-title {
+    margin: 4px 0 0;
+    font-size: clamp(28px, 4vw, 44px);
+    line-height: 1.12;
+    letter-spacing: -0.03em;
+  }
+  .welcome-copy {
+    max-width: 680px;
+    margin: 0;
+    color: #94a3b8;
+    font-size: 15px;
+    line-height: 1.75;
+  }
+  .welcome-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    margin-top: 10px;
+  }
+  .hero {
+    padding: 30px;
+    border-radius: 22px;
+    border: 1px solid rgba(148, 163, 184, 0.2);
     background:
-      'linear-gradient(90deg, rgba(56, 189, 248, 0.35), rgba(148, 163, 184, 0.12))',
-  },
-  footer: {
-    maxWidth: '1180px',
-    margin: '32px auto 0',
-    padding: '0 28px',
-    color: '#475569',
-    fontSize: '12px',
-  },
+      linear-gradient(135deg, rgba(30, 41, 59, 0.92), rgba(15, 23, 42, 0.82));
+  }
+  .hero-title { margin: 8px 0 6px; font-size: clamp(26px, 4vw, 36px); }
+  .hero-copy { margin: 0; color: #94a3b8; line-height: 1.7; }
+  .section { margin-top: 26px; }
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .section-title { margin: 0; font-size: 18px; }
+  .section-hint { color: #64748b; font-size: 12px; }
+  .component-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
+  }
+  .component-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 160px;
+    padding: 20px;
+    border-radius: 18px;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    background: rgba(15, 23, 42, 0.78);
+    overflow: hidden;
+  }
+  .card-role {
+    align-self: flex-start;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: rgba(56, 189, 248, 0.12);
+    color: #7dd3fc;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .card-title { margin: 0; font-size: 16px; }
+  .card-copy { margin: 0; color: #94a3b8; font-size: 13px; line-height: 1.65; }
+  .card-bar {
+    margin-top: auto;
+    height: 8px;
+    border-radius: 999px;
+    background:
+      linear-gradient(90deg, rgba(56, 189, 248, 0.35), rgba(148, 163, 184, 0.12));
+  }
+  .placeholder-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    min-height: 280px;
+    padding: 28px;
+    border: 1px dashed rgba(125, 211, 252, 0.4);
+    border-radius: 18px;
+    background: rgba(8, 47, 73, 0.22);
+    text-align: center;
+    overflow-y: auto;
+  }
+  .placeholder-icon {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
+    background: rgba(56, 189, 248, 0.14);
+    color: #7dd3fc;
+    font-size: 20px;
+  }
+  .placeholder-title { font-size: 17px; }
+  .placeholder-copy { max-width: 420px; color: #94a3b8; font-size: 13px; line-height: 1.65; }
+  .app-footer {
+    padding: 18px 32px 28px;
+    color: #475569;
+    font-size: 12px;
+    text-align: center;
+  }
+  @media (min-width: 768px) {
+    .component-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .welcome-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (min-width: 1200px) {
+    .component-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
+  @media (max-width: 767px) {
+    .app-shell { flex-direction: column; }
+    .app-sidebar {
+      position: static;
+      width: 100%;
+      flex: none;
+      height: auto;
+      max-height: none;
+      padding: 16px 18px;
+      border-right: 0;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+    }
+    .sidebar-nav { flex-direction: row; overflow-x: auto; }
+    .nav-button { width: auto; flex: none; white-space: nowrap; }
+    .sidebar-foot { display: none; }
+    .app-header { padding: 14px 18px; }
+    .header-hint { display: none; }
+    .app-main { padding: 18px; }
+    .welcome-panel { min-height: 0; padding: 24px; }
+  }
+`
+
+function Placeholder({ title, description, id }) {
+  return (
+    <div
+      className="placeholder-card"
+      data-source={`placeholder-${id || 'pending'}`}
+      data-source-kind="container"
+    >
+      <span className="placeholder-icon" aria-hidden="true">
+        ◇
+      </span>
+      <strong className="placeholder-title" data-source={`placeholder-title-${id || 'pending'}`}>
+        {title || '待定区域'}
+      </strong>
+      <span className="placeholder-copy">
+        {description || '需求未明确，等待后续补充；当前只渲染占位区域。'}
+      </span>
+    </div>
+  )
 }
 
 export default function App() {
@@ -879,79 +1053,168 @@ export default function App() {
     () => ROUTES.find((route) => route.path === activePath) || ROUTES[0],
     [activePath],
   )
+  const sidebarLayout = LAYOUT.find((item) => item.region === 'sidebar')
   const headerLayout = LAYOUT.find((item) => item.region === 'header')
+  const mainLayout = LAYOUT.find((item) => item.region === 'main')
+  const placeholder = COMPONENTS.find((component) => component.isPlaceholder)
 
   return (
-    <div style={styles.page}>
-      <header data-source="app-header" data-source-kind="container" style={styles.header}>
-        <div data-source="app-brand" style={styles.brand}>
-          {APP_NAME}
+    <div className="app-shell">
+      <style>{GLOBAL_CSS}</style>
+      <aside
+        className="app-sidebar"
+        data-source="app-sidebar"
+        data-source-kind="container"
+      >
+        <div>
+          <div className="sidebar-kicker">WORKSPACE</div>
+          <div className="sidebar-title">{sidebarLayout?.title || '导航'}</div>
         </div>
-        <nav data-source="app-nav" data-source-kind="container" style={styles.nav}>
+        <nav className="sidebar-nav" data-source="app-nav" data-source-kind="container">
           {ROUTES.map((route, index) => (
             <button
               key={route.path}
               type="button"
               data-source={`nav-${index}`}
-              style={{
-                ...styles.navButton,
-                ...(route.path === activePath ? styles.navButtonActive : {}),
-              }}
+              className={`nav-button${route.path === activePath ? ' is-active' : ''}`}
               onClick={() => setActivePath(route.path)}
             >
               {route.name}
             </button>
           ))}
         </nav>
-      </header>
+        <div className="sidebar-foot">
+          {SKELETON_MODE
+            ? '空白骨架阶段：后续通过对话或画布圈选逐步补充业务。'
+            : '契约组件已就绪，可圈选组件发起增量修改。'}
+        </div>
+      </aside>
 
-      <main data-source="app-main" data-source-kind="container" style={styles.main}>
-        <section data-source="page-hero" data-source-kind="container" style={styles.hero}>
-          <p data-source="page-kicker" style={styles.kicker}>
-            {headerLayout?.title || 'INITIAL SKELETON'}
-          </p>
-          <h1 data-source="page-title" style={styles.title}>
-            {activeRoute?.name || APP_NAME}
-          </h1>
-          <p data-source="page-copy" style={styles.copy}>
-            {activeRoute?.description || '根据架构契约生成的初始页面骨架。'}
-          </p>
-        </section>
+      <div className="app-content">
+        <header
+          className="app-header"
+          data-source="app-header"
+          data-source-kind="container"
+        >
+          <div className="app-brand" data-source="app-brand">
+            {APP_NAME}
+          </div>
+          <div className="header-meta">
+            <span className="header-hint">
+              {headerLayout?.title || activeRoute?.name || APP_NAME}
+            </span>
+            <span className="header-chip">
+              {SKELETON_MODE ? 'SKELETON' : 'LIVE'}
+            </span>
+          </div>
+        </header>
 
-        {SECTIONS.map((section) => (
-          <section key={section.name} style={styles.section}>
-            <div style={styles.sectionHead}>
-              <h2 data-source={`section-${section.name}`} style={styles.sectionTitle}>
-                {section.name}
-              </h2>
-              <span style={styles.sectionHint}>契约组件 · 可圈选微调</span>
-            </div>
-            <div style={styles.grid}>
-              {section.components.map((component) => (
-                <article
-                  key={component.id}
-                  data-source={`component-${component.id}`}
+        <main
+          className="app-main"
+          data-source="app-main"
+          data-source-kind="container"
+        >
+          <div className="content-wrap">
+            {SKELETON_MODE ? (
+              <section
+                className="welcome-panel"
+                data-source="welcome-panel"
+                data-source-kind="container"
+              >
+                <p className="kicker" data-source="page-kicker">
+                  INITIAL SKELETON
+                </p>
+                <h1 className="welcome-title" data-source="page-title">
+                  Welcome to your new app
+                </h1>
+                <p className="welcome-copy" data-source="page-copy">
+                  {mainLayout?.description ||
+                    '应用骨架已就绪。先确认整体布局，再通过对话或画布圈选逐步添加具体业务功能。'}
+                </p>
+                <div className="welcome-grid">
+                  <Placeholder
+                    id="pending"
+                    title={placeholder?.name || '待定区域'}
+                    description={placeholder?.description}
+                  />
+                </div>
+              </section>
+            ) : (
+              <>
+                <section
+                  className="hero"
+                  data-source="page-hero"
                   data-source-kind="container"
-                  style={styles.card}
                 >
-                  <span style={styles.cardRole}>{component.role || 'module'}</span>
-                  <h3 data-source={`component-title-${component.id}`} style={styles.cardTitle}>
-                    {component.name}
-                  </h3>
-                  <p data-source={`component-copy-${component.id}`} style={styles.cardCopy}>
-                    {component.description || '等待接入具体数据与交互。'}
+                  <p className="kicker" data-source="page-kicker">
+                    {headerLayout?.title || 'INITIAL SKELETON'}
                   </p>
-                  <div style={styles.placeholder} />
-                </article>
-              ))}
-            </div>
-          </section>
-        ))}
-      </main>
+                  <h1 className="hero-title" data-source="page-title">
+                    {activeRoute?.name || APP_NAME}
+                  </h1>
+                  <p className="hero-copy" data-source="page-copy">
+                    {activeRoute?.description || '根据架构契约生成的初始页面骨架。'}
+                  </p>
+                </section>
 
-      <footer style={styles.footer}>
-        由 Vibe Platform Architect 契约生成 · 当前为可交互前端骨架
-      </footer>
+                {SECTIONS.map((section) => (
+                  <section className="section" key={section.name}>
+                    <div className="section-head">
+                      <h2
+                        className="section-title"
+                        data-source={`section-${section.name}`}
+                      >
+                        {section.name}
+                      </h2>
+                      <span className="section-hint">契约组件 · 可圈选微调</span>
+                    </div>
+                    <div className="component-grid">
+                      {section.components.map((component) =>
+                        component.isPlaceholder ? (
+                          <Placeholder
+                            key={component.id}
+                            id={component.id}
+                            title={component.name}
+                            description={component.description}
+                          />
+                        ) : (
+                          <article
+                            className="component-card"
+                            key={component.id}
+                            data-source={`component-${component.id}`}
+                            data-source-kind="container"
+                          >
+                            <span className="card-role">
+                              {component.role || 'module'}
+                            </span>
+                            <h3
+                              className="card-title"
+                              data-source={`component-title-${component.id}`}
+                            >
+                              {component.name}
+                            </h3>
+                            <p
+                              className="card-copy"
+                              data-source={`component-copy-${component.id}`}
+                            >
+                              {component.description || '等待接入具体数据与交互。'}
+                            </p>
+                            <div className="card-bar" />
+                          </article>
+                        ),
+                      )}
+                    </div>
+                  </section>
+                ))}
+              </>
+            )}
+          </div>
+        </main>
+
+        <footer className="app-footer" data-source="app-footer">
+          由 Vibe Platform Architect 契约生成 · 当前为可交互前端骨架
+        </footer>
+      </div>
     </div>
   )
 }
@@ -1009,14 +1272,44 @@ def _skeleton_layout(contract: ArchitectContract) -> list[dict[str, str]]:
                 "description": description,
             }
         )
-    if not layout:
-        layout.append({"region": "header", "title": "初始骨架", "description": ""})
-        layout.append({"region": "main", "title": "核心工作区", "description": ""})
+    # 新项目初始化固定是 Header + Sidebar + Main 三段式骨架。
+    # 契约漏掉某个区域时补齐，而不是让页面退化成单列堆叠。
+    defaults = {
+        "header": {"region": "header", "title": "顶部导航", "description": ""},
+        "sidebar": {"region": "sidebar", "title": "侧边栏", "description": ""},
+        "main": {"region": "main", "title": "主内容区", "description": ""},
+    }
+    regions = {item["region"] for item in layout}
+    for region in ("header", "sidebar", "main"):
+        if region not in regions:
+            layout.append(defaults[region])
     return layout
 
 
-def _skeleton_components(contract: ArchitectContract) -> list[dict[str, str]]:
-    components: list[dict[str, str]] = []
+def _placeholder_component(
+    *,
+    name: str = "待定区域",
+    description: str = "",
+    identifier: str = "pending",
+) -> dict[str, Any]:
+    """构造唯一允许的占位组件。"""
+    title = str(name or "待定区域").strip() or "待定区域"
+    return {
+        "id": identifier,
+        "name": title,
+        "role": "placeholder",
+        "section": "主内容区",
+        "description": (
+            str(description or "").strip()
+            or "需求未明确，等待后续补充；当前只渲染占位区域。"
+        ),
+        "isPlaceholder": True,
+        "placeholder": f'<Placeholder title="{title}" />',
+    }
+
+
+def _skeleton_components(contract: ArchitectContract) -> list[dict[str, Any]]:
+    components: list[dict[str, Any]] = []
     used: set[str] = set()
     for index, raw in enumerate(contract.components or [], start=1):
         if not isinstance(raw, dict):
@@ -1028,25 +1321,35 @@ def _skeleton_components(contract: ArchitectContract) -> list[dict[str, str]]:
         if identifier in used:
             identifier = f"{identifier}-{index}"
         used.add(identifier)
-        components.append(
-            {
-                "id": identifier,
-                "name": name,
-                "role": str(raw.get("role") or "module").strip(),
-                "section": str(raw.get("section") or "核心工作区").strip(),
-                "description": str(raw.get("description") or "").strip(),
-            }
+        is_placeholder = bool(raw.get("isPlaceholder") or raw.get("is_placeholder"))
+        item: dict[str, Any] = {
+            "id": identifier,
+            "name": name,
+            "role": (
+                "placeholder"
+                if is_placeholder
+                else str(raw.get("role") or "module").strip()
+            ),
+            "section": str(raw.get("section") or "核心工作区").strip(),
+            "description": str(raw.get("description") or "").strip(),
+            "isPlaceholder": is_placeholder,
+        }
+        if is_placeholder:
+            item["placeholder"] = (
+                str(raw.get("placeholder") or "").strip()
+                or f'<Placeholder title="{name}" />'
+            )
+        components.append(item)
+    if contract.skeleton_mode:
+        # 骨架模式的确定性保险丝：无论历史契约里混入了多少组件，
+        # 前端只渲染一个占位区域，绝不把模型脑补的业务卡片铺出来。
+        placeholder = next(
+            (item for item in components if item.get("isPlaceholder")),
+            None,
         )
+        return [placeholder or _placeholder_component()]
     if not components:
-        components.append(
-            {
-                "id": "primary-panel",
-                "name": "主面板",
-                "role": "module",
-                "section": "核心工作区",
-                "description": "等待补充契约组件。",
-            }
-        )
+        components.append(_placeholder_component())
     return components
 
 
@@ -1072,16 +1375,22 @@ def generate_frontend_skeleton_bundle(contract: ArchitectContract) -> GeneratedB
         .replace("__ROUTES__", json.dumps(routes, ensure_ascii=False, indent=2))
         .replace("__LAYOUT__", json.dumps(layout, ensure_ascii=False, indent=2))
         .replace("__COMPONENTS__", json.dumps(components, ensure_ascii=False, indent=2))
+        .replace("__SKELETON_MODE__", "true" if contract.skeleton_mode else "false")
     )
     return GeneratedBundle(
         files={"src/App.jsx": content},
         summary=(
-            f"按契约生成 React 骨架：{len(routes)} 个路由、" f"{len(components)} 个组件"
+            "按契约生成干净的应用骨架："
+            f"{len(routes)} 个路由、{len(components)} 个占位/业务组件"
+            if contract.skeleton_mode
+            else f"按契约生成 React 骨架：{len(routes)} 个路由、"
+            f"{len(components)} 个组件"
         ),
         metadata={
             "routes": len(routes),
             "components": len(components),
             "mode": "frontend",
+            "skeletonMode": contract.skeleton_mode,
         },
     )
 

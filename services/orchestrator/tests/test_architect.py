@@ -29,6 +29,11 @@ from ai_core.architect.llm import (
     DeepSeekArchitectLLM,
     MockArchitectLLM,
 )
+from ai_core.architect.skeleton import (
+    build_skeleton_draft,
+    is_abstract_brief,
+    should_use_skeleton,
+)
 from ai_core.architect.slots import infer_app_shape, infer_slots
 from ai_core.architect.schemas import (
     ArchitectAnalysis,
@@ -555,6 +560,116 @@ class ConfidenceGuardTest(unittest.TestCase):
         slots = [question.slot for question in guarded.questions]
         self.assertIn("data.entities", slots)
         self.assertLessEqual(len(slots), 3)
+
+
+class _NoBusinessLLM(MockArchitectLLM):
+    """若骨架闸门失效、错误地调用 LLM，测试立即失败。"""
+
+    def analyze(self, context: ArchitectContext):  # noqa: ANN001
+        raise AssertionError("抽象需求不应调用 analyze")
+
+    def draft_contract(self, context: ArchitectContext):  # noqa: ANN001
+        raise AssertionError("抽象需求不应调用 LLM 起草契约")
+
+    def revise_contract(self, context, previous, feedback):  # noqa: ANN001
+        raise AssertionError("骨架契约不应交给 LLM 修订")
+
+
+class SkeletonModeTest(unittest.TestCase):
+    """“做个工作台”必须走确定性骨架，禁止脑补业务组件。"""
+
+    def test_abstract_brief_detection(self) -> None:
+        self.assertTrue(is_abstract_brief("做个工作台"))
+        self.assertTrue(is_abstract_brief("帮我搭建一个管理后台"))
+        self.assertTrue(is_abstract_brief("做一个简单的网站"))
+        self.assertFalse(is_abstract_brief("做一个任务管理系统"))
+        self.assertFalse(is_abstract_brief("做个工作台，要能登录并上传简历"))
+        self.assertFalse(is_abstract_brief("做一个数据分析看板"))
+        self.assertFalse(is_abstract_brief("你好"))
+        self.assertFalse(is_abstract_brief("随便看看"))
+
+    def test_skeleton_gate_requires_blank_project(self) -> None:
+        history = [{"role": "user", "content": "做个工作台"}]
+        self.assertTrue(
+            should_use_skeleton(
+                history=history,
+                slots={},
+                source_files={},
+                project_summary="",
+                latest_changes="",
+            )
+        )
+        self.assertFalse(
+            should_use_skeleton(
+                history=history,
+                slots={},
+                source_files={"src/App.jsx": "export default () => null"},
+            )
+        )
+        self.assertFalse(
+            should_use_skeleton(
+                history=history,
+                slots={"business.key_flows": "创建订单"},
+                source_files={},
+            )
+        )
+        # 追问后用户仍然没说出业务：继续保持骨架模式，禁止模型借机脑补。
+        self.assertTrue(
+            should_use_skeleton(
+                history=history + [{"role": "user", "content": "没想好，先这样"}],
+                slots={},
+                source_files={},
+            )
+        )
+
+    def test_abstract_brief_stops_before_llm_and_returns_skeleton(self) -> None:
+        run_id = f"test_{uuid.uuid4().hex[:12]}"
+        buffer = RunEventBuffer(run_id)
+        runner = ArchitectGraphRunner(
+            _NoBusinessLLM(),
+            event_sink=buffer,
+            checkpointer_provider=MemoryCheckpointerProvider(),
+        )
+        state = _initial_state(run_id)
+        state.update(
+            {
+                "source_files": {},
+                "source_hash": "",
+                "ui_history": [{"role": "user", "content": "做个工作台"}],
+            }
+        )
+        outcome = runner.run(state)
+
+        self.assertTrue(outcome.interrupted)
+        payload = outcome.interrupt or {}
+        self.assertEqual(payload.get("kind"), "contract_confirmation")
+        contract = payload["contract"]
+        self.assertTrue(contract["skeletonMode"])
+        self.assertEqual(contract["appShape"], "lightweight_web")
+        self.assertEqual(len(contract["components"]), 1)
+        self.assertEqual(contract["components"][0]["name"], "待定区域")
+        self.assertTrue(contract["components"][0]["isPlaceholder"])
+        regions = [item["region"] for item in contract["pageLayout"]]
+        self.assertEqual(regions, ["header", "sidebar", "main"])
+        # 业务幻觉关键词不允许出现在组件清单里。
+        component_blob = str(contract["components"])
+        for forbidden in ("LoginForm", "ResumeUploader", "JDdetail", "登录", "简历"):
+            self.assertNotIn(forbidden, component_blob)
+
+        event_types = [event.type for event in buffer.snapshot()]
+        self.assertIn("architect.skeleton.detected", event_types)
+        self.assertIn("architect.skeleton.contract", event_types)
+        self.assertNotIn("architect.clarification.required", event_types)
+
+    def test_skeleton_draft_validates_and_keeps_placeholder_flag(self) -> None:
+        draft = build_skeleton_draft(project_name="工作台", goal="做个工作台")
+        validation = validate_draft("lightweight_web", draft)
+        self.assertTrue(validation.valid, validation.issues)
+        self.assertIsNotNone(validation.draft)
+        assert validation.draft is not None
+        self.assertTrue(validation.draft.skeleton_mode)
+        self.assertEqual(len(validation.draft.components), 1)
+        self.assertTrue(validation.draft.components[0]["isPlaceholder"])
 
 
 class ContractTierValidationTest(unittest.TestCase):

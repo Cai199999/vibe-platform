@@ -40,7 +40,7 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -62,6 +62,12 @@ from ai_core.architect.llm import (
     ArchitectContext,
     ArchitectLLM,
     ContractDraft,
+)
+from ai_core.architect.skeleton import (
+    build_skeleton_draft,
+    is_abstract_brief,
+    latest_user_text,
+    should_use_skeleton,
 )
 from ai_core.architect.slots import merge_inferred_slots
 from ai_core.domain.architect import (
@@ -86,6 +92,7 @@ NODE_LABELS = {
     "summarize_history": "压缩对话记忆",
     "ingest_context": "读取当前源码",
     "retrieve_knowledge": "检索架构规范",
+    "skeleton_gate": "检测抽象需求",
     "architect_analyze": "判别应用形态",
     "confidence_gate": "校验置信度",
     "clarify_gate": "等待用户澄清",
@@ -230,6 +237,7 @@ class ArchitectGraphRunner:
             "summarize_history": self._summarize_history,
             "ingest_context": self._ingest_context,
             "retrieve_knowledge": self._retrieve_knowledge,
+            "skeleton_gate": self._skeleton_gate,
             "architect_analyze": self._architect_analyze,
             "confidence_gate": self._confidence_gate,
             "clarify_gate": self._clarify_gate,
@@ -249,7 +257,15 @@ class ArchitectGraphRunner:
         builder.add_edge(START, "summarize_history")
         builder.add_edge("summarize_history", "ingest_context")
         builder.add_edge("ingest_context", "retrieve_knowledge")
-        builder.add_edge("retrieve_knowledge", "architect_analyze")
+        builder.add_edge("retrieve_knowledge", "skeleton_gate")
+        builder.add_conditional_edges(
+            "skeleton_gate",
+            self._route_skeleton,
+            {
+                "draft_contract": "draft_contract",
+                "architect_analyze": "architect_analyze",
+            },
+        )
         builder.add_edge("architect_analyze", "confidence_gate")
         builder.add_conditional_edges(
             "confidence_gate",
@@ -260,7 +276,9 @@ class ArchitectGraphRunner:
                 "confidence_exhausted": "confidence_exhausted",
             },
         )
-        builder.add_edge("clarify_gate", "architect_analyze")
+        # 澄清恢复后重新过一遍抽象需求闸门：用户可能仍然只说“没想好”，
+        # 此时必须停在骨架，而不是继续让模型追问并最终脑补。
+        builder.add_edge("clarify_gate", "skeleton_gate")
         builder.add_edge("draft_contract", "validate_contract")
         builder.add_conditional_edges(
             "validate_contract",
@@ -388,6 +406,64 @@ class ArchitectGraphRunner:
             dedupe_key=f"architect.rag.retrieved:{state['run_id']}",
         )
         return {"retrieved_chunks": payload}
+
+    # --------------------------------------------------------
+    # 节点：抽象需求 → 空白骨架
+    # --------------------------------------------------------
+    def _skeleton_gate(self, state: ArchitectState) -> dict[str, Any]:
+        """在调用 LLM 之前拦截“做个工作台”这类抽象需求。
+
+        这是防脑补的第一道确定性闸门：只要满足“空白新项目 + 抽象目标”，
+        就不让模型分析、追问或起草契约，直接进入骨架契约。这样即使真实
+        模型再想脑补 LoginForm / ResumeUploader，也完全没有机会输出。
+        """
+        use_skeleton = should_use_skeleton(
+            history=list(state.get("ui_history") or []),
+            slots=dict(state.get("slots") or {}),
+            source_files=dict(state.get("source_files") or {}),
+            project_summary=str(state.get("project_summary") or ""),
+            latest_changes=str(state.get("latest_changes") or ""),
+        )
+        if not use_skeleton:
+            return {"skeleton_mode": False}
+
+        goal = latest_user_text(state.get("ui_history"))
+        self._emit(
+            "architect.skeleton.detected",
+            {
+                "runId": state.get("run_id"),
+                "goal": goal,
+                "reason": "abstract_brief",
+                "layout": ["header", "sidebar", "main"],
+            },
+            dedupe_key=f"architect.skeleton.detected:{state.get('run_id')}",
+        )
+        return {
+            "skeleton_mode": True,
+            "app_shape": "lightweight_web",
+            "confidence_score": 1.0,
+            "missing_slots": [],
+            "questions": [],
+            "analysis": {
+                "app_shape": "lightweight_web",
+                "confidence_score": 1.0,
+                "missing_slots": [],
+                "slots": dict(state.get("slots") or {}),
+                "business_flows": [],
+                "entities": [],
+                "assumptions": ["抽象需求，仅生成空白骨架。"],
+                "reasoning": (
+                    "用户只提供了抽象目标，未说明业务对象与操作；"
+                    "按防脑补规则生成 Header + 侧边栏 + 空白主区域。"
+                ),
+            },
+            "status": "DRAFTING_CONTRACT",
+        }
+
+    def _route_skeleton(self, state: ArchitectState) -> str:
+        if state.get("skeleton_mode"):
+            return "draft_contract"
+        return "architect_analyze"
 
     # --------------------------------------------------------
     # 节点：应用形态与置信度
@@ -544,8 +620,26 @@ class ArchitectGraphRunner:
     # --------------------------------------------------------
     def _draft_contract(self, state: ArchitectState) -> dict[str, Any]:
         self._check_cancelled()
-        context = _context_from_state(state)
-        draft = self._llm.draft_contract(context)
+        if state.get("skeleton_mode"):
+            # 骨架模式完全跳过 LLM：契约内容由确定性代码生成，结构、
+            # 文案与唯一占位组件都不可被模型的“创作欲”改变。
+            draft = build_skeleton_draft(
+                project_name=str(state.get("project_name") or ""),
+                goal=latest_user_text(state.get("ui_history")),
+            )
+            self._emit(
+                "architect.skeleton.contract",
+                {
+                    "runId": state.get("run_id"),
+                    "components": len(draft.components),
+                    "layout": [item["region"] for item in draft.page_layout],
+                    "placeholder": True,
+                },
+                dedupe_key=f"architect.skeleton.contract:{state.get('run_id')}",
+            )
+        else:
+            context = _context_from_state(state)
+            draft = self._llm.draft_contract(context)
         self._check_cancelled()
         contract_id = state.get("contract_id") or f"ctr_{uuid.uuid4().hex[:20]}"
         self._emit(
@@ -630,11 +724,50 @@ class ArchitectGraphRunner:
             or "按规范修正契约"
         )
         context = _context_from_state(state)
+        skeleton_mode = bool(state.get("skeleton_mode"))
+        # 校验修复也走本节点。骨架契约由确定性代码生成，若仍被校验
+        # 拒绝，直接重建而不是交给 LLM“自由发挥”，否则会重新引入脑补。
+        if skeleton_mode and state.get("status") == "REPAIRING_CONTRACT":
+            draft = build_skeleton_draft(
+                project_name=str(state.get("project_name") or ""),
+                goal=latest_user_text(state.get("ui_history")),
+            )
+            self._check_cancelled()
+            return {
+                "contract_draft": draft_to_dict(draft),
+                "contract_feedback": "",
+                "status": "DRAFTING_CONTRACT",
+            }
+
+        if skeleton_mode and is_abstract_brief(feedback):
+            # 用户仍然只给了抽象反馈：继续确定性生成骨架，避免模型借
+            # “修订”之名补出业务组件。
+            draft = build_skeleton_draft(
+                project_name=str(state.get("project_name") or ""),
+                goal=feedback or latest_user_text(state.get("ui_history")),
+            )
+            self._check_cancelled()
+            return {
+                "contract_draft": draft_to_dict(draft),
+                "contract_feedback": "",
+                "status": "DRAFTING_CONTRACT",
+            }
+
+        if skeleton_mode:
+            # 用户开始补充具体业务（例如“需要登录和订单列表”）：带着
+            # 反馈进入正常契约修订，同时永久关闭骨架模式。
+            context = replace(
+                context,
+                ui_history=list(context.ui_history)
+                + [{"role": "user", "content": feedback}],
+            )
         draft = self._llm.revise_contract(context, previous, feedback)
+        draft = replace(draft, skeleton_mode=False)
         self._check_cancelled()
         return {
             "contract_draft": draft_to_dict(draft),
             "contract_feedback": "",
+            "skeleton_mode": False,
             "status": "DRAFTING_CONTRACT",
         }
 

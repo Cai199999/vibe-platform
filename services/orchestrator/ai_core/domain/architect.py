@@ -309,6 +309,9 @@ class ArchitectContract(CamelModel):
         default_factory=list
     )
     assumptions: list[str] = Field(default_factory=list)
+    # 抽象需求的空白骨架标记：FrontendCoder 只渲染 Header + Sidebar +
+    # Main 与占位组件，不生成任何猜测出来的业务 UI。
+    skeleton_mode: bool = False
     citations: list[ArchitectCitation] = Field(default_factory=list)
     created_at: datetime | None = None
     decided_at: datetime | None = None

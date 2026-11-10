@@ -112,27 +112,28 @@ def _contract(**overrides) -> ArchitectContract:
 
 def _frontend_contract(**overrides) -> ArchitectContract:
     """对话前置模式的轻量前端契约：没有后端与 DDL，但有页面结构。"""
-    return _contract(
-        appShape="lightweight_web",
-        techStack={"frontend": "react"},
-        apiRoutes=[],
-        databaseDdl="",
-        componentInteractions=[],
-        frontendRoutes=[
+    payload = {
+        "appShape": "lightweight_web",
+        "techStack": {"frontend": "react"},
+        "apiRoutes": [],
+        "databaseDdl": "",
+        "componentInteractions": [],
+        "frontendRoutes": [
             {"path": "/", "name": "任务总览", "description": "展示全部任务"},
             {"path": "/board", "name": "看板", "description": "按状态分组"},
         ],
-        pageLayout=[
+        "pageLayout": [
             {"region": "header", "description": "品牌与导航"},
             {"region": "main", "description": "任务看板工作区"},
         ],
-        components=[
+        "components": [
             {"name": "TaskBoard", "description": "任务看板容器"},
             {"name": "TaskCard", "description": "单条任务卡片"},
             {"name": "StatusSummary", "description": "状态统计"},
         ],
-        **overrides,
-    )
+    }
+    payload.update(overrides)
+    return _contract(**payload)
 
 
 class _MemorySandbox(SandboxProvider):
@@ -357,6 +358,67 @@ class CoderTests(unittest.TestCase):
         self.assertEqual(bundle.metadata["mode"], "frontend")
         self.assertEqual(bundle.metadata["routes"], 2)
         self.assertEqual(bundle.metadata["components"], 3)
+
+    def test_skeleton_mode_renders_clean_shell_and_single_placeholder(self) -> None:
+        """骨架模式必须只渲染 Header + Sidebar + Main 与一个占位组件。"""
+        contract = _frontend_contract(
+            contractId="ctr_skeleton_test",
+            skeletonMode=True,
+            frontendRoutes=[
+                {"path": "/", "name": "工作台", "description": "空白工作区"}
+            ],
+            pageLayout=[
+                {"region": "header", "title": "顶部导航"},
+                {"region": "sidebar", "title": "侧边栏"},
+                {"region": "main", "title": "主内容区"},
+            ],
+            components=[
+                {
+                    "name": "待定区域",
+                    "role": "placeholder",
+                    "section": "主内容区",
+                    "description": "需求未明确",
+                    "isPlaceholder": True,
+                }
+            ],
+        )
+        bundle = generate_frontend_skeleton_bundle(contract)
+        app = bundle.files["src/App.jsx"]
+
+        self.assertTrue(bundle.metadata["skeletonMode"])
+        self.assertIn("SKELETON_MODE = true", app)
+        self.assertIn("Welcome to your new app", app)
+        self.assertIn('data-source="app-sidebar"', app)
+        self.assertIn("grid-template-columns: repeat(3, minmax(0, 1fr))", app)
+        self.assertIn("min-height: 280px", app)
+        self.assertIn("overflow-y: auto", app)
+        self.assertIn("isPlaceholder", app)
+
+    def test_skeleton_mode_filters_hallucinated_business_components(self) -> None:
+        """即使历史契约混入业务组件，骨架模式也只输出一个占位组件。"""
+        contract = _frontend_contract(
+            contractId="ctr_skeleton_guard",
+            skeletonMode=True,
+            frontendRoutes=[{"path": "/", "name": "工作台"}],
+            pageLayout=[
+                {"region": "header", "title": "顶部导航"},
+                {"region": "sidebar", "title": "侧边栏"},
+                {"region": "main", "title": "主内容区"},
+            ],
+            components=[
+                {"name": "LoginForm", "role": "form"},
+                {"name": "ResumeUploader", "role": "upload"},
+                {"name": "JDdetail", "role": "detail"},
+            ],
+        )
+        bundle = generate_frontend_skeleton_bundle(contract)
+        app = bundle.files["src/App.jsx"]
+
+        self.assertEqual(bundle.metadata["components"], 1)
+        self.assertNotIn("LoginForm", app)
+        self.assertNotIn("ResumeUploader", app)
+        self.assertNotIn("JDdetail", app)
+        self.assertIn("待定区域", app)
 
     def test_infra_bundle_generates_production_deployment_files(self) -> None:
         bundle = generate_infra_bundle(_contract())

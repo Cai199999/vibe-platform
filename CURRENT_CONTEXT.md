@@ -16,6 +16,7 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒；中间�
 - **真实模型基线**：Eval 默认 DeepSeek，10 例 7 过=70%，57s，26,223 tokens/¥0.050088；001/005 为断言只认 CSS（实际 React hex），004 使用未装 Tailwind 类=真实失败。
 - **输出自修复**：Planner/Coder 校验失败回传原始输出+错误重试（`AGENT_JSON_RETRY_LIMIT=2`），Planner 耗尽降级文本计划。
 - **Token 成本**：每节点采集 usage、reducer 累加，随 `node.finished`/响应/终态事件下发；`LLM_PRICING` 可配。
+- **防脑补骨架**：抽象目标（如“做个工作台”）在 `skeleton_gate` 被确定性拦截，完全不调用 LLM；契约标记 `skeletonMode=true`，组件仅 `isPlaceholder=true`；FrontendCoder 只渲染 Header + Sidebar + Main、响应式 Grid、Welcome 与唯一占位。E2E 已跑通。
 
 ## 真假边界
 

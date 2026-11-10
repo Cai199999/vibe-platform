@@ -33,6 +33,30 @@ class ContractValidation:
     draft: ContractDraft | None = None
 
 
+def _normalize_component(raw: dict, index: int) -> dict:
+    """统一占位组件标记，兼容 LLM 的两种字段写法。
+
+    契约对外使用 camelCase（``isPlaceholder``），但模型偶尔按提示词输出
+    ``is_placeholder``。这里一并接受并写成规范字段；占位组件统一标记为
+    ``role=placeholder``，FrontendCoder 据此只渲染占位卡，不猜业务表单。
+    """
+    item = dict(raw)
+    flag = item.get("isPlaceholder")
+    if flag is None:
+        flag = item.get("is_placeholder")
+    is_placeholder = bool(flag)
+    item["isPlaceholder"] = is_placeholder
+    item.pop("is_placeholder", None)
+    if is_placeholder:
+        item["role"] = "placeholder"
+        name = str(item.get("name") or item.get("title") or "待定区域").strip()
+        item.setdefault("name", name)
+        item.setdefault("placeholder", f'<Placeholder title="{name}" />')
+        if not str(item.get("description") or "").strip():
+            item["description"] = "需求未明确，等待补充；当前仅渲染占位区域。"
+    return item
+
+
 def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
     issues: list[str] = []
 
@@ -46,7 +70,11 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
     interactions = list(draft.component_interactions)
     frontend_routes = list(draft.frontend_routes)
     page_layout = list(draft.page_layout)
-    components = list(draft.components)
+    components = [
+        _normalize_component(item, index)
+        for index, item in enumerate(draft.components or [], start=1)
+        if isinstance(item, dict)
+    ]
     ui_logic = list(draft.ui_logic)
     frontend_data_model = list(draft.frontend_data_model)
     script_spec = dict(draft.script_spec)
@@ -59,6 +87,21 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
             issues.append("前端契约缺少 page_layout，无法生成页面布局")
         if not components:
             issues.append("前端契约缺少 components，无法生成组件骨架")
+        if draft.skeleton_mode:
+            # 骨架模式是“最小化生成”的硬约束：宁可只有一个占位组件，
+            # 也绝不允许模型顺手补出登录 / 上传 / 详情等业务 UI。
+            if len(components) != 1 or not components[0].get("isPlaceholder"):
+                issues.append(
+                    "skeleton_mode 契约只能包含一个 isPlaceholder=true 的占位组件"
+                )
+            business_components = [
+                item
+                for item in components
+                if not item.get("isPlaceholder")
+                and str(item.get("role") or "").lower() not in {"placeholder", ""}
+            ]
+            if business_components:
+                issues.append("skeleton_mode 契约禁止生成具体业务组件")
 
     if shape == "lightweight_web":
         if api_routes:
@@ -133,6 +176,7 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
         script_spec=script_spec,
         implementation_path=draft.implementation_path,
         assumptions=draft.assumptions,
+        skeleton_mode=draft.skeleton_mode,
     )
     return ContractValidation(valid=not issues, issues=issues, draft=normalized)
 
@@ -157,6 +201,7 @@ def draft_to_dict(draft: ContractDraft) -> dict:
             item.model_dump(by_alias=True) for item in draft.implementation_path
         ],
         "assumptions": draft.assumptions,
+        "skeletonMode": draft.skeleton_mode,
     }
 
 
@@ -227,6 +272,7 @@ def draft_from_dict(payload: dict) -> ContractDraft:
         assumptions=[
             str(item) for item in payload.get("assumptions") or [] if str(item).strip()
         ],
+        skeleton_mode=bool(payload.get("skeletonMode") or payload.get("skeleton_mode")),
     )
 
 
@@ -286,6 +332,7 @@ def assemble_contract(
         script_spec=draft.script_spec,
         implementation_path=draft.implementation_path,
         assumptions=draft.assumptions,
+        skeleton_mode=draft.skeleton_mode,
         citations=citations,
         created_at=datetime.now(timezone.utc),
     )

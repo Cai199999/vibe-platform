@@ -700,6 +700,7 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         "round": 0,
         "status": "INGESTING",
         "app_shape": "",
+        "skeleton_mode": False,
         "slots": {},
         "confidence_score": 0.0,
         "missing_slots": [],
