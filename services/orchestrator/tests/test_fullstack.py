@@ -609,8 +609,10 @@ class CoderTests(unittest.TestCase):
         )
         dockerfile = bundle.files["Dockerfile"]
         self.assertIn("FROM node:22-alpine", dockerfile)
-        self.assertIn("COPY server/package.json", dockerfile)
-        self.assertIn('CMD ["node", "index.js"]', dockerfile)
+        self.assertIn("COPY server/package.json ./server/package.json", dockerfile)
+        # 保留 server/ 层级，SQLite 默认写入 /app/data（../data）。
+        self.assertIn("COPY server/ ./server", dockerfile)
+        self.assertIn('CMD ["node", "server/index.js"]', dockerfile)
         render = bundle.files["render.yaml"]
         self.assertIn("runtime: docker", render)
         self.assertIn("runtime: static", render)

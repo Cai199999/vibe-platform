@@ -601,15 +601,17 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 # 先复制依赖清单，命中 Docker 层缓存；生产依赖包含 Sequelize 与驱动。
-COPY server/package.json ./package.json
-RUN npm install --omit=dev --no-audit --no-fund \
+# 保留 server/ 目录层级：db.js 默认把 SQLite 放在 /app/data，
+# 与沙盒目录结构一致，未配置 DATABASE_URL 时也能直接写库。
+COPY server/package.json ./server/package.json
+RUN cd server && npm install --omit=dev --no-audit --no-fund \
     && chown -R node:node /app
 
-COPY server/ ./
+COPY server/ ./server
 USER node
 
 EXPOSE 3000
-CMD ["node", "index.js"]
+CMD ["node", "server/index.js"]
 """
 
 DOCKERIGNORE_TEMPLATE = r"""# 构建镜像时排除本地依赖、运行期数据与敏感配置。
