@@ -133,6 +133,10 @@ class Settings(BaseSettings):
     agent_approval_ttl_hours: int = 24
     # Reflection：同一实现偏好累计多少次成功修改后，才作为默认值注入 Prompt。
     agent_preference_min_evidence: int = 2
+    # Planner / Coder 结构化输出校验失败后的自修复重试次数。
+    # 每次重试都会把上一次原始输出与校验错误回传模型，要求只修复不合法字段；
+    # 0 表示关闭（首次失败直接走节点级重试 / 降级）。
+    agent_json_retry_limit: int = 2
     # 每个 Run 的内存事件缓冲上限；生产切换 Redis Stream 后由 stream TTL 管理。
     agent_event_buffer_size: int = 2000
 
@@ -142,6 +146,11 @@ class Settings(BaseSettings):
     # 对话历史超过阈值才压缩；摘要长度硬上限，防止压缩本身变成新负担。
     history_summary_token_threshold: int = 3000
     history_summary_max_chars: int = 200
+    # Token 费用核算：价格单位「货币金额 / 100 万 tokens」。
+    # 默认使用 DeepSeek 目录价，可在部署环境按实际账单覆盖，例如：
+    # LLM_PRICING={"deepseek-chat":{"input":2,"cached_input":0.5,"output":8}}
+    llm_pricing: dict[str, dict[str, float]] = {}
+    llm_cost_currency: str = "CNY"
     # 分层压缩：旧消息摘要，最近 N 轮原文保留。1 轮 = user + assistant。
     history_recent_turns: int = 10
     # 每 N 轮生成一次局部摘要，写入 local_summary.md。

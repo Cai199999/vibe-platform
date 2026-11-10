@@ -21,7 +21,7 @@ import difflib
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -52,6 +52,7 @@ from ai_core.agent.preferences import (
 from ai_core.context_memory import get_project_memory
 from ai_core.domain.state import AgentState
 from ai_core.config import get_settings
+from ai_core.observability.token_usage import TokenUsage, UsageCollector, collect_usage
 from ai_core.editor import (
     CodeEdit,
     EditKind,
@@ -96,6 +97,8 @@ class GraphRunOutcome:
     interrupted: bool
     interrupt: dict[str, Any] | None
     thread_id: str
+    # 整次 Run 的 Token 用量 / 费用（含澄清恢复前的历史节点）。
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentGraphRunner:
@@ -117,6 +120,9 @@ class AgentGraphRunner:
         self._llm = llm
         self._recursion_limit = recursion_limit
         self._event_sink = event_sink or NullEventSink()
+        # 本次 runner 调用的 Token 汇总；最终以 Checkpointer 状态里的
+        # token_usage 为准（可跨澄清 / 审批恢复累加）。
+        self._usage_total = TokenUsage()
         self._checkpointer_provider = (
             checkpointer_provider or get_checkpointer_provider()
         )
@@ -169,20 +175,30 @@ class AgentGraphRunner:
         snapshot = self._graph.get_state(config)
         state = dict(snapshot.values or {})
         interrupt_payload = _find_interrupt(snapshot)
+        usage = state.get("token_usage")
         outcome = GraphRunOutcome(
             state=state,  # type: ignore[arg-type]
             interrupted=bool(snapshot.next),
             interrupt=interrupt_payload,
             thread_id=resolved_thread_id,
+            usage=dict(usage) if isinstance(usage, dict) else self.usage_total(),
         )
         logger.info(
-            "agent run finish run_id=%s status=%s retry_count=%s interrupted=%s",
+            "agent run finish run_id=%s status=%s retry_count=%s interrupted=%s "
+            "tokens=%s cost=%s %s",
             state.get("run_id"),
             state.get("status"),
             state.get("retry_count"),
             outcome.interrupted,
+            outcome.usage.get("totalTokens"),
+            outcome.usage.get("cost"),
+            outcome.usage.get("currency"),
         )
         return outcome
+
+    def usage_total(self) -> dict[str, Any]:
+        """返回本 runner 调用的 Token 汇总（未合并历史 Checkpoint 时使用）。"""
+        return self._usage_total.as_dict()
 
     # --------------------------------------------------------
     # 图构建
@@ -321,9 +337,15 @@ class AgentGraphRunner:
                 },
                 dedupe_key=f"node.started:{key_base}",
             )
+            # 采集器只覆盖当前节点：模型适配器在每次真实调用后写入 usage，
+            # 节点结束后聚合为 node.finished.usage / state.token_usage。
+            collector = UsageCollector()
             try:
-                update = fn(state)
+                with collect_usage(collector):
+                    update = fn(state)
             except GraphInterrupt:
+                usage = collector.snapshot()
+                self._usage_total.add(usage)
                 self._emit(
                     "node.finished",
                     {
@@ -335,11 +357,14 @@ class AgentGraphRunner:
                             if name == "approval_gate"
                             else "等待用户澄清"
                         ),
+                        "usage": usage.as_dict(),
                     },
                     dedupe_key=f"node.finished:{key_base}:paused",
                 )
                 raise
             except Exception as exc:  # noqa: BLE001 - 事件后继续向上抛
+                usage = collector.snapshot()
+                self._usage_total.add(usage)
                 self._emit(
                     "node.finished",
                     {
@@ -347,14 +372,17 @@ class AgentGraphRunner:
                         "status": "error",
                         "durationMs": _duration_ms(started),
                         "summary": str(exc)[:300],
+                        "usage": usage.as_dict(),
                     },
                     dedupe_key=f"node.finished:{key_base}:error",
                 )
                 raise
 
+            usage = collector.snapshot()
+            self._usage_total.add(usage)
             # 节点执行期间用户可能已取消：返回值不写回状态，交给 Service
             # 统一回滚沙盒并发 run.cancelled。
-            self._check_cancelled(name, key_base, started)
+            self._check_cancelled(name, key_base, started, usage=usage)
 
             status = "ok"
             if update.get("apply_failed"):
@@ -373,9 +401,13 @@ class AgentGraphRunner:
                     "status": status,
                     "durationMs": _duration_ms(started),
                     "summary": _node_summary(name, update, state),
+                    "usage": usage.as_dict(),
                 },
                 dedupe_key=f"node.finished:{key_base}:{status}",
             )
+            if isinstance(update, dict) and usage.calls:
+                # 只写本节点增量；AgentState.token_usage 的 reducer 负责累加。
+                update = {**update, "token_usage": usage.as_dict()}
             return update
 
         return wrapped
@@ -385,18 +417,22 @@ class AgentGraphRunner:
         node: str,
         key_base: str,
         started: float,
+        usage: TokenUsage | None = None,
     ) -> None:
         """在安全点检查协作式取消标志；已取消则发事件并抛出控制流异常。"""
         if self._cancel_check is None or not self._cancel_check():
             return
+        payload: dict[str, Any] = {
+            "node": node,
+            "status": "cancelled",
+            "durationMs": _duration_ms(started),
+            "summary": "用户取消执行",
+        }
+        if usage is not None:
+            payload["usage"] = usage.as_dict()
         self._emit(
             "node.finished",
-            {
-                "node": node,
-                "status": "cancelled",
-                "durationMs": _duration_ms(started),
-                "summary": "用户取消执行",
-            },
+            payload,
             dedupe_key=f"node.finished:{key_base}:cancelled",
         )
         raise RunCancelledError("用户取消执行")

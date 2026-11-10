@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import AppHeader from '../components/AppHeader.jsx'
 import AccountDialog from '../components/AccountDialog.jsx'
 import SettingsDialog from '../components/SettingsDialog.jsx'
@@ -63,7 +70,7 @@ const EMPTY_RUN = {
   pendingAnnotationId: null,
   // run | rollback：同一个 pendingAnnotationId 下区分“执行修改”和“撤销”。
   pendingAction: null,
-  elapsed: 0,
+  // 执行耗时由 RuntimePanel 本地计时，不再写入页面级状态。
   startedAt: null,
   result: null,
   error: null,
@@ -169,6 +176,36 @@ function loadRunStates(projects) {
     return {}
   }
 }
+
+/**
+ * 只序列化“刷新后仍有价值”的字段。
+ *
+ * 注意不要把整个 run 直接 JSON.stringify：timeline / patchPreview /
+ * chatHistory 在大项目里可能上百 KB，之前每次 runStates 变化都同步写
+ * sessionStorage，会把主线程卡住。这里与 loadRunStates 的字段一一对应。
+ */
+function buildRunSnapshot(runStates) {
+  const snapshot = {}
+  Object.entries(runStates).forEach(([projectId, run]) => {
+    if (!run.result && !run.error && run.sandboxIds.length === 0) return
+    snapshot[projectId] = {
+      annotations: run.annotations,
+      result: run.result,
+      error: run.error,
+      lastInstruction: run.lastInstruction,
+      sandboxIds: run.sandboxIds,
+      // 保存门控与拖拽定位必须跨刷新保留，否则刷新后按钮误解锁。
+      dirty: run.dirty,
+      placement: run.placement,
+      projectSummary: run.projectSummary,
+      latestChanges: run.latestChanges,
+    }
+  })
+  return snapshot
+}
+
+// Run 状态落盘延迟：SSE / 计时器更新远高于持久化需要，合并写入即可。
+const RUN_PERSIST_DELAY_MS = 800
 
 // both 门控的前端镜像：只用于 UI 提示与刷新后恢复，权威状态仍在 AI Core。
 const GATE_STORAGE_KEY = 'vibe.supervisor.gates.v1'
@@ -998,10 +1035,23 @@ export default function WorkspacePage() {
   const annotationAbortRef = useRef(new Map())
   // 异步回调里需要读取最新 run 状态（state 本身是渲染快照）。
   const runStatesRef = useRef(runStates)
+  // 会话快照的延迟写盘句柄；卸载 / pagehide 时立即 flush。
+  const runPersistTimerRef = useRef(0)
 
   useEffect(() => {
     runStatesRef.current = runStates
   }, [runStates])
+
+  const persistRunStates = useCallback(() => {
+    try {
+      window.sessionStorage.setItem(
+        RUN_STORAGE_KEY,
+        JSON.stringify(buildRunSnapshot(runStatesRef.current)),
+      )
+    } catch {
+      // 快照过大 / 隐私模式：忽略，当前会话仍可正常使用。
+    }
+  }, [])
 
   // 页面卸载 / 切换项目时关闭所有 SSE，避免后台继续占用连接。
   useEffect(() => {
@@ -1018,29 +1068,35 @@ export default function WorkspacePage() {
   }, [])
 
   // 刷新页面后恢复已完成的预览；只持久化会话内结果，不写入 localStorage。
+  // 合并 800ms 内的多次状态变化，避免 SSE 批次触发同步 JSON 序列化。
   useEffect(() => {
-    const snapshot = {}
-    Object.entries(runStates).forEach(([projectId, run]) => {
-      if (!run.result && !run.error && run.sandboxIds.length === 0) return
-      snapshot[projectId] = {
-        annotations: run.annotations,
-        result: run.result,
-        error: run.error,
-        lastInstruction: run.lastInstruction,
-        sandboxIds: run.sandboxIds,
-        // 保存门控与拖拽定位必须跨刷新保留，否则刷新后按钮误解锁。
-        dirty: run.dirty,
-        placement: run.placement,
-        projectSummary: run.projectSummary,
-        latestChanges: run.latestChanges,
-      }
-    })
-    try {
-      window.sessionStorage.setItem(RUN_STORAGE_KEY, JSON.stringify(snapshot))
-    } catch {
-      // 快照过大 / 隐私模式：忽略，当前会话仍可正常使用。
+    if (runPersistTimerRef.current) {
+      window.clearTimeout(runPersistTimerRef.current)
     }
-  }, [runStates])
+    runPersistTimerRef.current = window.setTimeout(() => {
+      runPersistTimerRef.current = 0
+      persistRunStates()
+    }, RUN_PERSIST_DELAY_MS)
+    return () => {
+      if (runPersistTimerRef.current) {
+        window.clearTimeout(runPersistTimerRef.current)
+        runPersistTimerRef.current = 0
+      }
+    }
+  }, [runStates, persistRunStates])
+
+  // 关闭页面 / 切到后台时同步落盘一次，避免刷新前最后 800ms 的结果丢失。
+  useEffect(() => {
+    const flush = () => {
+      if (runPersistTimerRef.current) {
+        window.clearTimeout(runPersistTimerRef.current)
+        runPersistTimerRef.current = 0
+      }
+      persistRunStates()
+    }
+    window.addEventListener('pagehide', flush)
+    return () => window.removeEventListener('pagehide', flush)
+  }, [persistRunStates])
 
   const anyRunning = useMemo(
     () => Object.values(runStates).some((run) => run.submitting),
@@ -1084,30 +1140,9 @@ export default function WorkspacePage() {
     }
   }, [gateStates])
 
-  // 所有 Tab 共用同一个计时器；按 startedAt 计算各自耗时，避免多项目并发时互相覆盖。
-  useEffect(() => {
-    if (!anyRunning) return undefined
-    const timer = window.setInterval(() => {
-      setRunStates((previous) => {
-        let changed = false
-        const next = { ...previous }
-        Object.entries(previous).forEach(([projectId, run]) => {
-          if (!run.submitting) return
-          const elapsed = Math.max(
-            0,
-            Math.floor((Date.now() - (run.startedAt ?? Date.now())) / 1000),
-          )
-          if (elapsed !== run.elapsed) {
-            next[projectId] = { ...run, elapsed }
-            changed = true
-          }
-        })
-        return changed ? next : previous
-      })
-    }, 400)
-    return () => window.clearInterval(timer)
-  }, [anyRunning])
-
+  // 注意：执行耗时不再写回页面级 runStates。
+  // 之前每 400ms 一次全量 setRunStates，会连带重渲染所有 Tab 并触发
+  // sessionStorage 序列化；现在由 RuntimePanel 在本地按 1s 计时。
   const patchRun = (projectId, patch) => {
     if (!workspaceMountedRef.current) return
     if (closedProjectsRef.current.has(projectId)) return
@@ -1888,7 +1923,6 @@ export default function WorkspacePage() {
       submitting: true,
       pendingAnnotationId: annotationId,
       pendingAction: 'run',
-      elapsed: 0,
       startedAt: Date.now(),
       error: null,
       runId,
@@ -1971,7 +2005,6 @@ export default function WorkspacePage() {
       submitting: true,
       pendingAnnotationId: annotationId,
       pendingAction: 'run',
-      elapsed: 0,
       startedAt: Date.now(),
       error: null,
       lastInstruction: message,
@@ -2565,11 +2598,12 @@ export default function WorkspacePage() {
     streamControllersRef.current.get(projectId)?.abort()
     streamControllersRef.current.set(projectId, controller)
 
-    // 同一帧内到达的多个 SSE 事件合并为一次状态更新，避免流式输出时
-    // 每个 node.* 事件都触发整页重渲染。
+    // 同一时间窗内到达的多个 SSE 事件合并为**一次** runStates 更新：
+    // 既减少状态对象拷贝，也保证 React 每批只渲染一次工作区。
     const emitEvent = createFrameBatcher((events) => {
+      if (isStale()) return
+      const applicable = []
       for (const event of events) {
-        if (isStale()) continue
         if (closedProjectsRef.current.has(projectId)) {
           if (
             event.type === 'run.succeeded' ||
@@ -2581,10 +2615,15 @@ export default function WorkspacePage() {
           }
           continue
         }
-        patchRun(projectId, (previous) =>
-          applyStreamEvent(previous, event, annotationId),
-        )
+        applicable.push(event)
       }
+      if (applicable.length === 0) return
+      patchRun(projectId, (previous) =>
+        applicable.reduce(
+          (run, event) => applyStreamEvent(run, event, annotationId),
+          previous,
+        ),
+      )
     })
 
     try {
@@ -2930,7 +2969,6 @@ export default function WorkspacePage() {
       submitting: true,
       pendingAnnotationId: annotationId,
       pendingAction: 'rollback',
-      elapsed: 0,
       startedAt: Date.now(),
       error: null,
     })
@@ -3541,6 +3579,125 @@ export default function WorkspacePage() {
     .map((projectId) => projects.find((project) => project.id === projectId))
     .filter(Boolean)
 
+  /**
+   * 稳定的事件处理器集合。
+   *
+   * 页面级 runStates 每次 SSE 批次都会更新；如果每次渲染都向
+   * ProjectWorkspace 传新箭头函数，React.memo 永远失效，所有 Tab
+   * （包括隐藏的）都会跟着重渲染。
+   *
+   * 这里把处理器做成按 projectId 缓存的稳定对象，内部通过 ref 读取
+   * 最新一次提交的函数闭包——既避免陈旧 state，又让 memo 真正生效。
+   */
+  const workspaceActionsRef = useRef(null)
+  useLayoutEffect(() => {
+    workspaceActionsRef.current = {
+      handleAnnotationAdd,
+      handleAnnotationIntentChange,
+      handleAnnotationActionChange,
+      handleAnnotationRemove,
+      abortAnnotationScope,
+      handleAnnotationSend,
+      handleClarificationAnswer,
+      handleAnnotationRollback,
+      handlePlacementConfirm,
+      handlePlacementDismiss,
+      handleClearAnnotations,
+      handleApprovalDecision,
+      handleCancelRun,
+      handleSubmit,
+      handleRetry,
+      handleExport,
+      openSnapshotSave,
+      loadAgentCatalog,
+      handleOpenArchitect,
+      handleStartArchitect,
+      handleRestartArchitect,
+      handleFrontendBootstrap,
+      handleFullstackGenerate,
+      handleReleaseGate,
+      architectClose: architect.closePanel,
+      architectAnswer: architect.answer,
+      architectDecide: architect.decide,
+      architectCancel: architect.cancel,
+    }
+  })
+
+  const projectActions = useMemo(() => {
+    const map = new Map()
+    openTabs.forEach((projectId) => {
+      const call = (name, ...args) =>
+        workspaceActionsRef.current?.[name]?.(projectId, ...args)
+      map.set(projectId, {
+        onModelProviderChange: setModelProvider,
+        onAnnotationAdd: (payload) => call('handleAnnotationAdd', payload),
+        onAnnotationIntentChange: (annotationId, intent) =>
+          call('handleAnnotationIntentChange', annotationId, intent),
+        onAnnotationActionChange: (annotationId, action) =>
+          call('handleAnnotationActionChange', annotationId, action),
+        onAnnotationRemove: (annotationId) =>
+          call('handleAnnotationRemove', annotationId),
+        onAnnotationUnmount: (annotationId) =>
+          call('abortAnnotationScope', annotationId),
+        onAnnotationSend: (annotationId) =>
+          call('handleAnnotationSend', annotationId),
+        onClarificationAnswer: (
+          annotationId,
+          clarification,
+          answers,
+          comment,
+        ) =>
+          call(
+            'handleClarificationAnswer',
+            annotationId,
+            clarification,
+            answers,
+            comment,
+          ),
+        onAnnotationRollback: (annotationId, message) =>
+          call('handleAnnotationRollback', annotationId, message),
+        onPlacementConfirm: (placement, position) =>
+          call('handlePlacementConfirm', placement, position),
+        onPlacementDismiss: (placement) =>
+          call('handlePlacementDismiss', placement),
+        onClearAnnotations: () => call('handleClearAnnotations'),
+        onApprovalDecision: (decision, comment) =>
+          call('handleApprovalDecision', decision, comment),
+        onCancelRun: () => call('handleCancelRun'),
+        onSubmit: () => call('handleSubmit'),
+        onRetry: () => call('handleRetry'),
+        onExport: () => call('handleExport'),
+        onSaveSnapshot: () => call('openSnapshotSave'),
+        onRefreshAgents: () => workspaceActionsRef.current?.loadAgentCatalog(),
+        onArchitectOpen: () => call('handleOpenArchitect'),
+        onArchitectStart: (goal) => call('handleStartArchitect', goal),
+        onArchitectRestart: () => call('handleRestartArchitect'),
+        onStartCreate: () => call('handleOpenArchitect'),
+        onFrontendBootstrap: () =>
+          call('handleFrontendBootstrap', { manual: true }),
+        onArchitectClose: () =>
+          workspaceActionsRef.current?.architectClose(projectId),
+        onArchitectAnswer: (answers, comment) =>
+          workspaceActionsRef.current?.architectAnswer(
+            projectId,
+            answers,
+            comment,
+          ),
+        onArchitectDecide: (decision, comment) =>
+          workspaceActionsRef.current?.architectDecide(
+            projectId,
+            decision,
+            comment,
+          ),
+        onArchitectCancel: () =>
+          workspaceActionsRef.current?.architectCancel(projectId),
+        onFullstackGenerate: () => call('handleFullstackGenerate'),
+        onReleaseGate: () => call('handleReleaseGate'),
+      })
+    })
+    return map
+  }, [openTabs])
+
   const activeSnapshotTab =
     snapshotTabs.find((tab) => tab.id === activeSnapshotId) ?? null
 
@@ -3695,91 +3852,18 @@ export default function WorkspacePage() {
                 run={run}
                 active={activeSnapshotId == null && project.id === activeTabId}
                 modelProvider={modelProvider}
-                onModelProviderChange={setModelProvider}
-                onAnnotationAdd={(payload) => handleAnnotationAdd(project.id, payload)}
-                onAnnotationIntentChange={(annotationId, intent) =>
-                  handleAnnotationIntentChange(project.id, annotationId, intent)
-                }
-                onAnnotationActionChange={(annotationId, action) =>
-                  handleAnnotationActionChange(project.id, annotationId, action)
-                }
-                onAnnotationRemove={(annotationId) =>
-                  handleAnnotationRemove(project.id, annotationId)
-                }
-                onAnnotationUnmount={(annotationId) =>
-                  // 浮层卸载（关闭标注 / 错误边界降级 / 项目销毁）时，
-                  // 主动中止该标注的异步请求，并丢弃迟到结果。
-                  abortAnnotationScope(project.id, annotationId)
-                }
-                onAnnotationSend={(annotationId) =>
-                  handleAnnotationSend(project.id, annotationId)
-                }
-                onClarificationAnswer={(
-                  annotationId,
-                  clarification,
-                  answers,
-                  comment,
-                ) =>
-                  handleClarificationAnswer(
-                    project.id,
-                    annotationId,
-                    clarification,
-                    answers,
-                    comment,
-                  )
-                }
-                onAnnotationRollback={(annotationId, message) =>
-                  handleAnnotationRollback(project.id, annotationId, message)
-                }
-                onPlacementConfirm={(placement, position) =>
-                  handlePlacementConfirm(project.id, placement, position)
-                }
-                onPlacementDismiss={(placement) =>
-                  handlePlacementDismiss(project.id, placement)
-                }
-                onClearAnnotations={() => handleClearAnnotations(project.id)}
-                onApprovalDecision={(decision, comment) =>
-                  handleApprovalDecision(project.id, decision, comment)
-                }
-                onCancelRun={() => handleCancelRun(project.id)}
-                onSubmit={() => handleSubmit(project.id)}
-                onRetry={() => handleRetry(project.id)}
                 canExport={Boolean(run.result?.sandboxId)}
                 exporting={exportingProjectId === project.id}
-                onExport={() => handleExport(project.id)}
                 canSaveSnapshot={Boolean(run.result?.sandboxId)}
-                onSaveSnapshot={() => openSnapshotSave(project.id)}
                 previewRefreshNonce={previewRefresh[project.id] ?? 0}
                 architectState={
                   architectStates[project.id] ?? EMPTY_ARCHITECT
                 }
                 supervisorGate={gateStates[project.id] ?? null}
                 agentCatalog={agentCatalog}
-                onRefreshAgents={loadAgentCatalog}
                 previewFocusNonce={previewFocus[project.id] ?? 0}
-                onArchitectOpen={() => handleOpenArchitect(project.id)}
-                onArchitectStart={(goal) =>
-                  handleStartArchitect(project.id, goal)
-                }
-                onArchitectRestart={() =>
-                  handleRestartArchitect(project.id)
-                }
-                onStartCreate={() => handleOpenArchitect(project.id)}
-                onFrontendBootstrap={() =>
-                  handleFrontendBootstrap(project.id, { manual: true })
-                }
-                onArchitectClose={() => architect.closePanel(project.id)}
-                onArchitectAnswer={(answers, comment) =>
-                  architect.answer(project.id, answers, comment)
-                }
-                onArchitectDecide={(decision, comment) =>
-                  architect.decide(project.id, decision, comment)
-                }
-                onArchitectCancel={() => architect.cancel(project.id)}
-                onFullstackGenerate={() =>
-                  handleFullstackGenerate(project.id)
-                }
-                onReleaseGate={() => handleReleaseGate(project.id)}
+                // 稳定回调：内部通过 ref 调用最新闭包，允许 memo 跳过无关重渲染。
+                {...projectActions.get(project.id)}
               />
             )
           })}

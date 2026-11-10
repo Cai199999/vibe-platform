@@ -532,6 +532,30 @@ function RunDetails({
  * 保留旧的 previewUrl。此时 iframe 只会显示浏览器自己的“连接失败”页面。
  * 用 no-cors 请求探活：能连上就返回 opaque response，连接拒绝会 reject。
  */
+/**
+ * 执行耗时只在 RuntimePanel 本地计时。
+ *
+ * 旧实现把 elapsed 写回页面级 runStates，每 400ms 触发一次全局重渲染；
+ * 这里改成组件内 1s 心跳，计时成本只落在当前预览面板。
+ */
+function useElapsed(startedAt, running) {
+  const [elapsed, setElapsed] = useState(0)
+
+  useEffect(() => {
+    if (!running || !startedAt) {
+      setElapsed(0)
+      return undefined
+    }
+    const tick = () =>
+      setElapsed(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)))
+    tick()
+    const timer = window.setInterval(tick, 1000)
+    return () => window.clearInterval(timer)
+  }, [startedAt, running])
+
+  return elapsed
+}
+
 function usePreviewConnection(previewUrl, active) {
   const [status, setStatus] = useState('idle')
 
@@ -594,6 +618,9 @@ export default function RuntimePanel({
   projectName,
   modelProvider = 'auto',
   expanded = false,
+  // active = 当前 Tab 是否处于激活状态。非激活 Tab 不挂载 iframe，
+  // 避免多个隐藏沙盒同时运行 HMR / 定时器。
+  active = true,
   visible = true,
   onRetry,
   onGoToCanvas,
@@ -614,7 +641,6 @@ export default function RuntimePanel({
   const [deployOpen, setDeployOpen] = useState(false)
   const {
     submitting,
-    elapsed,
     result,
     error,
     annotations = [],
@@ -625,6 +651,8 @@ export default function RuntimePanel({
     pendingAction = null,
   } = run
   const previewUrl = result?.previewUrl
+  // 本地秒表：与页面级状态解耦，执行期间不再每 400ms 重渲染整个工作区。
+  const elapsed = useElapsed(run.startedAt, submitting)
   const success = SUCCESS_STATUSES.has(result?.status)
   const diffLines = result?.generatedPatch ? result.generatedPatch.split('\n').length : 0
   const connection = usePreviewConnection(previewUrl, visible && !submitting)
@@ -711,8 +739,9 @@ export default function RuntimePanel({
       </div>
 
       <div className="runtime-stage">
-        {/* iframe 一旦挂载就保留到下一次 Run 或关闭 Tab，切换视图只改 display。 */}
-        {previewUrl && (
+        {/* 只有激活 Tab 才挂载 iframe；隐藏 Tab 的沙盒 JS / HMR 连接会被释放。
+            切换视图（画布 <-> 预览）仍只改 display，不重建 iframe。 */}
+        {previewUrl && active && (
           <ScaledPreview
             // 快照回滚后工作区文件已变化，但 URL 不变；用 nonce 重建 iframe，
             // 强制浏览器重新加载沙盒的最新构建结果。

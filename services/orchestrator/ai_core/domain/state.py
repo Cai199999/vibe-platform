@@ -25,6 +25,37 @@ class VerifyState(TypedDict, total=False):
     error_fingerprint: str
 
 
+def _merge_token_usage(
+    left: dict[str, Any] | None,
+    right: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """LangGraph reducer：把每个节点的 token 用量累加到整次 Run。
+
+    节点只返回“本节点增量”，Checkpointer 负责持久化累计值；澄清 / 审批
+    恢复后仍能看到整次 Run 的历史成本，而不是最后一段节点的成本。
+    """
+    if not left:
+        return dict(right or {})
+    if not right:
+        return dict(left)
+
+    merged = dict(left)
+    for field in (
+        "inputTokens",
+        "outputTokens",
+        "cachedInputTokens",
+        "totalTokens",
+        "calls",
+    ):
+        merged[field] = int(merged.get(field, 0) or 0) + int(right.get(field, 0) or 0)
+    merged["cost"] = round(
+        float(merged.get("cost", 0.0) or 0.0) + float(right.get("cost", 0.0) or 0.0),
+        6,
+    )
+    merged["currency"] = right.get("currency") or merged.get("currency") or "CNY"
+    return merged
+
+
 class AgentState(TypedDict, total=False):
     """单 Agent 闭环状态。
 
@@ -59,6 +90,9 @@ class AgentState(TypedDict, total=False):
     history_summary: str
     history_tokens_before: int
     history_tokens_after: int
+    # 整次 Run 的 Token 用量与费用；由 Graph 节点按增量写入，
+    # reducer 负责跨节点 / 跨澄清恢复累加。
+    token_usage: Annotated[dict[str, Any], _merge_token_usage]
     # 外部检索（search_web）结果与查询词；由 research 节点写入，
     # planner 会把它追加到计划中，coder 据此引用外部事实。
     research_query: str
@@ -154,6 +188,8 @@ class ArchitectState(TypedDict, total=False):
     history_summary: str
     history_tokens_before: int
     history_tokens_after: int
+    # 整次 Architect Run 的 Token 用量 / 费用；由节点增量累加。
+    token_usage: Annotated[dict[str, Any], _merge_token_usage]
     threshold: float
     max_rounds: int
     round: int

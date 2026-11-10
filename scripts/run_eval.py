@@ -51,6 +51,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SUITE = REPO_ROOT / "config" / "eval_suite" / "core_cases.yaml"
 DEFAULT_REPORT = REPO_ROOT / "docs" / "eval_report.md"
 DEFAULT_BASE_URL = os.environ.get("EVAL_BASE_URL", "http://127.0.0.1:8080")
+# 真实模型基线默认使用 DeepSeek；仍可显式传 --llm-provider mock 做链路回归。
+DEFAULT_LLM_PROVIDER = (
+    os.environ.get("EVAL_LLM_PROVIDER", "deepseek").strip() or "deepseek"
+)
 TENANT_ID = "tenant_eval"
 
 ALLOWED_HANDOFFS = {
@@ -146,6 +150,8 @@ class CaseResult:
     hitl_event: str | None = None
     hitl_slot: str | None = None
     gate_status: str | None = None
+    # 本条用例真实模型调用的 Token 用量 / 费用（UI Run 响应回传）。
+    token_usage: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
 
     @property
@@ -661,10 +667,12 @@ class RealSandboxEvalRunner:
         *,
         run_tag: str,
         keep_sandboxes: bool = False,
+        llm_provider: str = DEFAULT_LLM_PROVIDER,
     ) -> None:
         self.client = client
         self.run_tag = run_tag
         self.keep_sandboxes = keep_sandboxes
+        self.llm_provider = llm_provider
         self.sandboxes_created = 0
         self.sandboxes_cleaned = 0
         self.cleanup_warnings: list[str] = []
@@ -717,11 +725,13 @@ class RealSandboxEvalRunner:
                     hitl_event,
                     hitl_slot,
                     hitl_run_id,
+                    hitl_usage,
                 ) = self._execute_architect_hitl(case, project_id)
                 result.checks.extend(hitl_checks)
                 result.hitl_event = hitl_event
                 result.hitl_slot = hitl_slot
                 result.run_id = hitl_run_id
+                result.token_usage = _merge_usage_dicts(result.token_usage, hitl_usage)
 
             if case.needs_gate:
                 gate_checks, gate_status, gate_run_id = self._execute_both_gate(
@@ -740,12 +750,14 @@ class RealSandboxEvalRunner:
                     sandbox_id,
                     run_status,
                     run_checks,
+                    token_usage,
                 ) = self._execute_ui_case(case, project_id, annotations)
                 result.run_id = run_id
                 result.sandbox_id = sandbox_id
                 result.run_status = run_status
                 result.code_source = code_source
                 result.checks.extend(run_checks)
+                result.token_usage = token_usage
                 result.checks.extend(
                     _check_code(
                         code,
@@ -780,12 +792,12 @@ class RealSandboxEvalRunner:
             "options": {
                 "scopeHint": "auto",
                 "ui": {
-                    "llmProvider": "mock",
+                    "llmProvider": self.llm_provider,
                     "mockScenario": "none",
                     "clarificationMode": "off",
                 },
                 "architect": {
-                    "llmProvider": "mock",
+                    "llmProvider": self.llm_provider,
                     "ragProvider": "markdown",
                     "ragTopK": 3,
                 },
@@ -796,7 +808,13 @@ class RealSandboxEvalRunner:
         self,
         case: CaseSpec,
         project_id: str,
-    ) -> tuple[list[Check], str | None, str | None, str | None]:
+    ) -> tuple[
+        list[Check],
+        str | None,
+        str | None,
+        str | None,
+        dict[str, Any],
+    ]:
         """真实启动 Architect SSE，验证其在生成契约前暂停澄清。
 
         断言“事件命中 + 首个问题槽位”，而不是只看 HTTP 200：Architect
@@ -812,7 +830,7 @@ class RealSandboxEvalRunner:
             "projectName": f"Eval HITL {case.case_id}"[:128],
             "source": {},
             "options": {
-                "llmProvider": "mock",
+                "llmProvider": self.llm_provider,
                 "ragProvider": "markdown",
                 "ragTopK": 3,
             },
@@ -872,7 +890,13 @@ class RealSandboxEvalRunner:
                     message="首个澄清问题的槽位与预期不一致",
                 )
             )
-        return checks, event.get("type") if event else None, first_slot, run_id
+        return (
+            checks,
+            event.get("type") if event else None,
+            first_slot,
+            run_id,
+            _usage_from_events(events),
+        )
 
     def _execute_both_gate(
         self,
@@ -950,6 +974,7 @@ class RealSandboxEvalRunner:
         str | None,
         str | None,
         list[Check],
+        dict[str, Any],
     ]:
         """通过 UI 子图执行真实沙盒 Run，并读取修改后的源码。"""
         payload = {
@@ -958,7 +983,7 @@ class RealSandboxEvalRunner:
             "annotations": annotations,
             "files": dict(case.fixture_files),
             "options": {
-                "llmProvider": "mock",
+                "llmProvider": self.llm_provider,
                 "mockScenario": "none",
                 "maxRetries": 3,
                 "keepSandbox": True,
@@ -980,6 +1005,8 @@ class RealSandboxEvalRunner:
         run_id = body.get("runId")
         sandbox_id = body.get("sandboxId")
         run_status = body.get("status")
+        raw_usage = body.get("tokenUsage")
+        token_usage = dict(raw_usage) if isinstance(raw_usage, dict) else {}
         if sandbox_id:
             self.sandboxes_created += 1
 
@@ -1051,7 +1078,7 @@ class RealSandboxEvalRunner:
                     message="未获取到生成代码，无法执行代码断言",
                 )
             )
-        return code, code_source, run_id, sandbox_id, run_status, checks
+        return code, code_source, run_id, sandbox_id, run_status, checks, token_usage
 
 
 def _isolate_annotations(
@@ -1236,6 +1263,77 @@ class RunContext:
     keep_sandboxes: bool
 
 
+def _merge_usage_dicts(
+    left: dict[str, Any] | None,
+    right: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """合并两个 camelCase usage 字典（Architect + UI）。"""
+    if not left:
+        return dict(right or {})
+    if not right:
+        return dict(left)
+    merged = dict(left)
+    for field_name in (
+        "inputTokens",
+        "outputTokens",
+        "cachedInputTokens",
+        "totalTokens",
+        "calls",
+    ):
+        merged[field_name] = int(merged.get(field_name, 0) or 0) + int(
+            right.get(field_name, 0) or 0
+        )
+    merged["cost"] = round(
+        float(merged.get("cost", 0.0) or 0.0) + float(right.get("cost", 0.0) or 0.0),
+        6,
+    )
+    merged["currency"] = right.get("currency") or merged.get("currency") or "CNY"
+    return merged
+
+
+def _usage_from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """从 Architect SSE 的节点完成事件中汇总 Token 用量。"""
+    merged: dict[str, Any] = {}
+    for event in events:
+        if event.get("type") != "architect.node.finished":
+            continue
+        payload = event.get("payload") or {}
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            merged = _merge_usage_dicts(merged, usage)
+    return merged
+
+
+def _sum_usage(results: list[CaseResult]) -> dict[str, Any]:
+    """汇总所有用例回传的 Token 用量与费用。"""
+    total = {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cachedInputTokens": 0,
+        "totalTokens": 0,
+        "calls": 0,
+        "cost": 0.0,
+        "currency": "CNY",
+    }
+    for result in results:
+        if not result.token_usage:
+            continue
+        for field_name in (
+            "inputTokens",
+            "outputTokens",
+            "cachedInputTokens",
+            "totalTokens",
+            "calls",
+        ):
+            total[field_name] += int(result.token_usage.get(field_name, 0) or 0)
+        total["cost"] += float(result.token_usage.get("cost", 0.0) or 0.0)
+        currency = result.token_usage.get("currency")
+        if currency:
+            total["currency"] = str(currency)
+    total["cost"] = round(total["cost"], 6)
+    return total
+
+
 def _render_console(
     results: list[CaseResult],
     context: RunContext,
@@ -1247,12 +1345,14 @@ def _render_console(
     passed = sum(1 for result in results if result.passed)
     failed = total - passed
     total_ms = sum(result.duration_ms for result in results)
+    usage = _sum_usage(results)
     lines = [
         "=" * 78,
         "  vibe-platform Eval Suite · 真实沙盒评测",
         "=" * 78,
         f"  API      : {context.base_url} ({context.api_mode.upper()})",
         f"  Suite    : {context.suite_name} · {context.suite_path}",
+        f"  LLM      : {runner.llm_provider}",
         f"  Started  : {context.started_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}",
         f"  Run tag  : {context.run_tag}",
         "-" * 78,
@@ -1293,6 +1393,9 @@ def _render_console(
             f"  Failed   : {failed}",
             f"  Pass rate: {pass_rate:.1f}%",
             f"  Duration : {total_ms / 1000:.2f}s",
+            f"  Tokens   : input={usage['inputTokens']} output={usage['outputTokens']} "
+            f"total={usage['totalTokens']}",
+            f"  LLM cost : {usage['cost']:.6f} {usage['currency']}",
             f"  Sandboxes: created={runner.sandboxes_created} "
             f"cleaned={runner.sandboxes_cleaned}",
         ]
@@ -1315,6 +1418,7 @@ def _render_markdown(
     failed = total - passed
     total_ms = sum(result.duration_ms for result in results)
     pass_rate = (passed / total * 100) if total else 0.0
+    usage = _sum_usage(results)
     generated_at = datetime.now(timezone.utc).astimezone()
 
     lines = [
@@ -1323,6 +1427,7 @@ def _render_markdown(
         f"> 生成时间：{generated_at.strftime('%Y-%m-%d %H:%M:%S %Z')}  ",
         f"> 评测集：`{context.suite_path}`  ",
         f"> 服务地址：`{context.base_url}`（{context.api_mode.upper()}）  ",
+        f"> 模型提供方：`{runner.llm_provider}`  ",
         f"> 运行标识：`{context.run_tag}`",
         "",
         "## 1. 总览",
@@ -1334,13 +1439,18 @@ def _render_markdown(
         f"| 失败 | {failed} |",
         f"| 通过率 | {pass_rate:.1f}% |",
         f"| 总耗时 | {total_ms / 1000:.2f}s |",
+        f"| Input tokens | {usage['inputTokens']} |",
+        f"| Output tokens | {usage['outputTokens']} |",
+        f"| 总 tokens | {usage['totalTokens']} |",
+        f"| 模型调用次数 | {usage['calls']} |",
+        f"| 预估费用 | {usage['cost']:.6f} {usage['currency']} |",
         f"| 创建沙盒 | {runner.sandboxes_created} |",
         f"| 清理沙盒 | {runner.sandboxes_cleaned} |",
         "",
         "## 2. 用例结果",
         "",
-        "| 用例 | 名称 | Handoff | 期望 | 执行证据 | 耗时 | 结果 |",
-        "|---|---|---|---|---|---:|---|",
+        "| 用例 | 名称 | Handoff | 期望 | 执行证据 | 耗时 | Tokens | 结果 |",
+        "|---|---|---|---|---|---:|---:|---|",
     ]
 
     for result in results:
@@ -1354,6 +1464,7 @@ def _render_markdown(
                     f"`{_expected_handoff(result)}`",
                     _escape_cell(_evidence(result)),
                     f"{result.duration_ms / 1000:.2f}s",
+                    str(result.token_usage.get("totalTokens", "-") or "-"),
                     "PASS" if result.passed else "FAIL",
                 ]
             )
@@ -1409,7 +1520,7 @@ def _render_markdown(
             "",
             "1. 读取 `config/eval_suite/core_cases.yaml`，逐条调用 Supervisor 路由接口；",
             "2. 对声明了代码断言的用例，调用 UI 子图 `/runs` 创建**真实 Docker 沙盒**，",
-            "   由 Mock LLM 生成代码、安装依赖、构建并启动预览；",
+            f"   由 `{runner.llm_provider}` LLM 生成代码、安装依赖、构建并启动预览；",
             "3. 对 HITL 用例，调用 Architect SSE 并等待 `architect.clarification.required`，",
             "   断言首个澄清问题槽位，随后取消 Run；",
             "4. 对 both 用例，调用 Supervisor `/dispatch`，断言只启动 Architect 且门控为",
@@ -1417,8 +1528,9 @@ def _render_markdown(
             "5. 通过沙盒导出接口读取真实源码 `src/App.jsx`，用空白不敏感正则断言代码片段；",
             "6. 每条用例结束后删除沙盒 / 取消后台 Run，避免资源泄漏。",
             "",
-            "> 说明：路由断言走真实 Supervisor 规则；代码生成使用 `llmProvider=mock`，",
-            "> 因而本报告验证的是“路由契约 + 沙盒执行链路”，不评价真实模型质量。",
+            f"> 说明：路由断言走真实 Supervisor 规则；代码生成使用 `llmProvider={runner.llm_provider}`。",
+            "> 当提供方为 `deepseek` 时，本报告反映真实模型的端到端成功率与 Token 成本；",
+            "> 当提供方为 `mock` 时，仅验证“路由契约 + 沙盒执行链路”，不评价模型质量。",
             "",
         ]
     )
@@ -1507,6 +1619,7 @@ def main(argv: list[str] | None = None) -> int:
         client,
         run_tag=context.run_tag,
         keep_sandboxes=args.keep_sandboxes,
+        llm_provider=args.llm_provider,
     )
 
     print(f"Running {len(selected)} case(s) against {base_url} ...", flush=True)
@@ -1557,6 +1670,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--report",
         default=str(DEFAULT_REPORT),
         help=f"Markdown 报告输出路径；默认 {DEFAULT_REPORT}",
+    )
+    parser.add_argument(
+        "--llm-provider",
+        choices=("auto", "mock", "deepseek"),
+        default=DEFAULT_LLM_PROVIDER,
+        help=(
+            "生成代码 / Architect 使用的模型提供方；默认 "
+            f"{DEFAULT_LLM_PROVIDER}（EVAL_LLM_PROVIDER 可覆盖）"
+        ),
     )
     parser.add_argument(
         "--filter",

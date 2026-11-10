@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import AgentCatalogMenu from './AgentCatalogMenu.jsx'
 import ArchitectPanel from './ArchitectPanel.jsx'
 import CanvasStage from './CanvasStage.jsx'
@@ -566,6 +566,9 @@ function ProjectWorkspaceInner({
               mode={canvasMode}
               liveUrl={run.result?.previewUrl ?? ''}
               refreshNonce={previewRefreshNonce}
+              // 非激活 Tab 销毁 iframe：隐藏 Tab 的 Vite/HMR 进程不再常驻。
+              // 切回 Tab 时按同一 URL 重新挂载，沙盒状态在服务端不会丢。
+              suspended={!active}
               onStartCreate={onStartCreate}
               onRetryBootstrap={onFrontendBootstrap}
               onOpenArchitect={onArchitectOpen}
@@ -626,6 +629,7 @@ function ProjectWorkspaceInner({
               projectName={project.name}
               modelProvider={modelProvider}
               expanded
+              active={active}
               visible={active && previewVisible}
               onRetry={submitReady ? onRetry : undefined}
               onGoToCanvas={() => setMode('canvas')}
@@ -673,10 +677,14 @@ function ProjectWorkspaceInner({
  *  - 切换对比模式面板只改 CSS 可见性，状态不会重置；
  *  - 展示模式下可开启视口联动，两边共享同一组变换。
  */
-export default function ProjectWorkspace(props) {
+function ProjectWorkspace(props) {
   return (
     <ViewportProvider>
       <ProjectWorkspaceInner {...props} />
     </ViewportProvider>
   )
 }
+
+// 页面级 runStates 更新时，只有受影响项目的 run 引用会变化；
+// 其余 Tab 通过 memo 直接跳过整棵子树（画布、预览、标注浮层）的重渲染。
+export default memo(ProjectWorkspace)

@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from ai_core.adapters.model.router import ModelRouter
 from ai_core.config import Settings, get_settings
+from ai_core.observability.token_usage import record_model_response
 from ai_core.ports.model import ModelClient, ModelClientError
 
 logger = logging.getLogger(__name__)
@@ -32,8 +33,13 @@ class DeepSeekClient(ModelClient):
         self._router = router or ModelRouter(self.settings)
 
     def generate(self, task: str, system: str, human: str) -> str:
-        """按任务分级调用模型，返回纯文本。"""
+        """按任务分级调用模型，返回纯文本。
+
+        真实调用结束后立即采集 usage；统计逻辑内部已做异常兜底，
+        不会因为网关缺少 usage 字段而影响业务结果。
+        """
         try:
+            profile = self._router.resolve(task)
             model = self._router.build(task)
             response = model.invoke(
                 [SystemMessage(content=system), HumanMessage(content=human)]
@@ -41,6 +47,7 @@ class DeepSeekClient(ModelClient):
         except Exception as exc:  # noqa: BLE001 - 统一转换为端口异常
             raise ModelClientError(f"DeepSeek 调用失败: {exc}") from exc
 
+        self._record_usage(task, profile.model, response)
         return self._content_to_text(response.content)
 
     def generate_json(
@@ -75,6 +82,7 @@ class DeepSeekClient(ModelClient):
 
         messages = [SystemMessage(content=system), HumanMessage(content=human)]
         try:
+            profile = self._router.resolve(task)
             model = self._router.build(task)
         except Exception as exc:  # noqa: BLE001 - 统一转换为端口异常
             raise ModelClientError(f"DeepSeek 调用失败: {exc}") from exc
@@ -82,19 +90,32 @@ class DeepSeekClient(ModelClient):
         if self.settings.architect_structured_output:
             try:
                 response = model.bind(response_format=response_format).invoke(messages)
-                return self._content_to_text(response.content)
             except Exception as exc:  # noqa: BLE001 - 兼容不支持该参数的网关
                 logger.warning(
                     "response_format 调用失败，回退普通 JSON 提示 task=%s: %s",
                     task,
                     exc,
                 )
+            else:
+                self._record_usage(task, profile.model, response)
+                return self._content_to_text(response.content)
 
         try:
             response = model.invoke(messages)
         except Exception as exc:  # noqa: BLE001 - 统一转换为端口异常
             raise ModelClientError(f"DeepSeek 调用失败: {exc}") from exc
+        self._record_usage(task, profile.model, response)
         return self._content_to_text(response.content)
+
+    def _record_usage(self, task: str, model: str, response: Any) -> None:
+        """把 usage 写入当前节点采集器（无采集器时为空操作）。"""
+        record_model_response(
+            task=task,
+            model=model,
+            response=response,
+            pricing=self.settings.llm_pricing,
+            currency=self.settings.llm_cost_currency,
+        )
 
     @staticmethod
     def _content_to_text(content: Any) -> str:

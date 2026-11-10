@@ -8,6 +8,8 @@ import {
 import { streamFullstack } from './fullstackStream.js'
 
 const STORAGE_KEY = 'vibe.architect.v1'
+// Architect / Fullstack 事件合并写盘间隔：SSE 期间不再逐事件同步序列化。
+const PERSIST_DELAY_MS = 800
 const TERMINAL = new Set(['CONFIRMED', 'CANCELLED', 'FAILED'])
 const ACTIVE = new Set([
   'RUNNING',
@@ -567,52 +569,56 @@ export function useArchitect({ token } = {}) {
   }, [states])
 
   // 只持久化可恢复字段；open 永远重置，避免刷新后自动弹出面板。
+  // 800ms 合并写盘：契约 / 全栈节点事件到达时不再逐条同步 JSON 序列化。
   useEffect(() => {
-    const snapshot = {}
-    Object.entries(states).forEach(([projectId, state]) => {
-      if (!state.runId) return
-      snapshot[projectId] = {
-        runId: state.runId,
-        streamPath: state.streamPath,
-        status: state.status,
-        lastSeq: state.lastSeq,
-        appShape: state.appShape,
-        confidenceScore: state.confidenceScore,
-        threshold: state.threshold,
-        round: state.round,
-        maxRounds: state.maxRounds,
-        clarification: state.clarification,
-        contract: state.contract,
-        citations: state.citations,
-        messages: state.messages,
-        sourceOrigin: state.sourceOrigin,
-        error: state.error,
-        errorCode: state.errorCode ?? null,
-        cancelRequested: state.cancelRequested,
-        updatedAt: state.updatedAt,
-        // 只持久化可恢复字段：节点输出体积大且刷新后无法继续追加，丢弃。
-        fullstack: state.fullstack
-          ? {
-              runId: state.fullstack.runId,
-              status: state.fullstack.status,
-              mode: state.fullstack.mode,
-              lastSeq: state.fullstack.lastSeq,
-              sandboxId: state.fullstack.sandboxId,
-              previewUrl: state.fullstack.previewUrl,
-              steps: state.fullstack.steps,
-              result: state.fullstack.result,
-              error: state.fullstack.error,
-              errorCode: state.fullstack.errorCode,
-              updatedAt: state.fullstack.updatedAt,
-            }
-          : undefined,
+    const timer = window.setTimeout(() => {
+      const snapshot = {}
+      Object.entries(statesRef.current).forEach(([projectId, state]) => {
+        if (!state.runId) return
+        snapshot[projectId] = {
+          runId: state.runId,
+          streamPath: state.streamPath,
+          status: state.status,
+          lastSeq: state.lastSeq,
+          appShape: state.appShape,
+          confidenceScore: state.confidenceScore,
+          threshold: state.threshold,
+          round: state.round,
+          maxRounds: state.maxRounds,
+          clarification: state.clarification,
+          contract: state.contract,
+          citations: state.citations,
+          messages: state.messages,
+          sourceOrigin: state.sourceOrigin,
+          error: state.error,
+          errorCode: state.errorCode ?? null,
+          cancelRequested: state.cancelRequested,
+          updatedAt: state.updatedAt,
+          // 只持久化可恢复字段：节点输出体积大且刷新后无法继续追加，丢弃。
+          fullstack: state.fullstack
+            ? {
+                runId: state.fullstack.runId,
+                status: state.fullstack.status,
+                mode: state.fullstack.mode,
+                lastSeq: state.fullstack.lastSeq,
+                sandboxId: state.fullstack.sandboxId,
+                previewUrl: state.fullstack.previewUrl,
+                steps: state.fullstack.steps,
+                result: state.fullstack.result,
+                error: state.fullstack.error,
+                errorCode: state.fullstack.errorCode,
+                updatedAt: state.fullstack.updatedAt,
+              }
+            : undefined,
+        }
+      })
+      try {
+        window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot))
+      } catch {
+        // 快照过大 / 隐私模式：忽略。
       }
-    })
-    try {
-      window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot))
-    } catch {
-      // 快照过大 / 隐私模式：忽略。
-    }
+    }, PERSIST_DELAY_MS)
+    return () => window.clearTimeout(timer)
   }, [states])
 
   useEffect(

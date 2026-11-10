@@ -38,8 +38,9 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -72,6 +73,7 @@ from ai_core.domain.architect import (
 )
 from ai_core.domain.state import ArchitectState
 from ai_core.config import get_settings
+from ai_core.observability.token_usage import TokenUsage, UsageCollector, collect_usage
 from ai_core.adapters.rag import get_rag_provider
 from ai_core.ports.rag import RAGProvider, RAGProviderError
 
@@ -109,6 +111,8 @@ class ArchitectGraphOutcome:
     interrupted: bool
     interrupt: dict[str, Any] | None
     thread_id: str
+    # 整次 Architect Run 的 Token 用量 / 费用。
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 class ArchitectGraphRunner:
@@ -127,6 +131,8 @@ class ArchitectGraphRunner:
     ) -> None:
         self._llm = llm
         self._event_sink = event_sink or NullEventSink()
+        # Token 采集：每个节点独立聚合，最终以 Checkpoint 累计值为准。
+        self._usage_total = TokenUsage()
         self._checkpointer_provider = (
             checkpointer_provider or get_checkpointer_provider()
         )
@@ -168,33 +174,77 @@ class ArchitectGraphRunner:
 
         snapshot = self._graph.get_state(config)
         state = dict(snapshot.values or {})
+        usage = state.get("token_usage")
         return ArchitectGraphOutcome(
             state=state,  # type: ignore[arg-type]
             interrupted=bool(snapshot.next),
             interrupt=_find_interrupt(snapshot),
             thread_id=resolved_thread_id,
+            usage=dict(usage) if isinstance(usage, dict) else self.usage_total(),
         )
+
+    def usage_total(self) -> dict[str, Any]:
+        """返回本 runner 调用的 Token 汇总（未合并历史 Checkpoint 时使用）。"""
+        return self._usage_total.as_dict()
 
     # --------------------------------------------------------
     # 图构建
     # --------------------------------------------------------
+    def _instrument(
+        self,
+        name: str,
+        fn: Callable[[ArchitectState], dict[str, Any]],
+    ) -> Callable[[ArchitectState], dict[str, Any]]:
+        """为节点统一采集 Token 用量，并写入 ``architect.node.finished`` 事件。
+
+        只有真正发生模型调用的节点才发事件，避免 RAG / 校验节点产生噪声；
+        状态中的 ``token_usage`` 由 reducer 跨节点累加。
+        """
+
+        def wrapped(state: ArchitectState) -> dict[str, Any]:
+            started = time.perf_counter()
+            collector = UsageCollector()
+            with collect_usage(collector):
+                update = fn(state)
+            usage = collector.snapshot()
+            self._usage_total.add(usage)
+            if isinstance(update, dict) and usage.calls:
+                update = {**update, "token_usage": usage.as_dict()}
+                self._emit(
+                    "architect.node.finished",
+                    {
+                        "runId": state.get("run_id"),
+                        "node": name,
+                        "label": NODE_LABELS.get(name, name),
+                        "durationMs": int((time.perf_counter() - started) * 1000),
+                        "usage": usage.as_dict(),
+                    },
+                )
+            return update
+
+        return wrapped
+
     def _build(self):
         builder = StateGraph(ArchitectState)
-        builder.add_node("summarize_history", self._summarize_history)
-        builder.add_node("ingest_context", self._ingest_context)
-        builder.add_node("retrieve_knowledge", self._retrieve_knowledge)
-        builder.add_node("architect_analyze", self._architect_analyze)
-        builder.add_node("confidence_gate", self._confidence_gate)
-        builder.add_node("clarify_gate", self._clarify_gate)
-        builder.add_node("draft_contract", self._draft_contract)
-        builder.add_node("validate_contract", self._validate_contract)
-        builder.add_node("revise_contract", self._revise_contract)
-        builder.add_node("contract_ready", self._contract_ready)
-        builder.add_node("contract_gate", self._contract_gate)
-        builder.add_node("confirmed", self._confirmed)
-        builder.add_node("cancelled", self._cancelled)
-        builder.add_node("confidence_exhausted", self._confidence_exhausted)
-        builder.add_node("failed", self._failed)
+        nodes: dict[str, Callable[[ArchitectState], dict[str, Any]]] = {
+            "summarize_history": self._summarize_history,
+            "ingest_context": self._ingest_context,
+            "retrieve_knowledge": self._retrieve_knowledge,
+            "architect_analyze": self._architect_analyze,
+            "confidence_gate": self._confidence_gate,
+            "clarify_gate": self._clarify_gate,
+            "draft_contract": self._draft_contract,
+            "validate_contract": self._validate_contract,
+            "revise_contract": self._revise_contract,
+            "contract_ready": self._contract_ready,
+            "contract_gate": self._contract_gate,
+            "confirmed": self._confirmed,
+            "cancelled": self._cancelled,
+            "confidence_exhausted": self._confidence_exhausted,
+            "failed": self._failed,
+        }
+        for name, fn in nodes.items():
+            builder.add_node(name, self._instrument(name, fn))
 
         builder.add_edge(START, "summarize_history")
         builder.add_edge("summarize_history", "ingest_context")

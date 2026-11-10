@@ -42,6 +42,10 @@ services:
       HISTORY_SUMMARY_MAX_CHARS: ${HISTORY_SUMMARY_MAX_CHARS:-200}
       ERROR_CONTEXT_LINES: ${ERROR_CONTEXT_LINES:-10}
       ERROR_CONTEXT_MAX_CHARS: ${ERROR_CONTEXT_MAX_CHARS:-2000}
+      # 结构化输出自修复 + Token 费用核算。
+      AGENT_JSON_RETRY_LIMIT: ${AGENT_JSON_RETRY_LIMIT:-2}
+      LLM_PRICING: ${LLM_PRICING:-{}}
+      LLM_COST_CURRENCY: ${LLM_COST_CURRENCY:-CNY}
       REDIS_HOST: ${REDIS_HOST:-host.docker.internal}
       REDIS_PORT: ${REDIS_PORT:-6379}
       # Sandbox：通过挂载的 Docker Socket 在宿主机创建隔离容器。

@@ -217,6 +217,8 @@ class PreparedRun:
     base_commit: str | None
     initial_state: dict[str, Any]
     event_buffer: RunEventBuffer
+    # 本次 Run 的 Token 用量 / 费用；Runner 结束后回填，供终态事件与审计使用。
+    token_usage: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -977,9 +979,11 @@ class RunExecutionService:
             )
         except RunCancelledError:
             logger.info("agent run cancelled run_id=%s", prepared.run_id)
+            prepared.token_usage = runner.usage_total()
             return self._complete_cancelled(active, prepared)
         except AgentLLMError as exc:
             logger.exception("agent llm failed run_id=%s", prepared.run_id)
+            prepared.token_usage = runner.usage_total()
             return self._complete_failure(
                 active,
                 prepared,
@@ -988,6 +992,7 @@ class RunExecutionService:
             )
         except SandboxError as exc:
             logger.exception("agent sandbox failed run_id=%s", prepared.run_id)
+            prepared.token_usage = runner.usage_total()
             return self._complete_failure(
                 active,
                 prepared,
@@ -996,6 +1001,7 @@ class RunExecutionService:
             )
         except Exception as exc:  # noqa: BLE001 - 统一转为 run.failed
             logger.exception("agent unexpected failure run_id=%s", prepared.run_id)
+            prepared.token_usage = runner.usage_total()
             return self._complete_failure(
                 active,
                 prepared,
@@ -1003,6 +1009,7 @@ class RunExecutionService:
                 code="INTERNAL_ERROR",
             )
 
+        prepared.token_usage = outcome.usage
         # 用户在最后一个节点执行期间点了取消：取消优先于成功落地。
         if active.cancel_requested:
             return self._complete_cancelled(active, prepared)
@@ -1096,6 +1103,8 @@ class RunExecutionService:
         error_code = final_state.get("error_code")
         retry_count = int(final_state.get("retry_count", 0))
         preview_url = prepared.handle.preview_url
+        # 整次 Run 的 token / 费用（优先取 Checkpoint 中的累计值）。
+        usage = dict(final_state.get("token_usage") or outcome.usage or {})
 
         commit_hash: str | None = None
         baseline_commit: str | None = None
@@ -1226,6 +1235,7 @@ class RunExecutionService:
                     # 前端据此渲染每条助手消息的“回滚到此步”。
                     "turnCount": prepared.run_turn_count,
                     "commits": [item.model_dump(by_alias=True) for item in commits],
+                    "usage": usage,
                 },
                 dedupe_key=f"run.succeeded:{prepared.run_id}",
             )
@@ -1239,6 +1249,7 @@ class RunExecutionService:
                     "previewUrl": preview_url,
                     "message": assistant_message,
                     "assistantMessage": assistant_message,
+                    "usage": usage,
                 },
                 dedupe_key=f"run.rejected:{prepared.run_id}",
             )
@@ -1252,6 +1263,7 @@ class RunExecutionService:
                     "retryCount": retry_count,
                     "sandboxId": prepared.handle.sandbox_id,
                     "previewUrl": preview_url,
+                    "usage": usage,
                 },
                 dedupe_key=f"run.failed:{prepared.run_id}",
             )
@@ -1321,6 +1333,7 @@ class RunExecutionService:
             reused_sandbox=prepared.reused_sandbox,
             assistant_message=assistant_message,
         )
+        response.token_usage = dict(prepared.token_usage)
         with _ACTIVE_LOCK:
             active.response = response
             active.status = "CANCELLED"
@@ -1337,6 +1350,7 @@ class RunExecutionService:
                 "sandboxId": prepared.handle.sandbox_id,
                 "previewUrl": preview_url,
                 "assistantMessage": assistant_message,
+                "usage": prepared.token_usage,
             },
             dedupe_key=f"run.cancelled:{prepared.run_id}",
         )
@@ -1415,6 +1429,7 @@ class RunExecutionService:
             reused_sandbox=prepared.reused_sandbox,
             assistant_message=assistant_message,
         )
+        response.token_usage = dict(prepared.token_usage)
         with _ACTIVE_LOCK:
             active.response = response
             active.status = "FAILED"
@@ -1428,6 +1443,7 @@ class RunExecutionService:
                 "retryCount": 0,
                 "sandboxId": prepared.handle.sandbox_id,
                 "previewUrl": prepared.handle.preview_url,
+                "usage": prepared.token_usage,
             },
             dedupe_key=f"run.failed:{prepared.run_id}",
         )
@@ -2058,6 +2074,7 @@ class RunExecutionService:
             commits=commits or [],
             clarification=clarification,
             approval=approval,
+            token_usage=dict(state.get("token_usage") or {}),
             error=state.get("error"),
         )
 

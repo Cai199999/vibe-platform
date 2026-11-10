@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import useFillViewport from '../workspace/useFillViewport.js'
 import usePanZoom from '../workspace/usePanZoom.js'
 import {
@@ -974,10 +974,13 @@ function withRefresh(url, nonce) {
   return `${url}${separator}vibe_canvas=${nonce}`
 }
 
-export default function CanvasStage({
+function CanvasStage({
   mode = 'mock',
   liveUrl = '',
   refreshNonce = 0,
+  // 非激活 Tab 不挂载 iframe：避免最多 5 个隐藏 Tab 各自常驻一个
+  // Vite 应用 + HMR WebSocket。切回时重新挂载，沙盒状态由服务端保存。
+  suspended = false,
   onStartCreate,
   onRetryBootstrap,
   onOpenArchitect,
@@ -1356,7 +1359,7 @@ export default function CanvasStage({
 
           {mode === 'live' && (
             <div className="canvas-live-page" data-canvas-live>
-              {liveUrl ? (
+              {liveUrl && !suspended ? (
                 <iframe
                   key={`${liveUrl}:${refreshNonce}`}
                   ref={liveFrameRef}
@@ -1369,8 +1372,14 @@ export default function CanvasStage({
                 />
               ) : (
                 <div className="canvas-live-empty">
-                  <span className="mini-spinner" aria-hidden="true" />
-                  正在连接实时页面…
+                  {liveUrl ? (
+                    '标签页已暂停，切回后自动恢复预览'
+                  ) : (
+                    <>
+                      <span className="mini-spinner" aria-hidden="true" />
+                      正在连接实时页面…
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -1623,3 +1632,6 @@ export default function CanvasStage({
     </div>
   )
 }
+
+// 时间轴 / 其他项目的 Run 更新不会改变画布 props；memo 避免整块画布重渲染。
+export default memo(CanvasStage)

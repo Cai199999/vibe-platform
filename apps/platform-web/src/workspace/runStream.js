@@ -18,31 +18,30 @@ const TERMINAL_EVENTS = new Set([
 const RECONNECT_LIMIT = 6
 
 /**
- * 按动画帧批量派发 SSE 事件。
+ * 按固定时间窗批量派发 SSE 事件。
  *
- * 服务端可能在一秒内推送几十个 node.* 事件；如果每个事件都直接 setState，
- * React 会反复渲染整棵工作区。这里把同一帧内的事件合并成一次回调，
- * React 18 会自动批处理本次回调里的多次状态更新，显著降低主线程压力。
+ * 服务端推的是节点级事件（node.started / node.finished / node.progress），
+ * 数量不算多，但每个事件都会让页面级 runStates 变化，进而重渲染整棵
+ * 工作区（最多 5 个 Tab + 画布/预览 iframe）。
  *
- * 终态事件（run.succeeded / clarification.required 等）立即 flush，
- * 保证 UI 在流关闭前拿到最终状态。
+ * 因此这里不再跟随 rAF（最多 60 次/秒），而是合并到一个 100ms 时间窗：
+ *  - 时间轴文字更新 10 次/秒已经足够顺滑；
+ *  - node.progress 只保留同一节点在窗口内的最后一条（中间态无展示价值）；
+ *  - 终态事件（run.succeeded / clarification.required 等）仍然同步 flush，
+ *    保证流关闭前 UI 拿到最终状态。
  */
-export function createFrameBatcher(callback, immediateTypes = TERMINAL_EVENTS) {
+export function createFrameBatcher(
+  callback,
+  immediateTypes = TERMINAL_EVENTS,
+  { windowMs = 100 } = {},
+) {
   let queue = []
-  let frame = 0
-  const schedule =
-    typeof requestAnimationFrame === 'function'
-      ? requestAnimationFrame
-      : (fn) => setTimeout(fn, 16)
-  const cancel =
-    typeof cancelAnimationFrame === 'function'
-      ? cancelAnimationFrame
-      : clearTimeout
+  let timer = 0
 
   const flush = () => {
-    if (frame) {
-      cancel(frame)
-      frame = 0
+    if (timer) {
+      clearTimeout(timer)
+      timer = 0
     }
     if (queue.length === 0) return
     const batch = queue
@@ -52,17 +51,31 @@ export function createFrameBatcher(callback, immediateTypes = TERMINAL_EVENTS) {
 
   const push = (event) => {
     if (!event) return
+    // 同一节点的进度消息只保留最新一条：状态行只展示最后文案，
+    // 丢掉中间态可以显著减少状态拷贝和渲染次数。
+    if (event.type === 'node.progress') {
+      const node = event.payload?.node
+      const index = queue.findIndex(
+        (item) =>
+          item.type === 'node.progress' && item.payload?.node === node,
+      )
+      if (index >= 0) {
+        queue[index] = event
+        if (!timer) timer = setTimeout(flush, windowMs)
+        return
+      }
+    }
     queue.push(event)
     if (immediateTypes.has(event.type)) {
       flush()
       return
     }
-    if (!frame) frame = schedule(flush)
+    if (!timer) timer = setTimeout(flush, windowMs)
   }
   push.flush = flush
   push.cancel = () => {
-    if (frame) cancel(frame)
-    frame = 0
+    if (timer) clearTimeout(timer)
+    timer = 0
     queue = []
   }
   return push

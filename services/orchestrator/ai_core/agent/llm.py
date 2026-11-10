@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from ai_core.adapters.model.deepseek import DeepSeekClient
 from ai_core.agent.memory import fallback_summary
@@ -44,6 +45,8 @@ from ai_core.editor import (
     EditLayout,
     default_editor_registry,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AgentLLMError(Exception):
@@ -547,8 +550,17 @@ class DeepSeekAgentLLM(AgentLLM):
             f"用户已澄清的回答:\n{answers_block}\n\n"
             f"上一轮错误（如有）:\n{_truncate(previous_errors or '无', 4000)}"
         )
-        content = self._invoke("planner", system, human)
-        return _parse_plan_result(content, annotations)
+        # 真实模型偶发输出 Markdown 围栏或截断 JSON。先按严格 JSON 解析，
+        # 失败时把错误回传模型自修复；自修复仍失败才降级为纯文本计划，
+        # 保证产品不会因为一次格式漂移直接中断。
+        return self._generate_with_repair(
+            task="planner",
+            system=system,
+            human=human,
+            parse=lambda raw: _parse_plan_result(raw, annotations, strict=True),
+            label="修改计划",
+            fallback=lambda raw: _parse_plan_result(raw, annotations),
+        )
 
     def generate(
         self,
@@ -618,8 +630,16 @@ class DeepSeekAgentLLM(AgentLLM):
             f"上一轮验证结果:\n{json.dumps(verify_result, ensure_ascii=False, default=str)}\n\n"
             f"当前重试次数: {retry_count}"
         )
-        content = self._invoke("coder", system, human)
-        return self._parse_code_result(content, target_files)
+        # Coder 输出必须同时满足：合法 JSON、目标文件全覆盖、patch 可用。
+        # 任一校验失败都把「原始输出 + 校验错误」回传模型自修复；连续失败
+        # 才抛 AgentLLMError，交给 Graph 的构建错误修复循环处理。
+        return self._generate_with_repair(
+            task="coder",
+            system=system,
+            human=human,
+            parse=lambda raw: self._parse_code_result(raw, target_files),
+            label="代码修改",
+        )
 
     def summarize_history(self, text: str, max_chars: int = 200) -> str:
         """用 FAST 模型把历史对话压缩为最多 max_chars 个字符。"""
@@ -631,6 +651,67 @@ class DeepSeekAgentLLM(AgentLLM):
         human = f"历史对话：\n{_truncate(text, 24000)}"
         summary = self._invoke("summary", system, human).strip()
         return _truncate(summary, max_chars)
+
+    def _generate_with_repair(
+        self,
+        *,
+        task: str,
+        system: str,
+        human: str,
+        parse: Callable[[str], Any],
+        label: str,
+        fallback: Callable[[str], Any] | None = None,
+    ) -> Any:
+        """调用模型并解析结构化输出，失败时带错误上下文自修复。
+
+        真实模型的格式漂移（Markdown 围栏、截断 JSON、缺目标文件、空
+        patch）不是网络错误，重发原 Prompt 往往得到同样结果。因此每次
+        重试都把「上一轮原始输出 + 具体校验错误」追加到 Human Prompt，
+        要求模型只修复指出的字段。
+
+        Args:
+            parse: 严格解析器；抛 ``AgentLLMError`` / ``ValueError`` 等
+                即视为输出不合法。
+            fallback: 所有重试耗尽后的降级解析器。Planner 用它保证
+                纯文本计划仍可继续；Coder 不传，必须失败。
+        """
+        retries = max(0, int(self.settings.agent_json_retry_limit))
+        current_human = human
+        last_raw = ""
+        last_error = "未知错误"
+        for attempt in range(retries + 1):
+            last_raw = self._invoke(task, system, current_human)
+            try:
+                return parse(last_raw)
+            except (AgentLLMError, ValueError, TypeError, KeyError) as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "agent %s 结构化输出校验失败 attempt=%s/%s task=%s: %s",
+                    label,
+                    attempt + 1,
+                    retries + 1,
+                    task,
+                    last_error,
+                )
+                if attempt >= retries:
+                    break
+                current_human = (
+                    f"{human}\n\n"
+                    f"【上一次输出】\n{_truncate(last_raw, 8000)}\n\n"
+                    f"【校验错误】\n{_truncate(last_error, 2000)}\n\n"
+                    "请只输出修正后的完整 JSON 对象：保留已经正确的字段，"
+                    "修复校验错误指出的字段，不要输出 Markdown 围栏或解释。"
+                )
+
+        if fallback is not None:
+            logger.warning(
+                "agent %s 自修复耗尽，使用降级解析 task=%s: %s",
+                label,
+                task,
+                last_error,
+            )
+            return fallback(last_raw)
+        raise AgentLLMError(f"{label}连续 {retries + 1} 次输出不合法: {last_error}")
 
     def _invoke(self, task: str, system: str, human: str) -> str:
         try:
@@ -672,15 +753,24 @@ class DeepSeekAgentLLM(AgentLLM):
 # ------------------------------------------------------------
 # 通用工具
 # ------------------------------------------------------------
-def _parse_plan_result(raw: str, annotations: list[dict[str, Any]]) -> PlanResult:
-    """解析 Planner JSON；解析失败时降级为“按文本计划执行、不中断”。
+def _parse_plan_result(
+    raw: str,
+    annotations: list[dict[str, Any]],
+    *,
+    strict: bool = False,
+) -> PlanResult:
+    """解析 Planner JSON。
 
-    模型偶发不按 JSON 输出时，宁可继续执行已有计划，也不能因为解析失败
-    把每个请求都变成澄清，导致产品不可用。
+    ``strict=True`` 时，非 JSON 输出直接抛错，供自修复重试捕获；
+    ``strict=False``（最终降级）时，按纯文本计划继续执行：模型偶发不按
+    JSON 输出时，宁可继续执行已有计划，也不能因为解析失败把每个请求都
+    变成澄清，导致产品不可用。
     """
     try:
         payload = _extract_json(raw)
     except AgentLLMError:
+        if strict:
+            raise
         return PlanResult(
             plan=raw.strip(),
             confidence_score=0.8,

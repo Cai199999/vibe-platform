@@ -490,6 +490,8 @@ class ExecuteRunResponse(CamelModel):
     clarification: Clarification | None = None
     # HITL：仅 AWAITING_APPROVAL（等待审批）时 non-null。
     approval: Approval | None = None
+    # 本次 Run 的 Token 用量与费用（含所有模型调用）。
+    token_usage: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
 
 
