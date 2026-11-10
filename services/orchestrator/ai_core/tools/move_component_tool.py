@@ -25,7 +25,9 @@ from langchain_core.tools import BaseTool, tool
 
 from ai_core.tools.base import ToolDescriptor, ToolRegistry
 
-_SELECTOR_SAFE = re.compile(r"^[A-Za-z0-9_\-:.\[\]=\"'# >+~*()]+$")
+# 直接拖拽的节点标记形如 ``src/App.jsx:12:5``，因此选择器字符集必须允许
+# 点号与路径斜杠；它们只出现在引号属性值内，不会破坏 CSS 结构。
+_SELECTOR_SAFE = re.compile(r"^[A-Za-z0-9_\-:.\[\]=\"'# >+~*()/@%]+$")
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]+$")
 
 

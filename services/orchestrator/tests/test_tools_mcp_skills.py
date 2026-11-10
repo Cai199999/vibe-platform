@@ -20,13 +20,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ai_core.agent.graph import AgentGraphRunner, _extract_research_query
+from ai_core.agent.graph import (
+    AgentGraphRunner,
+    _explicit_move_offset,
+    _extract_research_query,
+    _is_explicit_move_batch,
+)
 from ai_core.agent.llm import (
     DeepSeekAgentLLM,
     append_css_rule,
     is_move_only_instruction,
 )
 from ai_core.config import Settings
+from ai_core.domain.agent import AnnotationEnvelope
 from ai_core.mcp.client import McpServerConfig, McpStdioClient
 from ai_core.skill_loader import (
     load_skill_directory,
@@ -197,6 +203,131 @@ class AgentMoveToolShortcutTest(unittest.TestCase):
                 0,
             )
         )
+
+
+class DirectDragMoveTest(unittest.TestCase):
+    """直接拖拽：payload.move 是事实值，必须跳过 LLM 并生成累计位移。"""
+
+    APP = AgentMoveToolShortcutTest.APP
+
+    def _runner(self) -> tuple[AgentGraphRunner, list[tuple]]:
+        """复用生产 Toolbox，但跳过完整 Graph 初始化。"""
+        runner = AgentGraphRunner.__new__(AgentGraphRunner)
+        runner._toolbox = build_default_toolbox(_settings())
+        events: list[tuple] = []
+        runner._emit = lambda event, payload, **kwargs: events.append(  # type: ignore[method-assign]
+            (event, payload, kwargs)
+        )
+        return runner, events
+
+    def test_move_envelope_is_accepted_and_keeps_raw_action(self) -> None:
+        envelope = AnnotationEnvelope.model_validate(
+            {
+                "annotationId": "ann_drag_1",
+                "type": "drag",
+                "action": "MOVE",
+                "target": {"selector": '[data-source="cta"]'},
+                "payload": {"move": {"dx": 12, "dy": -6}},
+            }
+        )
+        self.assertEqual(envelope.action, "MOVE")
+        # 业务分支仍按“修改已有元素”处理，避免被当成新增。
+        self.assertTrue(envelope.is_modify_existing)
+        dumped = envelope.model_dump(mode="json")
+        self.assertEqual(dumped["action"], "MOVE")
+        self.assertEqual(dumped["payload"]["move"]["dx"], 12)
+
+    def test_explicit_offset_requires_finite_bounded_numbers(self) -> None:
+        base = {
+            "action": "MOVE",
+            "target": {"selector": '[data-source="cta"]'},
+        }
+        self.assertEqual(
+            _explicit_move_offset({**base, "payload": {"move": {"dx": 3, "dy": -4}}}),
+            (3.0, -4.0),
+        )
+        self.assertIsNone(
+            _explicit_move_offset({**base, "payload": {"move": {"dx": "x", "dy": 0}}})
+        )
+        self.assertIsNone(
+            _explicit_move_offset({**base, "payload": {"move": {"dx": 2001, "dy": 0}}})
+        )
+        self.assertIsNone(
+            _explicit_move_offset(
+                {
+                    "action": "MODIFY_EXISTING",
+                    "payload": {"move": {"dx": 3, "dy": 0}},
+                }
+            )
+        )
+
+    def test_explicit_move_batch_bypasses_planner(self) -> None:
+        move = {
+            "action": "MOVE",
+            "target": {"selector": '[data-source="cta"]'},
+            "payload": {"move": {"dx": 8, "dy": 4}},
+        }
+        self.assertTrue(_is_explicit_move_batch([move]))
+        self.assertFalse(
+            _is_explicit_move_batch(
+                [
+                    move,
+                    {
+                        "action": "MODIFY_EXISTING",
+                        "target": {"selector": '[data-source="cta"]'},
+                        "payload": {"text": "把按钮向右移动 8px"},
+                    },
+                ]
+            )
+        )
+        self.assertFalse(
+            _is_explicit_move_batch(
+                [
+                    {
+                        "action": "MOVE",
+                        "target": {},
+                        "payload": {"move": {"dx": 8, "dy": 4}},
+                    }
+                ]
+            )
+        )
+
+    def test_move_tool_uses_payload_offset_without_text(self) -> None:
+        runner, events = self._runner()
+        annotation = {
+            "annotationId": "ann_drag_2",
+            "action": "MOVE",
+            "target": {
+                "selector": '[data-source="cta"]',
+                "source": {"file": "src/App.jsx", "target": "cta"},
+            },
+            # 刻意不给 payload.text：直接拖拽不依赖自然语言。
+            "payload": {"move": {"dx": -32, "dy": 18}},
+        }
+        result = runner._try_move_tool(
+            {"run_id": "run_drag", "target_files": ["src/App.jsx"]},
+            [annotation],
+            {"src/App.jsx": self.APP},
+            0,
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        generated = result["generated_files"]["src/App.jsx"]
+        self.assertIn("translate3d(-32.00px,18.00px,0)", generated)
+        self.assertNotIn("width:", generated)
+        self.assertNotIn("height:", generated)
+        progress = [
+            payload["message"]
+            for event, payload, _kwargs in events
+            if event == "node.progress"
+        ]
+        self.assertTrue(any("move_component" in item for item in progress))
+
+    def test_source_marker_selector_with_file_line_is_safe(self) -> None:
+        """SDK 兜底选择器形如 ``[data-source="src/App.jsx:12:5"]``。"""
+        rule = build_move_rule('[data-source="src/App.jsx:12:5"]', 10, 20)
+        self.assertIn('[data-source="src/App.jsx:12:5"]', rule)
+        self.assertIn("translate3d(10.00px,20.00px,0)", rule)
 
 
 class WebSearchParserTest(unittest.TestCase):

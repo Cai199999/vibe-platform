@@ -47,6 +47,21 @@ import { INITIAL_APP } from '../mockProject.js'
 
 const TARGET_FILE = 'src/App.jsx'
 const MAX_ANNOTATIONS = 3
+// 直接拖拽的静默同步超时：超过后前端必须回滚视觉位置，不能无限等待。
+const MOVE_SYNC_TIMEOUT_MS = 120000
+const MOVE_SYNC_DEBOUNCE_MS = 500
+const MOVE_BATCH_LIMIT = 3
+
+/** Promise + 超时竞速；超时返回 `{ timedOut: true }`，不拒绝。 */
+function raceWithTimeout(promise, ms) {
+  let timer = 0
+  const timeout = new Promise((resolve) => {
+    timer = window.setTimeout(() => resolve({ timedOut: true }), ms)
+  })
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) window.clearTimeout(timer)
+  })
+}
 
 /**
  * 导入项目可能使用不同的入口文件（React 常见 src/App.tsx，
@@ -367,11 +382,17 @@ function inferAnnotationAction(target, intent, geometryAction) {
 function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) {
   const rect = entry.rect
   const instruction = entry.intent.trim()
+  // 直接拖拽使用独立的 MOVE 语义：目标、累计位移都来自 SDK 的几何事实，
+  // 不需要 LLM 解析自然语言。其余动作仍走旧别名归一化。
+  const rawAction = String(entry.action || '').toUpperCase()
+  const isMove = rawAction === 'MOVE'
   // 旧 localStorage 里的标注没有 action：按指令与几何判定即时推断。
   // 有 action 时统一归一化，旧 ADD / MODIFY 也在这里升级。
-  const action = entry.action
-    ? normalizeAction(entry.action)
-    : inferAnnotationAction(entry.target, instruction, entry.geometryAction)
+  const action = isMove
+    ? 'MOVE'
+    : entry.action
+      ? normalizeAction(entry.action)
+      : inferAnnotationAction(entry.target, instruction, entry.geometryAction)
   // CREATE_NEW 的目标必须是“最近 data-source 父容器”，由 CanvasStage 在
   // 圈选时计算；只命中叶子时不能把新增 JSX 塞进 button / p / h1。
   // MODIFY_EXISTING 没有命中元素时才回退到默认 CTA，保持旧行为。
@@ -402,26 +423,33 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
   const snippetContent = precise
     ? sourceLines.slice(startLine - 1, endLine).join('\n')
     : sourceText
-  const acceptance = isCreateAction(action)
+  const moveOffset = isMove ? entry.moveOffset ?? null : null
+  const acceptance = isMove
     ? [
-        `在${target?.label || '圈选区域'}（${target?.selector || '父容器'}）内部新增组件：${instruction}`,
-        '只生成组件主体与 data-vibe-created 审计标记，不写死绝对坐标；按父容器自然文档流插入',
-        '原有 DOM 结构、布局、文案与交互保持不变',
-      ]
-    : [
-        `按指令修改${target?.label || '目标组件'}：${instruction}`,
-        '若为移动指令，只允许追加 transform: translate3d(dx,dy,0)，禁止修改宽高',
+        `把${target?.label || '目标组件'}移动到累计偏移 (${Math.round(Number(moveOffset?.dx) || 0)}, ${Math.round(Number(moveOffset?.dy) || 0)}) px`,
+        '只允许追加 transform: translate3d(dx,dy,0)，禁止修改 width / height / left / top',
         '其余布局、文案与交互保持不变',
       ]
+    : isCreateAction(action)
+      ? [
+          `在${target?.label || '圈选区域'}（${target?.selector || '父容器'}）内部新增组件：${instruction}`,
+          '只生成组件主体与 data-vibe-created 审计标记，不写死绝对坐标；按父容器自然文档流插入',
+          '原有 DOM 结构、布局、文案与交互保持不变',
+        ]
+      : [
+          `按指令修改${target?.label || '目标组件'}：${instruction}`,
+          '若为移动指令，只允许追加 transform: translate3d(dx,dy,0)，禁止修改宽高',
+          '其余布局、文案与交互保持不变',
+        ]
   // relativeTarget 只在 CREATE_NEW 时有意义：作为插入父容器与相对顺序
   // 参考，不再驱动绝对定位。
   const relative = isCreateAction(action) ? entry.relativeRect : null
   return {
     version: 1,
     annotationId: entry.id,
-    // visual-draw = 精准点击选择；drag = 圈选。后端两者都按 UI 标注处理，
-    // 保留 type 便于审计与后续差异化策略。
-    type: precise ? 'visual-draw' : 'drag',
+    // visual-draw = 精准点击选择；drag = 圈选 / 直接拖拽。后端都按 UI
+    // 标注处理，保留 type 便于审计与后续差异化策略。
+    type: !isMove && precise ? 'visual-draw' : 'drag',
     action,
     worldTarget: {
       x: Number(rect.x.toFixed(6)),
@@ -495,6 +523,23 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
       from: null,
       to: null,
       strokes: [],
+      // 直接拖拽：dx / dy 是相对组件原始位置的累计偏移（不是本次手势
+      // 增量）。后端 _try_move_tool 直接读取它调用 move_component，
+      // 不再让模型从自然语言里猜方向与距离。
+      ...(isMove && moveOffset
+        ? {
+            // 顶层 dx / dy 是协议约定字段；move 子对象携带选择器与 token，
+            // 方便后端确定性 Tool 与前端回滚精确定位。
+            dx: Math.round(Number(moveOffset.dx) || 0),
+            dy: Math.round(Number(moveOffset.dy) || 0),
+            move: {
+              dx: Math.round(Number(moveOffset.dx) || 0),
+              dy: Math.round(Number(moveOffset.dy) || 0),
+              selector: target?.selector ?? null,
+              token: entry.moveToken ?? null,
+            },
+          }
+        : {}),
       // 旧版拖拽坐标已停用：位置调整必须走 move_component Skill 的
       // transform 规则，模型不得自行写死 left/top 或宽高。
     },
@@ -1006,6 +1051,18 @@ export default function WorkspacePage() {
   const closedAnnotationsRef = useRef(new Map())
   // 按 projectId:annotationId 维度持有 AbortController，关闭浮层即中止。
   const annotationAbortRef = useRef(new Map())
+  // 直接拖拽：每个项目独立防抖队列 / 已提交累计位移 / 回滚与提交信号。
+  // pending: projectId -> Map<selector, {payload, base, next, token, ...}>
+  const dragPendingRef = useRef(new Map())
+  const dragTimersRef = useRef(new Map())
+  // 已成功写入代码的累计位移，下一次拖拽在此基础上叠加。
+  const dragCommittedRef = useRef(new Map())
+  const dragSeqRef = useRef(0)
+  const [dragRollbacks, setDragRollbacks] = useState({})
+  const [dragCommits, setDragCommits] = useState({})
+  // 静默同步期间仍然保持拖拽模式：submitting=true 只是后台在写代码，
+  // 不应该让用户重新点一次【拖拽】才能继续调整布局。
+  const [dragSyncStates, setDragSyncStates] = useState({})
   // 异步回调里需要读取最新 run 状态（state 本身是渲染快照）。
   const runStatesRef = useRef(runStates)
   // 会话快照的延迟写盘句柄；卸载 / pagehide 时立即 flush。
@@ -1037,6 +1094,10 @@ export default function WorkspacePage() {
       annotationAbortRef.current.clear()
       snapshotDiffAbortRef.current.forEach((controller) => controller.abort())
       snapshotDiffAbortRef.current.clear()
+      // 未触发的拖拽防抖必须取消，避免卸载后仍发起静默 Run。
+      dragTimersRef.current.forEach((timer) => window.clearTimeout(timer))
+      dragTimersRef.current.clear()
+      dragPendingRef.current.clear()
     }
   }, [])
 
@@ -1793,7 +1854,13 @@ export default function WorkspacePage() {
    */
   const buildSupervisorPayload = (
     projectId,
-    { message = '', annotations = [], scopeHint = 'auto' } = {},
+    {
+      message = '',
+      annotations = [],
+      scopeHint = 'auto',
+      targetAgent = null,
+      requireManualApproval: approvalOverride,
+    } = {},
   ) => {
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
@@ -1838,12 +1905,16 @@ export default function WorkspacePage() {
       latestChanges: run.latestChanges || '',
       options: {
         scopeHint,
+        ...(targetAgent ? { targetAgent } : {}),
         ui: {
           llmProvider: modelProvider,
           mockScenario: 'none',
           maxRetries: 3,
           keepSandbox: true,
-          requireManualApproval,
+          requireManualApproval:
+            approvalOverride === undefined
+              ? requireManualApproval
+              : approvalOverride,
         },
         architect: {
           llmProvider: modelProvider,
@@ -1883,13 +1954,21 @@ export default function WorkspacePage() {
    */
   const attachUiDispatch = async (
     projectId,
-    { runId, streamPath, annotationId, handoff, epoch },
+    {
+      runId,
+      streamPath,
+      annotationId,
+      handoff,
+      epoch,
+      // 静默拖拽同步不能把用户从画布强行切到预览：拖拽模式要保持上下文。
+      switchToPreview = true,
+    },
   ) => {
     // 浮层在 dispatch 返回前已被用户关闭：不要订阅，也不要写任何状态；
     // 后端 Run 可能已经启动，尽力取消它。
     if (annotationId && isAnnotationClosed(projectId, annotationId)) {
       cancelRunSilently(runId)
-      return
+      return null
     }
     patchRun(projectId, (previous) => ({
       ...previous,
@@ -1909,8 +1988,8 @@ export default function WorkspacePage() {
       supervisorHandoff: handoff,
       supervisorPhase: 'ui_running',
     }))
-    focusPreview(projectId)
-    await startRunStream(projectId, null, annotationId, {
+    if (switchToPreview) focusPreview(projectId)
+    return await startRunStream(projectId, null, annotationId, {
       attach: true,
       runId,
       streamPath,
@@ -1932,22 +2011,36 @@ export default function WorkspacePage() {
       annotationId = null,
       sendEntries = [],
       commitOnSuccess = false,
+      // 直接拖拽：显式指定 UI Agent、跳过人工审批，并把结果返回给调用方。
+      scopeHint = 'auto',
+      targetAgent = null,
+      requireManualApproval: approvalOverride,
+      // 静默拖拽同步传 false：成功后仍停留在画布，不切到预览。
+      switchToPreview = true,
     },
   ) => {
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
-    if (!project || run.submitting || inflightRef.current.has(projectId)) return
+    if (!project || run.submitting || inflightRef.current.has(projectId)) {
+      return { ok: false, reason: 'busy' }
+    }
     if (run.clarification || run.approval) {
       showToast('error', '请先处理当前的澄清或审批，再发起新的请求')
-      return
+      return { ok: false, reason: 'paused' }
     }
     if (gateIsActive(projectId)) {
       showToast('info', '正在进行全局架构设计，请先确认契约')
-      return
+      return { ok: false, reason: 'gate' }
     }
 
-    const payload = buildSupervisorPayload(projectId, { message, annotations })
-    if (!payload) return
+    const payload = buildSupervisorPayload(projectId, {
+      message,
+      annotations,
+      scopeHint,
+      targetAgent,
+      requireManualApproval: approvalOverride,
+    })
+    if (!payload) return { ok: false, reason: 'payload' }
 
     // 每次提交都开启新的 epoch，并为本标注持有 AbortController。
     // 用户关闭浮层时 abort 会同时中断 route / dispatch 和后续 SSE。
@@ -1999,13 +2092,13 @@ export default function WorkspacePage() {
       // 用户只看到结果、看不到 Supervisor 的思考过程。
       const routeStartedAt = Date.now()
       const route = await routeSupervisor(payload, session?.token, signal)
-      if (isStale()) return
+      if (isStale()) return { ok: false, reason: 'stale' }
       const minThinkingMs = 480
       const remaining = minThinkingMs - (Date.now() - routeStartedAt)
       if (remaining > 0) {
         await abortableDelay(remaining, signal)
       }
-      if (isStale()) return
+      if (isStale()) return { ok: false, reason: 'stale' }
       const decision = route.decision ?? {}
       const handoffMeta = (route.handoffs ?? []).find(
         (item) => item.agentId === decision.target,
@@ -2038,7 +2131,7 @@ export default function WorkspacePage() {
           'info',
           `已匹配专属 Agent：${decisionView.agentDisplayName ?? decision.target}（本次演示仅完成路由）`,
         )
-        return
+        return { ok: false, reason: 'custom', decision: decisionView }
       }
 
       if (decision.handoff === 'rejected' || !decision.dispatchable) {
@@ -2060,7 +2153,7 @@ export default function WorkspacePage() {
             decision.reason || '没有识别到明确意图，请补充标注或说明',
           )
         }
-        return
+        return { ok: false, reason: 'rejected', decision: decisionView }
       }
 
       const result = await dispatchSupervisor(payload, session?.token, signal)
@@ -2069,7 +2162,7 @@ export default function WorkspacePage() {
         ;(result.dispatches ?? []).forEach((dispatch) =>
           cancelRunSilently(dispatch.runId),
         )
-        return
+        return { ok: false, reason: 'stale' }
       }
       const handoff = result.decision?.handoff ?? decision.handoff
       if (commitOnSuccess || handoff === 'handoff_ui' || handoff === 'handoff_both') {
@@ -2085,14 +2178,20 @@ export default function WorkspacePage() {
           supervisorDecision: decisionView,
           supervisorHandoff: handoff,
         })
-        await attachUiDispatch(projectId, {
+        const terminal = await attachUiDispatch(projectId, {
           runId: ui.runId,
           streamPath: ui.streamPath,
           annotationId,
           handoff,
           epoch,
+          switchToPreview,
         })
-        return
+        return {
+          ok: terminal?.type === 'run.succeeded',
+          reason: terminal?.type || 'no-terminal',
+          event: terminal,
+          decision: decisionView,
+        }
       }
 
       if (handoff === 'handoff_architect' || handoff === 'handoff_both') {
@@ -2135,14 +2234,16 @@ export default function WorkspacePage() {
           showToast('info', '正在进行全局架构设计，请先确认契约')
         }
         releaseInflight()
-        return
+        return { ok: false, reason: handoff, decision: decisionView }
       }
 
       throw new Error(`暂不支持的 Handoff: ${handoff}`)
     } catch (cause) {
       // 用户主动关闭 / 新一轮提交接管：静默退出，绝不能把 AbortError 或
       // 过期请求渲染成“执行失败”。
-      if (cause?.name === 'AbortError' || isStale()) return
+      if (cause?.name === 'AbortError' || isStale()) {
+        return { ok: false, reason: 'aborted' }
+      }
       releaseInflight()
       const messageText = cause?.message || String(cause)
       patchRun(projectId, {
@@ -2153,6 +2254,7 @@ export default function WorkspacePage() {
         supervisorPhase: 'error',
       })
       showToast('error', `调度失败：${messageText}`)
+      return { ok: false, reason: 'error', message: messageText }
     } finally {
       if (scopeKey) {
         // 若同一 scope 已被新一轮提交替换，不要误删新 controller。
@@ -2587,6 +2689,8 @@ export default function WorkspacePage() {
     const controller = new AbortController()
     streamControllersRef.current.get(projectId)?.abort()
     streamControllersRef.current.set(projectId, controller)
+    // 记录终态事件，供“静默拖拽同步”判断成功 / 失败；旧调用方忽略返回值。
+    let terminalEvent = null
 
     // 同一时间窗内到达的多个 SSE 事件合并为**一次** runStates 更新：
     // 既减少状态对象拷贝，也保证 React 每批只渲染一次工作区。
@@ -2594,6 +2698,14 @@ export default function WorkspacePage() {
       if (isStale()) return
       const applicable = []
       for (const event of events) {
+        if (
+          event.type === 'run.succeeded' ||
+          event.type === 'run.failed' ||
+          event.type === 'run.cancelled' ||
+          event.type === 'run.rejected'
+        ) {
+          terminalEvent = event
+        }
         if (closedProjectsRef.current.has(projectId)) {
           if (
             event.type === 'run.succeeded' ||
@@ -2672,6 +2784,8 @@ export default function WorkspacePage() {
             : previous,
         )
       }
+      // 供静默拖拽同步判断结果；常规调用方无需消费。
+      return terminalEvent
     }
   }
 
@@ -2944,6 +3058,260 @@ export default function WorkspacePage() {
       sendEntries: [sendEntry],
       commitOnSuccess: true,
     })
+  }
+
+  /**
+   * 直接拖拽的最终出口（业界标准的「直接操作 + 后台静默同步」）。
+   *
+   * SDK 只负责手势与临时 translate，这里负责：
+   *   1. 计算相对组件原始位置的累计偏移（同一组件多次拖拽可叠加）；
+   *   2. 立即 Toast 告知已接管，500ms 防抖只提交最后一次位置；
+   *   3. 以标准 AnnotationEnvelope（action=MOVE, payload.move）静默提交，
+   *      不占用聊天输入框，也不要求用户再点发送；
+   *   4. 终态失败 / 超时由 dragRollbacks 还原 iframe 内的临时位移。
+   */
+  const triggerDragRollback = (projectId, items, message) => {
+    if (!items?.length) return
+    setDragRollbacks((previous) => ({
+      ...previous,
+      [projectId]: {
+        nonce: (previous[projectId]?.nonce ?? 0) + 1,
+        items,
+      },
+    }))
+    showToast('error', message || '代码同步失败，位置已还原')
+  }
+
+  const moveOffsetText = (dx, dy) => {
+    const parts = []
+    if (dx) parts.push(`${dx > 0 ? '向右' : '向左'} ${Math.abs(dx)}px`)
+    if (dy) parts.push(`${dy > 0 ? '向下' : '向上'} ${Math.abs(dy)}px`)
+    return parts.join('、') || '原位'
+  }
+
+  const dragRect = (payload) => {
+    const rect = payload?.rect
+    if (!rect) return { x: 0, y: 0, width: 0.1, height: 0.1 }
+    const clamp01 = (value) => Math.min(1, Math.max(0, Number(value) || 0))
+    return {
+      x: clamp01(rect.x / 1440),
+      y: clamp01(rect.y / 900),
+      width: Math.min(1, Math.max(0.001, Number(rect.width) / 1440 || 0.1)),
+      height: Math.min(1, Math.max(0.001, Number(rect.height) / 900 || 0.1)),
+    }
+  }
+
+  const buildMoveEntry = (project, item) => {
+    const source = item.payload.source || {}
+    const file = source.file || projectEntryFile(project)
+    const selector =
+      item.selector ||
+      (source.file
+        ? `[data-source="${source.file}:${source.line || 1}:${
+            source.column || 1
+          }"]`
+        : '')
+    const label = source.component || source.tag || '组件'
+    dragSeqRef.current += 1
+    return {
+      id: `move_${Date.now().toString(36)}_${dragSeqRef.current}`,
+      action: 'MOVE',
+      type: 'drag',
+      intent: `把「${label}」${moveOffsetText(
+        Math.round(item.next.x),
+        Math.round(item.next.y),
+      )}移动（只改位置，不要改宽高）`,
+      rect: dragRect(item.payload),
+      target: {
+        marker: source.marker || '',
+        selector,
+        label,
+        role: source.tag || 'element',
+        component: source.component || 'App',
+        tag: source.tag || 'div',
+      },
+      inspectSource: {
+        file,
+        line: Number(source.line) || 1,
+        column: Number(source.column) || 1,
+        component: source.component || 'App',
+        sourceKind: source.sourceKind || 'jsx',
+        marker: source.marker || '',
+      },
+      moveOffset: { dx: Math.round(item.next.x), dy: Math.round(item.next.y) },
+      moveToken: item.token,
+      createdAt: new Date().toISOString(),
+    }
+  }
+
+  /**
+   * 等 runStates 真正落回 submitting=false 后再解除“静默同步”标记。
+   *
+   * 若在 await 返回后立刻解除，React 可能尚未提交 submitting=false，
+   * CanvasStage 会短暂看到 disabled=true 而强制退出拖拽模式。
+   */
+  const releaseDragSync = (projectId) => {
+    const poll = () => {
+      const current = runStatesRef.current[projectId] ?? EMPTY_RUN
+      if (current.submitting) {
+        window.setTimeout(poll, 120)
+        return
+      }
+      setDragSyncStates((previous) => {
+        if (!previous[projectId]) return previous
+        const next = { ...previous }
+        delete next[projectId]
+        return next
+      })
+    }
+    window.setTimeout(poll, 0)
+  }
+
+  const flushComponentDrags = async (projectId) => {
+    const pending = dragPendingRef.current.get(projectId)
+    dragPendingRef.current.delete(projectId)
+    if (!pending || pending.size === 0) return
+    const project = projects.find((item) => item.id === projectId)
+    if (!project) return
+
+    const all = [...pending.values()]
+    // 一次 Run 最多 3 个标注；超出的旧拖拽没有提交，必须还原。
+    const overflow = all.slice(0, Math.max(0, all.length - MOVE_BATCH_LIMIT))
+    const batch = all.slice(-MOVE_BATCH_LIMIT)
+    overflow.forEach((item) => {
+      dragCommittedRef.current.set(
+        `${projectId}::${item.selector}`,
+        item.base,
+      )
+    })
+    if (overflow.length) {
+      triggerDragRollback(
+        projectId,
+        overflow.map((item) => ({
+          token: item.token,
+          selector: item.selector,
+        })),
+        '一次最多同步 3 个组件，其余位置已还原',
+      )
+    }
+    if (batch.length === 0) return
+
+    const entries = batch.map((item) => buildMoveEntry(project, item))
+    const message = entries.map((entry) => entry.intent).join(' / ')
+    setDragSyncStates((previous) => ({
+      ...previous,
+      [projectId]: true,
+    }))
+    const submission = submitViaSupervisor(projectId, {
+      message,
+      annotations: entries,
+      scopeHint: 'ui',
+      // 拖拽是确定性的几何事实，直接交给 UI Agent，不再经过意图猜测。
+      targetAgent: 'ui_graph',
+      // 静默同步不能让人工审批打断；失败由前端回滚。
+      requireManualApproval: false,
+      // 不抢焦点：用户还在画布上拖拽，不能被切到预览面板。
+      switchToPreview: false,
+    })
+    const outcome = await raceWithTimeout(submission, MOVE_SYNC_TIMEOUT_MS)
+    // 必须等 submitting=false 真正渲染后再解除，避免中间帧退出拖拽模式。
+    releaseDragSync(projectId)
+    const restore = () => {
+      batch.forEach((item) => {
+        dragCommittedRef.current.set(
+          `${projectId}::${item.selector}`,
+          item.base,
+        )
+      })
+    }
+    const rollbackItems = batch.map((item) => ({
+      token: item.token,
+      selector: item.selector,
+    }))
+
+    if (outcome?.timedOut) {
+      // 超时后 Run 可能仍在构建：尽力取消，避免稍后 HMR 把已回滚的位置
+      // 再次改掉。
+      const runId = runStatesRef.current?.[projectId]?.runId
+      if (runId) cancelRunSilently(runId)
+      restore()
+      triggerDragRollback(projectId, rollbackItems, '代码同步超时，位置已还原')
+      return
+    }
+    if (outcome?.ok) {
+      setDragCommits((previous) => ({
+        ...previous,
+        [projectId]: {
+          nonce: (previous[projectId]?.nonce ?? 0) + 1,
+          items: batch.map((item) => ({
+            token: item.token,
+            selector: item.selector,
+          })),
+        },
+      }))
+      showToast('success', '位置已同步到代码')
+      return
+    }
+    restore()
+    triggerDragRollback(projectId, rollbackItems)
+  }
+
+  /** SDK 松手回调：先乐观记录，再 500ms 防抖提交最后一次位置。 */
+  const handleComponentDragEnd = (projectId, payload) => {
+    const project = projects.find((item) => item.id === projectId)
+    const run = runStates[projectId] ?? EMPTY_RUN
+    if (!project || !payload?.selector) return
+    // 没有沙盒就没有可写入的代码，直接还原并提示。
+    if (!run.result?.sandboxId) {
+      triggerDragRollback(
+        projectId,
+        [{ token: payload.token, selector: payload.selector }],
+        '当前页面尚未生成代码，无法同步位置',
+      )
+      return
+    }
+    const busy =
+      run.submitting ||
+      Boolean(run.clarification) ||
+      Boolean(run.approval) ||
+      inflightRef.current.has(projectId) ||
+      gateIsActive(projectId)
+    if (busy) {
+      triggerDragRollback(
+        projectId,
+        [{ token: payload.token, selector: payload.selector }],
+        '当前有任务执行中，位置未同步',
+      )
+      return
+    }
+    const dx = Math.round(Number(payload.dx) || 0)
+    const dy = Math.round(Number(payload.dy) || 0)
+    if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return
+
+    const selector = payload.selector
+    const key = `${projectId}::${selector}`
+    const base = dragCommittedRef.current.get(key) || { x: 0, y: 0 }
+    const next = { x: base.x + dx, y: base.y + dy }
+    dragCommittedRef.current.set(key, next)
+
+    const pending =
+      dragPendingRef.current.get(projectId) || new Map()
+    pending.set(selector, { payload, selector, base, next, token: payload.token })
+    dragPendingRef.current.set(projectId, pending)
+    showToast('info', '位置已更新，Agent 正在同步代码...')
+
+    const existing = dragTimersRef.current.get(projectId)
+    if (existing) window.clearTimeout(existing)
+    const timer = window.setTimeout(() => {
+      dragTimersRef.current.delete(projectId)
+      void flushComponentDrags(projectId)
+    }, MOVE_SYNC_DEBOUNCE_MS)
+    dragTimersRef.current.set(projectId, timer)
+  }
+
+  /** 用户取消拖拽（pointercancel）：SDK 已自行还原，无需提交。 */
+  const handleComponentDragCancel = () => {
+    // 取消手势不产生代码变更；保留已排队的其他组件拖拽。
   }
 
   const handleSubmit = async (projectId) => {
@@ -3641,6 +4009,8 @@ export default function WorkspacePage() {
       abortAnnotationScope,
       handleAnnotationSend,
       handleAnnotationMove,
+      handleComponentDragEnd,
+      handleComponentDragCancel,
       handleClarificationAnswer,
       handleAnnotationRollback,
       handleClearAnnotations,
@@ -3685,6 +4055,10 @@ export default function WorkspacePage() {
           call('handleAnnotationSend', annotationId),
         onAnnotationMove: (annotationId, dx, dy) =>
           call('handleAnnotationMove', annotationId, dx, dy),
+        onComponentDragEnd: (payload) =>
+          call('handleComponentDragEnd', payload),
+        onComponentDragCancel: (payload) =>
+          call('handleComponentDragCancel', payload),
         onClarificationAnswer: (
           annotationId,
           clarification,
@@ -3903,6 +4277,9 @@ export default function WorkspacePage() {
                   architectStates[project.id] ?? EMPTY_ARCHITECT
                 }
                 supervisorGate={gateStates[project.id] ?? null}
+                dragRollback={dragRollbacks[project.id] ?? null}
+                dragCommit={dragCommits[project.id] ?? null}
+                dragSyncActive={Boolean(dragSyncStates[project.id])}
                 agentCatalog={agentCatalog}
                 agentToken={session?.token}
                 previewFocusNonce={previewFocus[project.id] ?? 0}

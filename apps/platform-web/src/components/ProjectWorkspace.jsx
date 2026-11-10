@@ -40,6 +40,15 @@ function ProjectWorkspaceInner({
   onAnnotationUnmount,
   onAnnotationSend,
   onAnnotationMove,
+  // 直接拖拽：SDK 只回传“目标 + 手势位移”，代码同步由 WorkspacePage
+  // 静默提交；这里负责把拖拽中的视觉变化同步到右侧预览。
+  onComponentDragStart,
+  onComponentDragMove,
+  onComponentDragEnd,
+  onComponentDragCancel,
+  dragRollback = null,
+  dragCommit = null,
+  dragSyncActive = false,
   onClarificationAnswer,
   onAnnotationRollback,
   onPlacementConfirm,
@@ -96,6 +105,45 @@ function ProjectWorkspaceInner({
   // 画布最新滚动位置：即使当前是单屏模式也要记录，否则从单屏切换到
   // 双屏时预览只能从 0 开始，与用户已经滚到的位置脱节。
   const canvasScrollRef = useRef(null)
+  // 拖拽视觉同步：非双屏时只记录最新值，切到双屏后补发一次。
+  const [dragFeedback, setDragFeedback] = useState(null)
+  const dragFeedbackRef = useRef(null)
+  const dragNonceRef = useRef(0)
+
+  const publishDragFeedback = (payload) => {
+    if (!payload?.selector) return
+    dragNonceRef.current += 1
+    const next = { ...payload, nonce: dragNonceRef.current }
+    dragFeedbackRef.current = next
+    if (viewMode === 'dual') setDragFeedback(next)
+  }
+
+  const handleComponentDragStart = (payload) => {
+    publishDragFeedback({ ...payload, phase: 'move' })
+    onComponentDragStart?.(payload)
+  }
+
+  const handleComponentDragMove = (payload) => {
+    publishDragFeedback({ ...payload, phase: 'move' })
+    onComponentDragMove?.(payload)
+  }
+
+  const handleComponentDragEnd = (payload) => {
+    publishDragFeedback({ ...payload, phase: 'end' })
+    onComponentDragEnd?.(payload)
+  }
+
+  const handleComponentDragCancel = (payload) => {
+    onComponentDragCancel?.(payload)
+  }
+
+  // 后端已完成（成功提交 / 失败回滚）后，清空本地拖拽快照：
+  // 预览 iframe 重载时不能再把旧位移叠加到已经更新的代码上。
+  useEffect(() => {
+    if (!dragCommit?.nonce && !dragRollback?.nonce) return
+    dragFeedbackRef.current = null
+    setDragFeedback(null)
+  }, [dragCommit?.nonce, dragRollback?.nonce])
 
   const publishScrollSync = (payload) => {
     if (!payload) return
@@ -120,6 +168,14 @@ function ProjectWorkspaceInner({
   useEffect(() => {
     if (viewMode !== 'dual') return
     publishScrollSync(canvasScrollRef.current)
+    // 拖拽进行中切到双屏：预览需要立即追上当前位移。
+    if (dragFeedbackRef.current) {
+      dragNonceRef.current += 1
+      setDragFeedback({
+        ...dragFeedbackRef.current,
+        nonce: dragNonceRef.current,
+      })
+    }
     // publishScrollSync 只依赖 ref 与 setState，不需要进入依赖。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewMode])
@@ -713,6 +769,13 @@ function ProjectWorkspaceInner({
               onInspectPick={handleInspectPick}
               onFrameScroll={handleFrameScroll}
               onFrameInteraction={handleFrameInteraction}
+              onComponentDragStart={handleComponentDragStart}
+              onComponentDragMove={handleComponentDragMove}
+              onComponentDragEnd={handleComponentDragEnd}
+              onComponentDragCancel={handleComponentDragCancel}
+              dragRollback={dragRollback}
+              dragCommit={dragCommit}
+              dragSyncActive={dragSyncActive}
               clarification={run.clarification}
               onAnnotationRollback={onAnnotationRollback}
               pendingAnnotationId={run.pendingAnnotationId}
@@ -794,6 +857,9 @@ function ProjectWorkspaceInner({
               interactionFeedback={
                 viewMode === 'dual' ? clickFeedback : null
               }
+              dragFeedback={viewMode === 'dual' ? dragFeedback : null}
+              dragRollback={dragRollback}
+              dragCommit={dragCommit}
             />
           </ErrorBoundary>
         </div>

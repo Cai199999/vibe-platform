@@ -20,6 +20,7 @@ import copy
 import difflib
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ from ai_core.agent.error_context import (
 from ai_core.agent.events import EventSink, NullEventSink
 from ai_core.agent.llm import (
     AgentLLM,
+    PlanResult,
     annotation_selector,
     annotation_target_file,
     annotation_text,
@@ -108,6 +110,42 @@ class GraphRunOutcome:
     thread_id: str
     # 整次 Run 的 Token 用量 / 费用（含澄清恢复前的历史节点）。
     usage: dict[str, Any] = field(default_factory=dict)
+
+
+def _explicit_move_offset(annotation: dict[str, Any]) -> tuple[float, float] | None:
+    """读取直接拖拽写入的累计位移。
+
+    与自然语言解析不同，``action="MOVE"`` 的 ``payload.move.dx/dy`` 是
+    前端几何计算的事实值：无需猜测方向、距离，也不受措辞影响。只接受
+    有限数字，并复用 move_component 的 ±2000px 边界。
+    """
+    if str(annotation.get("action") or "").upper() != "MOVE":
+        return None
+    payload = annotation.get("payload") or {}
+    move = payload.get("move") if isinstance(payload, dict) else None
+    if not isinstance(move, dict):
+        return None
+    try:
+        dx = float(move.get("dx"))
+        dy = float(move.get("dy"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(dx) or not math.isfinite(dy):
+        return None
+    if abs(dx) > 2000 or abs(dy) > 2000:
+        return None
+    return dx, dy
+
+
+def _is_explicit_move_batch(annotations: list[dict[str, Any]]) -> bool:
+    """所有标注都是带选择器的直接拖拽 MOVE 时，走完全确定性链路。"""
+    if not annotations:
+        return False
+    return all(
+        _explicit_move_offset(annotation) is not None
+        and bool(annotation_selector(annotation))
+        for annotation in annotations
+    )
 
 
 class AgentGraphRunner:
@@ -602,12 +640,25 @@ class AgentGraphRunner:
         annotations = [item["annotation"] for item in context["annotations"]]
         # 只注入精准截断后的错误上下文，避免把完整构建日志塞回 Planner。
         previous_errors = _repair_feedback(state.get("verify_result") or {})
-        plan = self._llm.plan(
-            annotations=annotations,
-            current_files=state["current_files"],
-            previous_errors=previous_errors,
-            clarification_answers=answers or None,
-        )
+        if _is_explicit_move_batch(annotations):
+            # 直接拖拽是确定性几何输入：不调用规划模型，避免把“拖了 12px”
+            # 重新解释成自然语言需求，也避免任何澄清中断打断静默同步。
+            plan = PlanResult(
+                plan=(
+                    "调用 move_component Tool，按 payload.move 的累计 dx/dy "
+                    "写入 CSS transform；禁止修改宽高与布局。"
+                ),
+                confidence_score=0.99,
+                decision_impact=IMPLEMENTATION_DETAIL,
+                needs_clarification=False,
+            )
+        else:
+            plan = self._llm.plan(
+                annotations=annotations,
+                current_files=state["current_files"],
+                previous_errors=previous_errors,
+                clarification_answers=answers or None,
+            )
         # 把 research 节点的外部检索结果并入计划，Coder 会从 state["plan"]
         # 读到它；要求模型引用时保留 URL，便于用户核查事实来源。
         plan_text = plan.plan
@@ -746,10 +797,16 @@ class AgentGraphRunner:
             return None
         rules: list[tuple[str, str, str]] = []
         for annotation in annotations:
-            text = annotation_text(annotation)
-            offset = detect_move_offset(text)
             selector = annotation_selector(annotation)
-            if offset is None or not selector or not is_move_only_instruction(text):
+            # 直接拖拽：payload.move 是前端算好的累计偏移，直接使用；
+            # 自然语言移动仍走原来的解析 + 纯移动指令校验。
+            offset = _explicit_move_offset(annotation)
+            if offset is None:
+                text = annotation_text(annotation)
+                offset = detect_move_offset(text)
+                if offset is None or not selector or not is_move_only_instruction(text):
+                    return None
+            elif not selector:
                 return None
             path = annotation_target_file(annotation, current_files, target_files[0])
             if path not in current_files:

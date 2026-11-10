@@ -639,6 +639,10 @@ export default function RuntimePanel({
   // 双屏同步：画布滚动位置 / 点击反馈，仅展示模式传入。
   syncScroll = null,
   interactionFeedback = null,
+  // 直接拖拽：预览实时跟随画布位移；失败时按 items 回滚。
+  dragFeedback = null,
+  dragRollback = null,
+  dragCommit = null,
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [deployOpen, setDeployOpen] = useState(false)
@@ -756,6 +760,9 @@ export default function RuntimePanel({
             onInspectPick={onInspectPick}
             syncScroll={syncScroll}
             interactionFeedback={interactionFeedback}
+            dragFeedback={dragFeedback}
+            dragRollback={dragRollback}
+            dragCommit={dragCommit}
           />
         )}
 

@@ -93,9 +93,11 @@ class AnnotationEnvelope(CamelModel):
     #   - CREATE_NEW：新增组件。Agent 只负责生成组件主体，不得强制写死
     #     绝对坐标；前端会把它作为可拖拽悬浮层，用户松手后再发送坐标 Patch。
     #   - MODIFY_EXISTING：修改、移动或重新定位已有元素。
+    #   - MOVE：直接拖拽产生的确定性位移。payload.move 携带累计 dx/dy
+    #     与选择器，UI Graph 不再调用规划模型，直接走 move_component Tool。
     # 旧客户端仍发送 MODIFY / ADD，领域层通过 actions.normalize_action()
     # 统一语义，避免历史数据失效。
-    action: Literal["MODIFY", "ADD", "CREATE_NEW", "MODIFY_EXISTING"] = "MODIFY"
+    action: Literal["MODIFY", "ADD", "CREATE_NEW", "MODIFY_EXISTING", "MOVE"] = "MODIFY"
     world_target: dict[str, Any] = Field(default_factory=dict)
     # ADD 专用：圈选区域相对“最近 data-source 父容器”的位置。
     # 契约同时包含两套坐标：

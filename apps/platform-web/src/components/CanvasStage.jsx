@@ -1008,6 +1008,18 @@ function CanvasStage({
   // 画布内的页面滚动 / 点击由 SDK 回传，父级据此同步右侧预览。
   onFrameScroll,
   onFrameInteraction,
+  // 直接拖拽：SDK 在 iframe 内完成手势与临时位移，松手后把目标与
+  // 累计位移回传父页面，由 WorkspacePage 静默提交给 UI Agent。
+  onComponentDragStart,
+  onComponentDragMove,
+  onComponentDragEnd,
+  onComponentDragCancel,
+  // 后端同步失败时由父页面下发 { nonce, items }，SDK 还原到拖拽前位置。
+  dragRollback = null,
+  // 同步成功后清理 SDK 临时记录（HMR 已把位移写进 CSS）。
+  dragCommit = null,
+  // 静默同步进行中：submitting=true 属于后台写代码，不应强制退出拖拽模式。
+  dragSyncActive = false,
 }) {
   const stageRef = useRef(null)
   // 固定 1440×900 的视口节点：所有屏幕 → 世界坐标换算都以它的
@@ -1015,8 +1027,16 @@ function CanvasStage({
   const viewportRef = useRef(null)
   const onFrameScrollRef = useRef(onFrameScroll)
   const onFrameInteractionRef = useRef(onFrameInteraction)
+  const onComponentDragStartRef = useRef(onComponentDragStart)
+  const onComponentDragMoveRef = useRef(onComponentDragMove)
+  const onComponentDragEndRef = useRef(onComponentDragEnd)
+  const onComponentDragCancelRef = useRef(onComponentDragCancel)
   onFrameScrollRef.current = onFrameScroll
   onFrameInteractionRef.current = onFrameInteraction
+  onComponentDragStartRef.current = onComponentDragStart
+  onComponentDragMoveRef.current = onComponentDragMove
+  onComponentDragEndRef.current = onComponentDragEnd
+  onComponentDragCancelRef.current = onComponentDragCancel
   const startTargetRef = useRef(null)
   const inputRefs = useRef(new Map())
   const focusedAnnotationRef = useRef(null)
@@ -1032,6 +1052,11 @@ function CanvasStage({
   //   annotate = 覆盖层接收指针，用于圈选 / 平移 / 缩放；
   //   interact = iframe 接管指针，用户可以直接点击真实页面里的按钮。
   const [interactionMode, setInteractionMode] = useState('annotate')
+  // 直接拖拽模式：显式开关，开启后 iframe 内左键拖动组件即产生位移。
+  // 普通浏览态保持关闭，避免用户点按钮时被误判为拖拽。
+  const [dragArmed, setDragArmed] = useState(false)
+  const dragArmedRef = useRef(dragArmed)
+  dragArmedRef.current = dragArmed
   const liveFrameRef = useRef(null)
   // pointerdown 时的命中目标：pointer capture 会把 pointerup 的 target
   // 重定向到 stage，因此“是否点在真实页面上”必须在下笔时记录。
@@ -1127,6 +1152,58 @@ function CanvasStage({
     if (mode !== 'live') setInteractionMode('annotate')
   }, [mode])
 
+  // 拖拽只在 live 画布的浏览态生效；Inspect / 生成中 / 审批门控时强制退出，
+  // 否则用户会在不可提交的状态下产生“看起来移动了但代码没变”的错觉。
+  useEffect(() => {
+    if (
+      mode !== 'live' ||
+      canvasInspect ||
+      (disabled && !dragSyncActive) ||
+      blocked ||
+      interactionMode !== 'interact'
+    ) {
+      setDragArmed(false)
+    }
+  }, [mode, canvasInspect, disabled, dragSyncActive, blocked, interactionMode])
+
+  // 同步拖拽开关到 iframe SDK；iframe 未就绪时由 ready 消息补发。
+  useEffect(() => {
+    if (mode !== 'live') return
+    const frame = liveFrameRef.current
+    frame?.contentWindow?.postMessage(
+      { channel: 'vibe-inspect', type: 'drag-mode', enabled: dragArmed },
+      '*',
+    )
+  }, [mode, dragArmed, refreshNonce])
+
+  // 代码同步失败：按 token 还原 iframe 内的临时位移。
+  useEffect(() => {
+    if (!dragRollback || mode !== 'live') return
+    const frame = liveFrameRef.current
+    frame?.contentWindow?.postMessage(
+      {
+        channel: 'vibe-inspect',
+        type: 'drag-rollback',
+        payload: { items: dragRollback.items ?? [] },
+      },
+      '*',
+    )
+  }, [dragRollback?.nonce, mode])
+
+  // 同步成功：通知 SDK 丢弃 token 记录，后续 iframe 重载不再重复叠加。
+  useEffect(() => {
+    if (!dragCommit?.items?.length || mode !== 'live') return
+    const frame = liveFrameRef.current
+    frame?.contentWindow?.postMessage(
+      {
+        channel: 'vibe-inspect',
+        type: 'drag-commit',
+        payload: { items: dragCommit.items },
+      },
+      '*',
+    )
+  }, [dragCommit?.nonce, mode])
+
   // 选中目标后按 D 进入 / 退出移动预览；输入框内不拦截 D 键。
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -1144,6 +1221,8 @@ function CanvasStage({
       if (String(event.key || '').toLowerCase() !== 'd') return
       if (!activeAnnotationId || disabled || blocked) return
       event.preventDefault()
+      // 标注浮层移动与 iframe 直接拖拽互斥，避免两套手势同时生效。
+      setDragArmed(false)
       setMovingId((current) =>
         current === activeAnnotationId ? null : activeAnnotationId,
       )
@@ -1180,13 +1259,15 @@ function CanvasStage({
 
   // Esc 是“退出浏览”的通用快捷键，和预设的「点灰色空白返回标注」互补。
   useEffect(() => {
-    if (!liveInteractive) return undefined
+    if (!liveInteractive && !dragArmed) return undefined
     const onKeyDown = (event) => {
-      if (event.key === 'Escape') setInteractionMode('annotate')
+      if (event.key !== 'Escape') return
+      setDragArmed(false)
+      if (liveInteractive) setInteractionMode('annotate')
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [liveInteractive])
+  }, [liveInteractive, dragArmed])
 
   /*
    * 交互态下 iframe 接管指针事件，父页面收不到中键 pointerdown。
@@ -1205,6 +1286,12 @@ function CanvasStage({
         inspectModeRef.current &&
           frame.contentWindow?.postMessage(
             { channel: 'vibe-inspect', type: 'enable', enabled: true },
+            '*',
+          )
+        // HMR 会重建 SDK 状态；拖拽模式必须在 ready 后补发一次。
+        dragArmedRef.current &&
+          frame.contentWindow?.postMessage(
+            { channel: 'vibe-inspect', type: 'drag-mode', enabled: true },
             '*',
           )
         setInspectHover(null)
@@ -1239,6 +1326,24 @@ function CanvasStage({
             source: data.payload.source ?? null,
           })
         }
+        return
+      }
+      if (data.type === 'drag-start') {
+        // 拖拽开始：画布与预览同步进入“跟手”状态，预览侧由
+        // ProjectWorkspace 转发 drag-apply。
+        onComponentDragStartRef.current?.(data.payload)
+        return
+      }
+      if (data.type === 'drag-move') {
+        onComponentDragMoveRef.current?.(data.payload)
+        return
+      }
+      if (data.type === 'drag-end') {
+        onComponentDragEndRef.current?.(data.payload)
+        return
+      }
+      if (data.type === 'drag-cancel') {
+        onComponentDragCancelRef.current?.(data.payload)
         return
       }
       if (data.type === 'pan-start') {
@@ -1549,8 +1654,9 @@ function CanvasStage({
 
       <div
         ref={stageRef}
-        className={`canvas-stage ${disabled || blocked ? 'is-disabled' : ''} ${drawing ? 'is-drawing' : ''} ${liveInteractive ? 'is-interacting' : ''} ${mode === 'live' ? (liveInteractive ? 'is-web-focus' : 'is-canvas-focus') : ''} ${viewport.spaceHeld ? 'is-pan-ready' : ''} ${viewport.panning ? 'is-panning' : ''}`}
+        className={`canvas-stage ${disabled || blocked ? 'is-disabled' : ''} ${drawing ? 'is-drawing' : ''} ${liveInteractive ? 'is-interacting' : ''} ${dragArmed ? 'is-drag-mode' : ''} ${mode === 'live' ? (liveInteractive ? 'is-web-focus' : 'is-canvas-focus') : ''} ${viewport.spaceHeld ? 'is-pan-ready' : ''} ${viewport.panning ? 'is-panning' : ''}`}
         data-canvas-interaction={mode === 'live' ? interactionMode : undefined}
+        data-canvas-drag={mode === 'live' ? (dragArmed ? 'on' : 'off') : undefined}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={finishDrawing}
@@ -1915,6 +2021,34 @@ function CanvasStage({
           )}
           {mode === 'live' && (
             <button
+              className={`viewport-reset canvas-drag-toggle ${dragArmed ? 'is-active' : ''}`}
+              type="button"
+              data-canvas-drag-toggle
+              aria-pressed={dragArmed}
+              disabled={blocked || disabled}
+              title={
+                dragArmed
+                  ? '退出拖拽模式（Esc）'
+                  : '拖拽布局：在页面里直接拖动组件，松手后 Agent 静默同步代码'
+              }
+              onClick={() => {
+                if (dragArmed) {
+                  setDragArmed(false)
+                  return
+                }
+                // 拖拽必须由 iframe 接管指针；同时退出旧的标注浮层移动。
+                setMovingId(null)
+                setMoveOffset({ x: 0, y: 0 })
+                moveDragRef.current = null
+                setInteractionMode('interact')
+                setDragArmed(true)
+              }}
+            >
+              {dragArmed ? '✕ 退出拖拽' : '✥ 拖拽'}
+            </button>
+          )}
+          {mode === 'live' && (
+            <button
               className={`viewport-reset canvas-interaction-toggle ${liveInteractive ? 'is-active' : ''}`}
               type="button"
               data-canvas-interaction-toggle
@@ -1956,9 +2090,11 @@ function CanvasStage({
                 : drawing
                   ? '松开鼠标完成圈选'
                   : mode === 'live'
-                    ? liveInteractive
-                      ? '网页焦点 · 滚轮滚动页面 · 点击灰色空白回到画布 · 中键平移'
-                      : '画布焦点 · 滚轮缩放画布 · 单击页面进入浏览 · 拖拽圈选 · 中键平移'
+                    ? dragArmed
+                      ? '拖拽布局 · 按住页面组件拖动 · 松手自动同步代码 · Esc 退出 · 中键平移'
+                      : liveInteractive
+                        ? '网页焦点 · 滚轮滚动页面 · 点击灰色空白回到画布 · 中键平移'
+                        : '画布焦点 · 滚轮缩放画布 · 单击页面进入浏览 · 拖拽圈选 · 中键平移'
                     : interactive
                       ? '圈选页面区域 · 滚轮缩放画布 · 空格/中键平移'
                       : ''}

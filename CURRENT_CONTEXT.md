@@ -20,6 +20,7 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒；中间�
 - **体验断层修复（六项）**：契约确认后对话栏常驻、可追加需求并走同一契约 REVISE；Inspect 在 live 画布可用；全栈前后端共用 collectionPath（不再猜 `/stream`）；侧边栏按路由真实切换内容；拖拽痕仅在画布、展示区渲染最终代码；移动改为 `move_component` Tool，只写 `transform: translate3d`，拖拽仅转自然语言指令。
 - **企业级升级（五问题）**：画布完整 flex 链 + 自适应缩放，Tab 激活强制重算并重载 iframe；`管理 Agent` 支持内置锁定、AgentBuilder 新建/删除、知识库 `.md/.txt` 上传；Architect 强制交互澄清，前端按契约生成真实 onClick + Loading/Error/Success；新增 `ConsistencyVerifier`，在沙盒构建前比对前端 Method/Path/Payload 与后端 `api-routes.json`，不一致即阻断并输出差异报告。
 - **Phase B 交互闭环**：画布/预览固定 1440×900 + 文档原生滚动；焦点模型——点击页面进网页焦点（滚轮滚页面），点击画布空白回画布焦点（滚轮缩放），中键/空格始终平移；SDK 补发真实滚动快照，双屏同步 scroll-to，并在预览重放 click 使 React 状态一致；Architect 双 Tab（架构确认/影子助手），影子 LLM 只读问答 + 顶部不可关闭待答 Banner + 生成门禁。
+- **直接拖拽静默同步**：SDK 接管 pointer 手势，拖拽期间只写内联 `translate`；宿主 500ms 防抖合并后以 `action=MOVE`（携带 dx/dy/selector）静默派发 `ui_graph`，后端确定性调用 `move_component` 只写 `transform: translate3d` 并经 Vite HMR 生效；成功后清内联位移与记录，失败/超时回滚到拖前位置并 Toast；同步期间保持画布焦点与拖拽模式。E2E 覆盖防抖累计、二次叠加与失败回滚。
 
 ## 真假边界
 

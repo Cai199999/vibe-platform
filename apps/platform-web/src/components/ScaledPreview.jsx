@@ -45,6 +45,12 @@ export default function ScaledPreview({
   syncScroll = null,
   // 画布中的点击反馈：{ rect, nonce }，在预览同位置画一个短暂涟漪。
   interactionFeedback = null,
+  // 画布直接拖拽：实时把 inline translate 应用到预览，保证双屏视觉一致。
+  dragFeedback = null,
+  // 后端同步失败：{ nonce, items }，按 token 还原临时位移。
+  dragRollback = null,
+  // 后端同步成功：清理 SDK 内的临时位移记录，避免 iframe 重载后重复叠加。
+  dragCommit = null,
 }) {
   const screenRef = useRef(null)
   const iframeRef = useRef(null)
@@ -231,6 +237,39 @@ export default function ScaledPreview({
     // sendInspect 只做 postMessage；按 nonce 触发一次重放。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interactionFeedback?.nonce])
+
+  /*
+   * 直接拖拽：画布 iframe 已经把位移写在 inline translate 上，预览是另一个
+   * React 实例，需要把同一选择器 + 同一 inline 位移应用过去。
+   * 只改 translate，不触发 layout；最终位置仍以后端写入的 CSS 为准。
+   */
+  useEffect(() => {
+    if (!dragFeedback?.selector || !readyRef.current) return
+    sendInspect(
+      message('drag-apply', {
+        token: dragFeedback.token,
+        selector: dragFeedback.selector,
+        x: Number(dragFeedback.inlineX) || 0,
+        y: Number(dragFeedback.inlineY) || 0,
+      }),
+    )
+    // sendInspect 只做 postMessage；按 nonce 驱动一次同步。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragFeedback?.nonce])
+
+  // 同步失败：按 token 还原到拖拽前位置。
+  useEffect(() => {
+    if (!dragRollback?.items?.length || !readyRef.current) return
+    sendInspect(message('drag-rollback', { items: dragRollback.items }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragRollback?.nonce])
+
+  // 同步成功：清理临时记录；HMR 后以代码里的 transform 为唯一事实。
+  useEffect(() => {
+    if (!dragCommit?.items?.length || !readyRef.current) return
+    sendInspect(message('drag-commit', { items: dragCommit.items }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragCommit?.nonce])
 
   /*
    * 预览和画布一样恢复真实浏览器的滚轮手感：

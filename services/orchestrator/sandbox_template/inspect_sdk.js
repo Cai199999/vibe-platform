@@ -26,6 +26,33 @@
   var overlay = null
   // 预览侧重放点击时置位，避免把重放产生的新 click 再回传父页面。
   var replayingClick = false
+  // 直接拖拽布局：由父页面显式开启，避免普通浏览时点击按钮误触发位移。
+  var dragArmed = false
+  var dragState = null
+  // token -> {node, startTranslate, selector}；成功提交后由父页面清理。
+  // 记录“开始拖拽前的 inline translate”，失败回滚时原样还原。
+  var appliedDrags = {}
+  // 拖拽松手后浏览器仍会补发一次 click；这里吞掉它，避免误触按钮。
+  var suppressClick = false
+  var dragTokenSeed = 0
+  var INLINE_TAGS = {
+    span: true,
+    p: true,
+    strong: true,
+    em: true,
+    b: true,
+    i: true,
+    small: true,
+    label: true,
+    a: true,
+    code: true,
+    h1: true,
+    h2: true,
+    h3: true,
+    h4: true,
+    h5: true,
+    h6: true,
+  }
   var CONTAINER_TAGS = {
     div: true,
     section: true,
@@ -250,6 +277,210 @@
     }
   }
 
+  // ------------------------------------------------------------
+  // 直接拖拽布局
+  // ------------------------------------------------------------
+  /**
+   * 解析当前节点上的 inline translate。
+   *
+   * 拖拽预览必须叠加在最终 CSS 规则之上：
+   *   - 首次拖拽：inline translate 为空，直接显示手势位移；
+   *   - 第二次拖拽：上一次成功同步后 HMR 已经把位移写成 CSS transform，
+   *     inline 仍为空，此时手势位移会与 CSS transform 自然叠加；
+   *   - 若上一次同步尚未 HMR，inline 里仍是上次的位移，则从该值继续。
+   * 因此这里只读取 inline style，绝不把 computed transform 当成基准，
+   * 否则 CSS 位移会被重复计算。
+   */
+  function readInlineTranslate(node) {
+    if (!node || !node.style) return { x: 0, y: 0 }
+    var value = String(node.style.translate || '').trim()
+    if (!value || value === 'none') return { x: 0, y: 0 }
+    var parts = value.split(/\s+/)
+    return {
+      x: parseFloat(parts[0]) || 0,
+      y: parseFloat(parts[1]) || 0,
+    }
+  }
+
+  function applyInlineTranslate(node, x, y) {
+    if (!node || !node.style) return
+    var px = round2(x)
+    var py = round2(y)
+    // 归零时移除 inline，让最终 CSS 规则（上一轮已同步的位置）接管。
+    node.style.translate = px || py ? px + 'px ' + py + 'px' : ''
+  }
+
+  function nextDragToken() {
+    dragTokenSeed += 1
+    return 'drag_' + Date.now().toString(36) + '_' + dragTokenSeed
+  }
+
+  /**
+   * 选择拖拽目标。
+   *
+   * 插件会给每个 JSX 节点注入 data-source-file，若直接使用命中节点，
+   * 点击卡片标题时只会移动标题。这里对 span / p / h1 等行内文本节点
+   * 向上提升到最近的容器型 data-source（卡片 / section / main），
+   * 让“拖卡片”符合直觉；按钮等交互节点仍保持自身为目标。
+   */
+  function resolveDragTarget(node) {
+    if (!node || typeof node.closest !== 'function') return null
+    var current = node.closest(
+      '[data-source-file], [data-source], [data-vibe-target]',
+    )
+    if (!current) return null
+    var first = current
+    while (current) {
+      var source = readSource(current)
+      if (!source) return first
+      if (source.kind === 'container') return current
+      if (!INLINE_TAGS[String(source.tag || '').toLowerCase()]) return current
+      var parent = current.parentElement
+      current = parent
+        ? parent.closest(
+            '[data-source-file], [data-source], [data-vibe-target]',
+          )
+        : null
+    }
+    return first
+  }
+
+  /** 内联 transform 会覆盖页面样式，拖拽期间禁用文字选择 / 原生拖图。 */
+  function ensureDragStyle() {
+    if (document.getElementById('vibe-drag-style')) return
+    var style = document.createElement('style')
+    style.id = 'vibe-drag-style'
+    style.textContent = [
+      'html.vibe-drag-enabled [data-source],html.vibe-drag-enabled [data-source-file],html.vibe-drag-enabled [data-vibe-target]{cursor:grab !important;}',
+      'html.vibe-drag-enabled.vibe-drag-active,html.vibe-drag-enabled.vibe-drag-active *{cursor:grabbing !important;user-select:none !important;-webkit-user-select:none !important;}',
+    ].join('')
+    document.documentElement.appendChild(style)
+  }
+
+  function setDragArmed(value) {
+    dragArmed = Boolean(value)
+    ensureDragStyle()
+    document.documentElement.classList.toggle(
+      'vibe-drag-enabled',
+      dragArmed,
+    )
+    if (!dragArmed) {
+      cancelActiveDrag()
+      document.documentElement.classList.remove('vibe-drag-active')
+    }
+  }
+
+  /** 退出拖拽模式 / iframe 重载前恢复未提交的位移，避免页面停在半途。 */
+  function cancelActiveDrag() {
+    if (!dragState) return
+    var state = dragState
+    dragState = null
+    applyInlineTranslate(
+      state.node,
+      state.baseX,
+      state.baseY,
+    )
+    if (state.dragging) {
+      post('drag-cancel', {
+        token: state.token,
+        selector: state.selector,
+        source: state.source,
+      })
+    }
+  }
+
+  /**
+   * 防抖窗口内同一组件可能经历多次手势。第二个 token 记录到的
+   * ``node.style.translate`` 已经包含第一段预览位移，绝不能把它当作
+   * “原始基线”，否则成功提交后 CSS transform 与内联 translate 会叠加。
+   * 因此新记录必须继承同一节点已有记录的 startTranslate。
+   */
+  function inheritedStartTranslate(node) {
+    for (var key in appliedDrags) {
+      if (!Object.prototype.hasOwnProperty.call(appliedDrags, key)) continue
+      var record = appliedDrags[key]
+      if (record && record.node === node) return record.startTranslate
+    }
+    return null
+  }
+
+  /** 提交 / 回滚后清掉同一节点的所有 token，避免旧记录残留。 */
+  function clearNodeRecords(node, selector) {
+    Object.keys(appliedDrags).forEach(function (key) {
+      var record = appliedDrags[key]
+      if (!record) {
+        delete appliedDrags[key]
+        return
+      }
+      if (node && record.node === node) {
+        delete appliedDrags[key]
+        return
+      }
+      if (!node && selector && record.selector === selector) {
+        delete appliedDrags[key]
+      }
+    })
+  }
+
+  /** 预览侧应用主画布拖拽：同一 token 只记录一次起始 inline。 */
+  function applyDragPreview(body) {
+    var selector = String(body.selector || '')
+    var token = String(body.token || '')
+    var node = queryNode(selector)
+    if (!node) return
+    var record = appliedDrags[token]
+    if (!record) {
+      var inherited = inheritedStartTranslate(node)
+      record = {
+        node: node,
+        selector: selector,
+        startTranslate:
+          inherited === null ? node.style.translate || '' : inherited,
+      }
+      appliedDrags[token] = record
+    }
+    if (!record.node || !record.node.isConnected) {
+      record.node = node
+    }
+    applyInlineTranslate(
+      record.node,
+      Number(body.x) || 0,
+      Number(body.y) || 0,
+    )
+  }
+
+  /** 回滚：优先用 token 记录的原始节点，找不到时按 selector 重新查询。 */
+  function rollbackDrags(body) {
+    var items = Array.isArray(body.items)
+      ? body.items
+      : [
+          {
+            token: body.token,
+            selector: body.selector,
+            startTranslate: body.startTranslate,
+          },
+        ]
+    items.forEach(function (item) {
+      if (!item) return
+      var token = String(item.token || '')
+      var record = token ? appliedDrags[token] : null
+      if (record) {
+        var target = record.node && record.node.isConnected
+          ? record.node
+          : queryNode(record.selector || item.selector)
+        if (target) target.style.translate = record.startTranslate || ''
+        // 同一节点在防抖窗口内可能积累多个 token，按 selector + 节点双重清理。
+        clearNodeRecords(null, record.selector || item.selector)
+        if (target) clearNodeRecords(target)
+        return
+      }
+      var node = queryNode(item.selector)
+      if (node) node.style.translate = item.startTranslate || ''
+      clearNodeRecords(null, item.selector)
+      if (node) clearNodeRecords(node)
+    })
+  }
+
   /**
    * 测量新增组件与父容器的位置。
    *
@@ -409,6 +640,58 @@
     }
     if (data.type === 'clear') {
       clearOverlay()
+      return
+    }
+    /*
+     * 直接拖拽协议（画布 ↔ iframe）：
+     *   parent -> iframe: drag-mode / drag-apply / drag-rollback / drag-commit
+     *   iframe -> parent: drag-start / drag-move / drag-end / drag-cancel
+     *
+     * drag-mode 是显式模式：普通浏览态点击按钮不会变成拖拽。
+     * drag-apply 只用于右侧预览，保持双屏视觉一致（最终仍以 HMR 为准）。
+     */
+    if (data.type === 'drag-mode') {
+      setDragArmed(bodyOf(data).enabled ?? data.enabled)
+      return
+    }
+    if (data.type === 'drag-apply') {
+      applyDragPreview(bodyOf(data))
+      return
+    }
+    if (data.type === 'drag-rollback') {
+      rollbackDrags(bodyOf(data))
+      return
+    }
+    if (data.type === 'drag-commit') {
+      /*
+       * 同步成功：后端已经写入累计 transform。预览阶段的内联 translate
+       * 必须归零，否则“CSS transform + 内联 translate”会叠成双倍位移。
+       * 第二次拖拽从归零后的基线开始，父页面负责累加历史 dx/dy。
+       */
+      var commitBody = bodyOf(data)
+      var commitItems = Array.isArray(commitBody.items)
+        ? commitBody.items
+        : [commitBody]
+      commitItems.forEach(function (item) {
+        var commitToken = String((item && item.token) || '')
+        var record = commitToken ? appliedDrags[commitToken] : null
+        if (record) {
+          var commitNode =
+            record.node && record.node.isConnected
+              ? record.node
+              : queryNode(record.selector || item.selector)
+          if (commitNode && commitNode.style) {
+            commitNode.style.translate = record.startTranslate || ''
+          }
+          // 同一节点的旧 token（防抖窗口内的前几次手势）一并清理。
+          clearNodeRecords(null, record.selector || item.selector)
+          if (commitNode) clearNodeRecords(commitNode)
+          return
+        }
+        var fallback = queryNode(item && item.selector)
+        if (fallback && fallback.style) fallback.style.translate = ''
+        clearNodeRecords(null, item && item.selector)
+      })
       return
     }
     if (data.type === 'move') {
@@ -577,6 +860,13 @@
   document.addEventListener(
     'click',
     function (event) {
+      // 拖拽松手后浏览器补发的 click：吞掉一次，避免误触按钮。
+      if (suppressClick) {
+        suppressClick = false
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
       if (enabled || replayingClick) return
       var target = event.target
       if (!target || typeof target.getBoundingClientRect !== 'function') return
@@ -687,6 +977,216 @@
     'auxclick',
     function (event) {
       if (event.button === 1) event.preventDefault()
+    },
+    true,
+  )
+
+  /*
+   * 直接拖拽布局。
+   * ------------------------------------------------------------------
+   * 拖拽模式下左键按下即锁定一个 data-source 节点：
+   *   - 位移超过 4px 才真正开始，避免把普通点击误判成拖拽；
+   *   - 拖拽中只改 inline `translate`，不碰 width / height / layout，
+   *     页面不会回流，手感与设计工具一致；
+   *   - 松手后保留 inline 位移等待后端 HMR；失败时父页面发
+   *     drag-rollback，按 token 还原到拖拽前的位置。
+   * 中键平移仍由上面的 pan-* 协议负责，两者互不干扰。
+   */
+  document.addEventListener(
+    'pointerdown',
+    function (event) {
+      if (!dragArmed || enabled || event.button !== 0 || dragState) return
+      var target = resolveDragTarget(event.target)
+      if (!target) return
+      var source = readSource(target)
+      if (!source) return
+      var selector = source.selector
+      if (!selector && source.file) {
+        selector =
+          '[data-source="' +
+          source.file +
+          ':' +
+          source.line +
+          ':' +
+          source.column +
+          '"]'
+      }
+      if (!selector) return
+      var start = readInlineTranslate(target)
+      dragState = {
+        token: nextDragToken(),
+        node: target,
+        selector: selector,
+        source: source,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        baseX: start.x,
+        baseY: start.y,
+        dx: 0,
+        dy: 0,
+        dragging: false,
+        startTranslate: target.style.translate || '',
+        frame: 0,
+        lastRect: rectOf(target),
+      }
+      // 阻止浏览器把图片 / 链接解释成 HTML5 drag，但先不 preventDefault：
+      // 用户只是单击时，按钮仍应收到正常 click。
+    },
+    true,
+  )
+
+  document.addEventListener(
+    'pointermove',
+    function (event) {
+      var state = dragState
+      if (!state || state.pointerId !== event.pointerId) return
+      if ((event.buttons & 1) === 0) {
+        cancelActiveDrag()
+        return
+      }
+      var dx = event.clientX - state.startX
+      var dy = event.clientY - state.startY
+      if (!state.dragging) {
+        if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return
+        state.dragging = true
+        document.documentElement.classList.add('vibe-drag-active')
+        try {
+          window.getSelection().removeAllRanges()
+        } catch (error) {
+          // 某些浏览器允许 selection 为空，忽略即可。
+        }
+        post('drag-start', {
+          token: state.token,
+          selector: state.selector,
+          source: state.source,
+          rect: rectOf(state.node),
+          label:
+            (state.source && (state.source.component || state.source.tag)) ||
+            '',
+          dx: 0,
+          dy: 0,
+        })
+      }
+      event.preventDefault()
+      event.stopPropagation()
+      state.dx = dx
+      state.dy = dy
+      if (!state.node || !state.node.isConnected) {
+        state.node = queryNode(state.selector)
+        if (!state.node) return
+      }
+      applyInlineTranslate(
+        state.node,
+        state.baseX + dx,
+        state.baseY + dy,
+      )
+      // 位移消息按帧合并：拖拽期间父页面只需要最新位置。
+      if (state.frame) return
+      state.frame = window.requestAnimationFrame
+        ? window.requestAnimationFrame(function () {
+            state.frame = 0
+            if (!state.node) return
+            state.lastRect = rectOf(state.node)
+            post('drag-move', {
+              token: state.token,
+              selector: state.selector,
+              source: state.source,
+              dx: state.dx,
+              dy: state.dy,
+              inlineX: state.baseX + state.dx,
+              inlineY: state.baseY + state.dy,
+              rect: state.lastRect,
+            })
+          })
+        : window.setTimeout(function () {
+            state.frame = 0
+            post('drag-move', {
+              token: state.token,
+              selector: state.selector,
+              source: state.source,
+              dx: state.dx,
+              dy: state.dy,
+              inlineX: state.baseX + state.dx,
+              inlineY: state.baseY + state.dy,
+              rect: rectOf(state.node),
+            })
+          }, 16)
+    },
+    true,
+  )
+
+  function finishDrag(event) {
+    var state = dragState
+    if (!state || state.pointerId !== event.pointerId) return
+    dragState = null
+    if (state.frame) {
+      if (window.cancelAnimationFrame) window.cancelAnimationFrame(state.frame)
+      else window.clearTimeout(state.frame)
+      state.frame = 0
+    }
+    document.documentElement.classList.remove('vibe-drag-active')
+    if (!state.dragging) return
+    // 拖拽完成后吞掉浏览器补发的 click，避免误触按钮 / 链接。
+    suppressClick = true
+    window.setTimeout(function () {
+      suppressClick = false
+    }, 400)
+    var node = state.node && state.node.isConnected
+      ? state.node
+      : queryNode(state.selector)
+    if (!node) {
+      post('drag-cancel', {
+        token: state.token,
+        selector: state.selector,
+        source: state.source,
+      })
+      return
+    }
+    applyInlineTranslate(node, state.baseX + state.dx, state.baseY + state.dy)
+    // 保留起始 inline：同步失败时父页面按 token 精确还原。
+    // 防抖窗口内同一节点已有 token 时，沿用最早的基线，避免把上一段
+    // 未提交的预览位移误当成“原始位置”。
+    var inherited = inheritedStartTranslate(node)
+    appliedDrags[state.token] = {
+      node: node,
+      selector: state.selector,
+      startTranslate:
+        inherited === null ? state.startTranslate : inherited,
+    }
+    post('drag-end', {
+      token: state.token,
+      selector: state.selector,
+      source: state.source,
+      label:
+        (state.source && (state.source.component || state.source.tag)) || '',
+      // dx / dy 是本次手势位移；父页面叠加“已提交位移”后得到累计值。
+      dx: round2(state.dx),
+      dy: round2(state.dy),
+      inlineX: round2(state.baseX + state.dx),
+      inlineY: round2(state.baseY + state.dy),
+      startTranslate: state.startTranslate,
+      rect: rectOf(node),
+    })
+  }
+
+  document.addEventListener('pointerup', finishDrag, true)
+  document.addEventListener(
+    'pointercancel',
+    function (event) {
+      var state = dragState
+      if (!state || state.pointerId !== event.pointerId) return
+      cancelActiveDrag()
+      document.documentElement.classList.remove('vibe-drag-active')
+    },
+    true,
+  )
+
+  // HTML5 原生拖拽（图片 / 链接）在拖拽模式下必须禁用，否则会抢走手势。
+  document.addEventListener(
+    'dragstart',
+    function (event) {
+      if (dragArmed) event.preventDefault()
     },
     true,
   )
