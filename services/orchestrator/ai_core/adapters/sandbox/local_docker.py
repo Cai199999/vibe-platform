@@ -705,13 +705,23 @@ class LocalDockerSandbox(SandboxProvider):
         return sorted(set(changed))
 
     def verify(self, sandbox_id: str, check: str = "build") -> VerifyResult:
-        if check not in {"build", "test"}:
+        if check not in {"build", "test", "install"}:
             raise SandboxValidationError(f"不支持的校验类型: {check}")
 
         container = self._get_container(sandbox_id)
         timeout = self.settings.sandbox_verify_timeout_seconds
         # busybox timeout：超时返回 124，避免 exec_run 无限阻塞。
-        command = f"timeout {timeout}s npm run {check}"
+        if check == "install":
+            # 全栈生成会新增后端依赖（例如 multer）：先装根项目，再装
+            # server/，否则容器重启后 Node 会因 ERR_MODULE_NOT_FOUND 起不来。
+            install_command = (
+                "npm install --no-audit --no-fund && "
+                "if [ -f server/package.json ]; then "
+                "(cd server && npm install --no-audit --no-fund); fi"
+            )
+            command = f"timeout {timeout}s sh -c {shlex.quote(install_command)}"
+        else:
+            command = f"timeout {timeout}s npm run {check}"
 
         started = time.monotonic()
         try:

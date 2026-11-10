@@ -389,6 +389,56 @@ class CoderTests(unittest.TestCase):
         self.assertIn('"mysql2"', package)
         self.assertIn('"pg"', package)
         self.assertIn('"db:migrate"', package)
+        # 普通 CRUD 契约不得被强行注入上传依赖。
+        self.assertNotIn("multer", code)
+        self.assertNotIn('"multer"', package)
+
+    def test_backend_bundle_adds_multer_for_upload_contract(self) -> None:
+        ddl = (
+            "CREATE TABLE resumes (\n"
+            "  id BIGINT PRIMARY KEY AUTO_INCREMENT,\n"
+            "  name VARCHAR(64) NOT NULL,\n"
+            "  email VARCHAR(128) NOT NULL,\n"
+            "  position VARCHAR(128),\n"
+            "  file_name VARCHAR(255),\n"
+            "  file_path VARCHAR(512),\n"
+            "  file_size BIGINT,\n"
+            "  created_at DATETIME\n"
+            ");"
+        )
+        contract = _contract(
+            contractMarkdown="# 简历投递\n求职者上传 PDF 简历并保存记录。",
+            databaseDdl=ddl,
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/resumes",
+                    response="list",
+                    description="简历列表",
+                ),
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/resumes",
+                    request="multipart/form-data",
+                    response="Resume",
+                    description="上传简历并写入数据库",
+                ),
+            ],
+        )
+        bundle = generate_backend_bundle(contract)
+        code = bundle.files["server/index.js"]
+        self.assertIn("import multer from 'multer'", code)
+        self.assertIn(
+            "app.post(COLLECTION_PATH, upload.single('file'), createHandler)", code
+        )
+        self.assertIn('body["file_name"] = request.file.originalname', code)
+        self.assertIn('body["file_path"] = `/uploads/${request.file.filename}`', code)
+        self.assertIn('body["file_size"] = request.file.size', code)
+        self.assertIn('"multer": "2.5.0"', bundle.files["server/package.json"])
+        self.assertTrue(bundle.metadata["upload"]["enabled"])
+        self.assertEqual(
+            bundle.metadata["upload"]["fileColumns"]["file_name"], "file_name"
+        )
 
     def test_frontend_bundle_patches_main_vite_and_package(self) -> None:
         main = (
@@ -659,7 +709,13 @@ class GraphTests(unittest.TestCase):
         self.assertIn("render.yaml", sandbox.files)
         self.assertIn(".env.example", sandbox.files)
         self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/api/health")])
-        self.assertEqual(sandbox.verified, [(sandbox.handle.sandbox_id, "build")])
+        self.assertEqual(
+            sandbox.verified,
+            [
+                (sandbox.handle.sandbox_id, "install"),
+                (sandbox.handle.sandbox_id, "build"),
+            ],
+        )
         self.assertEqual(outcome["table"], "todos")
         self.assertEqual(outcome["collection_path"], "/api/v1/todos")
         self.assertIn("server/index.js", outcome["backend_files"])
@@ -744,8 +800,14 @@ class GraphTests(unittest.TestCase):
             }
         )
 
-        # 补齐后通过一致性检查，才允许构建与重启。
-        self.assertEqual(sandbox.verified, [(sandbox.handle.sandbox_id, "build")])
+        # 补齐后通过一致性检查，才允许安装依赖、构建与重启。
+        self.assertEqual(
+            sandbox.verified,
+            [
+                (sandbox.handle.sandbox_id, "install"),
+                (sandbox.handle.sandbox_id, "build"),
+            ],
+        )
         self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/api/health")])
         manifest = json.loads(sandbox.files["server/api-routes.json"])
         registered = {(item["method"], item["path"]) for item in manifest["routes"]}
@@ -993,7 +1055,13 @@ class GraphTests(unittest.TestCase):
         self.assertFalse(
             any(event.type == "fullstack.consistency.repair" for event in events)
         )
-        self.assertEqual(sandbox.verified, [(sandbox.handle.sandbox_id, "build")])
+        self.assertEqual(
+            sandbox.verified,
+            [
+                (sandbox.handle.sandbox_id, "install"),
+                (sandbox.handle.sandbox_id, "build"),
+            ],
+        )
         self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/api/health")])
 
     def test_frontend_mode_runs_three_nodes_and_probes_root(self) -> None:

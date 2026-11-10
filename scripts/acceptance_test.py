@@ -140,8 +140,8 @@ def format_command_failure(
 # ------------------------------------------------------------
 # 1. 生成与导出
 # ------------------------------------------------------------
-def generate_fullstack() -> tuple[str, str, dict[str, Any]]:
-    """跑完整 Architect -> CONFIRM -> 全栈生成，返回 runId/sandboxId/payload。"""
+def generate_fullstack() -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+    """跑完整 Architect -> CONFIRM -> 全栈生成，返回 runId/sandboxId/payload/契约。"""
     run_id, contract, contract_seq, _ = generation.drive_to_fullstack_contract()
     confirmed = generation.confirm_contract(run_id, contract, contract_seq)
     events, terminal = generation.start_fullstack(f"fsk_{run_id}", confirmed)
@@ -165,7 +165,7 @@ def generate_fullstack() -> tuple[str, str, dict[str, Any]]:
     for required in REQUIRED_FILES:
         if required not in generated_paths:
             raise AcceptanceFailure(f"生成事件中没有出现 {required}")
-    return run_id, sandbox_id, payload
+    return run_id, sandbox_id, payload, confirmed
 
 
 def download_export(run_id: str, sandbox_id: str, archive_path: Path) -> int:
@@ -272,6 +272,93 @@ def normalize_route(path: str) -> str:
     return "/" + "/".join(segments)
 
 
+IDENTIFIER = r"[A-Za-z_$][\w$]*"
+ROUTE_CALL_PATTERN = re.compile(
+    rf"\b({IDENTIFIER})\.(get|post|put|patch|delete)\(\s*" r"(['\"`])([^'\"`]+)\3",
+    re.IGNORECASE,
+)
+ROUTE_CHAIN_PATTERN = re.compile(
+    rf"\b({IDENTIFIER})\.route\(\s*(['\"`])([^'\"`]+)\2\s*\)"
+    r"((?:\s*\.(?:get|post|put|patch|delete)\((?:[^()]|\([^()]*\))*\))+)",
+    re.IGNORECASE,
+)
+USE_PATTERN = re.compile(
+    rf"\b({IDENTIFIER})\.use\(\s*"
+    rf"(?:(['\"`])([^'\"`]*)\2\s*,\s*)?({IDENTIFIER})\s*\)",
+    re.IGNORECASE,
+)
+
+
+def _join_route(prefix: str, path: str) -> str:
+    """模拟 Express 的挂载拼接：prefix + child path。"""
+    if not prefix:
+        return path
+    return prefix.rstrip("/") + "/" + path.lstrip("/")
+
+
+def parse_express_routes(text: str) -> list[tuple[str, str]]:
+    """解析单文件内 Express 路由，支持 app.use 二级挂载。
+
+    覆盖：
+
+      - ``app.get('/api/...')`` / ``router.post('/...')``
+      - ``router.use('/v1', childRouter)`` 多级前缀
+      - ``app.route('/api/...').get(...).post(...)`` 链式注册
+
+    返回 ``(method, full_path)``，不包含未挂载到 /api 的路径。
+    """
+    routes_by_object: dict[str, list[tuple[str, str]]] = {}
+    for match in ROUTE_CALL_PATTERN.finditer(text):
+        routes_by_object.setdefault(match.group(1), []).append(
+            (match.group(2).upper(), match.group(4))
+        )
+    for match in ROUTE_CHAIN_PATTERN.finditer(text):
+        obj = match.group(1)
+        path = match.group(3)
+        for method in re.findall(
+            r"\.(get|post|put|patch|delete)\(",
+            match.group(4),
+            re.IGNORECASE,
+        ):
+            routes_by_object.setdefault(obj, []).append((method.upper(), path))
+
+    edges: dict[str, list[tuple[str, str]]] = {}
+    children: set[str] = set()
+    for match in USE_PATTERN.finditer(text):
+        parent = match.group(1)
+        prefix = match.group(3) or ""
+        child = match.group(4)
+        edges.setdefault(parent, []).append((prefix, child))
+        children.add(child)
+
+    # 从 app 出发计算每个 router 对象的完整挂载前缀；同一 router 可以被
+    # 挂载多次，因此保留集合而不是单值。
+    prefixes: dict[str, set[str]] = {}
+    queue: list[tuple[str, str]] = [("app", "")]
+    # 没有挂载边的 router 视为根路由器（常见于 router.get('/api/...')）。
+    for obj in routes_by_object:
+        if obj != "app" and obj not in children:
+            queue.append((obj, ""))
+    visited: set[tuple[str, str]] = set()
+    while queue:
+        obj, prefix = queue.pop(0)
+        if (obj, prefix) in visited:
+            continue
+        visited.add((obj, prefix))
+        prefixes.setdefault(obj, set()).add(prefix)
+        for child_prefix, child in edges.get(obj, []):
+            queue.append((child, _join_route(prefix, child_prefix)))
+
+    collected: list[tuple[str, str]] = []
+    for obj, registrations in routes_by_object.items():
+        for prefix in prefixes.get(obj, {""}):
+            for method, path in registrations:
+                full_path = _join_route(prefix, path)
+                if full_path.startswith("/api"):
+                    collected.append((method, full_path))
+    return collected
+
+
 def collect_backend_routes(package_root: Path) -> dict[str, set[str]]:
     """从 api-routes.json 与 index.js 收集后端实际注册的路由。"""
     routes: dict[str, set[str]] = {}
@@ -305,12 +392,8 @@ def collect_backend_routes(package_root: Path) -> dict[str, set[str]]:
     index_file = package_root / "server" / "index.js"
     if index_file.is_file():
         text = index_file.read_text(encoding="utf-8")
-        pattern = re.compile(
-            r"(?:app|router)\.(get|post|put|patch|delete)\(\s*" r"(['\"`])([^'\"`]+)\2",
-            re.IGNORECASE,
-        )
-        for match in pattern.finditer(text):
-            add(match.group(1), match.group(3), "server/index.js")
+        for method, path in parse_express_routes(text):
+            add(method, path, "server/index.js")
 
     if not routes:
         raise AcceptanceFailure(
@@ -407,39 +490,76 @@ def collect_frontend_requests(
                 continue
             add(method, route_match.group(1), relative, line_of(obj.start()))
 
-        # 2.3 路径常量 + fetch(apiUrl(CONST))，从调用点后 600 字符找 method。
+        # 2.3 路径常量 + fetch / axios / 自定义 client 引用。
         constants = {
             match.group(1): match.group(3)
             for match in re.finditer(
-                r"\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*(['\"])(/api/[^'\"]*)\2",
+                r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
+                r"(['\"`])(/api/[^'\"`]*)\2",
                 text,
             )
         }
         for name, route in constants.items():
+            quoted = re.escape(name)
             references = list(
                 re.finditer(
-                    rf"fetch\(\s*apiUrl\(\s*{re.escape(name)}\s*\)",
+                    rf"(?:\bfetch\(\s*(?:apiUrl\(\s*)?{quoted}\s*\)?"
+                    rf"|\b{IDENTIFIER}\.(get|post|put|patch|delete)\(\s*"
+                    rf"(?:apiUrl\(\s*)?{quoted}\s*\)?)",
                     text,
+                    re.IGNORECASE,
                 )
             )
             if not references:
                 add(None, route, relative, line_of(text.find(route)))
                 continue
             for reference in references:
+                explicit_method = reference.group(1) if reference.lastindex else None
+                if explicit_method:
+                    add(explicit_method, route, relative, line_of(reference.start()))
+                    continue
                 window = text[reference.start() : reference.start() + 600]
                 method_match = re.search(r"method\s*:\s*['\"](\w+)['\"]", window)
                 method = method_match.group(1) if method_match else "GET"
                 add(method, route, relative, line_of(reference.start()))
 
-        # 2.4 直接 fetch('/api/...')。
-        for match in re.finditer(r"fetch\(\s*(['\"])(/api/[^'\"]*)\1", text):
+        # 2.4 fetch('/api/...') / fetch(`/api/.../${id}`)。
+        for match in re.finditer(
+            r"fetch\(\s*(?:(['\"`])(/api/[^'\"`]*)\1|apiUrl\(\s*(['\"`])(/api/[^'\"`]*)\3)",
+            text,
+        ):
+            route = match.group(2) or match.group(4)
             window = text[match.start() : match.start() + 500]
             method_match = re.search(r"method\s*:\s*['\"](\w+)['\"]", window)
             method = method_match.group(1) if method_match else "GET"
-            add(method, match.group(2), relative, line_of(match.start()))
+            add(method, route, relative, line_of(match.start()))
 
-        # 2.5 兜底：任何以 /api/ 开头的字符串常量都视为被引用。
-        for match in re.finditer(r"(['\"])(/api/[^'\"\s`]*)\1", text):
+        # 2.5 axios / 自定义 HTTP client 的显式方法：
+        #     axios.get('/api/...')、client.post(apiUrl('/api/...'))。
+        for match in re.finditer(
+            rf"\b({IDENTIFIER})\.(get|post|put|patch|delete)\(\s*"
+            r"(?:apiUrl\(\s*)?(['\"`])(/api/[^'\"`]*)\3",
+            text,
+            re.IGNORECASE,
+        ):
+            add(match.group(2), match.group(4), relative, line_of(match.start()))
+
+        # 2.6 axios({ method: 'post', url: '/api/...' }) 配置对象写法。
+        for match in re.finditer(
+            r"\baxios(?:\.request)?\(\s*\{([^{}]*)\}",
+            text,
+            re.DOTALL,
+        ):
+            chunk = match.group(1)
+            method_match = re.search(r"method\s*:\s*['\"](\w+)['\"]", chunk)
+            url_match = re.search(r"url\s*:\s*['\"`](/api/[^'\"`]*)['\"`]", chunk)
+            if not url_match:
+                continue
+            method = method_match.group(1) if method_match else "GET"
+            add(method, url_match.group(1), relative, line_of(match.start()))
+
+        # 2.7 兜底：任何以 /api/ 开头的字符串常量都视为被引用。
+        for match in re.finditer(r"(['\"`])(/api/[^'\"`\s]*)\1", text):
             add(None, match.group(2), relative, line_of(match.start()))
 
     return list(found.values())
@@ -488,6 +608,227 @@ def check_route_consistency(package_root: Path) -> tuple[int, list[str]]:
         location = f"{item['file']}:{item['line']}"
         issues.append(f"404 风险: 前端引用 {item['route']}（{location}）在后端未注册")
     return len(backend), issues
+
+
+# ------------------------------------------------------------
+# 2.6 业务语义断言：契约要求的能力必须在生成代码中可见
+# ------------------------------------------------------------
+UPLOAD_INTENT_PATTERN = re.compile(
+    r"(上传|附件|文件上传|upload|multipart|form-data|file\s*upload)",
+    re.IGNORECASE,
+)
+UPLOAD_MIDDLEWARE_PATTERN = re.compile(
+    r"\b(multer|formidable|busboy|multiparty|express-fileupload)\b",
+    re.IGNORECASE,
+)
+SUCCESS_STATE_PATTERN = re.compile(
+    r"(set(?:Status|State)\(\s*['\"]success|setSuccess\s*\(|成功|alert\s*\()",
+    re.IGNORECASE,
+)
+
+
+def _contract_value(contract: dict[str, Any], *keys: str) -> Any:
+    """兼容 camelCase / snake_case 两种契约字段名。"""
+    for key in keys:
+        if key in contract:
+            return contract[key]
+    return None
+
+
+def _contract_text(contract: dict[str, Any]) -> str:
+    return json.dumps(contract, ensure_ascii=False, default=str)
+
+
+def parse_ddl_schema(ddl: str) -> dict[str, list[str]]:
+    """解析 CREATE TABLE，返回 ``{表名: [字段名]}``。
+
+    按括号配对截取字段定义，兼容 ``DECIMAL(10,2)`` 这类嵌套括号；
+    同时跳过 PRIMARY / FOREIGN / KEY 等表级约束行。
+    """
+    schema: dict[str, list[str]] = {}
+    pattern = re.compile(
+        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+        r"[\"'`\[]?([A-Za-z_][\w]*)[\"'`\]]?\s*\(",
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(ddl or ""):
+        table = match.group(1)
+        depth = 1
+        index = match.end()
+        while index < len(ddl) and depth:
+            char = ddl[index]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            index += 1
+        if depth != 0:
+            continue
+        body = ddl[match.end() : index - 1]
+        columns: list[str] = []
+        for line in body.split(","):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            name = stripped.split()[0].strip("\"'`[]")
+            if name.upper() in {
+                "PRIMARY",
+                "FOREIGN",
+                "UNIQUE",
+                "CONSTRAINT",
+                "KEY",
+                "INDEX",
+                "CHECK",
+            }:
+                continue
+            columns.append(name)
+        schema[table] = columns
+    return schema
+
+
+def _ddl_tables(ddl: str) -> list[str]:
+    return list(parse_ddl_schema(ddl))
+
+
+def _ddl_columns(ddl: str) -> list[str]:
+    columns: list[str] = []
+    for table_columns in parse_ddl_schema(ddl).values():
+        columns.extend(table_columns)
+    return columns
+
+
+def check_business_semantics(
+    package_root: Path,
+    contract: dict[str, Any],
+    backend_routes: dict[str, set[str]] | None = None,
+    *,
+    require_upload: bool | None = None,
+    require_success_state: bool | None = None,
+) -> list[str]:
+    """检查“契约要求的业务能力”是否真的落到生成代码里。
+
+    这里不追求运行所有业务逻辑，而是抓住最容易“文档有、代码没有”的断点：
+
+      1. 契约声明的每个 API 路由必须出现在后端路由表；
+      2. 契约 DDL 中每张表必须出现在 ``server/schema.sql``；
+      3. 契约提到上传/附件时，后端必须引入上传中间件，
+         且 DDL 中存在 file/upload/attachment/resume 类字段；
+      4. 契约存在真实 API 交互时，前端必须包含成功态提示或状态切换。
+
+    这些断言由契约驱动：纯展示/轻量应用不会被强行要求 multer。
+    """
+    issues: list[str] = []
+    shape = str(_contract_value(contract, "appShape", "app_shape") or "")
+    if shape != "full_stack_system":
+        return issues
+
+    routes = backend_routes or collect_backend_routes(package_root)
+    contract_routes = _contract_value(contract, "apiRoutes", "api_routes") or []
+    for route in contract_routes:
+        if not isinstance(route, dict):
+            continue
+        method = str(route.get("method") or "").upper()
+        path = str(route.get("path") or "")
+        if not method or not path:
+            continue
+        normalized = normalize_route(path)
+        if method not in routes.get(normalized, set()):
+            issues.append(f"契约路由未落到后端: {method} {path}")
+
+    ddl = str(_contract_value(contract, "databaseDdl", "database_ddl") or "").strip()
+    if not ddl:
+        issues.append("全栈契约缺少 databaseDdl，无法验证数据库表")
+        return issues
+
+    schema_file = package_root / "server" / "schema.sql"
+    if not schema_file.is_file():
+        issues.append("缺少 server/schema.sql，数据库表未落盘")
+        schema = ""
+    else:
+        schema = schema_file.read_text(encoding="utf-8", errors="replace")
+
+    tables = _ddl_tables(ddl)
+    if not tables:
+        issues.append("契约 DDL 中未解析出任何 CREATE TABLE")
+    for table in tables:
+        if not re.search(rf"\b{re.escape(table)}\b", schema, re.IGNORECASE):
+            issues.append(f"契约表未写入 schema.sql: {table}")
+
+    contract_blob = _contract_text(contract)
+    upload_required = (
+        require_upload
+        if require_upload is not None
+        else bool(UPLOAD_INTENT_PATTERN.search(contract_blob))
+    )
+    if upload_required:
+        index_file = package_root / "server" / "index.js"
+        index_code = (
+            index_file.read_text(encoding="utf-8", errors="replace")
+            if index_file.is_file()
+            else ""
+        )
+        middleware = UPLOAD_MIDDLEWARE_PATTERN.search(index_code)
+        if not middleware:
+            issues.append(
+                "契约要求文件上传，但 server/index.js 未引入 "
+                "multer/formidable/busboy 等上传中间件"
+            )
+        else:
+            package_file = package_root / "server" / "package.json"
+            dependencies: dict[str, Any] = {}
+            if package_file.is_file():
+                try:
+                    dependencies = (
+                        json.loads(package_file.read_text(encoding="utf-8")).get(
+                            "dependencies"
+                        )
+                        or {}
+                    )
+                except json.JSONDecodeError:
+                    dependencies = {}
+            expected_dep = middleware.group(1).lower()
+            if not any(expected_dep in str(name).lower() for name in dependencies):
+                issues.append(
+                    f"server/index.js 使用了 {middleware.group(1)}，"
+                    "但 server/package.json 未声明该依赖"
+                )
+        upload_columns = [
+            column
+            for column in _ddl_columns(ddl)
+            if re.search(r"(file|upload|attachment|resume)", column, re.IGNORECASE)
+        ]
+        if not upload_columns:
+            issues.append(
+                "契约要求文件上传，但 DDL 中没有 file/upload/attachment/resume 类字段"
+            )
+
+    interactions = (
+        _contract_value(contract, "componentInteractions", "component_interactions")
+        or []
+    )
+    has_api_interaction = any(
+        isinstance(item, dict)
+        and str(item.get("apiRoute") or item.get("api_route") or "").strip()
+        for item in interactions
+    )
+    success_required = (
+        require_success_state
+        if require_success_state is not None
+        else has_api_interaction
+    )
+    if success_required:
+        frontend_code = "\n".join(
+            path.read_text(encoding="utf-8", errors="replace")
+            for path in sorted((package_root / "src").rglob("*"))
+            if path.is_file() and path.suffix.lower() in FRONTEND_SUFFIXES
+        )
+        if not SUCCESS_STATE_PATTERN.search(frontend_code):
+            issues.append(
+                "契约存在 API 交互，但前端未发现成功态提示"
+                "（setStatus('success') / setSuccess / alert / 成功文案）"
+            )
+
+    return issues
 
 
 # ------------------------------------------------------------
@@ -803,9 +1144,9 @@ def main() -> int:
     docker_ready = ensure_docker(report)
 
     try:
-        stage("1/6 生成全栈代码")
+        stage("1/7 生成全栈代码")
         try:
-            run_id, sandbox_id, payload = generate_fullstack()
+            run_id, sandbox_id, payload, contract = generate_fullstack()
             print(
                 f"   ✓ runId={run_id} sandboxId={sandbox_id} "
                 f"collection={payload.get('collectionPath')}"
@@ -814,7 +1155,7 @@ def main() -> int:
             report.fail(f"全栈代码生成失败: {exc}")
             return report.finish()
 
-        stage("2/6 下载导出包")
+        stage("2/7 下载导出包")
         try:
             size = download_export(run_id, sandbox_id, archive_path)
             report.ok(f"已下载 project-export.tar.gz（{size / 1024:.1f} KB）")
@@ -822,7 +1163,7 @@ def main() -> int:
             report.fail(f"导出包下载失败: {exc}")
             return report.finish()
 
-        stage("3/6 解压与必需文件")
+        stage("3/7 解压与必需文件")
         try:
             extract_archive(archive_path, package_dir)
             package_root = resolve_package_root(package_dir)
@@ -837,7 +1178,7 @@ def main() -> int:
         else:
             report.ok("DEPLOY.md / Dockerfile / render.yaml 均存在")
 
-        stage("4/6 前后端路由一致性")
+        stage("4/7 前后端路由一致性")
         try:
             backend_count, route_issues = check_route_consistency(package_root)
             if route_issues:
@@ -848,7 +1189,18 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             report.fail(f"路由检查失败: {exc}")
 
-        stage("5/6 纯净容器 npm install / build")
+        stage("5/7 业务语义断言")
+        try:
+            semantic_issues = check_business_semantics(package_root, contract)
+            if semantic_issues:
+                for issue in semantic_issues:
+                    report.fail(issue)
+            else:
+                report.ok("契约路由 / 数据表 / 上传中间件 / 成功态与生成代码一致")
+        except Exception as exc:  # noqa: BLE001
+            report.fail(f"业务语义检查失败: {exc}")
+
+        stage("6/7 纯净容器 npm install / build")
         if not docker_ready:
             report.fail("跳过容器内 npm 与 docker build（docker 不可用）")
         elif not (package_root / "Dockerfile").is_file():
@@ -857,7 +1209,7 @@ def main() -> int:
             npm_install_and_build(package_root, report)
             image_tag = docker_build(package_root, report) or ""
 
-            stage("6/6 无数据库配置运行 + SQLite 自检")
+            stage("7/7 无数据库配置运行 + SQLite 自检")
             if image_tag:
                 result = docker_run_and_verify(
                     image_tag,

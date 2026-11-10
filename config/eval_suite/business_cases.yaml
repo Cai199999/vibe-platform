@@ -1,0 +1,156 @@
+# ============================================================
+# 业务语义评测集（Business Eval）
+#
+# 与 core_cases.yaml 的分工：
+#   - core_cases：Supervisor 路由 + UI 局部改码回归；
+#   - business_cases：真实 DeepSeek 生成《全栈实施契约》，
+#     再跑完整全栈生成，验证“AI 是否真的理解业务”。
+#
+# 运行：
+#   python3 scripts/business_eval.py
+#   python3 scripts/business_eval.py --filter biz_003 --verbose
+#
+# 字段说明：
+#   prompt                    用户原话，直接作为 Architect 输入
+#   expected_app_shape        lightweight_web / full_stack_system
+#   expected_api_routes       契约必须包含的 Method + Path（动态参数统一为 {id}）
+#   expected_tables           契约 DDL 必须包含的表名（允许单复数）
+#   expected_columns          表字段断言；用 | 表示任一等价命名
+#   clarifications            自动回答澄清问题（按 slot 覆盖）
+#   run_fullstack             是否继续生成并导出可部署产物
+#   semantic.requires_upload  是否断言上传中间件与文件字段
+#   semantic.requires_success_state 是否断言前端成功态提示
+# ============================================================
+
+- id: "biz_001"
+  name: "纯前端作品集展示"
+  tags: ["lightweight", "frontend"]
+  prompt: >
+    做一个个人作品集首页：顶部展示姓名和一句简介，中间用三张卡片展示
+    项目名称、简介和技术标签，底部展示邮箱和 GitHub 链接。
+    纯前端展示，不需要后端接口，也不需要数据库。
+  expected_app_shape: "lightweight_web"
+  expected_api_routes: []
+  expected_tables: []
+  run_fullstack: false
+  clarifications:
+    app.shape: "lightweight_web"
+    ui.primary_flow: "用户打开页面即可浏览作品集，无需提交或保存数据"
+  semantic:
+    requires_upload: false
+    requires_success_state: false
+
+- id: "biz_002"
+  name: "客户管理 CRUD"
+  tags: ["fullstack", "crud", "database"]
+  prompt: >
+    做一个客户管理后台：可以新增客户、查看客户列表、编辑客户信息和
+    删除客户。客户字段包括姓名、手机号、邮箱、公司。
+    数据需要保存到 MySQL 数据库。
+  expected_app_shape: "full_stack_system"
+  expected_api_routes:
+    - method: "GET"
+      path: "/api/v1/customers"
+    - method: "POST"
+      path: "/api/v1/customers"
+    - method: "PUT"
+      path: "/api/v1/customers/{id}"
+    - method: "DELETE"
+      path: "/api/v1/customers/{id}"
+  expected_tables: ["customers"]
+  expected_columns:
+    customers:
+      - "name|contact_name|customer_name"
+      - "phone|mobile|telephone"
+      - "email"
+      - "company|company_name"
+  run_fullstack: true
+  clarifications:
+    app.shape: "full_stack_system"
+    backend.framework: "node_express"
+    database.engine: "mysql"
+    business.key_flows: >
+      用户填写客户信息后提交，系统写入 customers 表并刷新列表；
+      编辑时按客户 ID 更新记录；删除时按客户 ID 移除记录。
+    data.entities: >
+      Customer(id, name, phone, email, company, created_at, updated_at)
+    ui.primary_flow: >
+      新增客户 -> 列表刷新 -> 编辑客户 -> 删除客户
+  semantic:
+    requires_upload: false
+    requires_success_state: true
+
+- id: "biz_003"
+  name: "简历上传与列表"
+  tags: ["fullstack", "upload", "database"]
+  prompt: >
+    做一个简历投递系统：求职者上传 PDF 简历，填写姓名、邮箱、应聘岗位；
+    上传后保存记录并展示简历列表。需要 MySQL 持久化，
+    上传文件保存到服务器本地目录。
+  expected_app_shape: "full_stack_system"
+  expected_api_routes:
+    - method: "GET"
+      path: "/api/v1/resumes"
+    - method: "POST"
+      path: "/api/v1/resumes"
+  expected_tables: ["resumes"]
+  expected_columns:
+    resumes:
+      - "name|applicant_name"
+      - "email"
+      - "position|job_title"
+      - "file_name|file_path|file_url|resume_file|attachment_path"
+  run_fullstack: true
+  clarifications:
+    app.shape: "full_stack_system"
+    backend.framework: "node_express"
+    database.engine: "mysql"
+    ui.interactions: "save_and_refresh"
+    business.key_flows: >
+      用户选择 PDF 简历并填写姓名、邮箱、应聘岗位，提交后上传文件、
+      写入 resumes 表并刷新简历列表；失败时保留表单并提示错误。
+    data.entities: >
+      Resume(id, name, email, position, file_name, file_path, file_size,
+      created_at, updated_at)
+    ui.primary_flow: >
+      选择 PDF 简历 -> 填写姓名/邮箱/岗位 -> 提交 -> 列表刷新并提示成功
+  semantic:
+    requires_upload: true
+    requires_success_state: true
+
+- id: "biz_004"
+  name: "待办事项 CRUD"
+  tags: ["fullstack", "crud", "state"]
+  prompt: >
+    做一个待办事项应用：可以添加待办、把待办标记为完成、删除待办，
+    列表展示待办标题和完成状态。数据需要保存到 MySQL 数据库。
+  expected_app_shape: "full_stack_system"
+  expected_api_routes:
+    - method: "GET"
+      path: "/api/v1/todos"
+    - method: "POST"
+      path: "/api/v1/todos"
+    - method: "PUT"
+      path: "/api/v1/todos/{id}"
+    - method: "DELETE"
+      path: "/api/v1/todos/{id}"
+  expected_tables: ["todos"]
+  expected_columns:
+    todos:
+      - "title|name"
+      - "status|completed|done"
+  run_fullstack: true
+  clarifications:
+    app.shape: "full_stack_system"
+    backend.framework: "node_express"
+    database.engine: "mysql"
+    business.key_flows: >
+      用户输入待办标题后创建记录；点击完成按 ID 更新 status；
+      点击删除按 ID 移除记录；每次操作后刷新列表。
+    data.entities: >
+      Todo(id, title, status, created_at, updated_at)
+    ui.primary_flow: >
+      添加待办 -> 列表展示 -> 标记完成 -> 删除待办
+  semantic:
+    requires_upload: false
+    requires_success_state: true

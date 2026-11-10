@@ -396,6 +396,7 @@ EXPRESS_SERVER_TEMPLATE = r"""// 由 BackendCoder 根据《全栈实施契约》
 // Express + Sequelize：真实 REST 路由，Vite 通过 /api 同源代理访问。
 // 生产环境由 DATABASE_URL 选择 MySQL / PostgreSQL；沙盒自动回退 SQLite。
 import express from 'express'
+__UPLOAD_IMPORTS__
 import {
   STORAGE,
   createRecord,
@@ -437,6 +438,8 @@ app.use((request, response, next) => {
 const asyncHandler = (handler) => (request, response, next) =>
   Promise.resolve(handler(request, response, next)).catch(next)
 
+__UPLOAD_MIDDLEWARE__
+
 const listHandler = asyncHandler(async (request, response) => {
   const page = Math.max(1, Number(request.query.page || 1))
   const size = Math.min(100, Math.max(1, Number(request.query.size || 20)))
@@ -445,7 +448,10 @@ const listHandler = asyncHandler(async (request, response) => {
 })
 
 const createHandler = asyncHandler(async (request, response) => {
-  const record = await createRecord(request.body || {})
+  const body =
+    request.body && typeof request.body === 'object' ? { ...request.body } : {}
+__UPLOAD_BODY_PATCH__
+  const record = await createRecord(body)
   response.status(201).json({
     ...record,
     success: true,
@@ -458,7 +464,7 @@ app.get('/api/health', asyncHandler(async (_request, response) => {
 }))
 
 app.get(COLLECTION_PATH, listHandler)
-app.post(COLLECTION_PATH, createHandler)
+app.post(COLLECTION_PATH, __COLLECTION_POST_MIDDLEWARE__createHandler)
 // 通用数据别名：便于外部脚本和前端用同一张表做快速验证。
 app.get('/api/data', listHandler)
 app.post('/api/data', createHandler)

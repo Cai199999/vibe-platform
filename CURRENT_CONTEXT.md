@@ -24,6 +24,7 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒；中间�
 - **全栈语义路由自愈**：BackendCoder 为契约每个业务动作（抓取/改写/投递/对话等）注册独立 Express 路由并生成 Mock 处理，不再折叠为通用 CRUD；`api-routes.json.routes` 记录全部实际路由；一致性 FixAction 只让后端补路由，绝不改前端到无关接口；LangGraph `ConsistencyVerifier -> BackendCoder -> ConsistencyVerifier` 自愈最多 2 次。280 tests 通过，真实 Node 服务四端点均 201。
 - **Architect 面板收尾**：移除架构确认/随意提问双 Tab，主状态机与影子助手问答合并为统一时间轴，正式提问高亮；正式推进只保留正文“追加修改需求…”，底部仅保留只读助手输入（标题已删），提问绝不触发决策；全栈 SUCCEEDED 且一致性通过后成功卡一键导出 tar.gz。E2E 覆盖路由隔离与真实下载。
 - **全栈产物验收**：新增 `scripts/acceptance_test.py`，生成→导出→安全解压→校验三件套→前后端路由比对→纯净容器 npm build→无 DB env 跑通 SQLite CRUD；生成 Dockerfile 已改为保留 `server/` 层级，修复 `/data` EACCES。
+- **业务 Eval**：`business_cases.yaml` 4 例（纯前端/CRUD/上传），真实 DeepSeek 契约 + 产物语义断言 4/4；上传契约自动注入 multer，构建前安装 `server/` 依赖。
 
 ## 真假边界
 

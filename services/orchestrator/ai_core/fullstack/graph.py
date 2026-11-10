@@ -469,6 +469,29 @@ class FullstackGraphRunner:
                 started,
             )
             return {}
+        # 后端依赖可能随契约变化（例如上传需要 multer）。构建前先安装，
+        # 否则沙盒重启时 server/index.js 会因缺少模块直接退出。
+        if options.mode != "frontend":
+            install = self._sandbox.verify(state["sandbox_id"], "install")
+            if not install.success:
+                logs = install.logs or "依赖安装失败且没有日志"
+                self._emit(
+                    "fullstack.node.output",
+                    {
+                        "runId": state["run_id"],
+                        "node": "BuildVerifier",
+                        "path": "npm install",
+                        "language": "text",
+                        "content": logs[-4000:],
+                        "truncated": install.logs_truncated,
+                    },
+                )
+                self._node_failed(
+                    "BuildVerifier",
+                    state,
+                    FullstackBuildError(f"npm install 退出码 {install.exit_code}"),
+                )
+                raise FullstackBuildError("生成代码依赖安装失败：\n" + logs)
         result = self._sandbox.verify(state["sandbox_id"], "build")
         if not result.success:
             logs = result.logs or "构建失败且没有日志"

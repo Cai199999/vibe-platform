@@ -54,6 +54,24 @@ SERVER_DEPENDENCIES = {
     "pg": "8.13.1",
     "pg-hstore": "2.3.4",
 }
+# 只有契约明确要求文件上传时才注入，避免普通 CRUD 项目多装依赖。
+MULTER_VERSION = "2.5.0"
+_UPLOAD_INTENT = re.compile(
+    r"(上传|附件|upload|multipart|form-data|file\s*upload|resume|简历)",
+    re.IGNORECASE,
+)
+_UPLOAD_PATH = re.compile(r"(upload|attachment|file)", re.IGNORECASE)
+_FILE_NAME_COLUMN = re.compile(
+    r"^(file_?name|filename|original_?name|attachment_?name|"
+    r"(resume|file|attachment)_(name|file))$",
+    re.IGNORECASE,
+)
+_FILE_PATH_COLUMN = re.compile(
+    r"^(file_?(path|url|key)|filepath|attachment_?(path|url)|"
+    r"(resume|file)_(path|url|key))$",
+    re.IGNORECASE,
+)
+_FILE_SIZE_COLUMN = re.compile(r"^(file_?size|filesize|size)$", re.IGNORECASE)
 
 _SQL_IDENTIFIER = re.compile(r"[^a-zA-Z0-9_]")
 _CREATE_TABLE = re.compile(
@@ -596,7 +614,115 @@ def _merge_routes(
     return merged
 
 
-def _business_route_code(route: ArchitectApiRoute) -> str:
+def _contract_mentions_upload(contract: ArchitectContract) -> bool:
+    """判断契约是否真的要求文件上传 / 附件能力。
+
+    只扫描契约里与业务有关的文本，避免因为项目名带 ``file`` 就误装中间件。
+    """
+    parts = [contract.contract_markdown or "", contract.database_ddl or ""]
+    for route in contract.api_routes or []:
+        parts.extend([str(route.path or ""), str(route.description or "")])
+        if route.request:
+            parts.append(json.dumps(route.request, ensure_ascii=False))
+    for interaction in contract.component_interactions or []:
+        parts.append(
+            json.dumps(interaction.model_dump(by_alias=True), ensure_ascii=False)
+        )
+    return bool(_UPLOAD_INTENT.search("\n".join(parts)))
+
+
+def _pick_upload_column(columns: Iterable[str], pattern: re.Pattern[str]) -> str | None:
+    for column in columns:
+        if pattern.match(column):
+            return column
+    return None
+
+
+def build_upload_support(
+    contract: ArchitectContract, columns: Iterable[str]
+) -> dict[str, Any]:
+    """按契约生成 multer 上传中间件片段。
+
+    生成器只在契约出现“上传 / 附件 / multipart”等意图时启用；字段映射
+    从 DDL 中挑选同名或语义等价的列，保证文件元数据真正落库，而不是
+    仅把中间件 import 进去做样子。
+    """
+    support: dict[str, Any] = {
+        "enabled": False,
+        "imports": "",
+        "middleware": "",
+        "body_patch": "",
+        "post_middleware": "",
+        "dependency": None,
+        "file_columns": {},
+    }
+    column_list = list(columns)
+    if not _contract_mentions_upload(contract):
+        return support
+
+    file_name = _pick_upload_column(column_list, _FILE_NAME_COLUMN)
+    file_path = _pick_upload_column(column_list, _FILE_PATH_COLUMN)
+    file_size = _pick_upload_column(column_list, _FILE_SIZE_COLUMN)
+
+    patch_lines: list[str] = []
+    if file_name:
+        patch_lines.append(
+            f"  body[{json.dumps(file_name)}] = request.file.originalname"
+        )
+    if file_path:
+        patch_lines.append(
+            f"  body[{json.dumps(file_path)}] = `/uploads/${{request.file.filename}}`"
+        )
+    if file_size:
+        patch_lines.append(f"  body[{json.dumps(file_size)}] = request.file.size")
+    body_patch = (
+        "  // 把 multer 解析出的文件元数据映射到契约字段。\n" + "\n".join(patch_lines)
+        if patch_lines
+        else ""
+    )
+
+    support.update(
+        {
+            "enabled": True,
+            "imports": (
+                "import multer from 'multer'\n"
+                "import { mkdirSync } from 'node:fs'\n"
+                "import { extname } from 'node:path'\n"
+                "import { fileURLToPath } from 'node:url'\n"
+            ),
+            "middleware": (
+                "// 契约要求文件上传：磁盘存储 + 5MB 限制，文件落在 server/uploads。\n"
+                "const UPLOAD_DIR = fileURLToPath(new URL('./uploads/', import.meta.url))\n"
+                "mkdirSync(UPLOAD_DIR, { recursive: true })\n"
+                "const upload = multer({\n"
+                "  storage: multer.diskStorage({\n"
+                "    destination: (_request, _file, callback) => callback(null, UPLOAD_DIR),\n"
+                "    filename: (_request, file, callback) => {\n"
+                "      const suffix = extname(file.originalname || '').slice(0, 12)\n"
+                "      const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`\n"
+                "      callback(null, `${stamp}${suffix}`)\n"
+                "    },\n"
+                "  }),\n"
+                "  limits: { fileSize: 5 * 1024 * 1024 },\n"
+                "})\n"
+                "app.use('/uploads', express.static(UPLOAD_DIR))\n"
+            ),
+            "body_patch": body_patch,
+            "post_middleware": "upload.single('file'), ",
+            "dependency": MULTER_VERSION,
+            "file_columns": {
+                "file_name": file_name,
+                "file_path": file_path,
+                "file_size": file_size,
+            },
+        }
+    )
+    return support
+
+
+def _business_route_code(
+    route: ArchitectApiRoute, upload: dict[str, Any] | None = None
+) -> str:
     """为一个契约业务动作生成独立 Express 路由 + 确定性 Mock 处理逻辑。
 
     绝不能把“抓取 JD / AI 改写 / 投递 / 对话”折叠到通用 CRUD：路径必须
@@ -608,6 +734,18 @@ def _business_route_code(route: ArchitectApiRoute) -> str:
     description = route.description or f"{label} 业务动作"
     label_js = json.dumps(label, ensure_ascii=False)
     description_js = json.dumps(description, ensure_ascii=False)
+    upload_enabled = bool(
+        upload
+        and upload.get("enabled")
+        and method == "POST"
+        and (
+            _UPLOAD_PATH.search(path)
+            or _UPLOAD_PATH.search(description)
+            or _UPLOAD_INTENT.search(description)
+        )
+    )
+    route_middleware = upload["post_middleware"] if upload_enabled else ""
+    body_patch = (upload or {}).get("body_patch", "") if upload_enabled else ""
     if method == "GET":
         payload = (
             "  response.json({\n"
@@ -632,7 +770,8 @@ def _business_route_code(route: ArchitectApiRoute) -> str:
         message_js = json.dumps(f"{description}（沙盒 Mock 响应）", ensure_ascii=False)
         payload = (
             "  const body = request.body && typeof request.body === 'object'"
-            " ? request.body : {}\n"
+            " ? { ...request.body } : {}\n"
+            f"{body_patch}\n"
             f"  response.status({status}).json({{\n"
             "    success: true,\n"
             f"    route: {label_js},\n"
@@ -644,7 +783,8 @@ def _business_route_code(route: ArchitectApiRoute) -> str:
     return (
         f"// 契约业务动作：{description}\n"
         f"app.{method.lower()}("
-        f"{json.dumps(path, ensure_ascii=False)}, asyncHandler(async (request, response) => {{\n"
+        f"{json.dumps(path, ensure_ascii=False)}, {route_middleware}"
+        f"asyncHandler(async (request, response) => {{\n"
         f"{payload}"
         "}))\n"
     )
@@ -672,6 +812,7 @@ def generate_backend_bundle(
     table = extract_table_name(contract.database_ddl)
     column_defs = extract_column_defs(contract.database_ddl)
     columns = [name for name, _ in column_defs]
+    upload = build_upload_support(contract, columns)
     engine = contract_database_engine(contract)
     engine_label = DATABASE_ENGINE_LABELS.get(engine, engine)
     # 集合路径只允许静态资源根路径；详情路径由同一资源派生。
@@ -688,6 +829,10 @@ def generate_backend_bundle(
         "__ENTITY__": entity,
         "__COLLECTION_PATH__": express_base,
         "__ITEM_PATH__": detail,
+        "__UPLOAD_IMPORTS__": upload["imports"],
+        "__UPLOAD_MIDDLEWARE__": upload["middleware"],
+        "__UPLOAD_BODY_PATCH__": upload["body_patch"],
+        "__COLLECTION_POST_MIDDLEWARE__": upload["post_middleware"],
     }
     server_code = EXPRESS_SERVER_TEMPLATE
     for key, value in replacements.items():
@@ -714,7 +859,7 @@ def generate_backend_bundle(
         key = (method, path)
         if key in registered_keys:
             continue
-        business_snippets.append(_business_route_code(route))
+        business_snippets.append(_business_route_code(route, upload))
         registered.append((method, path, "express.contract"))
         registered_keys.add(key)
     server_code = server_code.replace(
@@ -786,7 +931,10 @@ def generate_backend_bundle(
                 "name": "vibe-fullstack-server",
                 "private": True,
                 "type": "module",
-                "dependencies": SERVER_DEPENDENCIES,
+                "dependencies": {
+                    **SERVER_DEPENDENCIES,
+                    **({"multer": upload["dependency"]} if upload["enabled"] else {}),
+                },
                 "scripts": {
                     "start": "node index.js",
                     "db:migrate": "node migrate.mjs",
@@ -824,6 +972,11 @@ def generate_backend_bundle(
                 for method, path, source in registered
             ],
             "businessRouteCount": len(business_snippets),
+            "upload": {
+                "enabled": bool(upload["enabled"]),
+                "dependency": upload["dependency"],
+                "fileColumns": upload["file_columns"],
+            },
         },
     )
 
