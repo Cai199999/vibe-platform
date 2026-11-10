@@ -704,8 +704,12 @@ class GraphTests(unittest.TestCase):
         # 本次 graph 不发送终态事件，终态由 Service 统一 emit。
         self.assertNotIn("fullstack.completed", [event.type for event in events])
 
-    def test_consistency_failure_blocks_build_before_sandbox(self) -> None:
-        """前端请求与后端路由不一致时，必须停在 ConsistencyVerifier。"""
+    def test_consistency_failure_self_heals_by_backend_routes(self) -> None:
+        """前端请求缺失路由时，BackendCoder 自动补齐后继续构建。
+
+        旧行为是直接阻断，并把“聊天 / 投递”建议成无关的 CRUD 路径；
+        新行为必须保持前端业务请求不变，由后端补语义匹配的端点。
+        """
         sandbox = _MemorySandbox()
         sandbox.files = _base_files()
         sandbox.files["src/App.jsx"] = (
@@ -715,7 +719,7 @@ class GraphTests(unittest.TestCase):
                     {
                         "component": "TaskStream",
                         "method": "GET",
-                        # 前端订阅长连接路径，后端实际只注册了 /api/v1/todos。
+                        # 前端订阅长连接路径，初始后端只注册了 /api/v1/todos。
                         "apiRoute": "/api/v1/tasks/stream",
                         "payloadKey": "",
                     }
@@ -724,55 +728,271 @@ class GraphTests(unittest.TestCase):
             )
             + "\nexport default function App() { return <main /> }\n"
         )
-        buffer = RunEventBuffer("fsk_consistency_failed")
+        buffer = RunEventBuffer("fsk_consistency_self_heal")
         runner = FullstackGraphRunner(sandbox, event_sink=buffer)
 
-        with self.assertRaises(FullstackConsistencyError) as ctx:
-            runner.run(
-                {
-                    "run_id": "fsk_consistency_failed",
-                    "project_id": "proj_fullstack",
-                    "sandbox_id": sandbox.handle.sandbox_id,
-                    "preview_url": sandbox.handle.preview_url,
-                    "contract": _contract(),
-                    "files": [],
-                }
-            )
+        runner.run(
+            {
+                "run_id": "fsk_consistency_self_heal",
+                "project_id": "proj_fullstack",
+                "sandbox_id": sandbox.handle.sandbox_id,
+                "preview_url": sandbox.handle.preview_url,
+                "contract": _contract(),
+                "files": [],
+            }
+        )
 
-        self.assertEqual(ctx.exception.node, "ConsistencyVerifier")
-        # 未通过一致性检查前不得进入构建或重启沙盒。
-        self.assertEqual(sandbox.verified, [])
-        self.assertEqual(sandbox.restarts, [])
+        # 补齐后通过一致性检查，才允许构建与重启。
+        self.assertEqual(sandbox.verified, [(sandbox.handle.sandbox_id, "build")])
+        self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/api/health")])
+        manifest = json.loads(sandbox.files["server/api-routes.json"])
+        registered = {(item["method"], item["path"]) for item in manifest["routes"]}
+        self.assertIn(("GET", "/api/v1/tasks/stream"), registered)
+        self.assertIn(
+            'app.get("/api/v1/tasks/stream"', sandbox.files["server/index.js"]
+        )
 
         events = buffer.snapshot()
-        started_nodes = [
-            event.payload["node"]
+        backend_starts = [
+            event
             for event in events
             if event.type == "fullstack.node.started"
+            and event.payload["node"] == "BackendCoder"
         ]
+        self.assertEqual(len(backend_starts), 2)
+        reports = [
+            event for event in events if event.type == "fullstack.consistency.report"
+        ]
+        self.assertFalse(reports[0].payload["ok"])
+        self.assertTrue(reports[-1].payload["ok"])
+        repairs = [
+            event for event in events if event.type == "fullstack.consistency.repair"
+        ]
+        self.assertEqual(len(repairs), 1)
+        self.assertEqual(repairs[0].payload["attempt"], 1)
         self.assertEqual(
-            started_nodes,
+            repairs[0].payload["missingRoutes"],
             [
-                "DBACoder",
-                "BackendCoder",
-                "FrontendCoder",
-                "InfraCoder",
-                "ConsistencyVerifier",
+                {
+                    "method": "GET",
+                    "path": "/api/v1/tasks/stream",
+                    "description": (
+                        "TaskStream：后端未注册该路径" "（Method + Path 完全匹配失败）"
+                    ),
+                }
             ],
         )
-        self.assertTrue(
+        self.assertFalse(
             any(
                 event.type == "fullstack.node.failed"
                 and event.payload["node"] == "ConsistencyVerifier"
                 for event in events
             )
         )
-        report_event = next(
-            event for event in events if event.type == "fullstack.consistency.report"
+
+    def test_consistency_retries_at_most_twice_then_fails(self) -> None:
+        """自愈最多 2 次；仍不一致时在一致性格点终止，不进入构建。"""
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        sandbox.files["src/App.jsx"] = (
+            "const INTERACTIONS = "
+            + json.dumps(
+                [
+                    {
+                        "component": "TaskStream",
+                        "method": "GET",
+                        "apiRoute": "/api/v1/tasks/stream",
+                        "payloadKey": "",
+                    }
+                ],
+                ensure_ascii=False,
+            )
+            + "\nexport default function App() { return <main /> }\n"
         )
-        self.assertFalse(report_event.payload["ok"])
-        self.assertEqual(report_event.payload["issues"][0]["kind"], "path")
-        self.assertIn("/api/v1/todos", report_event.payload["issues"][0]["suggestion"])
+        buffer = RunEventBuffer("fsk_consistency_retry_limit")
+        runner = FullstackGraphRunner(sandbox, event_sink=buffer)
+
+        from ai_core.fullstack import graph as graph_module
+        from ai_core.fullstack.consistency import (
+            BackendRoute,
+            ConsistencyIssue,
+            ConsistencyReport,
+        )
+
+        failing_report = ConsistencyReport(
+            calls_checked=1,
+            backend_routes=(BackendRoute("GET", "/api/v1/todos"),),
+            issues=(
+                ConsistencyIssue(
+                    kind="path",
+                    component="TaskStream",
+                    method="GET",
+                    path="/api/v1/tasks/stream",
+                    message="后端未注册该路径（Method + Path 完全匹配失败）",
+                    suggestion="由 BackendCoder 补齐",
+                    fix_action="ADD_BACKEND_ROUTE",
+                ),
+            ),
+        )
+        original = graph_module.verify_consistency
+        graph_module.verify_consistency = lambda *_args, **_kwargs: failing_report
+        try:
+            with self.assertRaises(FullstackConsistencyError) as ctx:
+                runner.run(
+                    {
+                        "run_id": "fsk_consistency_retry_limit",
+                        "project_id": "proj_fullstack",
+                        "sandbox_id": sandbox.handle.sandbox_id,
+                        "preview_url": sandbox.handle.preview_url,
+                        "contract": _contract(),
+                        "files": [],
+                    }
+                )
+        finally:
+            graph_module.verify_consistency = original
+
+        self.assertEqual(ctx.exception.node, "ConsistencyVerifier")
+        self.assertEqual(sandbox.verified, [])
+        self.assertEqual(sandbox.restarts, [])
+        events = buffer.snapshot()
+        backend_starts = [
+            event
+            for event in events
+            if event.type == "fullstack.node.started"
+            and event.payload["node"] == "BackendCoder"
+        ]
+        # 初始生成 1 次 + 自愈 2 次。
+        self.assertEqual(len(backend_starts), 3)
+        repairs = [
+            event for event in events if event.type == "fullstack.consistency.repair"
+        ]
+        self.assertEqual([event.payload["attempt"] for event in repairs], [1, 2])
+
+    def test_resume_assistant_business_actions_are_all_registered(self) -> None:
+        """回归用户用例：抓取 / 改写 / 投递 / 对话四个业务动作必须独立对齐。"""
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/jobs/scrape",
+                    description="抓取 JD",
+                ),
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/resumes/{id}/rewrite",
+                    description="AI 改写简历",
+                ),
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/applications/deliver",
+                    description="投递职位",
+                ),
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/chat/messages",
+                    description="对话消息",
+                ),
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/resumes",
+                    description="创建简历",
+                ),
+            ],
+            databaseDdl=(
+                "CREATE TABLE resumes (\n"
+                "  id BIGINT PRIMARY KEY AUTO_INCREMENT,\n"
+                "  name VARCHAR(200) NOT NULL,\n"
+                "  status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',\n"
+                "  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP\n"
+                ");"
+            ),
+            components=[
+                {"name": "ScrapeButton"},
+                {"name": "RewriteButton"},
+                {"name": "DeliverButton"},
+                {"name": "ChatPanel"},
+            ],
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="ScrapeButton",
+                    event="click",
+                    api_route="POST /api/v1/jobs/scrape",
+                    logic="抓取 JD",
+                ),
+                ArchitectComponentInteraction(
+                    component="RewriteButton",
+                    event="click",
+                    api_route="POST /api/v1/resumes/{id}/rewrite",
+                    logic="AI 改写简历",
+                ),
+                ArchitectComponentInteraction(
+                    component="DeliverButton",
+                    event="click",
+                    api_route="POST /api/v1/applications/deliver",
+                    logic="投递职位",
+                ),
+                ArchitectComponentInteraction(
+                    component="ChatPanel",
+                    event="click",
+                    api_route="POST /api/v1/chat/messages",
+                    logic="对话消息",
+                ),
+            ],
+        )
+        # 模拟真实项目流：契约确认后先由 FrontendCoder 生成含 INTERACTIONS 的
+        # App.jsx，再做全栈生成。FrontendCoder（fullstack 模式）只挂数据面板，
+        # 不会覆盖已有页面，因此这里必须预置真实前端骨架。
+        sandbox.files["src/App.jsx"] = generate_frontend_skeleton_bundle(
+            contract
+        ).files["src/App.jsx"]
+        buffer = RunEventBuffer("fsk_resume_assistant")
+        runner = FullstackGraphRunner(sandbox, event_sink=buffer)
+
+        runner.run(
+            {
+                "run_id": "fsk_resume_assistant",
+                "project_id": "proj_resume",
+                "sandbox_id": sandbox.handle.sandbox_id,
+                "preview_url": sandbox.handle.preview_url,
+                "contract": contract,
+                "files": [],
+            }
+        )
+
+        manifest = json.loads(sandbox.files["server/api-routes.json"])
+        registered = {(item["method"], item["path"]) for item in manifest["routes"]}
+        expected = {
+            ("POST", "/api/v1/jobs/scrape"),
+            ("POST", "/api/v1/resumes/:id/rewrite"),
+            ("POST", "/api/v1/applications/deliver"),
+            ("POST", "/api/v1/chat/messages"),
+            ("POST", "/api/v1/resumes"),
+        }
+        self.assertTrue(expected.issubset(registered))
+        code = sandbox.files["server/index.js"]
+        for method, path in expected - {("POST", "/api/v1/resumes")}:
+            self.assertIn(f'app.{method.lower()}("{path}"', code)
+        # 前端 App.jsx 中四个业务请求与后端注册路径逐字符一致。
+        app = sandbox.files["src/App.jsx"]
+        for path in (
+            "/api/v1/jobs/scrape",
+            "/api/v1/resumes/:id/rewrite",
+            "/api/v1/applications/deliver",
+            "/api/v1/chat/messages",
+        ):
+            self.assertIn(path, app)
+        events = buffer.snapshot()
+        reports = [
+            event for event in events if event.type == "fullstack.consistency.report"
+        ]
+        self.assertTrue(reports[0].payload["ok"], reports[0].payload["summary"])
+        self.assertFalse(
+            any(event.type == "fullstack.consistency.repair" for event in events)
+        )
+        self.assertEqual(sandbox.verified, [(sandbox.handle.sandbox_id, "build")])
+        self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/api/health")])
 
     def test_frontend_mode_runs_three_nodes_and_probes_root(self) -> None:
         """契约确认后的前端初始化只生成 App.jsx，不写后端 / 部署文件。"""

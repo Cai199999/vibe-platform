@@ -25,11 +25,10 @@
 
 from __future__ import annotations
 
-import difflib
 import json
 import re
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping
 
 from ai_core.domain.architect import ArchitectContract
 from ai_core.fullstack.coders import (
@@ -86,7 +85,14 @@ class FrontendCall:
 
 @dataclass(frozen=True)
 class ConsistencyIssue:
-    """一处可定位、可修复的跨端差异。"""
+    """一处可定位、可修复的跨端差异。
+
+    ``fix_action`` 是给 Coder 的机器可读指令，不是给用户看的文案：
+      - ``ADD_BACKEND_ROUTE``：BackendCoder 补齐缺失的 Method + Path；
+      - ``EXTEND_BACKEND_FIELD``：BackendCoder 扩展可写字段/请求体映射。
+    一致性检查的职责是**业务语义对齐**，绝不能把前端请求改成某个无关的
+    现有路径来“消掉”差异。
+    """
 
     kind: str
     component: str
@@ -94,6 +100,7 @@ class ConsistencyIssue:
     path: str
     message: str
     suggestion: str
+    fix_action: str = ""
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -103,6 +110,7 @@ class ConsistencyIssue:
             "path": self.path,
             "message": self.message,
             "suggestion": self.suggestion,
+            "fixAction": self.fix_action,
         }
 
 
@@ -118,6 +126,35 @@ class ConsistencyReport:
     @property
     def ok(self) -> bool:
         return not self.issues
+
+    def missing_routes(self) -> tuple[dict[str, str], ...]:
+        """需要 BackendCoder 补齐的路由（按 Method + Path 去重）。
+
+        只包含可通过“注册后端路由”解决的差异；Payload 字段问题无法靠
+        新增路由修复，因此不进入自愈路由列表，避免无意义的重复重试。
+        """
+        routes: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for issue in self.issues:
+            if issue.kind not in {"path", "method"}:
+                continue
+            key = (issue.method, issue.path)
+            if key in seen:
+                continue
+            seen.add(key)
+            routes.append(
+                {
+                    "method": issue.method,
+                    "path": issue.path,
+                    "description": f"{issue.component}：{issue.message}",
+                }
+            )
+        return tuple(routes)
+
+    @property
+    def repairable(self) -> bool:
+        """是否存在可由 BackendCoder 自动补齐的路由差异。"""
+        return bool(self.missing_routes())
 
     def summary(self) -> str:
         if self.ok:
@@ -140,7 +177,16 @@ class ConsistencyReport:
                 f"{index}. [{issue.kind}] {issue.component} 请求 "
                 f"{issue.method} {issue.path}：{issue.message}"
             )
-            lines.append(f"   修复建议：{issue.suggestion}")
+            lines.append(
+                f"   修复动作（{issue.fix_action or 'MANUAL'}）：{issue.suggestion}"
+            )
+        if self.missing_routes():
+            lines.append(
+                "请 BackendCoder 补齐以下路由；前端业务请求保持不变："
+                + "；".join(
+                    f"{item['method']} {item['path']}" for item in self.missing_routes()
+                )
+            )
         lines.append(
             "后端已注册路由："
             + "；".join(f"{route.method} {route.path}" for route in self.backend_routes)
@@ -154,6 +200,8 @@ class ConsistencyReport:
             "callsChecked": self.calls_checked,
             "checkedFiles": list(self.checked_files),
             "backendRoutes": [route.to_dict() for route in self.backend_routes],
+            "missingRoutes": list(self.missing_routes()),
+            "repairable": self.repairable,
             "issues": [issue.to_dict() for issue in self.issues],
         }
 
@@ -197,7 +245,7 @@ def verify_consistency(
         shape = _path_shape(call.path)
         candidates = route_by_shape.get(shape, [])
         if not candidates:
-            issues.append(_path_issue(call, backend_routes, route_by_shape))
+            issues.append(_path_issue(call))
             continue
         methods = {route.method for route in candidates}
         if call.method not in methods:
@@ -212,9 +260,10 @@ def verify_consistency(
                         f"{'/'.join(sorted(methods))}，前端使用了 {call.method}"
                     ),
                     suggestion=(
-                        f"把前端请求方法改为 {sorted(methods)[0]}，"
-                        f"或在 BackendCoder 中同时注册 {call.method} 路由"
+                        f"由 BackendCoder 为 {call.path} 增加 {call.method} "
+                        "方法及对应业务处理逻辑；前端 Method 保持不变"
                     ),
+                    fix_action="ADD_BACKEND_ROUTE",
                 )
             )
             continue
@@ -248,22 +297,57 @@ def extract_backend_routes(
     files: Mapping[str, str],
     contract: ArchitectContract,
 ) -> list[BackendRoute]:
-    """从 ``server/api-routes.json`` 读取后端路由，并补齐固定通用路由。"""
-    manifest = _read_route_manifest(files.get("server/api-routes.json"))
-    routes = contract.api_routes or []
-    collection = manifest.get("collection") or _express_path(collection_path(routes))
-    item = manifest.get("item") or _express_path(item_path(routes, collection))
+    """从 ``server/api-routes.json`` 读取后端路由，并补齐固定通用路由。
 
+    新清单的 ``routes`` 是 BackendCoder **实际注册**的完整路由表（含
+    抓取 / 改写 / 投递 / 对话等业务端点）；只有旧清单才回退到
+    ``collection`` / ``item`` / ``contractRoutes``。
+    """
+    manifest = _read_route_manifest(files.get("server/api-routes.json"))
     result: list[BackendRoute] = [
         BackendRoute("GET", HEALTH_PATH, "express.template"),
-        BackendRoute("GET", collection, "express.collection"),
-        BackendRoute("POST", collection, "express.collection"),
         BackendRoute("GET", GENERIC_DATA_PATH, "express.template"),
         BackendRoute("POST", GENERIC_DATA_PATH, "express.template"),
     ]
+
+    manifest_routes = manifest.get("routes")
+    if isinstance(manifest_routes, list) and manifest_routes:
+        for raw in manifest_routes:
+            if not isinstance(raw, dict):
+                continue
+            method = str(raw.get("method") or "GET").upper().strip()
+            path = _normalize_path(str(raw.get("path") or ""))
+            if not method or not path.startswith("/api/"):
+                continue
+            result.append(
+                BackendRoute(method, path, str(raw.get("source") or "express"))
+            )
+        return _dedupe_routes(result)
+
+    routes = contract.api_routes or []
+    collection = manifest.get("collection") or _express_path(collection_path(routes))
+    item = manifest.get("item") or _express_path(item_path(routes, collection))
+    result.extend(
+        [
+            BackendRoute("GET", collection, "express.collection"),
+            BackendRoute("POST", collection, "express.collection"),
+        ]
+    )
     if item and item != collection:
         for method in ("GET", "PUT", "PATCH", "DELETE"):
             result.append(BackendRoute(method, item, "express.item"))
+
+    # 旧版清单可能已经写入 contractRoutes，但仍缺少完整 routes 表；
+    # 这些路由同样是后端实际注册的业务端点，必须参与一致性比对。
+    contract_routes = manifest.get("contractRoutes")
+    if isinstance(contract_routes, list):
+        for raw in contract_routes:
+            if not isinstance(raw, dict):
+                continue
+            method = str(raw.get("method") or "GET").upper().strip()
+            path = _normalize_path(str(raw.get("path") or ""))
+            if method and path.startswith("/api/"):
+                result.append(BackendRoute(method, path, "express.contract"))
     return _dedupe_routes(result)
 
 
@@ -402,57 +486,25 @@ def _js_string_constant(content: str, name: str) -> str:
 # ------------------------------------------------------------
 # 比对工具
 # ------------------------------------------------------------
-def _path_issue(
-    call: FrontendCall,
-    routes: Sequence[BackendRoute],
-    route_by_shape: Mapping[tuple[str, ...], Sequence[BackendRoute]],
-) -> ConsistencyIssue:
-    """路径不存在：优先推荐同 Method 的最相近路由。"""
-    same_method = [route for route in routes if route.method == call.method]
-    suggestion = _closest_route(call, same_method) or _closest_route(call, routes)
-    if suggestion is None:
-        hint = "后端没有任何可用路由，请先检查 BackendCoder 输出"
-    else:
-        hint = f"把前端请求改为 {suggestion.method} {suggestion.path}"
+def _path_issue(call: FrontendCall) -> ConsistencyIssue:
+    """路径不存在：生成“让后端补齐”的 FixAction，绝不改前端到无关路径。
+
+    业务语义对齐的前提是：前端调用什么动作，后端就该有同名端点。
+    把“聊天 / 投递”改成“请求简历接口”只会让业务逻辑彻底崩溃。
+    """
     return ConsistencyIssue(
         kind="path",
         component=call.component,
         method=call.method,
         path=call.path,
         message="后端未注册该路径（Method + Path 完全匹配失败）",
-        suggestion=hint,
+        suggestion=(
+            f"由 BackendCoder 补充注册 {call.method} {call.path}，"
+            f"并实现与「{call.component}」语义匹配的业务逻辑或 Mock 响应；"
+            "前端请求路径保持不变"
+        ),
+        fix_action="ADD_BACKEND_ROUTE",
     )
-
-
-def _closest_route(
-    call: FrontendCall,
-    routes: Iterable[BackendRoute],
-) -> BackendRoute | None:
-    """选择最相近的后端路由作为修复建议。
-
-    排序键：公共路径前缀越长越优先；前缀相同时优先更短的资源根路径。
-    这样 ``/api/v1/tasks/stream`` 会推荐集合路由 ``/api/v1/tasks``，
-    而不是 ``/api/v1/tasks/:id``。
-    """
-    target_shape = _path_shape(call.path)
-    target = "/".join(target_shape)
-    best: tuple[tuple[int, int, float], BackendRoute] | None = None
-    for route in routes:
-        candidate_shape = _path_shape(route.path)
-        common = 0
-        for left, right in zip(target_shape, candidate_shape):
-            if left != right:
-                break
-            common += 1
-        candidate = "/".join(candidate_shape)
-        score = (
-            common,
-            -len(candidate_shape),
-            difflib.SequenceMatcher(None, target, candidate).ratio(),
-        )
-        if best is None or score > best[0]:
-            best = (score, route)
-    return best[1] if best else None
 
 
 def _payload_issue(
@@ -475,23 +527,14 @@ def _payload_issue(
             f"请求体字段 `{call.payload_key}` 不在后端可写列中" f"（可写列：{columns}）"
         ),
         suggestion=(
-            f"把 payloadKey 改为 {_preferred_payload_column(writable_columns)}"
+            f"由 BackendCoder 在数据库可写列或请求体映射中支持字段 "
+            f"`{call.payload_key}`（当前可写列：{columns}）；"
+            "不要把前端请求改到无关业务接口"
             if writable_columns
-            else "在 databaseDdl 中补充可写字段，或改为纯前端交互"
+            else "由 BackendCoder 在 databaseDdl 中补充该字段，或确认该请求字段是否应写入持久层"
         ),
+        fix_action="EXTEND_BACKEND_FIELD",
     )
-
-
-def _preferred_payload_column(columns: Sequence[str]) -> str:
-    """优先推荐 name / title / label，避免建议用户提交 tenant_id。"""
-    lowered = {column.casefold(): column for column in columns}
-    for preferred in ("name", "title", "label"):
-        if preferred in lowered:
-            return lowered[preferred]
-    business = [
-        column for column in columns if column.casefold() not in {"tenant_id", "status"}
-    ]
-    return business[0] if business else columns[0]
 
 
 def _writable_columns(contract: ArchitectContract) -> list[str]:

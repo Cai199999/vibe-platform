@@ -292,6 +292,28 @@ _NON_COLLECTION_SUFFIXES = (
     "/tailor",
     "/approve",
     "/reject",
+    # 业务动作不是 CRUD 集合根：/jobs/scrape、/chat/messages、
+    # /applications/deliver 等必须由独立路由处理，不能被当作数据表。
+    "/scrape",
+    "/rewrite",
+    "/deliver",
+    "/messages",
+    "/chat",
+    "/analyze",
+    "/generate",
+    "/submit",
+    "/send",
+    "/reply",
+    "/cancel",
+    "/retry",
+    "/execute",
+    "/process",
+    "/match",
+    "/recommend",
+    "/apply",
+    "/publish",
+    "/parse",
+    "/extract",
 )
 
 
@@ -511,13 +533,142 @@ def _express_path(path: str) -> str:
     return re.sub(r"\{(\w+)\}", r":\1", path.strip())
 
 
-def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
+_EXPRESS_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+
+
+def _coerce_route(
+    raw: ArchitectApiRoute | dict[str, Any] | Any,
+) -> ArchitectApiRoute | None:
+    """把契约路由或自愈列表中的普通字典统一成 ``ArchitectApiRoute``。"""
+    if isinstance(raw, ArchitectApiRoute):
+        return raw
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return ArchitectApiRoute.model_validate(
+            {
+                "method": str(raw.get("method") or "GET"),
+                "path": str(raw.get("path") or ""),
+                "request": str(raw.get("request") or ""),
+                "response": str(raw.get("response") or ""),
+                "description": str(
+                    raw.get("description") or raw.get("reason") or "一致性补齐路由"
+                ),
+            }
+        )
+    except Exception:  # noqa: BLE001 - 单条脏数据不应阻断整次生成
+        return None
+
+
+def _merge_routes(
+    routes: Iterable[ArchitectApiRoute],
+    extra_routes: Iterable[ArchitectApiRoute | dict[str, Any]] | None,
+) -> list[ArchitectApiRoute]:
+    """合并契约路由与自愈补齐路由，按 (Method, Path) 去重。
+
+    前端可能对同一路径声明多个动作（例如 GET/POST 同路径），因此不能只按
+    Path 去重；同时过滤非法方法与非 ``/api/`` 路径，避免生成不可注册代码。
+    """
+    merged: list[ArchitectApiRoute] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in [*routes, *(extra_routes or [])]:
+        route = _coerce_route(raw)
+        if route is None:
+            continue
+        method = str(route.method or "GET").upper().strip()
+        path = str(route.path or "").split("?", 1)[0].strip()
+        if method not in _EXPRESS_METHODS or not path.startswith("/api/"):
+            continue
+        key = (method, path)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(
+            ArchitectApiRoute(
+                method=method,
+                path=path,
+                request=route.request,
+                response=route.response,
+                description=route.description,
+                auth_required=route.auth_required,
+            )
+        )
+    return merged
+
+
+def _business_route_code(route: ArchitectApiRoute) -> str:
+    """为一个契约业务动作生成独立 Express 路由 + 确定性 Mock 处理逻辑。
+
+    绝不能把“抓取 JD / AI 改写 / 投递 / 对话”折叠到通用 CRUD：路径必须
+    与前端逐字符一致，响应必须携带 success/route/data，前端可据此渲染。
+    """
+    method = str(route.method).upper()
+    path = _express_path(route.path)
+    label = f"{method} {path}"
+    description = route.description or f"{label} 业务动作"
+    label_js = json.dumps(label, ensure_ascii=False)
+    description_js = json.dumps(description, ensure_ascii=False)
+    if method == "GET":
+        payload = (
+            "  response.json({\n"
+            "    success: true,\n"
+            f"    route: {label_js},\n"
+            f"    description: {description_js},\n"
+            "    data: [],\n"
+            "    items: [],\n"
+            "  })\n"
+        )
+    elif method == "DELETE":
+        payload = (
+            "  response.json({\n"
+            "    success: true,\n"
+            f"    route: {label_js},\n"
+            f"    description: {description_js},\n"
+            "    data: { deleted: true },\n"
+            "  })\n"
+        )
+    else:
+        status = 201 if method == "POST" else 200
+        message_js = json.dumps(f"{description}（沙盒 Mock 响应）", ensure_ascii=False)
+        payload = (
+            "  const body = request.body && typeof request.body === 'object'"
+            " ? request.body : {}\n"
+            f"  response.status({status}).json({{\n"
+            "    success: true,\n"
+            f"    route: {label_js},\n"
+            f"    description: {description_js},\n"
+            "    data: Object.assign({ id: `mock-${Date.now()}` }, body),\n"
+            f"    message: {message_js},\n"
+            "  })\n"
+        )
+    return (
+        f"// 契约业务动作：{description}\n"
+        f"app.{method.lower()}("
+        f"{json.dumps(path, ensure_ascii=False)}, asyncHandler(async (request, response) => {{\n"
+        f"{payload}"
+        "}))\n"
+    )
+
+
+def generate_backend_bundle(
+    contract: ArchitectContract,
+    *,
+    extra_routes: Iterable[ArchitectApiRoute | dict[str, Any]] | None = None,
+) -> GeneratedBundle:
     """按契约 apiRoutes 生成 Express + Sequelize 后端。
 
     ``server/db.js`` 与 ``server/package.json`` 由 DBACoder 一并生成；
     BackendCoder 负责 HTTP 层、依赖清单与运行说明，保持节点职责清晰。
+
+    契约铁律（确定性模板没有可编辑的 System Prompt，规则直接固化在生成器）：
+    契约里的**每一个业务动作**（抓取 JD、AI 改写、投递、对话等）都必须
+    注册独立且语义匹配的 Express 路由，禁止只用一个通用 CRUD 接口敷衍。
+    没有专属持久化需求的动作生成确定性 Mock 处理逻辑，保证前端请求不会 404。
+
+    ``extra_routes`` 供一致性自愈使用：ConsistencyVerifier 发现缺失路由后，
+    把 ``{method, path, description}`` 列表回传给 BackendCoder 补齐。
     """
-    routes = contract.api_routes or []
+    routes = _merge_routes(contract.api_routes or [], extra_routes)
     table = extract_table_name(contract.database_ddl)
     column_defs = extract_column_defs(contract.database_ddl)
     columns = [name for name, _ in column_defs]
@@ -541,6 +692,35 @@ def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
     server_code = EXPRESS_SERVER_TEMPLATE
     for key, value in replacements.items():
         server_code = server_code.replace(key, value)
+
+    # 通用 CRUD 已覆盖的路由不再重复注册；其余契约动作逐个生成独立端点。
+    # 前端请求路径与 Express 注册路径都经过 _express_path，保证逐字符一致。
+    registered: list[tuple[str, str, str]] = [
+        ("GET", "/api/health", "express.template"),
+        ("GET", express_base, "express.collection"),
+        ("POST", express_base, "express.collection"),
+        ("GET", "/api/data", "express.template"),
+        ("POST", "/api/data", "express.template"),
+    ]
+    if detail and detail != express_base:
+        for method in ("GET", "PUT", "PATCH", "DELETE"):
+            registered.append((method, detail, "express.item"))
+    registered_keys = {(method, path) for method, path, _source in registered}
+
+    business_snippets: list[str] = []
+    for route in routes:
+        method = str(route.method or "GET").upper()
+        path = _express_path(str(route.path or ""))
+        key = (method, path)
+        if key in registered_keys:
+            continue
+        business_snippets.append(_business_route_code(route))
+        registered.append((method, path, "express.contract"))
+        registered_keys.add(key)
+    server_code = server_code.replace(
+        "__CONTRACT_BUSINESS_ROUTES__",
+        "\n".join(business_snippets) or "// 契约未声明额外业务路由。",
+    )
 
     route_lines = []
     for route in routes:
@@ -583,6 +763,12 @@ def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
                 "prefix": "/api",
                 "collection": express_base,
                 "item": detail,
+                # routes 是后端**实际注册**的完整路由表；一致性检查以它为准，
+                # 不再只读取 collection / item 两个通用端点。
+                "routes": [
+                    {"method": method, "path": path, "source": source}
+                    for method, path, source in registered
+                ],
                 "contractRoutes": [
                     {
                         "method": str(route.method or "GET").upper(),
@@ -615,7 +801,8 @@ def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
         files=files,
         summary=(
             f"生成 Express + Sequelize 后端（{engine_label}），"
-            f"{len(routes) or 2} 条 REST 路由"
+            f"{len(routes) or 2} 条契约路由，"
+            f"{len(business_snippets)} 条独立业务端点"
         ),
         metadata={
             "table": table,
@@ -632,6 +819,11 @@ def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
                 {"method": str(r.method or "GET").upper(), "path": str(r.path or "")}
                 for r in routes
             ],
+            "registeredRoutes": [
+                {"method": method, "path": path, "source": source}
+                for method, path, source in registered
+            ],
+            "businessRouteCount": len(business_snippets),
         },
     )
 

@@ -3,7 +3,10 @@
 拓扑::
 
     START -> DBACoder -> BackendCoder -> FrontendCoder -> InfraCoder
-          -> ConsistencyVerifier -> BuildVerifier -> SandboxRestart -> END
+          -> ConsistencyVerifier -[通过]-> BuildVerifier -> SandboxRestart -> END
+                 ^                     |
+                 |                     +-[缺失路由]-> BackendCoder（补齐后重检）
+                 +-----------------------------------+
 
 设计说明：
 
@@ -11,11 +14,11 @@
     Checkpoint：生成失败时重新点一次“开始生成全栈代码”即可幂等重跑；
   - DBACoder / BackendCoder / FrontendCoder / InfraCoder 使用确定性模板，
     保证离线、Mock 与真实模型环境行为一致；
-  - DBACoder 生成 Sequelize ORM（生产走 DATABASE_URL，沙盒回退 SQLite）；
-  - InfraCoder 生成 Dockerfile / render.yaml / .env.example 等一键部署配置；
-  - ConsistencyVerifier 在全部代码生成后、进入沙盒构建前比对前端请求
-    与后端路由；不一致时直接阻断，并把 Method / Path / Payload 差异报告
-    交给 Coder 修复；
+  - BackendCoder 为契约中的每个业务动作注册独立路由，通用 CRUD 不能替代
+    抓取 / 改写 / 投递 / 对话等语义端点；
+  - ConsistencyVerifier 在构建前比对前端请求与后端实际路由；缺失路由时
+    生成 FixAction 回传 BackendCoder 自动补齐，最多重试 2 次，仍不一致才
+    向用户报错。它只做业务语义对齐，绝不建议前端改到无关路径；
   - 构建校验与沙盒重启放在图内，失败会带节点名进入 ``fullstack.failed``，
     前端可准确定位是“代码生成失败”还是“服务启动失败”。
 """
@@ -42,7 +45,7 @@ from ai_core.fullstack.coders import (
 from ai_core.fullstack.consistency import (
     ConsistencyError,
     ConsistencyReport,
-    ensure_consistency,
+    verify_consistency,
 )
 from ai_core.ports.sandbox import SandboxProvider
 
@@ -50,6 +53,8 @@ logger = logging.getLogger(__name__)
 
 # 节点总数用于日志与 SSE 的 index/total；新增节点时只需改这一处。
 GRAPH_NODE_TOTAL = 7
+# 一致性检查失败后，最多把缺失路由回传 BackendCoder 自愈 2 次。
+MAX_CONSISTENCY_REPAIRS = 2
 # 对话前置模式的初始前端骨架只执行三个节点。
 FRONTEND_GRAPH_NODE_TOTAL = 3
 FULLSTACK_NODE_ORDER = [
@@ -118,6 +123,12 @@ class FullstackState(TypedDict, total=False):
     frontend_files: list[str]
     infra_files: list[str]
     frontend_entry: str
+    # ---- 一致性自愈状态 ----
+    consistency_fix_routes: list[dict[str, str]]
+    consistency_applied_routes: list[dict[str, str]]
+    consistency_repair_count: int
+    consistency_ok: bool
+    needs_backend_repair: bool
 
 
 class FullstackGraphRunner:
@@ -182,14 +193,41 @@ class FullstackGraphRunner:
         builder.add_node("ConsistencyVerifier", self._consistency_verifier)
         builder.add_edge(START, "DBACoder")
         builder.add_edge("DBACoder", "BackendCoder")
-        builder.add_edge("BackendCoder", "FrontendCoder")
+        # 正常生成：BackendCoder -> FrontendCoder；
+        # 一致性自愈：BackendCoder 补齐路由后直接回到 ConsistencyVerifier。
+        builder.add_conditional_edges(
+            "BackendCoder",
+            self._route_after_backend_coder,
+            {
+                "frontend": "FrontendCoder",
+                "consistency": "ConsistencyVerifier",
+            },
+        )
         builder.add_edge("FrontendCoder", "InfraCoder")
         # 全部代码生成完毕、进入沙盒构建前，先做跨端接口一致性校验。
         builder.add_edge("InfraCoder", "ConsistencyVerifier")
-        builder.add_edge("ConsistencyVerifier", "BuildVerifier")
+        # 通过 -> 构建；缺失路由 -> BackendCoder 自愈；重试耗尽在节点内抛错。
+        builder.add_conditional_edges(
+            "ConsistencyVerifier",
+            self._route_after_consistency_verifier,
+            {
+                "build": "BuildVerifier",
+                "repair": "BackendCoder",
+            },
+        )
         builder.add_edge("BuildVerifier", "SandboxRestart")
         builder.add_edge("SandboxRestart", END)
         return builder.compile()
+
+    @staticmethod
+    def _route_after_backend_coder(state: FullstackState) -> str:
+        """修复模式只回一致性检查；正常模式继续生成前端。"""
+        return "consistency" if state.get("needs_backend_repair") else "frontend"
+
+    @staticmethod
+    def _route_after_consistency_verifier(state: FullstackState) -> str:
+        """一致性通过才允许构建，否则回到 BackendCoder 补齐缺失路由。"""
+        return "build" if state.get("consistency_ok") else "repair"
 
     # --------------------------------------------------------
     # 节点：DBACoder
@@ -224,17 +262,28 @@ class FullstackGraphRunner:
         started = time.monotonic()
         self._node_started("BackendCoder", state)
         try:
-            bundle = generate_backend_bundle(contract)
+            # 正常生成时 fix_routes 为空；自愈时把缺失路由合并进契约路由，
+            # 重新生成 server/index.js 与 api-routes.json。
+            fix_routes = list(state.get("consistency_fix_routes") or [])
+            applied_routes = list(state.get("consistency_applied_routes") or [])
+            for route in fix_routes:
+                if route not in applied_routes:
+                    applied_routes.append(route)
+            bundle = generate_backend_bundle(contract, extra_routes=applied_routes)
             files = self._write_bundle(state, bundle)
             collection = str(bundle.metadata.get("collectionPath") or "")
+            summary = bundle.summary
+            if fix_routes:
+                summary = f"一致性自愈：补齐 {len(fix_routes)} 条缺失路由；" + summary
             self._emit_outputs("BackendCoder", bundle, state)
-            self._node_completed(
-                "BackendCoder", state, bundle.summary, bundle.files, started
-            )
+            self._node_completed("BackendCoder", state, summary, bundle.files, started)
             return {
                 "backend_files": sorted(bundle.files),
                 "collection_path": collection,
                 "files": files,
+                "consistency_fix_routes": [],
+                "consistency_applied_routes": applied_routes,
+                "needs_backend_repair": False,
             }
         except Exception as exc:
             self._node_failed("BackendCoder", state, exc)
@@ -311,13 +360,15 @@ class FullstackGraphRunner:
     # 节点：ConsistencyVerifier
     # --------------------------------------------------------
     def _consistency_verifier(self, state: FullstackState) -> dict[str, Any]:
-        """比对前端请求与后端路由；不一致时阻断进入沙盒。
+        """比对前端请求与后端路由；缺失路由时驱动 BackendCoder 自愈。
 
         读取顺序即“最终事实”：
           1. 前端：``src/App.jsx`` 的 INTERACTIONS + ``src/fullstack-api.jsx``
              的 COLLECTION_PATH；
-          2. 后端：``server/api-routes.json``（BackendCoder 生成）。
+          2. 后端：``server/api-routes.json``（BackendCoder 生成，含全部
+             实际注册的业务路由）。
         校验只做静态解析，不启动服务，因此失败不会产生半启动的沙盒。
+        缺失路由最多回传 BackendCoder 补齐 2 次；通过后才允许进入构建。
         """
         contract = state["contract"]
         sandbox_id = state["sandbox_id"]
@@ -335,33 +386,72 @@ class FullstackGraphRunner:
                 snapshot[path] = content
 
         try:
-            report = ensure_consistency(snapshot, contract)
-        except ConsistencyError as exc:
-            # 差异报告单独推送一次，前端可以直接渲染 issue 列表。
-            self._emit(
-                "fullstack.consistency.report",
-                {"runId": state["run_id"], **exc.report.to_dict()},
-            )
-            self._node_failed("ConsistencyVerifier", state, exc)
-            raise FullstackConsistencyError(exc.report) from exc
+            report = verify_consistency(snapshot, contract)
         except Exception as exc:
             self._node_failed("ConsistencyVerifier", state, exc)
             raise FullstackGenerationError(
                 f"接口一致性检查失败: {exc}", node="ConsistencyVerifier"
             ) from exc
 
+        # 差异报告单独推送一次，前端可以直接渲染 issue 列表。
         self._emit(
             "fullstack.consistency.report",
             {"runId": state["run_id"], **report.to_dict()},
         )
-        self._node_completed(
-            "ConsistencyVerifier",
-            state,
-            report.summary(),
-            [],
-            started,
-        )
-        return {}
+        if report.ok:
+            self._node_completed(
+                "ConsistencyVerifier",
+                state,
+                report.summary(),
+                [],
+                started,
+            )
+            return {"consistency_ok": True, "needs_backend_repair": False}
+
+        repair_count = int(state.get("consistency_repair_count") or 0)
+        missing_routes = list(report.missing_routes())
+        if missing_routes and repair_count < MAX_CONSISTENCY_REPAIRS:
+            # 自愈：把缺失路由作为 FixAction 回传 BackendCoder，补齐后重检。
+            # 不向用户抛错，也不允许把前端请求改到无关的现有路径。
+            next_count = repair_count + 1
+            logger.warning(
+                "ConsistencyVerifier 缺失 %d 条路由，转 BackendCoder 自愈 [%d/%d] run_id=%s",
+                len(missing_routes),
+                next_count,
+                MAX_CONSISTENCY_REPAIRS,
+                state.get("run_id"),
+            )
+            self._emit(
+                "fullstack.consistency.repair",
+                {
+                    "runId": state["run_id"],
+                    "attempt": next_count,
+                    "maxAttempts": MAX_CONSISTENCY_REPAIRS,
+                    "node": "BackendCoder",
+                    "missingRoutes": missing_routes,
+                    "report": report.to_dict(),
+                },
+            )
+            self._node_completed(
+                "ConsistencyVerifier",
+                state,
+                (
+                    f"发现 {len(missing_routes)} 条缺失路由，转交 BackendCoder "
+                    f"补齐（第 {next_count}/{MAX_CONSISTENCY_REPAIRS} 次）"
+                ),
+                [],
+                started,
+            )
+            return {
+                "consistency_ok": False,
+                "needs_backend_repair": True,
+                "consistency_fix_routes": missing_routes,
+                "consistency_repair_count": next_count,
+            }
+
+        # 重试耗尽，或差异无法通过补齐路由解决（如 Payload 字段冲突）。
+        self._node_failed("ConsistencyVerifier", state, ConsistencyError(report))
+        raise FullstackConsistencyError(report)
 
     # --------------------------------------------------------
     # 节点：BuildVerifier
@@ -592,6 +682,7 @@ class FullstackGraphRunner:
 
 __all__ = [
     "GRAPH_NODE_TOTAL",
+    "MAX_CONSISTENCY_REPAIRS",
     "FullstackBuildError",
     "FullstackConsistencyError",
     "FullstackGenerationError",

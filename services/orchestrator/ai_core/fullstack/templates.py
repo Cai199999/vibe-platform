@@ -491,6 +491,11 @@ if (ITEM_PATH && ITEM_PATH !== COLLECTION_PATH) {
   }))
 }
 
+// ---- 契约业务路由 ----
+// BackendCoder 为契约里的每个业务动作生成独立端点；通用 CRUD 只是基础能力，
+// 绝不能替代抓取 / 改写 / 投递 / 对话等语义路由。
+__CONTRACT_BUSINESS_ROUTES__
+
 app.use((request, response) => {
   response.status(404).json({
     code: 'ROUTE_NOT_FOUND',

@@ -123,7 +123,7 @@ class ConsistencyTest(unittest.TestCase):
         self.assertIn(("POST", "/api/v1/tasks"), routes)
         self.assertIn(("DELETE", "/api/v1/tasks/:id"), routes)
 
-    def test_path_mismatch_blocks_and_suggests_backend_route(self) -> None:
+    def test_path_mismatch_emits_backend_fix_action(self) -> None:
         contract = _contract(
             interactions=[
                 ArchitectComponentInteraction(
@@ -147,8 +147,24 @@ class ConsistencyTest(unittest.TestCase):
         issue = report.issues[0]
         self.assertEqual(issue.kind, "path")
         self.assertEqual(issue.path, "/api/v1/tasks/stream")
-        self.assertIn("/api/v1/tasks", issue.suggestion)
-        self.assertIn("修复建议", str(ctx.exception))
+        self.assertEqual(issue.fix_action, "ADD_BACKEND_ROUTE")
+        self.assertIn("BackendCoder", issue.suggestion)
+        self.assertIn("前端请求路径保持不变", issue.suggestion)
+        # 绝不允许通过把业务请求改到无关 CRUD 路径来“消掉”差异。
+        self.assertNotIn("把前端请求改为", issue.suggestion)
+        self.assertNotIn("把前端请求改为", str(ctx.exception))
+        self.assertTrue(report.repairable)
+        self.assertEqual(
+            report.missing_routes(),
+            (
+                {
+                    "method": "GET",
+                    "path": "/api/v1/tasks/stream",
+                    "description": "TaskList：后端未注册该路径（Method + Path 完全匹配失败）",
+                },
+            ),
+        )
+        self.assertIn("修复动作", str(ctx.exception))
 
     def test_method_mismatch_lists_allowed_methods(self) -> None:
         contract = _contract(
@@ -176,6 +192,9 @@ class ConsistencyTest(unittest.TestCase):
         self.assertEqual(issue.kind, "method")
         self.assertIn("GET", issue.message)
         self.assertIn("DELETE", issue.message)
+        self.assertEqual(issue.fix_action, "ADD_BACKEND_ROUTE")
+        self.assertIn("BackendCoder", issue.suggestion)
+        self.assertIn("前端 Method 保持不变", issue.suggestion)
 
     def test_payload_key_must_exist_in_ddl(self) -> None:
         contract = _contract()
@@ -201,7 +220,83 @@ class ConsistencyTest(unittest.TestCase):
         issue = report.issues[0]
         self.assertEqual(issue.kind, "payload")
         self.assertIn("priority", issue.message)
-        self.assertIn("name", issue.suggestion)
+        self.assertEqual(issue.fix_action, "EXTEND_BACKEND_FIELD")
+        self.assertIn("BackendCoder", issue.suggestion)
+        self.assertIn("无关业务接口", issue.suggestion)
+        # Payload 冲突不能靠新增路由解决，自愈不应空转重试。
+        self.assertFalse(report.repairable)
+
+    def test_every_business_action_gets_a_matching_backend_route(self) -> None:
+        """回归：抓取 / 改写 / 投递 / 对话不能被一个通用 CRUD 接口替代。"""
+        business_routes = [
+            ArchitectApiRoute(
+                method="POST", path="/api/v1/jobs/scrape", description="抓取 JD"
+            ),
+            ArchitectApiRoute(
+                method="POST",
+                path="/api/v1/resumes/{id}/rewrite",
+                description="AI 改写简历",
+            ),
+            ArchitectApiRoute(
+                method="POST",
+                path="/api/v1/applications/deliver",
+                description="投递职位",
+            ),
+            ArchitectApiRoute(
+                method="POST",
+                path="/api/v1/chat/messages",
+                description="对话消息",
+            ),
+        ]
+        contract = _contract(routes=business_routes)
+        backend = generate_backend_bundle(contract)
+        code = backend.files["server/index.js"]
+        manifest = json.loads(backend.files["server/api-routes.json"])
+
+        expected = {
+            ("POST", "/api/v1/jobs/scrape"),
+            ("POST", "/api/v1/resumes/:id/rewrite"),
+            ("POST", "/api/v1/applications/deliver"),
+            ("POST", "/api/v1/chat/messages"),
+        }
+        actual = {(item["method"], item["path"]) for item in manifest["routes"]}
+        self.assertTrue(expected.issubset(actual))
+        for method, path in expected:
+            self.assertIn(f'app.{method.lower()}("{path}"', code)
+        self.assertEqual(backend.metadata["businessRouteCount"], len(business_routes))
+        # 每个业务路由都有独立处理逻辑，而不是统一 404 或空壳。
+        self.assertIn("沙盒 Mock 响应", code)
+        self.assertIn("Object.assign", code)
+
+        # 前端交互（来自同一契约）与后端实际路由必须完全对齐。
+        interactions = [
+            ArchitectComponentInteraction(
+                component=f"Action{index}",
+                event="click",
+                api_route=f"{method} {path}",
+                logic=description,
+            )
+            for index, (method, path, description) in enumerate(
+                (
+                    ("POST", "/api/v1/jobs/scrape", "抓取 JD"),
+                    ("POST", "/api/v1/resumes/{id}/rewrite", "AI 改写简历"),
+                    ("POST", "/api/v1/applications/deliver", "投递职位"),
+                    ("POST", "/api/v1/chat/messages", "对话消息"),
+                ),
+                start=1,
+            )
+        ]
+        frontend_contract = contract.model_copy(
+            update={
+                "components": [{"name": f"Action{index}"} for index in range(1, 5)],
+                "component_interactions": interactions,
+            }
+        )
+        skeleton = generate_frontend_skeleton_bundle(frontend_contract)
+        report = verify_consistency(
+            {**backend.files, **skeleton.files}, frontend_contract
+        )
+        self.assertTrue(report.ok, report.failure_message())
 
     def test_local_interactions_are_ignored(self) -> None:
         contract = _contract()
