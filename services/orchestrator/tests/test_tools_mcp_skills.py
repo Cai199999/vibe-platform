@@ -20,8 +20,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ai_core.agent.graph import _extract_research_query
-from ai_core.agent.llm import DeepSeekAgentLLM
+from ai_core.agent.graph import AgentGraphRunner, _extract_research_query
+from ai_core.agent.llm import (
+    DeepSeekAgentLLM,
+    append_css_rule,
+    is_move_only_instruction,
+)
 from ai_core.config import Settings
 from ai_core.mcp.client import McpServerConfig, McpStdioClient
 from ai_core.skill_loader import (
@@ -32,7 +36,12 @@ from ai_core.supervisor.tools import (
     SupervisorToolNotFoundError,
     SupervisorToolService,
 )
-from ai_core.tools import ToolRegistry
+from ai_core.tools import ToolRegistry, build_default_toolbox
+from ai_core.tools.move_component_tool import (
+    MoveComponentError,
+    build_move_rule,
+    build_move_tool,
+)
 from ai_core.tools.web_search_tool import (
     parse_duckduckgo_html,
     register_web_search,
@@ -63,6 +72,131 @@ def _settings(**overrides: object) -> Settings:
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)
+
+
+class MoveComponentToolTest(unittest.TestCase):
+    """Task 6：移动必须是标准 Tool，且只用 transform 预览/落盘。"""
+
+    def test_rule_uses_transform_and_never_width_or_height(self) -> None:
+        rule = build_move_rule("cta-button", 24, -12)
+        self.assertIn('[data-source="cta-button"]', rule)
+        self.assertIn("translate3d(24.00px,-12.00px,0)", rule)
+        self.assertIn("will-change:transform", rule)
+        self.assertNotIn("width", rule)
+        self.assertNotIn("height", rule)
+
+    def test_tool_accepts_selector_and_returns_json(self) -> None:
+        payload = json.loads(
+            build_move_tool().invoke(
+                {"element_id": '[data-vibe-created="ann_1"]', "x": 10, "y": 20}
+            )
+        )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["strategy"], "css-transform")
+        self.assertIn("translate3d(10.00px,20.00px,0)", payload["rule"])
+
+    def test_rejects_injection_and_out_of_range_offsets(self) -> None:
+        with self.assertRaises(MoveComponentError):
+            build_move_rule("</style><script>alert(1)</script>", 0, 0)
+        with self.assertRaises(MoveComponentError):
+            build_move_rule("cta-button", 99999, 0)
+
+
+class AgentMoveToolShortcutTest(unittest.TestCase):
+    """纯移动必须由 AgentGraph 真正调用 Tool，而不是让模型自由写 CSS。"""
+
+    APP = (
+        "export default function App() {\n"
+        "  return (\n"
+        "    <main>\n"
+        "      <style>{`.cta{color:#fff;}`}</style>\n"
+        '      <button data-source="cta">开始</button>\n'
+        "    </main>\n"
+        "  )\n"
+        "}\n"
+    )
+
+    def _runner(self) -> tuple[AgentGraphRunner, list[tuple]]:
+        runner = AgentGraphRunner.__new__(AgentGraphRunner)
+        runner._toolbox = build_default_toolbox(_settings())
+        events: list[tuple] = []
+        runner._emit = lambda event, payload, **kwargs: events.append(  # type: ignore[method-assign]
+            (event, payload, kwargs)
+        )
+        return runner, events
+
+    def test_pure_move_calls_move_component_and_only_writes_transform(self) -> None:
+        runner, events = self._runner()
+        annotation = {
+            "annotationId": "ann_move_1",
+            "action": "MODIFY_EXISTING",
+            "target": {
+                "selector": '[data-source="cta"]',
+                "source": {"file": "src/App.jsx", "target": "cta"},
+            },
+            "payload": {"text": "把按钮向右移动 48px（只改位置，不要改宽高）"},
+        }
+        result = runner._try_move_tool(
+            {"run_id": "run_move", "target_files": ["src/App.jsx"]},
+            [annotation],
+            {"src/App.jsx": self.APP},
+            0,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        generated = result["generated_files"]["src/App.jsx"]
+        self.assertIn("translate3d(48.00px,0.00px,0)", generated)
+        self.assertIn('[data-source="cta"]', generated)
+        # Tool 规则只允许 transform：不得出现宽高修改。
+        self.assertNotIn("width:", generated)
+        self.assertNotIn("height:", generated)
+        progress = [
+            payload["message"]
+            for event, payload, _kwargs in events
+            if event == "node.progress"
+        ]
+        self.assertTrue(any("move_component" in item for item in progress))
+        self.assertEqual(result["status"], "CODING")
+
+    def test_css_rule_does_not_break_jsx_expression_style(self) -> None:
+        """生成骨架使用 ``<style>{GLOBAL_CSS}</style>``，不能把裸 CSS
+        插到 ``</style>`` 前（那会变成 JSX 非法文本）。"""
+        code = (
+            "export default function App() {\n"
+            "  return (\n"
+            "    <main>\n"
+            "      <style>{GLOBAL_CSS}</style>\n"
+            '      <button data-source="cta">开始</button>\n'
+            "    </main>\n"
+            "  )\n"
+            "}\n"
+        )
+        rule = '[data-source="cta"]{transform:translate3d(8.00px,0.00px,0) !important;}'
+        updated = append_css_rule(code, rule, "src/App.jsx")
+        self.assertIn("<style>{`" + rule + "`}</style>", updated)
+        self.assertNotIn("GLOBAL_CSS} [data-source", updated)
+
+    def test_mixed_move_request_falls_back_to_llm(self) -> None:
+        runner, _events = self._runner()
+        annotation = {
+            "annotationId": "ann_move_2",
+            "action": "MODIFY_EXISTING",
+            "target": {
+                "selector": '[data-source="cta"]',
+                "source": {"file": "src/App.jsx", "target": "cta"},
+            },
+            "payload": {"text": "把按钮向右移动 48px 并改成红色"},
+        }
+        self.assertFalse(is_move_only_instruction(annotation["payload"]["text"]))
+        self.assertIsNone(
+            runner._try_move_tool(
+                {"run_id": "run_move_2", "target_files": ["src/App.jsx"]},
+                [annotation],
+                {"src/App.jsx": self.APP},
+                0,
+            )
+        )
 
 
 class WebSearchParserTest(unittest.TestCase):

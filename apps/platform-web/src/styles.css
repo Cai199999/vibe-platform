@@ -5763,6 +5763,26 @@ body.is-viewport-panning * {
   font-weight: 700;
 }
 
+/* 契约确认后的持续对话区：面板常驻，新需求直接触发 REVISE。 */
+.architect-contract-append {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  margin-top: 14px;
+  padding: 15px;
+  border: 1px solid rgba(56, 189, 248, 0.24);
+  border-radius: 15px;
+  background: rgba(8, 47, 73, 0.18);
+}
+
+.architect-append-hint {
+  margin-right: auto;
+  align-self: center;
+  color: var(--faint);
+  font-size: 10px;
+  text-align: left;
+}
+
 .architect-decision-row {
   display: flex;
   justify-content: flex-end;
@@ -8130,6 +8150,46 @@ body.is-viewport-panning * {
   opacity: 0.86;
 }
 
+/* 画布模式 Inspect：位于 canvas-viewport 内，随画布 transform 同步缩放。 */
+.canvas-inspect-highlight {
+  position: absolute;
+  z-index: 40;
+  pointer-events: none;
+  border: 2px solid #38bdf8;
+  border-radius: 3px;
+  background: rgba(56, 189, 248, 0.12);
+  box-shadow: 0 0 0 1px rgba(2, 6, 23, 0.55),
+    0 0 20px rgba(56, 189, 248, 0.35);
+  box-sizing: border-box;
+}
+
+.canvas-inspect-label {
+  position: absolute;
+  left: -2px;
+  bottom: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 460px;
+  padding: 3px 8px;
+  border-radius: 4px 4px 4px 0;
+  background: #0284c7;
+  color: #f0f9ff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transform: translateY(-1px);
+}
+
+.canvas-inspect-label em {
+  font-style: normal;
+  font-weight: 500;
+  opacity: 0.86;
+}
+
 /* 命中后的标注输入卡片：悬浮在预览舞台右上角，不遮挡中心内容。 */
 .inspect-draft {
   position: absolute;
@@ -8720,7 +8780,41 @@ body.is-viewport-panning * {
   transform: none;
 }
 
-/* CREATE_NEW 拖拽定位层：覆盖在新增组件上，支持自由拖动。 */
+/* 画布移动预览：只使用 transform，绝不改 width / height。
+   视觉辅助元素只存在于画布；预览区永远渲染最终代码结果。 */
+.move-frame {
+  position: absolute;
+  z-index: 45;
+  box-sizing: border-box;
+  border: 2px dashed #facc15;
+  border-radius: 6px;
+  background: rgba(250, 204, 21, 0.08);
+  cursor: grab;
+  touch-action: none;
+  will-change: transform;
+  pointer-events: auto;
+}
+
+.move-frame.is-dragging {
+  cursor: grabbing;
+  border-style: solid;
+  background: rgba(250, 204, 21, 0.14);
+}
+
+.move-frame-label {
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  padding: 3px 8px;
+  border-radius: 4px 4px 4px 0;
+  background: #a16207;
+  color: #fefce8;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* 旧版 CREATE_NEW 拖拽定位层已停用：不再在预览区展示任何辅助线。 */
 .placement-frame {
   position: absolute;
   z-index: 8;

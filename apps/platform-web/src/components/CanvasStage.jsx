@@ -991,6 +991,7 @@ function CanvasStage({
   onAnnotationRemove,
   onAnnotationUnmount,
   onAnnotationSend,
+  onAnnotationMove,
   onClarificationAnswer,
   clarification,
   onAnnotationRollback,
@@ -999,6 +1000,11 @@ function CanvasStage({
   submitting,
   disabled,
   blocked = false,
+  // 精准选择（Inspect）：画布模式下也允许透传 hover / pick 给 iframe SDK。
+  // 与预览区共用同一套子协议，但高亮框绘制在画布自己的 viewport 坐标里，
+  // 因此缩放 / 平移后仍与真实 DOM 严格对齐。
+  inspectMode = false,
+  onInspectPick,
 }) {
   const stageRef = useRef(null)
   const startTargetRef = useRef(null)
@@ -1020,6 +1026,15 @@ function CanvasStage({
   // pointerdown 时的命中目标：pointer capture 会把 pointerup 的 target
   // 重定向到 stage，因此“是否点在真实页面上”必须在下笔时记录。
   const livePressRef = useRef(false)
+  const inspectModeRef = useRef(inspectMode)
+  const onInspectPickRef = useRef(onInspectPick)
+  // 精准选择命中的 iframe 逻辑坐标 rect（SDK 回传，单位 CSS px）。
+  const [inspectHover, setInspectHover] = useState(null)
+  // 移动交互：D 键 / 工具栏开启后，拖拽只做 transform 预览，
+  // 松手时把位移翻译成自然语言交给 Agent，不直接改 DOM 样式。
+  const [movingId, setMovingId] = useState(null)
+  const [moveOffset, setMoveOffset] = useState({ x: 0, y: 0 })
+  const moveDragRef = useRef(null)
 
   // 与沙盒预览共用动态设计视口：最小 1280×720，多余空间直接扩展逻辑宽高，
   // 保证画面铺满且不会把页面上下裁切。
@@ -1062,13 +1077,67 @@ function CanvasStage({
   // 只有 mock / live 画布允许圈选；空白、骨架屏、失败态不可绘制。
   const interactive = mode === 'mock' || mode === 'live'
   // 交互态只对 live 画布生效：mock 页面没有可点击的真实业务逻辑。
-  const liveInteractive = mode === 'live' && interactionMode === 'interact'
+  // Inspect 优先级最高：此时指针必须由覆盖层接管，不能穿透到 iframe。
+  const canvasInspect = Boolean(inspectMode) && mode === 'live'
+  const liveInteractive =
+    mode === 'live' && interactionMode === 'interact' && !canvasInspect
   const atLimit = annotations.length >= MAX_ANNOTATIONS
 
   // 切换到 mock / 空白画布时，必须回到标注态，避免 iframe 消失后残留状态。
   useEffect(() => {
     if (mode !== 'live') setInteractionMode('annotate')
   }, [mode])
+
+  // 选中目标后按 D 进入 / 退出移动预览；输入框内不拦截 D 键。
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      const tag = String(event.target?.tagName || '').toLowerCase()
+      if (
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        tag === 'input' ||
+        tag === 'textarea' ||
+        event.target?.isContentEditable
+      ) {
+        return
+      }
+      if (String(event.key || '').toLowerCase() !== 'd') return
+      if (!activeAnnotationId || disabled || blocked) return
+      event.preventDefault()
+      setMovingId((current) =>
+        current === activeAnnotationId ? null : activeAnnotationId,
+      )
+      setMoveOffset({ x: 0, y: 0 })
+      moveDragRef.current = null
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [activeAnnotationId, blocked, disabled])
+
+  // 选中目标被删除 / 切换时，移动预览必须同步退出，避免浮层悬空。
+  useEffect(() => {
+    if (!activeAnnotationId || !annotations.some((item) => item.id === activeAnnotationId)) {
+      setMovingId(null)
+      setMoveOffset({ x: 0, y: 0 })
+      moveDragRef.current = null
+    }
+  }, [activeAnnotationId, annotations])
+  useEffect(() => {
+    if (movingId && activeAnnotationId && movingId !== activeAnnotationId) {
+      setMovingId(null)
+      setMoveOffset({ x: 0, y: 0 })
+      moveDragRef.current = null
+    }
+  }, [activeAnnotationId, movingId])
+
+  // 开启 Inspect 时强制回到标注态；关闭时清空高亮，避免残留蓝框。
+  useEffect(() => {
+    inspectModeRef.current = inspectMode
+    onInspectPickRef.current = onInspectPick
+    if (canvasInspect) setInteractionMode('annotate')
+    if (!canvasInspect) setInspectHover(null)
+  }, [canvasInspect, inspectMode, onInspectPick])
 
   // Esc 是“退出浏览”的通用快捷键，和预设的「点灰色空白返回标注」互补。
   useEffect(() => {
@@ -1092,6 +1161,26 @@ function CanvasStage({
       if (!frame || event.source !== frame.contentWindow) return
       const data = event.data
       if (!data || data.channel !== 'vibe-inspect') return
+      if (data.type === 'ready') {
+        // iframe 重载（HMR / 首次加载）后重新下发 Inspect 开关。
+        inspectModeRef.current &&
+          frame.contentWindow?.postMessage(
+            { channel: 'vibe-inspect', type: 'enable', enabled: true },
+            '*',
+          )
+        setInspectHover(null)
+        return
+      }
+      if (data.type === 'hover') {
+        const payload = data.payload
+        setInspectHover(payload && payload.ok ? payload : null)
+        return
+      }
+      if (data.type === 'picked') {
+        setInspectHover(null)
+        if (data.payload?.ok) onInspectPickRef.current?.(data.payload)
+        return
+      }
       if (data.type === 'pan-start') {
         viewport.beginExternalPan()
         return
@@ -1116,6 +1205,35 @@ function CanvasStage({
     viewport.endExternalPan,
     viewport.scale,
   ])
+
+  /** 把父页面指针坐标映射为 iframe 内部逻辑坐标（未受父层 transform 缩放）。 */
+  const toLiveFramePoint = (event) => {
+    const node = stageRef.current
+    const frame = liveFrameRef.current
+    if (!node || !frame || viewport.scale <= 0) return null
+    const box = node.getBoundingClientRect()
+    const width = frame.clientWidth || designWidth
+    const height = frame.clientHeight || designHeight
+    const x = (event.clientX - box.left - viewport.translateX) / viewport.scale
+    const y = (event.clientY - box.top - viewport.translateY) / viewport.scale
+    if (x < 0 || y < 0 || x > width || y > height) return null
+    return { x, y }
+  }
+
+  const sendLiveInspect = (payload) => {
+    const frame = liveFrameRef.current
+    if (!frame?.contentWindow) return
+    frame.contentWindow.postMessage({ channel: 'vibe-inspect', ...payload }, '*')
+  }
+
+  // Inspect 开关或 iframe 地址变化时同步 SDK；iframe 自己发 ready 时也会补发。
+  useEffect(() => {
+    if (mode !== 'live') return
+    sendLiveInspect(message('enable', { enabled: Boolean(inspectMode) }))
+    if (!inspectMode) setInspectHover(null)
+    // sendLiveInspect 只做 postMessage，不需要进入依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inspectMode, liveUrl, refreshNonce, mode, suspended])
 
   const flashLimitNotice = () => {
     setLimitNotice(true)
@@ -1157,6 +1275,14 @@ function CanvasStage({
     if (viewport.startPan(event)) {
       return
     }
+    if (canvasInspect) {
+      if (event.button !== 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      const point = toLiveFramePoint(event)
+      if (point) sendLiveInspect(message('pick', point))
+      return
+    }
     if (disabled || !interactive || event.button !== 0) {
       return
     }
@@ -1191,6 +1317,16 @@ function CanvasStage({
     if (viewport.movePan(event)) {
       return
     }
+    if (canvasInspect) {
+      const point = toLiveFramePoint(event)
+      if (point) {
+        sendLiveInspect(message('move', point))
+      } else {
+        sendLiveInspect(message('clear'))
+        setInspectHover(null)
+      }
+      return
+    }
     if (!drawing || !draft) {
       return
     }
@@ -1200,6 +1336,10 @@ function CanvasStage({
 
   const finishDrawing = (event) => {
     if (viewport.endPan(event)) {
+      return
+    }
+    if (canvasInspect) {
+      event.preventDefault()
       return
     }
     if (!drawing || !draft) {
@@ -1271,6 +1411,56 @@ function CanvasStage({
       onAnnotationAdd?.({ rect, ...analysis })
     }
     startTargetRef.current = null
+  }
+
+  const movingAnnotation = movingId
+    ? annotations.find((item) => item.id === movingId) || null
+    : null
+
+  /** 移动预览开始：只记录起点，不修改任何宽高 / left/top。 */
+  const beginMoveDrag = (event) => {
+    if (!movingAnnotation || blocked || disabled) return
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+    moveDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      baseX: moveOffset.x,
+      baseY: moveOffset.y,
+    }
+  }
+
+  /** 拖拽中只更新 transform 位移；DOM 尺寸保持不变，按钮不会“瞬间变长”。 */
+  const moveMoveDrag = (event) => {
+    const drag = moveDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    event.preventDefault()
+    event.stopPropagation()
+    const scale = viewport.scale > 0 ? viewport.scale : 1
+    setMoveOffset({
+      x: drag.baseX + (event.clientX - drag.startX) / scale,
+      y: drag.baseY + (event.clientY - drag.startY) / scale,
+    })
+  }
+
+  /** 松手：像素位移转为自然语言，由 Agent 的 move_component Skill 执行。 */
+  const endMoveDrag = (event) => {
+    const drag = moveDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    event.preventDefault()
+    event.stopPropagation()
+    const scale = viewport.scale > 0 ? viewport.scale : 1
+    const dx = drag.baseX + (event.clientX - drag.startX) / scale
+    const dy = drag.baseY + (event.clientY - drag.startY) / scale
+    moveDragRef.current = null
+    setMovingId(null)
+    setMoveOffset({ x: 0, y: 0 })
+    if (Math.abs(dx) >= 4 || Math.abs(dy) >= 4) {
+      onAnnotationMove?.(movingId, dx, dy)
+    }
   }
 
   const draftRect = draft
@@ -1436,6 +1626,29 @@ function CanvasStage({
               </div>
             )}
 
+            {movingAnnotation && (
+              <div
+                className={`move-frame ${moveDragRef.current ? 'is-dragging' : ''}`}
+                data-move-frame
+                style={{
+                  left: `${movingAnnotation.rect.x * 100}%`,
+                  top: `${movingAnnotation.rect.y * 100}%`,
+                  width: `${movingAnnotation.rect.width * 100}%`,
+                  height: `${movingAnnotation.rect.height * 100}%`,
+                  transform: `translate3d(${moveOffset.x}px, ${moveOffset.y}px, 0)`,
+                  willChange: 'transform',
+                }}
+                onPointerDown={beginMoveDrag}
+                onPointerMove={moveMoveDrag}
+                onPointerUp={endMoveDrag}
+                onPointerCancel={endMoveDrag}
+              >
+                <span className="move-frame-label">
+                  拖拽预览 · 松手交给 Agent 执行
+                </span>
+              </div>
+            )}
+
             {annotations.map((annotation, index) => (
                 <AnnotationPopover
                   key={annotation.id}
@@ -1475,6 +1688,33 @@ function CanvasStage({
                 />
               ))}
           </div>
+
+          {/* 画布模式下的 Inspect 高亮：位于 canvas-viewport 内部，直接使用
+              iframe 逻辑坐标，父层 transform 会自动完成缩放/平移映射。 */}
+          {canvasInspect && inspectHover?.rect && (
+            <div
+              className="canvas-inspect-highlight"
+              data-canvas-inspect-highlight
+              style={{
+                left: `${inspectHover.rect.x}px`,
+                top: `${inspectHover.rect.y}px`,
+                width: `${inspectHover.rect.width}px`,
+                height: `${inspectHover.rect.height}px`,
+              }}
+            >
+              <span className="canvas-inspect-label">
+                {inspectHover.source?.component || inspectHover.tag || '组件'}
+                {inspectHover.source?.file ? (
+                  <em>
+                    {inspectHover.source.file}
+                    {inspectHover.source.line
+                      ? `:${inspectHover.source.line}`
+                      : ''}
+                  </em>
+                ) : null}
+              </span>
+            </div>
+          )}
         </div>
 
         {mode === 'blank' && (
@@ -1578,6 +1818,29 @@ function CanvasStage({
           >
             重置视图
           </button>
+          {activeAnnotationId && (
+            <button
+              className={`viewport-reset canvas-move-toggle ${movingId ? 'is-active' : ''}`}
+              type="button"
+              data-canvas-move-toggle
+              aria-pressed={Boolean(movingId)}
+              disabled={blocked || disabled}
+              title={
+                movingId
+                  ? '退出移动预览'
+                  : '移动当前标注（快捷键 D）：拖拽只做预览，松手后由 Agent 执行'
+              }
+              onClick={() => {
+                setMovingId((current) =>
+                  current === activeAnnotationId ? null : activeAnnotationId,
+                )
+                setMoveOffset({ x: 0, y: 0 })
+                moveDragRef.current = null
+              }}
+            >
+              {movingId ? '✕ 退出移动' : '⇢ 移动 (D)'}
+            </button>
+          )}
           {mode === 'live' && (
             <button
               className={`viewport-reset canvas-interaction-toggle ${liveInteractive ? 'is-active' : ''}`}
@@ -1632,6 +1895,8 @@ function CanvasStage({
     </div>
   )
 }
+
+const message = (type, extra = {}) => ({ type, ...extra })
 
 // 时间轴 / 其他项目的 Run 更新不会改变画布 props；memo 避免整块画布重渲染。
 export default memo(CanvasStage)

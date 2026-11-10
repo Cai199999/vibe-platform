@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import json
 import logging
 import re
 import time
@@ -38,7 +39,15 @@ from ai_core.agent.error_context import (
     extract_error_fingerprint,
 )
 from ai_core.agent.events import EventSink, NullEventSink
-from ai_core.agent.llm import AgentLLM
+from ai_core.agent.llm import (
+    AgentLLM,
+    annotation_selector,
+    annotation_target_file,
+    annotation_text,
+    append_css_rule,
+    detect_move_offset,
+    is_move_only_instruction,
+)
 from ai_core.agent.memory import IntentClassifier, compress_annotation_context
 from ai_core.agent.preferences import (
     CORE_BUSINESS,
@@ -717,6 +726,109 @@ class AgentGraphRunner:
             ],
         }
 
+    def _try_move_tool(
+        self,
+        state: AgentState,
+        annotations: list[dict[str, Any]],
+        current_files: dict[str, str],
+        retry_count: int,
+    ) -> dict[str, Any] | None:
+        """纯移动指令的确定性 Tool 短路。
+
+        只有“所有标注都是纯移动 + 能拿到目标选择器”时才生效；任何一条
+        不满足就返回 None，继续走原有 LLM 编码流程。调用的是 ToolRegistry
+        中注册的标准 Tool `move_component`，不是提示词模拟。
+        """
+        if not annotations:
+            return None
+        target_files = list(state.get("target_files") or [])
+        if not target_files:
+            return None
+        rules: list[tuple[str, str, str]] = []
+        for annotation in annotations:
+            text = annotation_text(annotation)
+            offset = detect_move_offset(text)
+            selector = annotation_selector(annotation)
+            if offset is None or not selector or not is_move_only_instruction(text):
+                return None
+            path = annotation_target_file(annotation, current_files, target_files[0])
+            if path not in current_files:
+                return None
+            tool = self._toolbox.get("move_component")
+            if tool is None:
+                return None
+            try:
+                raw = tool.invoke(
+                    {
+                        "element_id": selector,
+                        "x": offset[0],
+                        "y": offset[1],
+                    }
+                )
+                payload = json.loads(raw) if isinstance(raw, str) else raw
+                rule = str(payload.get("rule") or "")
+            except Exception as exc:  # noqa: BLE001 - 失败则回退 LLM
+                logger.warning("move_component tool skipped: %s", exc)
+                return None
+            if not rule:
+                return None
+            rules.append((path, rule, selector))
+            self._emit(
+                "node.progress",
+                {
+                    "node": "coder",
+                    "message": (
+                        f"调用 Tool move_component({selector}, "
+                        f"{offset[0]:g}, {offset[1]:g})"
+                    ),
+                },
+                dedupe_key=(
+                    f"node.progress:coder:move:"
+                    f"{annotation.get('annotationId')}:{retry_count}"
+                ),
+            )
+
+        updated = dict(current_files)
+        for path, rule, _selector in rules:
+            updated[path] = append_css_rule(updated[path], rule, path)
+        changed_paths = sorted({path for path, _rule, _selector in rules})
+        generated_files = {path: updated[path] for path in changed_paths}
+        patch = _combined_diff(current_files, generated_files)
+        round_no = int(state.get("clarification_round", 0))
+        patch_id = f"pat_{state.get('run_id')}_{round_no}_{retry_count}"
+        selector_labels = ", ".join(selector for _p, _r, selector in rules)
+        self._emit(
+            "patch.proposed",
+            {
+                "patchId": patch_id,
+                "files": changed_paths,
+                "insertions": sum(
+                    1
+                    for path in changed_paths
+                    for line in generated_files[path].splitlines()
+                    if "transform:translate3d" in line.replace(" ", "")
+                ),
+                "deletions": 0,
+                "summary": f"通过 move_component 移动 {selector_labels}",
+                "diffPreview": _tail(patch, 2000) if patch else "",
+            },
+            dedupe_key=f"patch.proposed:{patch_id}",
+        )
+        return {
+            "generated_patch": patch,
+            "generated_files": generated_files,
+            "patch_id": patch_id,
+            "apply_failed": False,
+            "status": "CODING",
+            "messages": [
+                _message(
+                    "coder",
+                    f"Tool move_component 完成 {len(rules)} 次位移；"
+                    "仅写入 transform，未修改宽高。",
+                )
+            ],
+        }
+
     def _coder(self, state: AgentState) -> dict[str, Any]:
         context = state["annotation_context"]
         annotations = [item["annotation"] for item in context["annotations"]]
@@ -732,6 +844,15 @@ class AgentGraphRunner:
             },
             dedupe_key=f"node.progress:coder:{retry_count}",
         )
+        # 纯移动请求走标准 Tool，而不是让模型自由写 CSS：
+        # 1) 位移规则由 move_component 统一生成（只允许 transform）；
+        # 2) 杜绝模型改 width / height / left / top 造成“按钮瞬间变长”；
+        # 3) 规则可测试、可审计，和 Mock Coder 完全一致。
+        move_result = self._try_move_tool(
+            state, annotations, current_files, retry_count
+        )
+        if move_result is not None:
+            return move_result
         try:
             result = self._llm.generate(
                 annotations=annotations,

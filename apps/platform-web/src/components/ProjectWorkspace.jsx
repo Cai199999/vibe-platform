@@ -3,6 +3,7 @@ import AgentCatalogMenu from './AgentCatalogMenu.jsx'
 import ArchitectPanel from './ArchitectPanel.jsx'
 import CanvasStage from './CanvasStage.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
+import InspectDraftCard from './InspectDraftCard.jsx'
 import RuntimePanel from './RuntimePanel.jsx'
 import SupervisorTrace from './SupervisorTrace.jsx'
 import {
@@ -38,6 +39,7 @@ function ProjectWorkspaceInner({
   onAnnotationRemove,
   onAnnotationUnmount,
   onAnnotationSend,
+  onAnnotationMove,
   onClarificationAnswer,
   onAnnotationRollback,
   onPlacementConfirm,
@@ -156,13 +158,20 @@ function ProjectWorkspaceInner({
           : 'idle'
   const inspectBlocked = submitting || approvalPending || gateActive
 
-  /** 开启 Inspect 时自动切到预览；关闭时清空草稿与高亮。 */
+  /**
+   * 精准选择在画布与预览两种模式下都可使用。
+   * - live 画布：CanvasStage 通过 postMessage 把 hover / pick 透传给 iframe SDK；
+   * - mock 画布没有真实 SDK：如果已有预览，则自动切到预览，避免用户以为按钮失效；
+   * - 手动关闭时清空草稿与高亮。
+   */
   const toggleInspect = () => {
     if (!previewReady || inspectBlocked) return
     const next = !inspectMode
     setInspectMode(next)
     setInspectDraft(null)
-    if (next && viewMode === 'compare') setMode('preview')
+    if (next && mode === 'canvas' && canvasMode !== 'live') {
+      setMode('preview')
+    }
   }
 
   /** SDK 回传的命中结果转换为本地标注草稿。 */
@@ -579,7 +588,10 @@ function ProjectWorkspaceInner({
               onAnnotationRemove={onAnnotationRemove}
               onAnnotationUnmount={onAnnotationUnmount}
               onAnnotationSend={onAnnotationSend}
+              onAnnotationMove={onAnnotationMove}
               onClarificationAnswer={onClarificationAnswer}
+              inspectMode={inspectMode && canvasVisible && !inspectBlocked}
+              onInspectPick={handleInspectPick}
               clarification={run.clarification}
               onAnnotationRollback={onAnnotationRollback}
               pendingAnnotationId={run.pendingAnnotationId}
@@ -589,6 +601,21 @@ function ProjectWorkspaceInner({
               blocked={approvalPending || gateActive}
             />
           </ErrorBoundary>
+
+          {/* 画布模式下命中 Inspect 后，输入卡片直接浮在画布上；预览模式
+              仍由 RuntimePanel 渲染，避免双屏时出现两份输入框。 */}
+          {inspectDraft &&
+            !submitting &&
+            !run.approval &&
+            viewMode === 'compare' &&
+            mode === 'canvas' && (
+              <InspectDraftCard
+                draft={inspectDraft}
+                onChange={handleInspectDraftChange}
+                onCancel={() => setInspectDraft(null)}
+                onSubmit={handleInspectDraftSubmit}
+              />
+            )}
 
           {pauseCta && viewMode === 'compare' && mode === 'canvas' && (
             <button
@@ -641,9 +668,6 @@ function ProjectWorkspaceInner({
               onInspectDraftChange={handleInspectDraftChange}
               onInspectDraftCancel={() => setInspectDraft(null)}
               onInspectDraftSubmit={handleInspectDraftSubmit}
-              placement={run.placement}
-              onPlacementConfirm={onPlacementConfirm}
-              onPlacementDismiss={onPlacementDismiss}
               refreshNonce={previewRefreshNonce}
             />
           </ErrorBoundary>

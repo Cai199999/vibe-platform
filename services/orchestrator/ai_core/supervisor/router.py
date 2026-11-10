@@ -57,6 +57,35 @@ COMBINED_KEYWORDS: tuple[str, ...] = (
     "再加上",
 )
 
+# “移动组件”是 UI Agent 的专属 Skill，不再依赖前端拖拽模式。
+# 只要用户对已圈选目标说出方向 / 位移意图，Supervisor 就标记为
+# ``ui_move`` 并携带工具信号，UI Graph 会调用 move_component 生成
+# 只改 transform 的确定性 CSS。
+MOVE_KEYWORDS: tuple[str, ...] = (
+    "挪",
+    "移动",
+    "拖到",
+    "拖拽到",
+    "往右",
+    "往左",
+    "向上",
+    "向下",
+    "向右",
+    "向左",
+    "右边一点",
+    "左边一点",
+    "位置改成",
+    "位置调整",
+)
+
+
+def is_move_request(message: str) -> bool:
+    """判断一句话是否是移动组件意图；排除“移动端 / 移动应用”。"""
+    text = str(message or "").strip()
+    if not text or "移动端" in text or "移动应用" in text:
+        return False
+    return any(keyword in text for keyword in MOVE_KEYWORDS)
+
 
 @dataclass(frozen=True)
 class IntentPrediction:
@@ -257,6 +286,26 @@ class RuleBasedIntentClassifier:
                 dispatchable=dispatchable,
                 missing_inputs=missing,
                 strategy="explicit_scope",
+            )
+
+        # ----------------------------------------------------
+        # 2.5 移动组件：在标注范围内识别为专用 UI Skill。
+        # ----------------------------------------------------
+        raw_message = str(request.message or "").strip()
+        if is_move_request(raw_message):
+            return IntentPrediction(
+                task_type="ui_move",
+                target="ui_graph",
+                confidence=0.94 if request.annotations else 0.82,
+                reason=(
+                    "识别为组件移动意图，将由 UI Agent 调用 move_component"
+                    if request.annotations
+                    else "识别为组件移动意图，但缺少画布标注"
+                ),
+                signals=["move:intent", "tool:move_component"],
+                dispatchable=dispatchable,
+                missing_inputs=missing,
+                strategy="move_skill",
             )
 
         # ----------------------------------------------------

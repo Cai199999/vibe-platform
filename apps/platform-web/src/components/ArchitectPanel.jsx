@@ -581,6 +581,68 @@ function FrontendBootstrap({ fullstack, contract, onRetry, onFullstackGenerate }
   )
 }
 
+/**
+ * 契约确认后的持续对话入口。
+ *
+ * 确认不是终点：架构师面板保持在线，用户可随时把新需求追加到当前
+ * Context。提交后由后端直接进入 revise_contract（不会重新澄清、不会
+ * 丢掉已经确认的技术栈与业务槽位），新契约回到待确认状态。
+ */
+function ContractAppend({ contract, submitting, onDecide }) {
+  const [comment, setComment] = useState('')
+  const ready = comment.trim().length > 0
+
+  const submit = () => {
+    if (!ready || submitting) return
+    onDecide('REVISE', comment.trim())
+    setComment('')
+  }
+
+  return (
+    <section className="architect-contract-append" data-contract-append>
+      <label className="architect-revision">
+        <span>追加修改需求…</span>
+        <textarea
+          rows={3}
+          value={comment}
+          placeholder="例如：账单页再加一个导出按钮；接口拆成 /api/v1/bills 与 /api/v1/bills/:id"
+          onChange={(event) => setComment(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault()
+              submit()
+            }
+          }}
+        />
+      </label>
+      <div className="architect-decision-row">
+        <span className="architect-append-hint">
+          会直接在当前契约上修订，无需重新澄清
+        </span>
+        <button
+          type="button"
+          className="architect-primary"
+          disabled={!ready || submitting}
+          title={ready ? '追加到当前 Context 并重新生成契约' : '请先写下新的需求'}
+          onClick={submit}
+        >
+          {submitting ? (
+            <>
+              <span className="mini-spinner" aria-label="修订中" />
+              修订中…
+            </>
+          ) : (
+            '追加需求并修订'
+          )}
+        </button>
+      </div>
+      <p className="architect-decision-hint">
+        契约 ID：<code>{contract.contractId}</code>
+      </p>
+    </section>
+  )
+}
+
 function ContractActions({ contract, submitting, onDecide }) {
   const [comment, setComment] = useState('')
   const [cancelConfirm, setCancelConfirm] = useState(false)
@@ -997,6 +1059,12 @@ export default function ArchitectPanel({
                   onGenerate={onFullstackGenerate}
                 />
               )}
+              {/* 契约确认后对话栏不关闭：底部持续提供追加需求入口。 */}
+              <ContractAppend
+                contract={contract}
+                submitting={Boolean(state.decisionSubmitting)}
+                onDecide={onDecide}
+              />
             </>
           )}
 

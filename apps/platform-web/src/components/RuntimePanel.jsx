@@ -751,9 +751,6 @@ export default function RuntimePanel({
             visible={visible && !submitting}
             inspectMode={inspectMode}
             onInspectPick={onInspectPick}
-            placement={placement}
-            onPlacementConfirm={onPlacementConfirm}
-            onPlacementDismiss={onPlacementDismiss}
           />
         )}
 

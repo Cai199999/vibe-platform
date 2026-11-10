@@ -155,7 +155,7 @@ class RelativeCoordinatePromptTest(unittest.TestCase):
         self.assertIn("relativeX", client.system)
         self.assertIn("parentWidth", client.system)
 
-    def test_coder_prompt_requires_exact_placement(self) -> None:
+    def test_coder_prompt_requires_transform_move_and_relative_hints(self) -> None:
         llm, client = self._llm(
             json.dumps(
                 {
@@ -183,11 +183,11 @@ class RelativeCoordinatePromptTest(unittest.TestCase):
             verify_result={"ok": False},
             retry_count=0,
         )
-        # Prompt 必须给出像素级落位算法，而不是只按比例猜。
+        # 相对坐标只用于插入顺序；移动必须使用 transform，禁止改宽高。
         self.assertIn("relativeX", client.system)
-        self.assertIn("position:absolute", client.system)
-        self.assertIn("margin-left", client.system)
         self.assertIn("flex/grid", client.system)
+        self.assertIn("transform: translate3d(dx, dy, 0)", client.system)
+        self.assertIn("禁止修改 width / height", client.system)
         self.assertIn('"relativeX": 320.5', client.human)
 
 

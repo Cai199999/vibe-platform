@@ -73,6 +73,30 @@ class RuleRoutingTest(unittest.TestCase):
         self.assertFalse(prediction.dispatchable)
         self.assertIn("annotations", prediction.missing_inputs)
 
+    def test_move_intent_routes_to_ui_agent_with_tool_signal(self) -> None:
+        """“挪到右边一点”必须是移动 Skill，而不是普通 UI 修改。"""
+        prediction = self.classify(
+            _request(message="把按钮挪到右边一点", annotations=[_annotation()])
+        )
+        self.assertEqual(prediction.target, "ui_graph")
+        self.assertEqual(prediction.task_type, "ui_move")
+        self.assertTrue(prediction.dispatchable)
+        self.assertIn("tool:move_component", prediction.signals)
+        self.assertEqual(prediction.strategy, "move_skill")
+
+    def test_move_intent_without_annotation_requires_canvas_target(self) -> None:
+        prediction = self.classify(_request(message="把卡片往左移动 40px"))
+        self.assertEqual(prediction.target, "ui_graph")
+        self.assertFalse(prediction.dispatchable)
+        self.assertIn("annotations", prediction.missing_inputs)
+
+    def test_mobile_product_does_not_trigger_move_intent(self) -> None:
+        prediction = self.classify(
+            _request(message="把移动端布局改成上下结构", annotations=[_annotation()])
+        )
+        self.assertNotEqual(prediction.task_type, "ui_move")
+        self.assertEqual(prediction.target, "ui_graph")
+
     def test_architect_by_keywords(self) -> None:
         prediction = self.classify(
             _request(message="帮我设计全栈系统，后端用 Spring Boot，数据库用 MySQL")

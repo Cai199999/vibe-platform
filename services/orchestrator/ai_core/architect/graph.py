@@ -255,7 +255,18 @@ class ArchitectGraphRunner:
             builder.add_node(name, self._instrument(name, fn))
 
         builder.add_edge(START, "summarize_history")
-        builder.add_edge("summarize_history", "ingest_context")
+        # 契约确认后用户仍可追加需求：服务端会把已有 contract_draft 与新
+        # 反馈写入初始状态，并标记 contract_decision=REVISE。此时直接从
+        # summarize_history 跳到 revise_contract，复用已确认契约的上下文，
+        # 不再重新做澄清 / 脑补一轮分析。
+        builder.add_conditional_edges(
+            "summarize_history",
+            self._route_after_summary,
+            {
+                "ingest_context": "ingest_context",
+                "revise_contract": "revise_contract",
+            },
+        )
         builder.add_edge("ingest_context", "retrieve_knowledge")
         builder.add_edge("retrieve_knowledge", "skeleton_gate")
         builder.add_conditional_edges(
@@ -306,6 +317,16 @@ class ArchitectGraphRunner:
         builder.add_edge("confidence_exhausted", END)
         builder.add_edge("failed", END)
         return builder.compile(checkpointer=self._checkpointer_provider.get())
+
+    def _route_after_summary(self, state: ArchitectState) -> str:
+        """区分“首次澄清”与“已确认契约后的追加修订”。
+
+        追加修订必须保留原契约与已收集的业务上下文，只让 LLM 重写受影响
+        的部分；重新走 analyze 会覆盖 slots，导致修订后的契约丢失旧信息。
+        """
+        if state.get("contract_decision") == "REVISE" and state.get("contract_draft"):
+            return "revise_contract"
+        return "ingest_context"
 
     # --------------------------------------------------------
     # 节点：历史压缩
@@ -898,7 +919,13 @@ class ArchitectGraphRunner:
                 "contract": payload,
                 "comment": state.get("contract_feedback") or "",
             },
-            dedupe_key=f"architect.contract.confirmed:{state.get('contract_id')}",
+            # 同一 contractId 可以被追加需求多次修订并再次确认；dedupe key
+            # 必须带 revision，否则第二次 CONFIRMED 会被事件缓冲区丢弃，
+            # 前端 SSE 永远等不到终态。
+            dedupe_key=(
+                f"architect.contract.confirmed:{state.get('contract_id')}:"
+                f"{int(state.get('contract_revision_count') or 0)}"
+            ),
         )
         return {"contract": payload, "status": "CONFIRMED"}
 
@@ -974,6 +1001,10 @@ class ArchitectGraphRunner:
         if self._pause_hook is not None and event_type in {
             "architect.clarification.required",
             "architect.contract.ready",
+            # 确认事件也必须在 SSE 可见前预热内存状态：否则前端收到
+            # confirmed 后立刻追加需求，会命中仍为 CONFIRMING_CONTRACT
+            # 的 409 竞态。
+            "architect.contract.confirmed",
         }:
             try:
                 self._pause_hook(event_type, payload)

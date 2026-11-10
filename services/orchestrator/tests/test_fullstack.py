@@ -33,6 +33,7 @@ from ai_core.fullstack.coders import (
     generate_frontend_bundle,
     generate_frontend_skeleton_bundle,
     generate_infra_bundle,
+    item_path,
 )
 from ai_core.fullstack.graph import FullstackGraphRunner
 from ai_core.fullstack.service import FullstackService
@@ -230,6 +231,85 @@ class CoderTests(unittest.TestCase):
         contract = _contract()
         self.assertEqual(collection_path(contract.api_routes), "/api/v1/todos")
 
+    def test_collection_path_never_uses_parameterized_stream_route(self) -> None:
+        """回归：``/api/v1/tasks/{task_id}/stream`` 不是集合路由。
+
+        旧逻辑只排除“参数在末尾”的路径，导致 SSE 路由被注入前端，
+        浏览器请求 ``/api/v1/tasks/{task_id}/stream``，Express 却把
+        花括号当普通字符注册，最终 404。前端必须拿到静态集合根路径。
+        """
+        routes = [
+            ArchitectApiRoute(
+                method="POST", path="/api/v1/resumes", description="创建简历"
+            ),
+            ArchitectApiRoute(
+                method="GET", path="/api/v1/resumes/{resume_id}", description="详情"
+            ),
+            ArchitectApiRoute(
+                method="GET", path="/api/v1/tasks/{task_id}/stream", description="SSE"
+            ),
+            ArchitectApiRoute(
+                method="GET", path="/api/v1/tasks/{task_id}", description="任务详情"
+            ),
+        ]
+        self.assertEqual(collection_path(routes), "/api/v1/resumes")
+        self.assertEqual(
+            item_path(routes, "/api/v1/resumes"), "/api/v1/resumes/{resume_id}"
+        )
+
+        # 契约只有参数化 / 流式路由时，也要推导出静态资源根路径，
+        # 而不是把带花括号的 URL 直接交给前端。
+        stream_only = [
+            ArchitectApiRoute(
+                method="GET", path="/api/v1/tasks/{task_id}/stream", description="SSE"
+            )
+        ]
+        self.assertEqual(collection_path(stream_only), "/api/v1/tasks")
+        self.assertEqual(item_path(stream_only, "/api/v1/tasks"), "/api/v1/tasks/:id")
+
+    def test_backend_and_frontend_share_one_express_route(self) -> None:
+        """Task 3 校验：前后端集合路由必须逐字符一致且无花括号参数。"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="POST", path="/api/v1/resumes", description="创建简历"
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/resumes/{resume_id}",
+                    description="简历详情",
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/tasks/{task_id}/stream",
+                    description="任务 SSE",
+                ),
+            ]
+        )
+        backend = generate_backend_bundle(contract)
+        collection = backend.metadata["collectionPath"]
+        self.assertEqual(collection, "/api/v1/resumes")
+        self.assertNotIn("{", collection)
+        self.assertIn(
+            f"const COLLECTION_PATH = '{collection}'", backend.files["server/index.js"]
+        )
+        self.assertIn("server/api-routes.json", backend.files)
+        self.assertIn(
+            '"collection": "/api/v1/resumes"', backend.files["server/api-routes.json"]
+        )
+
+        main = "import React from 'react'\nimport App from './App.jsx'\n<App />"
+        vite = "export default { server: { port: 5173 } }"
+        frontend = generate_frontend_bundle(
+            contract,
+            existing_main=main,
+            existing_vite=vite,
+            existing_package="{}",
+        )
+        panel = frontend.files["src/fullstack-api.jsx"]
+        self.assertIn(f"const COLLECTION_PATH = '{collection}'", panel)
+        self.assertNotIn("/stream", panel)
+
     def test_contract_database_engine_normalizes_and_defaults(self) -> None:
         self.assertEqual(contract_database_engine(_contract()), "mysql")
         postgres = _contract(
@@ -358,6 +438,11 @@ class CoderTests(unittest.TestCase):
         self.assertEqual(bundle.metadata["mode"], "frontend")
         self.assertEqual(bundle.metadata["routes"], 2)
         self.assertEqual(bundle.metadata["components"], 3)
+        # 侧边栏点击必须切换每个路由的独立内容，而不是共用同一块静态 DOM。
+        self.assertIn("const routeComponents = useMemo", app)
+        self.assertIn("activeComponents", app)
+        self.assertIn("data-route-path", app)
+        self.assertIn("routePaths[hash % routePaths.length]", app)
 
     def test_skeleton_mode_renders_clean_shell_and_single_placeholder(self) -> None:
         """骨架模式必须只渲染 Header + Sidebar + Main 与一个占位组件。"""

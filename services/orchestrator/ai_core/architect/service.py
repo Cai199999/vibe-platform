@@ -19,6 +19,7 @@ from ai_core.adapters.checkpoint import get_checkpointer_provider
 from ai_core.ports.checkpoint import CheckpointerProvider
 from ai_core.agent.events import RunEventBuffer, get_event_buffer
 from ai_core.architect.graph import (
+    CONTRACT_REVISION_SOFT_LIMIT,
     ArchitectGraphRunner,
     ArchitectRunCancelledError,
 )
@@ -311,6 +312,16 @@ class ArchitectService:
                 active.contract = contract
                 active.clarification = None
                 active.status = "AWAITING_CONTRACT_CONFIRMATION"
+            elif event_type == "architect.contract.confirmed":
+                # 让“已确认”在 SSE 事件可见前就生效。追加需求请求可能
+                # 与图线程收尾并发到达，不能依赖 _apply_outcome 的时序。
+                raw_contract = payload.get("contract") or {}
+                if raw_contract:
+                    contract = ArchitectContract.model_validate(raw_contract)
+                    contract.status = "CONFIRMED"
+                    active.contract = contract
+                active.clarification = None
+                active.status = "CONFIRMED"
             active.touch()
 
     # --------------------------------------------------------
@@ -399,6 +410,25 @@ class ArchitectService:
             logger.exception("architect resume failed run_id=%s", active.run_id)
             self._complete_failure(active, exc)
 
+    def _revision_worker(
+        self,
+        active: ActiveArchitectRun,
+        initial_state: dict[str, Any],
+    ) -> None:
+        """已确认契约的追加修订线程。
+
+        使用同一个 checkpoint thread 重新从 START 进入，但由
+        ``_route_after_summary`` 直接跳到 revise_contract；这样既复用了
+        原 Context，又不需要伪造一个新的 interrupt。
+        """
+        try:
+            self._execute_graph(active, initial_state=initial_state)
+        except ArchitectRunCancelledError:
+            self._complete_cancelled(active, active.cancel_reason)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("architect revision failed run_id=%s", active.run_id)
+            self._complete_failure(active, exc)
+
     # --------------------------------------------------------
     # 契约决策
     # --------------------------------------------------------
@@ -420,7 +450,15 @@ class ArchitectService:
             if contract.contract_id != expected_id:
                 raise ArchitectContractNotFoundError(f"实施契约不存在: {expected_id}")
 
-            if active.is_terminal:
+            # 已确认契约仍保持“持续在线”：用户追加新需求时允许再次
+            # REVISE。此时不是恢复旧 interrupt，而是从当前 checkpoint
+            # 状态直接进入 revise_contract，避免重新澄清或脑补。
+            confirming_revision = (
+                active.is_terminal
+                and active.status == "CONFIRMED"
+                and decision == "REVISE"
+            )
+            if active.is_terminal and not confirming_revision:
                 idempotent = (
                     decision == "CONFIRM"
                     and active.status == "CONFIRMED"
@@ -432,19 +470,30 @@ class ArchitectService:
                     f"Architect 已处于终态 {active.status}，不能再次决策"
                 )
 
-            if active.status != "AWAITING_CONTRACT_CONFIRMATION":
+            if (
+                not confirming_revision
+                and active.status != "AWAITING_CONTRACT_CONFIRMATION"
+            ):
                 raise ArchitectStateConflictError(
                     f"Architect 当前状态为 {active.status}，没有待确认契约"
                 )
             if decision == "REVISE" and not (request.comment or "").strip():
                 raise ArchitectStateConflictError("REVISE 必须提供 comment")
-
-            active.status = {
-                "CONFIRM": "CONFIRMING_CONTRACT",
-                "REVISE": "REVISING_CONTRACT",
-                "CANCEL": "CANCELLING",
-            }[decision]
-            active.touch()
+            if confirming_revision:
+                revision_count = int(active.state.get("contract_revision_count") or 0)
+                if revision_count >= CONTRACT_REVISION_SOFT_LIMIT:
+                    raise ArchitectStateConflictError(
+                        "契约修订次数超过上限，请重新发起架构澄清"
+                    )
+                active.status = "REVISING_CONTRACT"
+                active.touch()
+            else:
+                active.status = {
+                    "CONFIRM": "CONFIRMING_CONTRACT",
+                    "REVISE": "REVISING_CONTRACT",
+                    "CANCEL": "CANCELLING",
+                }[decision]
+                active.touch()
 
         active.buffer.emit(
             "architect.contract.decision.received",
@@ -459,6 +508,44 @@ class ArchitectService:
                 f"{int(active.state.get('contract_revision_count') or 0)}"
             ),
         )
+        if confirming_revision:
+            # 追加需求进入当前 Context：把新消息写入 ui_history，并保留
+            # 已确认契约的 draft / slots / 技术栈，只重写受影响部分。
+            base_state = dict(active.state or {})
+            history = list(base_state.get("ui_history") or [])
+            history.append({"role": "user", "content": request.comment.strip()})
+            revision_count = int(base_state.get("contract_revision_count") or 0)
+            revision_state = {
+                **base_state,
+                "ui_history": history,
+                "contract_decision": "REVISE",
+                "contract_feedback": request.comment.strip(),
+                "contract_revision_count": revision_count + 1,
+                "contract_issues": [],
+                "repair_count": 0,
+                "status": "REVISING_CONTRACT",
+            }
+            active.state = revision_state
+            active.buffer.emit(
+                "architect.contract.revision_requested",
+                {
+                    "contractId": contract.contract_id,
+                    "comment": request.comment.strip(),
+                    "revision": revision_count + 1,
+                },
+                dedupe_key=(
+                    f"architect.contract.revision:"
+                    f"{contract.contract_id}:{revision_count + 1}"
+                ),
+            )
+            threading.Thread(
+                target=self._revision_worker,
+                args=(active, revision_state),
+                name=f"architect-revision-{run_id}",
+                daemon=True,
+            ).start()
+            return _decision_response(active, contract, now)
+
         threading.Thread(
             target=self._resume_worker,
             args=(

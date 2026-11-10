@@ -39,6 +39,7 @@ from ai_core.domain.actions import (
 from ai_core.domain.agent import ExecuteRunRequest, RunOptions
 from ai_core.ports.model import ModelClient, ModelClientError
 from ai_core.skill_loader import skill_prompts_to_system
+from ai_core.tools.move_component_tool import build_move_rule
 from ai_core.editor import (
     CodeEdit,
     EditKind,
@@ -377,6 +378,24 @@ class MockAgentLLM(AgentLLM):
         if position:
             return _apply_position(code, annotation, position, path)
 
+        # 移动意图走标准 Tool：只生成 transform 位移，不触碰宽高。
+        # 这样“新建组件后自动进入拖拽模式”的旧链路可以被完全移除，
+        # 用户选中目标后直接说“往右挪一点”即可。
+        move = _detect_move(instruction)
+        selector = _annotation_selector(annotation)
+        if (
+            move
+            and selector
+            and not is_create_action(_annotation_action(annotation))
+            and not _is_add_intent(instruction)
+        ):
+            try:
+                rule = build_move_rule(selector, move[0], move[1])
+            except ValueError:
+                rule = ""
+            if rule:
+                return _append_css_rule(code, rule, path)
+
         if (
             self.scenario == "add_button"
             or is_create_action(_annotation_action(annotation))
@@ -487,18 +506,23 @@ class DeepSeekAgentLLM(AgentLLM):
             "  · CREATE_NEW（旧协议别名 ADD）：新增组件。只规划组件主体、"
             "插入父容器与可辨识的 data-vibe-created 标记；不要依赖 absolute "
             "坐标，也不要要求 Coder 把圈选坐标写死。插入到父容器自然文档流"
-            "即可，位置将由用户在预览中拖拽后通过独立 Patch 精确回写。\n"
-            "  · MODIFY_EXISTING（旧协议别名 MODIFY）：修改、移动或重新定位"
-            "已有元素；若 payload.position 存在，表示用户已拖拽确认，必须"
-            "按该坐标精确落位。\n"
+            "即可，位置调整由用户后续自然语言指令触发 move_component。\n"
+            "  · MODIFY_EXISTING（旧协议别名 MODIFY）：修改已有元素。\n"
+            "- **移动规划铁律**：用户说“挪 / 移动 / 往左 / 往右 / 上移 / 下移”"
+            "时，计划只能写“给目标元素追加 transform: translate3d(dx,dy,0)”，"
+            "禁止规划 width / height / left / top / position / margin 变更；"
+            "拖拽浮层是画布交互，不是最终代码的一部分。\n"
+            "- **API 路径规划铁律**：前端请求路径必须与后端 Express 路由逐字符"
+            "一致（/api/v1 前缀、静态集合根路径）；禁止把 `:id` / `{id}` / "
+            "`/stream` 路由当作集合接口。\n"
+            "- **导航规划铁律**：侧边栏 / 顶部导航必须规划真实内容切换"
+            "（react-router-dom 或 useState 页面状态），禁止只做静态 DOM 高亮。\n"
             "- CREATE_NEW 仍可能带 relativeTarget（旧客户端）：归一化 x/y 与"
             "像素 relativeX/relativeY/widthPx/heightPx/parentWidth/"
             "parentHeight 只用于判断应插入哪个父容器 / 相对顺序，不得据此"
             "生成绝对定位；target.selector 指向父容器。禁止把新增内容伪装"
             "成“修改某个已有元素”；\n"
-            "- 坐标回写 Patch 的 action 固定为 MODIFY_EXISTING，payload."
-            "position 包含 x/y（相对父容器左上角 CSS 像素）、parentSelector "
-            "与 selector；只调整定位，不得重建组件或删除内容；\n"
+            "- 旧版 payload.position 只作为历史审计信息，不再规划 left/top 定位；\n"
             "- 每个标注可能带 threadContext.chatHistory（同一圈的多轮对话）和"
             " previousRuns（上一轮修改记录）。必须理解上下文，例如用户先说"
             "“改成红色”，再说“不，我要蓝色”，最终结果只能是蓝色；不要同时保留"
@@ -597,24 +621,35 @@ class DeepSeekAgentLLM(AgentLLM):
             "结构，不得删除或覆盖已有节点；在 target.selector 指向的父容器"
             "内部插入完整、可编译的 JSX。**只生成组件主体，不要写 position:"
             "absolute / left / top，也不要根据旧 relativeTarget 写死坐标**；"
-            "按父容器现有 flex/grid 自然流插入即可。每个新增节点必须带 "
-            'data-vibe-created="<annotationId>"，供前端拖拽层测量与回写位置。'
+            "按父容器现有 flex/grid 自然流插入即可。每个新增节点带 "
+            'data-vibe-created="<annotationId>" 仅用于审计，禁止再引入拖拽层。'
             "绝不能把新增内容塞进 button / p / h1 等叶子元素内部；target 为空"
             "时，从页面主容器（main / 根 section）末尾插入；\n"
-            "  · MODIFY_EXISTING（旧协议别名 MODIFY）：修改、移动或重新定位"
-            "已有元素。若 payload.position 存在，说明用户已在预览中拖拽确认，"
-            "必须把组件移动到父容器内 (x, y) 像素位置：给父容器加 "
-            "position:relative，组件用 position:absolute + left/top，或追加"
-            "等价 CSS 规则；只改定位，不得重建组件、改文案或删除内容。\n"
+            "  · MODIFY_EXISTING（旧协议别名 MODIFY）：修改已有元素。\n"
+            "- **移动指令铁律**：当指令表达“挪 / 移动 / 往左 / 往右 / 上移 / "
+            "下移 / 拖到某处”时，只允许给目标元素追加 CSS "
+            "`transform: translate3d(dx, dy, 0) !important`（或等价 transform），"
+            "禁止修改 width / height / max-width / min-width / left / top / "
+            "position / margin 来模拟位移。移动是可叠加的相对位移，量级参考："
+            "一点≈24px，一些≈48px，未给方向时默认向右。画布拖拽只负责生成"
+            "这条自然语言指令，最终代码中绝不能出现辅助线、虚线框或拖拽浮层。\n"
+            "- **前端 API 路径铁律**：任何 fetch / axios 请求的 URL 必须与后端 "
+            "Express 路由逐字符一致（包含 /api/v1 前缀与静态集合根路径）。"
+            "禁止把带路径参数的 `:id` / `{id}` / `/stream` 路由当成集合接口；"
+            "数据面板默认只请求集合根路径，例如后端 "
+            "`app.get('/api/v1/resumes', ...)` 时前端必须请求 `/api/v1/resumes`。"
+            "若项目中存在 server/api-routes.json，以其中的 collection / item 为准。\n"
+            "- **侧边栏路由铁律**：如果页面包含侧边栏或顶部导航，必须实现真实的"
+            "内容切换：使用 react-router-dom，或至少用 useState 维护 activePath，"
+            "并为每个导航项渲染独立的页面 / 区块内容。禁止只生成静态 DOM 让点击"
+            "仅改变高亮；每个导航项都要有可验证的内容差异。\n"
             "- CREATE_NEW 生成的新元素必须有可辨识的文本与样式（如 className /"
             " style / 已有 CSS 类），新增按钮需保证点击区域可见；同一 thread "
             "多轮 CREATE_NEW 时不要重复插入完全相同的组件，除非用户明确要求"
             "再来一个；\n"
-            "- 兼容旧客户端：若尚未升级到拖拽流程，标注意图仍可能带 relativeX/"
-            "relativeY 等像素字段。它们只能用于判断 flex/grid 插入顺序或 "
-            "margin-left 粗调，不得覆盖 CREATE_NEW 的“位置后置”规则；"
-            "真正的位置以用户拖拽后的 payload.position + position:absolute "
-            "Patch 为准。\n"
+            "- 兼容旧客户端：relativeX / relativeY 等像素字段只能用于判断 "
+            "flex/grid 插入顺序或 margin 粗调，不得写死绝对坐标；旧版 "
+            "payload.position 仅作为历史审计信息，不再驱动 left/top 定位。\n"
             "- 如果上一轮构建失败，必须针对错误日志修复，同时保证全部标注仍然"
             "生效，而不是重复原方案。"
             f"{self._skill_system}"
@@ -1422,6 +1457,53 @@ def _detect_scale(text: str) -> float | None:
     return None
 
 
+_MOVE_RIGHT = ("向右", "往右", "右移", "右边", "右侧")
+_MOVE_LEFT = ("向左", "往左", "左移", "左边", "左侧")
+_MOVE_DOWN = ("向下", "往下", "下移", "底部", "下方", "下面")
+_MOVE_UP = ("向上", "往上", "上移", "顶部", "上方", "上面")
+
+
+def _move_distance(text: str) -> float:
+    """解析位移距离：优先显式 px，其次按口语程度取保守默认值。"""
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:px|像素)", text, re.IGNORECASE)
+    if match:
+        return max(1.0, min(2000.0, float(match.group(1))))
+    if any(token in text for token in ("一点", "稍微", "轻轻")):
+        return 24.0
+    if any(token in text for token in ("一些", "几下", "大点", "多一点")):
+        return 48.0
+    return 48.0
+
+
+def _detect_move(text: str) -> tuple[float, float] | None:
+    """把移动类自然语言解析为 ``(dx, dy)`` 像素偏移。
+
+    “移动端 / 移动应用”是产品名，不触发位移；只有出现方向词或明确的
+    移动动词（挪 / 拖动 / 位移）时才返回偏移。
+    """
+    normalized = str(text or "").strip()
+    if not normalized or "移动端" in normalized or "移动应用" in normalized:
+        return None
+    has_verb = any(token in normalized for token in ("挪", "移动", "拖到", "拖拽到"))
+    dx = 0.0
+    dy = 0.0
+    distance = _move_distance(normalized)
+    if any(token in normalized for token in _MOVE_RIGHT):
+        dx += distance
+    if any(token in normalized for token in _MOVE_LEFT):
+        dx -= distance
+    if any(token in normalized for token in _MOVE_DOWN):
+        dy += distance
+    if any(token in normalized for token in _MOVE_UP):
+        dy -= distance
+    if dx == 0 and dy == 0:
+        if not has_verb:
+            return None
+        # “挪一下 / 移动一点”没有方向时，按向右微调处理，避免空操作。
+        dx = distance
+    return dx, dy
+
+
 def _detect_text(text: str) -> str | None:
     for pattern in _TEXT_PATTERNS:
         match = pattern.search(text)
@@ -1432,17 +1514,28 @@ def _detect_text(text: str) -> str | None:
     return None
 
 
+def _jsx_style_block(rule: str) -> str:
+    """把 CSS 规则包装成合法的 JSX ``<style>`` 表达式。
+
+    规则会进入模板字符串，因此必须转义反斜杠、反引号与 ``${``；属性
+    选择器里的双引号不需要转义，放在模板字符串里是安全的。
+    """
+    escaped = rule.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+    return f"<style>{{`{escaped}`}}</style>"
+
+
 def _append_css_rule(code: str, rule: str, path: str = "src/App.jsx") -> str:
-    """把 CSS 规则追加到 JSX 的 <style> 字符串中。
+    """把 CSS 规则追加到 JSX 的 ``<style>`` 中，且不破坏 JSX 语法。
 
     通过 ``AnchorCodeEditor`` 实现，锚点优先级：
-      1. 模板字符串 ``"}</style>"``：规则直接拼进现有样式串；
-      2. 普通 ``</style>``：兼容非模板写法；
-      3. 没有 style 块：在页面主容器末尾新建一个 ``<style>`` 块。
+      1. ``"}</style>"``：规则直接拼进双引号字符串；
+      2. `` `}</style>` ``：规则拼进模板字符串，并转义特殊字符；
+      3. 其他 ``<style>{表达式}</style>``：在标签后新增一个兄弟
+         ``<style>{`规则`}</style>``。生成骨架常用 ``GLOBAL_CSS`` 变量，
+         把裸 CSS 插到 ``</style>`` 前会变成 JSX 非法内容。
+      4. 没有 style 块：在页面主容器末尾新建一个 ``<style>`` 块。
     """
-    # 模板字符串 <style>{"..."}</style>：规则会进入 JS 字符串字面量，
-    # 属性选择器里的双引号必须转义，否则 `[data-source="x"]` 会直接
-    # 截断字符串导致 JSX 编译失败。
+    # 双引号字符串：属性选择器里的双引号必须转义，否则会提前截断。
     js_marker = '"}</style>'
     if js_marker in code:
         escaped = rule.replace("\\", "\\\\").replace('"', '\\"')
@@ -1454,16 +1547,28 @@ def _append_css_rule(code: str, rule: str, path: str = "src/App.jsx") -> str:
             escaped,
             label="追加 CSS 规则",
         )
-    if "</style>" in code:
+    template_marker = "`}</style>"
+    if template_marker in code:
+        escaped = _jsx_style_block(rule)[len("<style>{`") : -len("`}</style>")]
         return _edit_source(
             code,
             path,
             EditKind.INSERT_BEFORE,
-            "</style>",
-            rule,
+            template_marker,
+            escaped,
             label="追加 CSS 规则",
         )
-    style_block = f"<style>{{`{rule}`}}</style>"
+    if "</style>" in code:
+        return _edit_source(
+            code,
+            path,
+            EditKind.INSERT_AFTER,
+            "</style>",
+            _jsx_style_block(rule),
+            layout=EditLayout.BLOCK,
+            label="追加 CSS 规则",
+        )
+    style_block = _jsx_style_block(rule)
     for closing_tag in ("</section>", "</main>"):
         if closing_tag in code:
             return _edit_source(
@@ -1598,3 +1703,69 @@ def build_agent_llm(
     if provider == "mock":
         return MockAgentLLM(scenario=options.mock_scenario)
     return DeepSeekAgentLLM(settings)
+
+
+# ------------------------------------------------------------
+# 供 Graph / Tool 短路使用的公开辅助函数
+# ------------------------------------------------------------
+# Graph 需要在调用 LLM 之前判断“这是一次纯移动请求”，从而直接调用标准
+# Tool `move_component`。这里只暴露稳定的函数名，内部实现仍复用同一套
+# 解析 / 锚点编辑逻辑，避免 Graph 与 Mock Coder 产生两套行为。
+def detect_move_offset(text: str) -> tuple[float, float] | None:
+    return _detect_move(text)
+
+
+def is_move_only_instruction(text: str) -> bool:
+    """判断指令是否只要求移动，不夹带颜色 / 文案 / 字号等其它修改。
+
+    保守策略：只要出现任何非移动类修改信号，就返回 False，交给完整
+    LLM 流程处理，避免“移动并把按钮改成红色”被短路成一次纯位移。
+    """
+    if _detect_move(text) is None:
+        return False
+    normalized = str(text or "").strip()
+    if _detect_color(normalized) is not None or _detect_text(normalized) is not None:
+        return False
+    non_move_tokens = (
+        "字号",
+        "字体",
+        "背景",
+        "边框",
+        "圆角",
+        "阴影",
+        "间距",
+        "padding",
+        "margin",
+        "加粗",
+        "斜体",
+        "隐藏",
+        "显示",
+        "删除",
+        "新增",
+        "添加",
+        "替换",
+        "改成",
+        "变为",
+        "颜色",
+    )
+    return not any(token in normalized.lower() for token in non_move_tokens)
+
+
+def annotation_selector(annotation: dict[str, Any]) -> str:
+    return _annotation_selector(annotation)
+
+
+def annotation_text(annotation: dict[str, Any]) -> str:
+    return _annotation_text(annotation)
+
+
+def annotation_target_file(
+    annotation: dict[str, Any],
+    current_files: dict[str, str],
+    fallback: str,
+) -> str:
+    return _annotation_target_file(annotation, current_files, fallback)
+
+
+def append_css_rule(code: str, rule: str, path: str = "src/App.jsx") -> str:
+    return _append_css_rule(code, rule, path)

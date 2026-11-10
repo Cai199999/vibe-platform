@@ -835,6 +835,13 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "- 所有形态都必须给 implementation_path 与可验证验收标准；\n"
             "- 必须复用 Project Summary 中已确认的技术栈与架构决策，不要另起"
             "一套；latestChanges 涉及的前后端能力必须进入契约；\n"
+            "- 【API 路径一致性铁律】full_stack_system 的 api_routes 必须为"
+            "每个资源先声明一条静态集合路由（例如 GET/POST "
+            "/api/v1/resumes），再声明详情路由（/api/v1/resumes/{resume_id}）；"
+            "路径参数只能使用 {name} 形式，禁止使用冒号；除用户明确要求实时"
+            "进度外，不要生成 /stream、/events 等 SSE 路由。前端数据面板只会"
+            "请求集合根路径，后端也必须注册完全相同的路径，禁止一边写 "
+            "/api/v1/tasks、另一边写 /api/v1/tasks/stream；\n"
             "- 不要编造用户未提供的业务实体；不确定处写入 assumptions。"
         )
         human = _contract_human(context)
@@ -862,6 +869,8 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "防脑补铁律：不得新增用户未明确要求的业务组件或表单；需求未聊透"
             "的区域只保留一个 is_placeholder:true 的占位组件；如果原契约是抽象"
             "骨架，除非用户反馈中明确给出业务对象，否则继续只输出空白骨架。"
+            "API 路径必须前后端逐字符一致：每个资源先有静态集合路由，再有"
+            "详情路由；路径参数用 {name}，不要新增 /stream、/events 端点。"
         )
         human = (
             f"{_contract_human(context)}\n\n"

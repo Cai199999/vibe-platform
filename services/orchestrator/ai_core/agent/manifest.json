@@ -18,74 +18,167 @@
     "run_build",
     "git_commit",
     "rollback_checkpoint",
-    "shell_tool"
+    "shell_tool",
+    "move_component"
   ],
   "input_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "UiGraphInput",
     "type": "object",
-    "required": ["projectId", "annotations"],
+    "required": [
+      "projectId",
+      "annotations"
+    ],
     "properties": {
-      "projectId": {"type": "string"},
-      "projectName": {"type": "string"},
+      "projectId": {
+        "type": "string"
+      },
+      "projectName": {
+        "type": "string"
+      },
       "annotations": {
         "type": "array",
         "minItems": 1,
         "maxItems": 3,
-        "items": {"type": "object"}
+        "items": {
+          "type": "object"
+        }
       },
-      "sandboxId": {"type": ["string", "null"]},
+      "sandboxId": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "files": {
         "type": "object",
-        "additionalProperties": {"type": "string"}
+        "additionalProperties": {
+          "type": "string"
+        }
       },
-      "options": {"type": "object"}
+      "options": {
+        "type": "object"
+      }
     }
   },
   "output_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "UiGraphOutput",
     "type": "object",
-    "required": ["runId", "status"],
+    "required": [
+      "runId",
+      "status"
+    ],
     "properties": {
-      "runId": {"type": "string"},
+      "runId": {
+        "type": "string"
+      },
       "status": {
         "type": "string",
-        "enum": ["SUCCEEDED", "AWAITING_APPROVAL", "FAILED", "CANCELLED"]
+        "enum": [
+          "SUCCEEDED",
+          "AWAITING_APPROVAL",
+          "FAILED",
+          "CANCELLED"
+        ]
       },
-      "sandboxId": {"type": ["string", "null"]},
-      "previewUrl": {"type": ["string", "null"]},
-      "commitHash": {"type": ["string", "null"]},
-      "generatedPatch": {"type": ["string", "null"]},
-      "threadContext": {"type": "object"}
+      "sandboxId": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "previewUrl": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "commitHash": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "generatedPatch": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "threadContext": {
+        "type": "object"
+      }
     }
   },
   "skills": [
+    {
+      "skill_id": "ui.move_component",
+      "name": "组件移动",
+      "description": "把“挪到右边一点”等自然语言转换为 CSS transform 位移，只改变位置，绝不修改宽高。",
+      "prompt_ref": "prompts/ui/move_component.md",
+      "rag_refs": [
+        "knowledge/ui/style"
+      ],
+      "tools": [
+        "read_file",
+        "apply_code_edit",
+        "move_component",
+        "run_build"
+      ],
+      "metadata": {
+        "stage": "M3",
+        "strategy": "css-transform"
+      }
+    },
     {
       "skill_id": "ui.style_edit",
       "name": "样式与布局修改",
       "description": "处理颜色、字号、间距、对齐、布局等视觉属性调整。",
       "prompt_ref": "prompts/ui/style_edit.md",
-      "rag_refs": ["knowledge/ui/style"],
-      "tools": ["read_file", "apply_code_edit", "run_build"],
-      "metadata": {"stage": "M3-preview"}
+      "rag_refs": [
+        "knowledge/ui/style"
+      ],
+      "tools": [
+        "read_file",
+        "apply_code_edit",
+        "run_build"
+      ],
+      "metadata": {
+        "stage": "M3-preview"
+      }
     },
     {
       "skill_id": "ui.content_structure_edit",
       "name": "文案与结构修改",
       "description": "处理文案替换、组件插入、局部结构重排等修改。",
       "prompt_ref": "prompts/ui/content_structure_edit.md",
-      "rag_refs": ["knowledge/ui/components"],
-      "tools": ["read_file", "apply_code_edit", "create_file", "run_build"],
-      "metadata": {"stage": "M3-preview"}
+      "rag_refs": [
+        "knowledge/ui/components"
+      ],
+      "tools": [
+        "read_file",
+        "apply_code_edit",
+        "create_file",
+        "run_build"
+      ],
+      "metadata": {
+        "stage": "M3-preview"
+      }
     },
     {
       "skill_id": "tailwind_magic",
       "name": "Tailwind 视觉强化",
       "description": "从 config/skills/tailwind_magic.skill.json 挂载的领域 Prompt，约束 Tailwind 样式质量。",
       "prompt_ref": "tailwind_magic.skill.json",
-      "rag_refs": ["knowledge/ui/style"],
-      "tools": ["read_file", "apply_code_edit", "run_build"],
+      "rag_refs": [
+        "knowledge/ui/style"
+      ],
+      "tools": [
+        "read_file",
+        "apply_code_edit",
+        "run_build"
+      ],
       "metadata": {
         "stage": "M3-preview",
         "external": true,
@@ -99,7 +192,11 @@
       "description": "从 config/skills/accessibility.skill.md 挂载的 Markdown Skill，约束生成代码符合 WCAG 2.1 AA / WAI-ARIA。",
       "prompt_ref": "accessibility.skill.md",
       "rag_refs": [],
-      "tools": ["read_file", "apply_code_edit", "run_build"],
+      "tools": [
+        "read_file",
+        "apply_code_edit",
+        "run_build"
+      ],
       "metadata": {
         "stage": "M3",
         "external": true,
@@ -125,7 +222,13 @@
     "字号",
     "圈选",
     "改一下",
-    "局部"
+    "局部",
+    "移动",
+    "挪到",
+    "往右",
+    "往左",
+    "拖到",
+    "位置"
   ],
   "stream_path_template": "/api/v1/runs/{runId}/events/stream",
   "metadata": {

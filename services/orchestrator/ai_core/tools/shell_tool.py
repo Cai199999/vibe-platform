@@ -191,10 +191,12 @@ def build_default_toolbox(
     MCP Server 发现失败只记录 warning：搜索 / shell 等本地 Tool 必须仍然
     可用，不能让一个挂掉的外部进程拖垮整个 Agent。
     """
+    from ai_core.tools.move_component_tool import register_move_component_tool
     from ai_core.tools.web_search_tool import register_web_search
 
     registry = ToolRegistry()
     register_shell_tool(registry, settings)
+    register_move_component_tool(registry)
     register_web_search(registry, settings)
     if include_mcp and settings.mcp_enabled:
         try:

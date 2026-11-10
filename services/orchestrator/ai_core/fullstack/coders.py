@@ -254,35 +254,140 @@ def _route_key(route: ArchitectApiRoute) -> tuple[str, str]:
     return (str(route.method or "GET").upper(), str(route.path or ""))
 
 
+# 路径参数既可能出现在末尾（``/todos/{id}``），也可能出现在中间
+# （``/tasks/{task_id}/stream``）。旧逻辑只识别末尾参数，导致
+# ``/api/v1/tasks/{task_id}/stream`` 被误当成“集合路由”注入给前端，
+# 浏览器请求的路径与 Express 实际注册的路径不一致，最终 404。
+_PARAM_SEGMENT = re.compile(r"(^|/)(\{[^/{}]+\}|:[A-Za-z_]\w*)(?=/|$)")
+
+
+def _has_path_params(path: str) -> bool:
+    """判断路由是否包含任意路径参数（不限于末尾）。"""
+    return bool(_PARAM_SEGMENT.search(str(path or "").split("?", 1)[0]))
+
+
 def _is_item_path(path: str) -> bool:
+    """仅末尾带参数的路径才是“单条记录”路由。"""
     return bool(re.search(r"(:\w+|\{\w+\})\s*/?$", path or ""))
 
 
+# SSE / 长连接 / 动作类端点不能作为集合路由：
+# 它们没有“列表 + 新增”的语义，前端数据面板也不能直接 GET。
+_NON_COLLECTION_SUFFIXES = (
+    "/stream",
+    "/events",
+    "/sse",
+    "/subscribe",
+    "/listen",
+    "/health",
+    "/fetch",
+    "/search",
+    "/login",
+    "/logout",
+    "/register",
+    "/upload",
+    "/download",
+    "/export",
+    "/import",
+    "/tailor",
+    "/approve",
+    "/reject",
+)
+
+
+def _is_collection_candidate(path: str) -> bool:
+    """静态、以 /api/ 开头、且不是动作 / 流式端点的路径。"""
+    normalized = str(path or "").split("?", 1)[0].strip()
+    if not normalized.startswith("/api/"):
+        return False
+    if _has_path_params(normalized):
+        return False
+    lowered = normalized.rstrip("/").lower()
+    return not any(
+        lowered == suffix or lowered.endswith(suffix)
+        for suffix in _NON_COLLECTION_SUFFIXES
+    )
+
+
 def collection_path(routes: Iterable[ArchitectApiRoute]) -> str:
-    """选择前端使用的集合路径：优先 GET 集合路由。"""
-    candidates = [
-        route
-        for route in routes
-        if str(route.method or "").upper() == "GET"
-        and str(route.path or "").startswith("/api/")
-        and not _is_item_path(str(route.path or ""))
+    """选择前端数据面板使用的集合路径。
+
+    选择顺序（必须与 BackendCoder 的 Express 注册路径完全一致）：
+      1. 静态 GET 集合路由（``GET /api/v1/tasks``）；
+      2. 任意方法的静态集合路由（例如只声明了 ``POST /api/v1/resumes``）；
+      3. 从参数化路由推导出的资源集合（``/api/v1/tasks/{id}/stream``
+         → ``/api/v1/tasks``）；
+      4. 兜底 ``/api/v1/records``。
+
+    所有候选都排除路径参数、``/stream``、``/events`` 等端点，避免把
+    带参数或长连接的 URL 直接注入前端。
+    """
+    route_list = list(routes)
+    static_routes = [
+        str(route.path or "").split("?", 1)[0].strip()
+        for route in route_list
+        if _is_collection_candidate(str(route.path or ""))
     ]
-    if candidates:
-        return str(candidates[0].path)
-    for route in routes:
-        path = str(route.path or "")
-        if path.startswith("/api/"):
+    # 同一路径可能同时有 GET/POST，去重但保留声明顺序。
+    unique_static = list(dict.fromkeys(static_routes))
+
+    for route in route_list:
+        path = str(route.path or "").split("?", 1)[0].strip()
+        if str(route.method or "").upper() == "GET" and _is_collection_candidate(path):
             return path
+
+    if unique_static:
+        # 优先选择段数最少的资源根路径（``/api/v1/resumes`` 优先于
+        # ``/api/v1/resumes/imports`` 这类子资源）。
+        return sorted(unique_static, key=lambda item: (item.count("/"), len(item)))[0]
+
+    # 没有静态路由时，从任意 /api/ 路径推导第一段资源名：
+    # ``/api/v1/tasks/{task_id}/stream`` → ``/api/v1/tasks``。
+    for route in route_list:
+        path = str(route.path or "").split("?", 1)[0].strip()
+        if not path.startswith("/api/"):
+            continue
+        segments = [segment for segment in path.split("/") if segment]
+        # 至少保留 /api + 版本号 + 资源名；没有版本号时保留 /api + 资源名。
+        if len(segments) >= 3:
+            return "/" + "/".join(segments[:3])
+        if len(segments) == 2:
+            return "/" + "/".join(segments)
     return DEFAULT_COLLECTION_PATH
 
 
 def item_path(routes: Iterable[ArchitectApiRoute], base: str) -> str:
-    """返回契约中的详情路由；没有显式声明时使用 ``<base>/<id>``。"""
+    """返回与集合路径同资源的详情路由；没有则使用 ``<base>/:id``。
+
+    不能随便挑契约里的第一个参数化路由：例如集合是
+    ``/api/v1/resumes``，不能拿 ``/api/v1/tasks/{task_id}/stream`` 当详情。
+    """
+    normalized_base = str(base or "").rstrip("/")
     for route in routes:
-        path = str(route.path or "")
-        if _is_item_path(path):
+        path = str(route.path or "").split("?", 1)[0].strip()
+        if not _is_item_path(path):
+            continue
+        prefix = re.sub(r"/(:\w+|\{\w+\})\s*/?$", "", path).rstrip("/")
+        if prefix == normalized_base:
             return re.sub(r"\s*/\s*$", "", path)
-    return f"{base.rstrip('/')}/:id"
+    return f"{normalized_base}/:id"
+
+
+def _assert_route_pair(collection: str, detail: str) -> None:
+    """生成阶段硬校验：前端与 Express 必须拿到同一条静态集合路径。
+
+    只要集合路径里还残留 ``{param}`` / ``:param``，或不是 /api/ 开头，
+    就说明契约的路由选择失败；直接抛错让 BuildVerifier 暴露问题，
+    不允许把 404 路径写进前端。
+    """
+    if not collection.startswith("/api/"):
+        raise ValueError(f"集合路由必须以 /api/ 开头: {collection}")
+    if "{" in collection or "}" in collection:
+        raise ValueError(f"集合路由残留路径参数: {collection}")
+    if _PARAM_SEGMENT.search(collection):
+        raise ValueError(f"集合路由不能包含 Express 路径参数: {collection}")
+    if not detail.startswith("/api/"):
+        raise ValueError(f"详情路由必须以 /api/ 开头: {detail}")
 
 
 def _entity_label(contract: ArchitectContract, table: str) -> str:
@@ -418,15 +523,19 @@ def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
     columns = [name for name, _ in column_defs]
     engine = contract_database_engine(contract)
     engine_label = DATABASE_ENGINE_LABELS.get(engine, engine)
+    # 集合路径只允许静态资源根路径；详情路径由同一资源派生。
+    # 前端与后端都从这里取值，避免各自“猜路由”导致 404。
     base = collection_path(routes)
     detail = _express_path(item_path(routes, base))
+    _assert_route_pair(base, detail)
+    express_base = _express_path(base)
     entity = _entity_label(contract, table)
 
     replacements = {
         "__API_PORT__": str(API_PORT),
         "__TABLE__": table,
         "__ENTITY__": entity,
-        "__COLLECTION_PATH__": base,
+        "__COLLECTION_PATH__": express_base,
         "__ITEM_PATH__": detail,
     }
     server_code = EXPRESS_SERVER_TEMPLATE
@@ -467,6 +576,25 @@ def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
     files = {
         "server/index.js": server_code,
         "server/README.md": readme,
+        # 前后端联调的唯一事实来源：BuildVerifier / 前端生成都读取该清单，
+        # 任何一端改路由都必须同时更新，避免路径漂移。
+        "server/api-routes.json": json.dumps(
+            {
+                "prefix": "/api",
+                "collection": express_base,
+                "item": detail,
+                "contractRoutes": [
+                    {
+                        "method": str(route.method or "GET").upper(),
+                        "path": str(route.path or ""),
+                    }
+                    for route in routes
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
         "server/package.json": json.dumps(
             {
                 "name": "vibe-fullstack-server",
@@ -492,8 +620,9 @@ def generate_backend_bundle(contract: ArchitectContract) -> GeneratedBundle:
         metadata={
             "table": table,
             "columns": columns,
-            "collectionPath": base,
+            "collectionPath": express_base,
             "itemPath": detail,
+            "routeManifest": "server/api-routes.json",
             "entity": entity,
             "runtime": "express-sequelize",
             "previewRuntime": "express-sqlite",
@@ -1056,7 +1185,39 @@ export default function App() {
   const sidebarLayout = LAYOUT.find((item) => item.region === 'sidebar')
   const headerLayout = LAYOUT.find((item) => item.region === 'header')
   const mainLayout = LAYOUT.find((item) => item.region === 'main')
-  const placeholder = COMPONENTS.find((component) => component.isPlaceholder)
+
+  // 侧边栏导航必须真正切换主内容区，而不是只改变高亮。
+  // 组件若带 route 字段则严格跟随该路由；没有 route 时按 section 的
+  // 稳定哈希分配到不同页面，保证每个导航项都有独立内容，避免“点了没反应”。
+  const routeComponents = useMemo(() => {
+    const groups = new Map(ROUTES.map((route) => [route.path, []]))
+    const routePaths = ROUTES.map((route) => route.path)
+    const routeIndexByName = new Map(
+      ROUTES.map((route, index) => [route.name, index]),
+    )
+    COMPONENTS.forEach((component) => {
+      let targetPath = String(component.route || '').trim()
+      if (!targetPath) {
+        const byName = routeIndexByName.get(component.section)
+        if (byName !== undefined) {
+          targetPath = routePaths[byName]
+        }
+      }
+      if (!targetPath) {
+        // 稳定分配：同一份契约每次生成的归属完全一致。
+        let hash = 0
+        const text = String(component.section || component.id || '')
+        for (let index = 0; index < text.length; index += 1) {
+          hash = (hash * 31 + text.charCodeAt(index)) >>> 0
+        }
+        targetPath = routePaths[hash % routePaths.length]
+      }
+      const bucket = groups.get(targetPath) || groups.get(routePaths[0])
+      bucket.push(component)
+    })
+    return groups
+  }, [])
+  const activeComponents = routeComponents.get(activeRoute?.path) || []
 
   return (
     <div className="app-shell">
@@ -1120,22 +1281,28 @@ export default function App() {
                 className="welcome-panel"
                 data-source="welcome-panel"
                 data-source-kind="container"
+                data-route-path={activeRoute?.path || '/'}
               >
                 <p className="kicker" data-source="page-kicker">
-                  INITIAL SKELETON
+                  {activeRoute?.path === ROUTES[0]?.path
+                    ? 'INITIAL SKELETON'
+                    : 'ROUTE WORKSPACE'}
                 </p>
                 <h1 className="welcome-title" data-source="page-title">
-                  Welcome to your new app
+                  {activeRoute?.path === ROUTES[0]?.path
+                    ? 'Welcome to your new app'
+                    : activeRoute?.name || '待定页面'}
                 </h1>
                 <p className="welcome-copy" data-source="page-copy">
-                  {mainLayout?.description ||
+                  {activeRoute?.description ||
+                    mainLayout?.description ||
                     '应用骨架已就绪。先确认整体布局，再通过对话或画布圈选逐步添加具体业务功能。'}
                 </p>
                 <div className="welcome-grid">
                   <Placeholder
-                    id="pending"
-                    title={placeholder?.name || '待定区域'}
-                    description={placeholder?.description}
+                    id={`pending-${String(activeRoute?.path || '/').replace(/[^a-zA-Z0-9]+/g, '-')}`}
+                    title={activeComponents[0]?.name || '待定区域'}
+                    description={activeComponents[0]?.description}
                   />
                 </div>
               </section>
@@ -1145,6 +1312,7 @@ export default function App() {
                   className="hero"
                   data-source="page-hero"
                   data-source-kind="container"
+                  data-route-path={activeRoute?.path || '/'}
                 >
                   <p className="kicker" data-source="page-kicker">
                     {headerLayout?.title || 'INITIAL SKELETON'}
@@ -1157,27 +1325,31 @@ export default function App() {
                   </p>
                 </section>
 
-                {SECTIONS.map((section) => (
-                  <section className="section" key={section.name}>
-                    <div className="section-head">
-                      <h2
-                        className="section-title"
-                        data-source={`section-${section.name}`}
-                      >
-                        {section.name}
-                      </h2>
-                      <span className="section-hint">契约组件 · 可圈选微调</span>
-                    </div>
+                {activeComponents.length === 0 ? (
+                  <section className="section" key={`empty-${activeRoute?.path}`}>
                     <div className="component-grid">
-                      {section.components.map((component) =>
-                        component.isPlaceholder ? (
+                      <Placeholder
+                        id={`empty-${String(activeRoute?.path || '/').replace(/[^a-zA-Z0-9]+/g, '-')}`}
+                        title={`${activeRoute?.name || '当前页面'} · 待补充`}
+                        description="该路由尚无契约组件；可以在此页面继续圈选并发起新增。"
+                      />
+                    </div>
+                  </section>
+                ) : (
+                  activeComponents.map((component) =>
+                    component.isPlaceholder ? (
+                      <section className="section" key={component.id}>
+                        <div className="component-grid">
                           <Placeholder
-                            key={component.id}
                             id={component.id}
                             title={component.name}
                             description={component.description}
                           />
-                        ) : (
+                        </div>
+                      </section>
+                    ) : (
+                      <section className="section" key={component.id}>
+                        <div className="component-grid">
                           <article
                             className="component-card"
                             key={component.id}
@@ -1201,11 +1373,11 @@ export default function App() {
                             </p>
                             <div className="card-bar" />
                           </article>
-                        ),
-                      )}
-                    </div>
-                  </section>
-                ))}
+                        </div>
+                      </section>
+                    ),
+                  )
+                )}
               </>
             )}
           </div>
@@ -1331,6 +1503,9 @@ def _skeleton_components(contract: ArchitectContract) -> list[dict[str, Any]]:
                 else str(raw.get("role") or "module").strip()
             ),
             "section": str(raw.get("section") or "核心工作区").strip(),
+            # 可选路由归属：模型若声明该组件属于某个页面，前端必须按
+            # route 渲染；没有声明时由模板做稳定分配。
+            "route": str(raw.get("route") or raw.get("page") or "").strip(),
             "description": str(raw.get("description") or "").strip(),
             "isPlaceholder": is_placeholder,
         }
@@ -1405,8 +1580,11 @@ def generate_frontend_bundle(
     """生成 API 面板、开发启动脚本，并注入 main.jsx / vite / package。"""
     routes = contract.api_routes or []
     table = extract_table_name(contract.database_ddl)
-    base = collection_path(routes)
+    # 与 BackendCoder 使用完全相同的路由选择函数与 Express 转换，
+    # 保证前端请求路径与 server/index.js 注册路径逐字符一致。
+    base = _express_path(collection_path(routes))
     entity = _entity_label(contract, table)
+    _assert_route_pair(base, _express_path(item_path(routes, base)))
 
     panel = (
         _FRONTEND_PANEL.replace("__COLLECTION_PATH__", base)

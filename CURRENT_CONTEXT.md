@@ -17,6 +17,7 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒；中间�
 - **输出自修复**：Planner/Coder 校验失败回传原始输出+错误重试（`AGENT_JSON_RETRY_LIMIT=2`），Planner 耗尽降级文本计划。
 - **Token 成本**：每节点采集 usage、reducer 累加，随 `node.finished`/响应/终态事件下发；`LLM_PRICING` 可配。
 - **防脑补骨架**：抽象目标（如“做个工作台”）在 `skeleton_gate` 被确定性拦截，完全不调用 LLM；契约标记 `skeletonMode=true`，组件仅 `isPlaceholder=true`；FrontendCoder 只渲染 Header + Sidebar + Main、响应式 Grid、Welcome 与唯一占位。E2E 已跑通。
+- **体验断层修复（六项）**：契约确认后对话栏常驻、可追加需求并走同一契约 REVISE；Inspect 在 live 画布可用；全栈前后端共用 collectionPath（不再猜 `/stream`）；侧边栏按路由真实切换内容；拖拽痕仅在画布、展示区渲染最终代码；移动改为 `move_component` Tool，只写 `transform: translate3d`，拖拽仅转自然语言指令。
 
 ## 真假边界
 

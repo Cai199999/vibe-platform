@@ -160,6 +160,29 @@ class ArchitectHarness:
             resume={"decision": decision, "comment": comment},
         )
 
+    def append_requirement(self, comment: str) -> None:
+        """模拟服务端“已确认契约后追加需求”的初始状态。
+
+        真实服务会把同一份状态写入同一个 checkpoint thread，并通过
+        contract_decision=REVISE 直接路由到 revise_contract。
+        """
+        state = dict(self.outcome.state)
+        history = list(state.get("ui_history") or [])
+        history.append({"role": "user", "content": comment})
+        revision_count = int(state.get("contract_revision_count") or 0)
+        state.update(
+            {
+                "ui_history": history,
+                "contract_decision": "REVISE",
+                "contract_feedback": comment,
+                "contract_revision_count": revision_count + 1,
+                "contract_issues": [],
+                "repair_count": 0,
+                "status": "REVISING_CONTRACT",
+            }
+        )
+        self.outcome = self.runner.run(state, run_id=self.run_id)
+
 
 class ArchitectFlowTest(unittest.TestCase):
     def test_first_round_always_asks_app_shape(self) -> None:
@@ -256,6 +279,40 @@ class ArchitectFlowTest(unittest.TestCase):
 
         harness.decide("CONFIRM")
         self.assertEqual(harness.outcome.state["status"], "CONFIRMED")
+
+    def test_confirmed_contract_accepts_appended_requirements(self) -> None:
+        """契约确认后仍可追加需求：不重新澄清，直接修订同一份契约。"""
+        harness = ArchitectHarness()
+        first = harness.drive_to_contract("full_stack_system")
+        contract_id = first["contract"]["contractId"]
+        harness.decide("CONFIRM")
+        self.assertEqual(harness.outcome.state["status"], "CONFIRMED")
+
+        harness.append_requirement("账单页再加一个导出按钮")
+        revised = harness.outcome.interrupt or {}
+        self.assertEqual(revised.get("kind"), "contract_confirmation")
+        contract = revised["contract"]
+        self.assertEqual(contract["contractId"], contract_id)
+        self.assertIn("账单页再加一个导出按钮", contract["contractMarkdown"])
+        self.assertEqual(
+            harness.outcome.state["contract_revision_count"],
+            1,
+        )
+        # 修订后仍可再次确认，说明面板可以持续在线。
+        harness.decide("CONFIRM")
+        self.assertEqual(harness.outcome.state["status"], "CONFIRMED")
+        # 第二次 CONFIRMED 必须作为新事件送达；否则前端会一直停在
+        # “确认中”，追加需求后的闭环无法完成。
+        confirmed_events = [
+            event
+            for event in harness.buffer.snapshot()
+            if event.type == "architect.contract.confirmed"
+        ]
+        self.assertEqual(len(confirmed_events), 2)
+        self.assertEqual(
+            confirmed_events[-1].payload["contract"]["contractId"],
+            contract_id,
+        )
 
     def test_comment_answer_backfills_slots_deterministically(self) -> None:
         harness = ArchitectHarness()

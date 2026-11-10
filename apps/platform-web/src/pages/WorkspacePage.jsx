@@ -166,7 +166,8 @@ function loadRunStates(projects) {
         lastInstruction: saved.lastInstruction ?? '',
         sandboxIds,
         dirty: Boolean(saved.dirty),
-        placement: saved.placement ?? null,
+        // 旧快照里的拖拽定位状态不再恢复：预览区只展示最终代码。
+        placement: null,
         projectSummary: saved.projectSummary ?? '',
         latestChanges: saved.latestChanges ?? '',
       }
@@ -194,9 +195,9 @@ function buildRunSnapshot(runStates) {
       error: run.error,
       lastInstruction: run.lastInstruction,
       sandboxIds: run.sandboxIds,
-      // 保存门控与拖拽定位必须跨刷新保留，否则刷新后按钮误解锁。
+      // 保存门控必须跨刷新保留，否则刷新后按钮误解锁。
       dirty: run.dirty,
-      placement: run.placement,
+      placement: null,
       projectSummary: run.projectSummary,
       latestChanges: run.latestChanges,
     }
@@ -400,15 +401,16 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
   const acceptance = isCreateAction(action)
     ? [
         `在${target?.label || '圈选区域'}（${target?.selector || '父容器'}）内部新增组件：${instruction}`,
-        '先只生成组件主体与 data-vibe-created 标记，不写死绝对坐标；用户在前端拖拽确认后，再由系统回写 left/top',
+        '只生成组件主体与 data-vibe-created 审计标记，不写死绝对坐标；按父容器自然文档流插入',
         '原有 DOM 结构、布局、文案与交互保持不变',
       ]
     : [
         `按指令修改${target?.label || '目标组件'}：${instruction}`,
+        '若为移动指令，只允许追加 transform: translate3d(dx,dy,0)，禁止修改宽高',
         '其余布局、文案与交互保持不变',
       ]
-  // relativeTarget 只在 CREATE_NEW 时有意义：作为初始落位参考，最终位置
-  // 以用户拖拽松手后的 payload.position 为准。
+  // relativeTarget 只在 CREATE_NEW 时有意义：作为插入父容器与相对顺序
+  // 参考，不再驱动绝对定位。
   const relative = isCreateAction(action) ? entry.relativeRect : null
   return {
     version: 1,
@@ -489,21 +491,8 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
       from: null,
       to: null,
       strokes: [],
-      // CREATE_NEW 确认拖拽后的坐标 Patch：Coder 据此写
-      // position:absolute; left/top，并给父容器补 position:relative。
-      // 未拖拽时保持 null，模型不得自行写死绝对坐标。
-      ...(entry.position
-        ? {
-            position: {
-              x: Number(entry.position.x) || 0,
-              y: Number(entry.position.y) || 0,
-              width: entry.position.width ?? null,
-              height: entry.position.height ?? null,
-              selector: entry.position.selector || null,
-              parentSelector: entry.position.parentSelector || null,
-            },
-          }
-        : {}),
+      // 旧版拖拽坐标已停用：位置调整必须走 move_component Skill 的
+      // transform 规则，模型不得自行写死 left/top 或宽高。
     },
     createdAt: entry.createdAt ?? new Date().toISOString(),
     threadId: entry.threadId,
@@ -747,7 +736,8 @@ function mergeLatestChanges(previous, next) {
  *
  * 保存门控：
  *  - 成功 Run 一律把 dirty 置 true，等待用户保存快照；
- *  - CREATE_NEW 成功后生成 placement 拖拽层，用户确认坐标后再回写代码。
+ *  - 新组件不再自动进入拖拽定位；位置调整统一走自然语言指令 +
+ *    Agent `move_component` Skill（只写 transform，不改宽高）。
  */
 function finalizeFromResult(run, result, annotationId) {
   const success = isSuccessStatus(result.status)
@@ -768,34 +758,8 @@ function finalizeFromResult(run, result, annotationId) {
       lastTurnCount:
         commit?.turnCount || result.turnCount || annotation.lastTurnCount,
       chatHistory: appendAssistantMessage(annotation, result),
-      // 只有“首次创建且尚未定位”的标注才需要用户拖拽；
-      // placementDone 由拖拽确认时写入，避免后续每次 Run 都重新浮出。
-      placementPending:
-        success && isCreateAction(annotation.action) && !annotation.placementDone
-          ? true
-          : annotation.placementPending,
     }
   })
-
-  // CREATE_NEW 成功：把新组件 marker 交给预览层测量 + 拖拽。
-  const placementCandidate = success
-    ? annotations.find((annotation) => annotation.placementPending)
-    : null
-  const placement = placementCandidate
-    ? {
-        annotationId: placementCandidate.id,
-        // 后端 Coder / Mock 统一给新增组件打这个标记。
-        selector: `[data-vibe-created="${placementCandidate.id}"]`,
-        // 父容器来自标注目标（CREATE_NEW 的目标就是插入父级）。
-        parentSelector: placementCandidate.target?.selector || '',
-        x: null,
-        y: null,
-        width: null,
-        height: null,
-        confirmed: false,
-        error: null,
-      }
-    : run.placement
 
   const changeText =
     result.assistantMessage ||
@@ -824,7 +788,8 @@ function finalizeFromResult(run, result, annotationId) {
         ? mergeLatestChanges(run.latestChanges, changeText)
         : changeText
       : run.latestChanges,
-    placement,
+    // 旧版 CREATE_NEW 拖拽定位层彻底停用；预览区只渲染最终代码。
+    placement: null,
     submitting: false,
     pendingAnnotationId: null,
     pendingAction: null,
@@ -2908,6 +2873,54 @@ export default function WorkspacePage() {
     })
   }
 
+  /**
+   * 画布拖拽移动的最终出口：把像素位移翻译成自然语言指令，交给
+   * Supervisor 识别为 ui_move，再调用标准 Tool `move_component`。
+   *
+   * 拖拽本身只负责“表达意图”，不会直接改写 DOM / style；真正的代码
+   * 变更仍走 Agent + Patch + 构建校验，避免前后端状态分叉。
+   */
+  const handleAnnotationMove = async (projectId, annotationId, dx, dy) => {
+    const project = projects.find((item) => item.id === projectId)
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const annotation = run.annotations.find((item) => item.id === annotationId)
+    if (
+      !project ||
+      !annotation ||
+      run.submitting ||
+      run.clarification ||
+      run.approval ||
+      inflightRef.current.has(projectId)
+    ) {
+      return
+    }
+    const round = (value) => Math.round(Number(value) || 0)
+    const moveX = round(dx)
+    const moveY = round(dy)
+    // 小于 4px 视为手抖；避免生成毫无意义的 Agent Run。
+    if (Math.abs(moveX) < 4 && Math.abs(moveY) < 4) return
+
+    const parts = []
+    if (moveX) parts.push(`${moveX > 0 ? '向右' : '向左'} ${Math.abs(moveX)}px`)
+    if (moveY) parts.push(`${moveY > 0 ? '向下' : '向上'} ${Math.abs(moveY)}px`)
+    const label = annotation.target?.label || annotation.label || '组件'
+    const instruction = `把「${label}」${parts.join('，')}移动（只改位置，不要改宽高）`
+
+    const userMessage = newMessage('user', instruction)
+    const sendEntry = {
+      ...annotation,
+      intent: instruction,
+      userMessage,
+    }
+    await submitViaSupervisor(projectId, {
+      message: instruction,
+      annotations: [sendEntry],
+      annotationId,
+      sendEntries: [sendEntry],
+      commitOnSuccess: true,
+    })
+  }
+
   const handleSubmit = async (projectId) => {
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
@@ -3598,10 +3611,9 @@ export default function WorkspacePage() {
       handleAnnotationRemove,
       abortAnnotationScope,
       handleAnnotationSend,
+      handleAnnotationMove,
       handleClarificationAnswer,
       handleAnnotationRollback,
-      handlePlacementConfirm,
-      handlePlacementDismiss,
       handleClearAnnotations,
       handleApprovalDecision,
       handleCancelRun,
@@ -3641,6 +3653,8 @@ export default function WorkspacePage() {
           call('abortAnnotationScope', annotationId),
         onAnnotationSend: (annotationId) =>
           call('handleAnnotationSend', annotationId),
+        onAnnotationMove: (annotationId, dx, dy) =>
+          call('handleAnnotationMove', annotationId, dx, dy),
         onClarificationAnswer: (
           annotationId,
           clarification,
@@ -3656,10 +3670,6 @@ export default function WorkspacePage() {
           ),
         onAnnotationRollback: (annotationId, message) =>
           call('handleAnnotationRollback', annotationId, message),
-        onPlacementConfirm: (placement, position) =>
-          call('handlePlacementConfirm', placement, position),
-        onPlacementDismiss: (placement) =>
-          call('handlePlacementDismiss', placement),
         onClearAnnotations: () => call('handleClearAnnotations'),
         onApprovalDecision: (decision, comment) =>
           call('handleApprovalDecision', decision, comment),
