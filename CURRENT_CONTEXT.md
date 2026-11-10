@@ -32,4 +32,4 @@ DeepSeek=真实调用+Eval；鉴权=Mock Token；持久化=BFF 无 DB；中间�
 
 ## 下一步
 
-P0 M3.2 知识中台；P1 Eval 断言语义化/圈选精度/Redis checkpoint；P2 部署按钮。
+P0 全栈真实业务验收（multipart/MySQL/多服务）；P1 业务 Eval 扩至 15–20 例、圈选精度、Redis checkpoint；P2 部署按钮；P3 M3.2 知识中台。

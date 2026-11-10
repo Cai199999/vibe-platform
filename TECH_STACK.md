@@ -29,6 +29,17 @@ M2.5 另有一条**独立的 Architect 链路**，与局部 UI Run 解耦：
 4. 检索 `knowledge/fullstack`（Markdown + BM25）生成带引用的《全栈实施契约》；
 5. 用户 `CONFIRM / REVISE / CANCEL`，确认结果保留在 Architect 状态中。
 
+契约确认后可直接进入**全栈生成链路**：
+
+1. DBACoder 生成 Sequelize 模型、`schema.sql` 与 `server/db.js`；
+2. BackendCoder 按契约逐条注册 Express 路由，上传意图自动注入 multer；
+3. FrontendCoder 在 `src/main.jsx` 挂载 `FullstackDataPanel`，不覆盖用户页面；
+4. InfraCoder 生成 `Dockerfile`、`.dockerignore`、`render.yaml`、`.env.example`、`DEPLOY.md`；
+5. ConsistencyVerifier 比对前后端 Method/Path，缺失路由回传 BackendCoder 自愈（最多 2 次）；
+6. BuildVerifier 安装根项目与 `server/` 依赖并执行 `npm run build`；
+7. SandboxRestart 同时拉起 Express 与 Vite，探测 `/api/health`；
+8. 成功卡支持一键导出 tar.gz，验收脚本与业务 Eval 可持续回归。
+
 顶层新增 **Supervisor 总调度**（M2.5）：
 
 1. `Supervisor Graph` 只做意图路由，不写代码；
@@ -41,7 +52,7 @@ M2.5 另有一条**独立的 Architect 链路**，与局部 UI Run 解耦：
 6. `handoff_both` 先只启动 Architect，契约 `CONFIRMED` 后
    `POST /gates/{gateId}/release` 才启动 UI，项目锁与门控状态机拒绝乱序执行。
 
-当前仍是**单前端应用（React/Vite）沙盒**。契约尚未驱动全栈代码生成；多服务沙盒、Redis checkpoint、真实鉴权与持久化尚未落地。
+当前仍是**单容器沙盒**：生成的 Express 后端与 Vite 前端运行在同一容器内，未拆分为 web/api/db 多服务。Redis checkpoint、真实鉴权与业务库持久化尚未落地。
 
 ---
 
@@ -95,7 +106,7 @@ M2.5 另有一条**独立的 Architect 链路**，与局部 UI Run 解耦：
 | `platform-web` | `vibe-platform/platform-web:dev`，基于 `node:20-alpine` | 5173 | 画布、标注、对话、预览、审批 UI |
 | `java-bff` | `vibe-platform/java-bff:dev`，Temurin 21 JRE | 8080 | 对外 API、参数校验、SSE 透传、沙盒导出代理 |
 | `python-ai` | `vibe-platform/python-ai:dev`，基于 `python:3.12-slim` | 8100 | Agent 编排、代码编辑、沙盒生命周期、事件缓冲 |
-| `sandbox-*` | `vibe-platform/sandbox-react:dev`，基于 `node:20-alpine` | 随机宿主端口，仅绑定 `127.0.0.1` | 运行用户 React/Vite 项目、构建校验、Git 快照 |
+| `sandbox-*` | `vibe-platform/sandbox-react:dev`，基于 `node:22-alpine` | 随机宿主端口，仅绑定 `127.0.0.1` | 运行用户 React/Vite + 生成的全栈 Express 项目、构建校验、Git 快照 |
 
 Docker Compose 使用自定义 bridge 网络 `vibe-platform-net`，三个平台服务通过服务名互访。
 
@@ -146,11 +157,17 @@ Docker Compose 使用自定义 bridge 网络 `vibe-platform-net`，三个平台�
 | 架构 RAG | Markdown + BM25（自研，无外部依赖） | — | 检索 `knowledge/fullstack` 规范与引用 | 已使用 |
 | 容器 SDK | Docker SDK for Python | 7.1.0 | 创建、执行、导出、销毁沙盒 | 已使用 |
 | 沙盒运行时 | Docker Engine | 宿主安装 | 隔离执行用户项目 | 已使用 |
-| 沙盒基础镜像 | `node:20-alpine` | Node 20 | React/Vite 构建与 dev server | 已使用 |
+| 沙盒基础镜像 | `node:22-alpine` | Node 22 | React/Vite + Express 构建与 dev server | 已使用 |
 | 沙盒框架 | React / React DOM | 18.3.1 | 生成项目的运行框架 | 已使用 |
 | 沙盒构建 | Vite / plugin-react | 5.4.21 / 4.3.4 | 用户项目构建 | 已使用 |
 | 沙盒测试 | Vitest | 2.1.9 | 用户项目测试脚本占位 | 已使用 |
 | 沙盒版本控制 | Git | Alpine 包 | 基线、每轮 checkpoint、回滚 | 已使用 |
+| 生成后端 | Express | 4.21.2 | 契约驱动的 REST API | 已使用（全栈） |
+| 生成 ORM | Sequelize | 6.37.5 | 生产 MySQL/PostgreSQL 持久化 | 已使用（全栈） |
+| 生成驱动 | mysql2 / pg / pg-hstore | 3.11.5 / 8.13.1 / 2.3.4 | 按 `DATABASE_URL` 选择方言 | 已使用（全栈） |
+| 生成上传 | multer | 2.5.0 | 契约含上传/附件时启用，磁盘存储 5MB 限制 | 已使用（按需） |
+| 生成本地库 | `node:sqlite` | Node 22 内置 | 无 `DATABASE_URL` 时自动回退 SQLite | 已使用（全栈） |
+| 生成部署 | Dockerfile / render.yaml | 由 InfraCoder 生成 | 单容器上云与 Render Blueprint | 已使用 |
 | 业务数据库 | MySQL | 8.0 | 预留业务持久化，schema 已定义 | 仅配置 |
 | 缓存 / 事件 | Redis | 7.0 | 预留 checkpoint / 事件总线 | 仅配置 |
 | 对象存储 | MinIO | RELEASE.2025-09-07T16-13-09Z | 预留源码 / 快照 / 导出产物 | 仅配置 |
@@ -323,7 +340,10 @@ START
 | 模型路由 | `DEEPSEEK_API_KEY` 非空时用 `ChatOpenAI` 指向 `https://api.deepseek.com`；为空时回退 Mock |
 | 代码编辑 | `CodeEditor` 协议 + `EditorRegistry` + `AnchorCodeEditor` + `FileCreator`；`TreeSitterEditor` 占位 |
 | 沙盒 | `LocalDockerSandbox` 通过 Docker SDK 管理容器 |
-| 构建校验 | 容器内执行 `npm run build`，失败则回传日志给 Coder 修复 |
+| 构建校验 | 容器内先装根项目 + `server/` 依赖，再执行 `npm run build`，失败回传日志 |
+| 全栈生成 | `FullstackGraphRunner`：DBACoder → BackendCoder → FrontendCoder → InfraCoder |
+| 一致性自愈 | `ConsistencyVerifier` 比对前端请求与后端路由，缺失时回传 BackendCoder，最多 2 次 |
+| Token 成本 | 节点 `usage` 累加，`LLM_PRICING` 计算 `cost`，随 SSE 终态下发 |
 | Git 快照 | 沙盒内 `git add -A` / `git commit` / `git reset --hard`，commit hash 白名单校验 |
 | 取消 | 协作式取消：标记 Run 状态，节点边界检查并停止 |
 
@@ -344,7 +364,8 @@ START
 - 未使用 pytest；编辑器 / Architect 测试使用标准库 `unittest`。
 - 未使用 tree-sitter 依赖。
 - 未实现 `RedisSaver`、Redis Stream 事件总线、跨进程 checkpoint 恢复。
-- Supervisor 路由层已实现，但 BackendCoder / DBA / Reviewer / ScriptAgent 仍是预留能力，尚未接入代码生成 Runtime。
+- Supervisor 路由层已实现；全栈链路中的 DBACoder / BackendCoder / FrontendCoder / InfraCoder 已接入确定性生成 Runtime，Reviewer / ScriptAgent 仍为预留能力。
+- 全栈后端运行在同一沙盒容器内，不是独立的 web/api/db 多服务编排。
 - 当前 Agent 仍运行在同一 AI Core 进程内；没有独立 Agent 进程、消息总线或跨进程 Agent 隔离。
 
 ### 6.6 M2.5 Architect 模块
@@ -432,6 +453,23 @@ Architect 并创建 gate；UI 请求保存在 gate 内。`release` 校验
 释放项目锁。当前门控为单进程内存实现，多副本部署需替换为 Redis/MySQL 分布式
 锁，API 契约不变。
 
+### 6.8 全栈生成模块
+
+| 组件 | 文件 | 职责 |
+|---|---|---|
+| Graph | `ai_core/fullstack/graph.py` | DBACoder → BackendCoder → FrontendCoder → InfraCoder → ConsistencyVerifier → BuildVerifier → SandboxRestart |
+| Coders | `ai_core/fullstack/coders.py` | 契约确定性映射：DDL、Express 路由、前端数据面板、部署文件；按需注入 multer |
+| Templates | `ai_core/fullstack/templates.py` | Express 服务、Sequelize/SQLite 双运行时、Dockerfile、Render、部署文档模板 |
+| Consistency | `ai_core/fullstack/consistency.py` | 前端 Method/Path/Payload 与后端路由比对，生成 ADD_BACKEND_ROUTE 修复动作 |
+| Service | `ai_core/fullstack/service.py` | 契约校验、确认态门禁、后台执行与 SSE 事件 |
+| API | `ai_core/api/fullstack.py` | 内部全栈 SSE；BFF 公开 `/api/v1/runs/fullstack` |
+| 导出 | `acceptance_test.py` / BFF export | tar.gz 导出、安全解压、部署三件套与 SQLite CRUD 验收 |
+| 业务 Eval | `config/eval_suite/business_cases.yaml`、`scripts/business_eval.py` | 真实 DeepSeek 契约 + 产物语义通过率 |
+
+全栈契约的硬约束：每条 `apiRoutes` 必须注册为独立 Express 路由；DDL 必须写入
+`server/schema.sql`；上传意图必须出现 multer 与文件字段映射；有 API 交互时前端
+必须有成功态提示。无 `DATABASE_URL` 时后端回退 `node:sqlite`，容器无配置即可运行。
+
 ---
 
 ## 7. 沙盒 `services/orchestrator/sandbox_template`
@@ -440,7 +478,7 @@ Architect 并创建 gate；UI 请求保存在 gate 内。`release` 校验
 
 | 组件 | 版本 |
 |---|---|
-| Node.js | 20（`node:20-alpine`） |
+| Node.js | 22（`node:22-alpine`），内置 `node:sqlite` |
 | React | 18.3.1 |
 | React DOM | 18.3.1 |
 | Vite | 5.4.21 |
@@ -570,13 +608,16 @@ MinIO : http://127.0.0.1:9000  (admin/admin123，仅本地开发)
 
 | 类别 | 工具 / 命令 | 说明 |
 |---|---|---|
-| Python 单元测试 | `python3 -m unittest discover -s services/orchestrator/tests` | 编辑器、Run 选项、RAG、Architect、Supervisor、Manifest、CustomAgent 等 72 个用例 |
+| Python 单元测试 | `python3 -m unittest discover -s services/orchestrator/tests` | 编辑器、Run 选项、RAG、Architect、Supervisor、Manifest、CustomAgent、全栈生成等 281 个用例 |
 | Python 语法检查 | `python3 -m compileall services/orchestrator/ai_core` | 编译检查 |
 | Python 格式化 | `black .` | 当前环境 black 26.10.1 |
 | 浏览器 E2E | Playwright 1.64.1，Chromium | Python API，`/tmp/vibe-browser/bin/python` |
 | 前端构建 | `docker exec vibe-platform-web npm run build` | Vite 生产构建 |
 | Java 构建 | `mvn compile` / Docker 多阶段构建 | Maven 3.9.9 |
-| 沙盒验证 | 容器内 `npm run build` | Agent 自动修复循环的一部分 |
+| 沙盒验证 | 容器内 `npm run install/build` | 先装根项目与 `server/` 依赖，再构建 |
+| 全栈验收 | `python3 scripts/acceptance_test.py` | 生成 → 导出 → 解压 → 路由/语义断言 → npm build → docker build → 无 DB env SQLite CRUD |
+| 业务评测 | `python3 scripts/business_eval.py` | 真实 DeepSeek 契约 + 产物语义，输出业务通过率 / 契约理解准确率 / 产物语义通过率 |
+| 评测用例 | PyYAML | 读取 `business_cases.yaml` / `core_cases.yaml` |
 | 一键启动 | `docker compose up -d` | 三服务 + 健康检查 |
 
 ### 10.1 E2E 覆盖脚本
@@ -594,7 +635,14 @@ scripts/ui_copy_clean_e2e_test.py
 scripts/popover_equal_scale_e2e_test.py
 scripts/architect_m2_5_e2e_test.py
 scripts/architect_ui_e2e_test.py
+scripts/architect_ux_e2e_test.py
 scripts/supervisor_e2e_test.py
+scripts/supervisor_both_e2e_test.py
+scripts/fullstack_generation_e2e_test.py
+scripts/fullstack_generation_ui_e2e_test.py
+scripts/fullstack_gate_ui_e2e_test.py
+scripts/acceptance_test.py
+scripts/business_eval.py
 ```
 
 已知遗留：`rollback_e2e_test.py`、`annotation_delete_rollback_e2e_test.py` 仍按旧同步 `/runs` 响应编写，尚未适配 SSE 与审批暂停。
@@ -614,10 +662,10 @@ scripts/supervisor_e2e_test.py
 | RedisSaver checkpoint | `MemorySaver` | 重启丢失中断状态 |
 | WebSocket 双向通道 | SSE 单向 + REST | 未实现 |
 | gVisor / Firecracker / K8s | 普通 Docker 容器 | 隔离强度较低 |
-| 多服务沙盒（web/api/db/edge） | 单 React/Vite 沙盒 | 全栈未实现 |
+| 多服务沙盒（web/api/db/edge） | 单容器内 React/Vite + 生成的 Express | 全栈代码已生成，但未拆分为多服务/多容器 |
 | Qdrant / 向量 RAG | 已实现 Markdown + BM25 检索；无向量库 | `chroma.py` 仅占位 |
 | OpenAPI / JSON Schema 代码生成 | Pydantic / Jackson DTO 手写 | `packages/protocol` 仅 README |
-| Supervisor + 多 Agent 进程 | Supervisor 路由层已落地；UI / Architect 独立子图 | BackendCoder/DBA/Reviewer 未接入；无独立 Agent 进程与消息总线 |
+| Supervisor + 多 Agent 进程 | Supervisor 路由层 + UI/Architect/Fullstack 独立子图 | Reviewer/ScriptAgent 未接入；无独立 Agent 进程与消息总线 |
 | Tree-sitter 结构化编辑 | 占位类 | 未安装依赖、未实现 |
 | 真实认证 / 多租户 | 前端 Mock 登录 | 无 Spring Security、无 JWT |
 | MinIO 源码 / 快照存储 | 客户端 Bean | 未写入对象 |

@@ -1,10 +1,11 @@
 # vibe-platform 项目完成情况摘要
 
-> 快照日期：2026-11-05  
+> 快照日期：2026-11-10
 > 当前提交：以 `git log -1 --oneline` 为准
-> 结论：已完成 **可运行的单前端应用（React/Vite）Vibe Coding 闭环**，
-> 并落地 Supervisor 多智能体路由、Architect 全栈契约与 both 强门控；
-> 真正的全栈代码生成 / 多服务沙盒仍处于设计或预留阶段。
+> 结论：已完成 **单容器全栈 Vibe Coding 闭环**：Architect 契约 → Express + Sequelize
+> 后端 → React 前端 → 部署文件 → 一致性自愈 → 构建 → 沙盒双服务 → 一键导出；
+> 并落地 Supervisor 多智能体路由、both 强门控、全栈产物验收与真实 DeepSeek 业务 Eval。
+> 多服务沙盒、Redis checkpoint、真实认证与业务库持久化仍未落地。
 
 ---
 
@@ -48,8 +49,10 @@ UI 修改在 Docker 沙盒中自动编码、构建、验证并生成 Git checkpo
 | Eval Suite v0.3 | ✅ 已完成 | 安全策略拦截（数据库端口 / 鉴权弱化）、Architect HITL 真实 SSE 断言、both 门控断言；双引擎 10/10 PASS |
 | Admin Eval 契约 | 📐 契约预留 | `POST /api/v1/admin/eval/run`、评测详情 / 历史得分曲线；Eval 与 Knowledge“考题 / 教材”解耦 |
 | M3.2-M3.4 中台实现 | ⏳ 未开始 | 知识中台 → Prompt Registry → 反馈自优化 |
-| 全栈代码生成 | ⏳ 未开始 | 契约尚未驱动 Spring Boot / MySQL / 脚本生成 |
-| 多服务沙盒 | ⏳ 未开始 | 当前只有单 React/Vite 沙盒 |
+| 全栈代码生成 | ✅ 已完成 | 契约驱动 Express + Sequelize + React + Dockerfile/render.yaml；一致性自愈最多 2 次 |
+| 全栈产物验收 | ✅ 已完成 | 导出 tar.gz → 安全解压 → 路由/业务语义断言 → npm/docker build → 无 DB env SQLite CRUD |
+| Business Eval | ✅ 已完成 | 4 条真实 DeepSeek 用例：纯前端 / CRUD / 上传；业务通过率 4/4 |
+| 多服务沙盒 | ⏳ 未开始 | 生成后端与前端同容器运行，尚未拆分 web/api/db/edge |
 | 真实认证 / 多租户 | ⏳ 未开始 | 前端 Mock 登录，BFF 无 Spring Security |
 | Redis 事件总线 / 持久化 | ⏳ 未开始 | 进程内事件缓冲 + `MemorySaver` |
 
@@ -138,6 +141,12 @@ flowchart LR
   - API 路由、数据库 DDL、前端设计、实施路径、Markdown 原文。
 - 用户可 `CONFIRM / REVISE / CANCEL`。
 - SSE 独立命名空间：`architect.*`，与 UI Run 完全解耦。
+- 契约确认后可一键进入全栈生成：DBACoder → BackendCoder → FrontendCoder →
+  InfraCoder → ConsistencyVerifier（自愈 ≤2）→ BuildVerifier → SandboxRestart。
+- 生成物：Express 4 + Sequelize 6、`server/schema.sql`、`src/fullstack-api.jsx`、
+  `Dockerfile`、`render.yaml`、`DEPLOY.md`；无 `DATABASE_URL` 时回退 `node:sqlite`。
+- 上传契约自动注入 `multer`，文件元数据映射到 DDL 的 `file_name/file_path/file_size`。
+- 成功后支持一键导出 tar.gz；契约文本、代码与导出包可被验收脚本持续回归。
 
 ### 4.4 Supervisor 多智能体路由
 
@@ -198,7 +207,7 @@ flowchart LR
 
 ### 4.6 沙盒 / Editor
 
-- Docker 沙盒模板：Node 20 + React 18 + Vite 5。
+- Docker 沙盒模板：Node 22 + React 18 + Vite 5；全栈项目同时运行 Express 与 Vite。
 - `cap_drop=ALL`、`no-new-privileges`、CPU / 内存限制、预览端口仅绑定回环。
 - 沙盒创建即 `git init` 并生成 baseline commit。
 - 每次成功 Run 自动 commit，支持按 thread 回滚。
@@ -222,7 +231,10 @@ flowchart LR
 ### 4.8 项目与导出
 
 - 多项目本地持久化、项目切换、新建项目。
-- 项目导出为可运行 React/Vite 工程。
+- 项目导出为可运行 React/Vite 工程；全栈 SUCCEEDED 且一致性通过后，
+  Architect 成功卡支持一键导出 `tar.gz`。
+- 全栈导出包含前端、`server/`、`Dockerfile`、`render.yaml`、`DEPLOY.md`、
+  `.env.example`，可直接上云或在本机无配置运行。
 - 预览 iframe、构建产物与 Git 提交状态可查看。
 
 ### 4.9 自动化评测（Eval Suite）
@@ -245,6 +257,11 @@ flowchart LR
   不被 RAG 检索，涉及知识库的评测需固定 `knowledgeSnapshotId`。
 - 管理中台预留 `POST /api/v1/admin/eval/run` 与历史得分曲线契约，后续一键触发。
 - 单测覆盖加载器错误、断言失败、报告写出；与真实沙盒 / DeepSeek E2E 互补。
+- `config/eval_suite/business_cases.yaml` + `scripts/business_eval.py`：
+  真实 DeepSeek 驱动 Architect，自动回答澄清，断言应用形态 / API 路由 /
+  DDL 表字段；全栈用例继续生成、导出并检查上传中间件与前端成功态。
+- 2026-11-10 结果：业务通过率 4/4，契约理解 4/4，产物语义 3/3；
+  36,586 tokens / ¥0.102416 / 123.5s，报告写入 `docs/business_eval_report.md`。
 
 ---
 
@@ -271,6 +288,8 @@ flowchart LR
 | `POST /api/v1/architect/runs/{runId}/clarifications/{id}/answers` | Architect 澄清 |
 | `POST /api/v1/architect/runs/{runId}/contracts/{id}/decision` | 契约决策 |
 | `POST /api/v1/architect/runs/{runId}/cancel` | 取消 Architect |
+| `POST /api/v1/runs/fullstack` | 启动全栈生成 SSE |
+| `GET /api/v1/sandboxes/{sandboxId}/export` | 导出沙盒工程 tar.gz |
 | `POST /api/v1/supervisor/route` | Supervisor 路由 |
 | `POST /api/v1/supervisor/dispatch` | Supervisor 派发 |
 | `GET /api/v1/supervisor/agents` | Agent 列表 |
@@ -290,13 +309,18 @@ flowchart LR
 
 | 类型 | 结果 |
 |---|---|
-| Python 单元测试 | **85 passed**（含 Eval Suite 9 项、安全策略 4 项） |
+| Python 单元测试 | **281 个用例**（全量 discover；本次实跑全栈 28 项） |
+| 全栈单测（Docker） | **28 passed**（新增 multer 上传契约用例） |
+| 全栈产物验收 | **PASS**：导出 69.8 KB，路由一致，npm/docker build 成功，无 DB env SQLite CRUD 正常 |
+| Business Eval（真实 DeepSeek） | **PASS**：业务 4/4、契约理解 4/4、产物语义 3/3 |
 | Eval Suite 离线跑批 | **PASS**（10/10，78.1 ms） |
 | Eval Suite 真实沙盒跑批 | **PASS**（10/10，22.71s，创建 / 清理沙盒各 4 个） |
 | Supervisor API E2E（直连 AI Core） | **PASS** |
 | Supervisor API E2E（经 Java BFF） | **PASS** |
 | both 混合 API E2E（直连 / BFF） | **PASS** |
 | 浏览器级 both 混合 E2E | **PASS** |
+| Architect 统一对话 + 一键导出 E2E | **PASS** |
+| 全栈生成 / 门控 / 导出 UI E2E | **PASS** |
 | 前端生产构建 | **PASS**（329.40 kB JS / 78.32 kB CSS） |
 
 浏览器级 `scripts/supervisor_mixed_ui_e2e_test.py` 覆盖：
@@ -323,9 +347,9 @@ API 级 both E2E 还覆盖：
 
 | 能力 | 当前状态 | 差距 |
 |---|---|---|
-| 全栈代码生成 | 只有契约 | 尚未生成 Spring Boot / MySQL / 迁移脚本 |
-| 多服务沙盒 | 单 React/Vite 沙盒 | web / api / db / edge 未实现 |
-| BackendCoder / DBA / ScriptAgent | 仅注册为 reserved | 无运行时、无编排 |
+| 全栈代码生成 | 单容器 Express + Sequelize + React | 未生成 Spring Boot；生产 MySQL 仅按 `DATABASE_URL` 切换，未在验收中连接真实库 |
+| 多服务沙盒 | 单容器双进程 | web / api / db / edge 未拆分 |
+| BackendCoder / DBA | 已接入全栈确定性生成 | 仍是模板生成，不含模型驱动的复杂业务逻辑；ScriptAgent 未接入 |
 | CustomAgent 运行时 | 只有 Manifest 与路由计划 | 需独立受限沙盒 / 临时 venv |
 | Skill 动态拼装 | `SkillRegistry` 只登记声明 | M3 才注入 Prompt / RAG、裁剪 Tool |
 | 长期记忆 / 用户画像 | 仅线程级短期记忆 | 规划在 M3，当前刻意不引入 |
@@ -341,7 +365,7 @@ API 级 both E2E 还覆盖：
 | Tree-sitter 编辑 | 占位类 | 未安装依赖、未实现结构化替换 |
 | OpenAPI / Schema 代码生成 | 手写 DTO | `packages/protocol` 仅 README |
 | 配额 / 审计 / 管理后台 | 无 | 未实现 |
-| Eval Suite 覆盖边界 | 离线 + 真实沙盒双引擎 | 真实沙盒仍用 Mock LLM；DeepSeek 评测、历史趋势基线、Admin 一键评测未实现 |
+| Eval Suite 覆盖边界 | Supervisor 离线/真实沙盒 + 全栈 Business Eval | 业务 Eval 仅 4 例静态语义；上传未真实发送 multipart；历史趋势与 Admin 一键评测未实现 |
 | 沙盒隔离强度 | 普通 Docker | 未使用 gVisor / Firecracker / K8s |
 | 门控多副本 | 单进程内存 | 需 Redis / MySQL 分布式锁 |
 
@@ -349,14 +373,13 @@ API 级 both E2E 还覆盖：
 
 ## 8. 建议下一步
 
-### P0：把契约变成真实全栈产物
+### P0：从“可生成”走向“可验证的真实业务”
 
-1. 增加 `BackendCoder`：根据《全栈实施契约》生成 Spring Boot 工程、
-   Controller / Service / Repository、配置与测试。
-2. 增加 `DbaAgent`：根据契约 DDL 生成 Flyway / SQL 迁移，并在临时 MySQL
-   中执行 up / down 验证。
+1. 全栈验收补真实 multipart 上传、PUT/DELETE 与分页筛选，而不只做静态语义断言。
+2. 用契约 DDL 在临时 MySQL 执行 up/down，验证生产方言而非只用 SQLite 回退。
 3. 扩展沙盒为多服务：`web + api + db`，通过统一 edge 入口预览与联调。
-4. 把 Architect `CONFIRMED` 契约作为后续 Agent 的唯一输入，禁止重新猜测业务模型。
+4. 扩大 Business Eval 到 15–20 例，覆盖需求含糊、多表关联、鉴权、错误态与边界条件。
+5. 把 Architect `CONFIRMED` 契约继续作为后续 Agent 的唯一输入，禁止重新猜测业务模型。
 
 ### P1：运行时与可靠性
 

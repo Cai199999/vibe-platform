@@ -148,8 +148,17 @@
 
 ## 6. 下一步
 
-1. 按 M1 设计基线拆分实现任务：协议包 → BFF → AI Core → Sandbox → platform-web。
-2. 优先固化 `packages/protocol` 与契约测试，确保 M2 全栈扩展不产生破坏性变更。
-3. M1 完成后以同一套契约启用 M2：多 Agent、`AWAITING_CLARIFICATION`、web/api/db/edge 多服务沙盒。
-4. M3 中台按 M3.1 管理中台骨架 → M3.2 知识中台 → M3.3 Prompt Registry →
-   M3.4 反馈与自优化推进；先做契约测试与租户隔离用例，再接真实向量库。
+1. 全栈验收补真实 multipart 上传、PUT/DELETE 与分页筛选，不只做静态语义。
+2. 用契约 DDL 在临时 MySQL 执行 up/down，验证生产方言。
+3. 扩展沙盒为 `web + api + db` 多服务，通过统一 edge 入口预览。
+4. 扩大 Business Eval 到 15–20 例，覆盖需求含糊、多表关联、鉴权与错误态。
+5. M3 中台按知识中台 → Prompt Registry → 反馈与自优化推进。
+
+## 7. 2026-11-10 当日进展
+
+- 全栈生成闭环：契约 → Express/Sequelize 后端 → React 前端 → 部署文件 →
+  一致性自愈 → 构建 → 沙盒双服务 → 一键导出。
+- 新增全栈产物验收脚本与 Business Eval；真实 DeepSeek 4 例全部通过
+  （契约理解 4/4、产物语义 3/3）。
+- 上传契约按需注入 multer，构建前安装 `server/` 依赖。
+- 完整工作与技术栈变更见 `docs/memory/2026-11-10_daily_summary.md`。
