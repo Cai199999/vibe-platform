@@ -145,6 +145,12 @@ class Settings(BaseSettings):
     # Coder 节点硬超时：结构化输出 + 模型调用整体超过该秒数立即熔断。
     # 30 秒足够生成常规页面，超时通常意味着标注范围过大或模型卡死。
     agent_coder_timeout_seconds: float = 30.0
+    # 首次超时后的降级重试：压缩上下文 + FAST 模型，优先尽快返回局部补丁。
+    # 仍失败时不再直接判死，而是返回可恢复错误，由前端提供“转后台运行”。
+    agent_coder_retry_timeout_seconds: float = 20.0
+    # 用户显式选择“转后台运行”时允许的更长时间；后台 Run 由 SSE 持续推送，
+    # 用户可以继续圈选，完成后由 Toast 通知。
+    agent_coder_background_timeout_seconds: float = 240.0
     # 每个 Run 的内存事件缓冲上限；生产切换 Redis Stream 后由 stream TTL 管理。
     agent_event_buffer_size: int = 2000
 

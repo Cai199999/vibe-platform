@@ -33,6 +33,7 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒；中间�
 - **M3 收尾（2026-11-11）**：根 README 重写为“双核架构 / 多智能体 / Hybrid RAG / 沙盒自愈 / 全栈交付”并附 Mermaid 全局图；新增 `docs/INTERVIEW_GUIDE.md`（5 个踩坑与自愈案例）；预留 `EMBEDDING_MODEL` 供 BGE-M3 升级。
 - **M3 交互与专家激活（2026-11-11）**：`backend_coder` / `dba_agent` 转 available，路由新增后端 / DBA 动作词并派发 FullstackGraph `backend` / `dba` 子图；前端支持 `handoff_agent` 与按 runId 挂载事件流。画布恢复双态指针：中键平移经 iframe SDK → 父页面遮罩持续追踪，拖拽期间锁定 `dragArmed`，SDK 不再用 `buttons` 误取消。FrontendCoder Prompt 强制响应式 Grid；BackendCoder Prompt 强制完整 AST 节点 / 全文件替换。新增 `frontend_ui_ecosystem` Skill（lucide-react/clsx）与 `knowledge/backend_docs` Hybrid RAG。322 单测 + 前端 build 全绿。
 - **真实模型体验专项（2026-11-11）**：Planner/Architect 温度固定 0.1，Prompt 限制每轮最多 2 问且必须 A/B/C；Coder 30s 硬超时熔断，JSON 重试降为 1 次（共 2 次），失败直接 `FAILED` 并返回“由于代码结构复杂，AI 生成超时，请尝试缩小标注范围”，不再进入构建自愈死循环；拖拽改为批量提交（见上）；Planner/Coder/Architect 节点接入 token SSE 与前端打字机，Supervisor 保持规则路由。331 单测 + 前端 build 全绿。
+- **UI Coder 职责解耦（2026-11-11）**：FrontendCoder 仅生成 React UI/Tailwind；系统 Prompt 明确禁止设计 API/DB/鉴权，缺业务逻辑时输出 `onClick={() => console.log('待绑定逻辑')}` + `TODO(interaction)`。上下文改由 `ui_context.py` 组装：小文件整发，大文件只保留目标 + 2 层父级 + 兄弟的 JSX 窗口，剥离 business/API/DDL，超预算强制 `mode=diff`。Coder 超时先切 `coder_fast` + 精简上下文 + 20s 重试（提示“已精简上下文并切换快速模型重试”）；仍失败返回 `CODER_TIMEOUT_RECOVERABLE`，前端失败页/结果 HUD 提供“转后台运行”，后台超时 240s、独立 SSE、顶部 HUD 提示、完成后 Toast。340 单测 + 前端 build 全绿。
 
 ### Embedding 升级预留（BGE-M3）
 

@@ -55,6 +55,9 @@ TASK_CAPABILITY: dict[str, Capability] = {
     "planner": "fast",
     # Coder 直接决定构建成功率，必须用强模型。
     "coder": "strong",
+    # 超时降级重试：上下文已精简到局部 Diff，优先用低延迟模型先返回结果。
+    # 即使质量略低，也比 30s 后直接 FAILED 更符合“先可用、再优化”。
+    "coder_fast": "fast",
     # 应用形态判别是分类 + 少量字段抽取。
     "architect_analyze": "fast",
     # 契约起草 / 修订是长上下文 + 结构化输出，质量优先。

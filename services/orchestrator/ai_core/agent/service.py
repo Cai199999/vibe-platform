@@ -41,6 +41,7 @@ from ai_core.agent.llm import (
     AgentLLMError,
     build_agent_llm,
 )
+from ai_core.agent.ui_context import extract_jsx_window
 from ai_core.domain.agent import (
     AnnotationEnvelope,
     Approval,
@@ -882,6 +883,16 @@ class RunExecutionService:
                 "apply_failed": False,
                 "retry_count": 0,
                 "max_retries": min(request.options.max_retries, 3),
+                # 大型重构可通过前端“转后台运行”获得更长超时；普通请求
+                # 仍保持严格熔断，避免一个卡死请求无限占用线程。
+                "background_run": bool(request.options.background),
+                "coder_timeout_seconds": (
+                    self._settings.agent_coder_background_timeout_seconds
+                    if request.options.background
+                    else self._settings.agent_coder_timeout_seconds
+                ),
+                "coder_fallback_used": False,
+                "background_available": False,
                 # Token 优化：历史压缩与同错去重
                 "history_summary": "",
                 "history_tokens_before": 0,
@@ -1265,7 +1276,11 @@ class RunExecutionService:
                 {
                     "code": error_code or "VERIFY_FAILED",
                     "message": error or "构建验证未通过",
-                    "retryable": False,
+                    # 可恢复超时不应被前端当成“只能重来”：允许一键转后台。
+                    "retryable": bool(final_state.get("background_available")),
+                    "backgroundAvailable": bool(
+                        final_state.get("background_available")
+                    ),
                     "retryCount": retry_count,
                     "sandboxId": prepared.handle.sandbox_id,
                     "previewUrl": preview_url,
@@ -1977,15 +1992,24 @@ class RunExecutionService:
             )
             # 前端 target.snippet 是圈选时的初始源码；多轮对话必须用沙盒当前
             # 源码覆盖，避免模型同时看到“旧片段 + 新文件”后回滚上一轮修改。
+            # 但绝不能把整份文件塞回 snippet：UI Coder 只应看到目标节点附近
+            # 的 JSX 窗口（父级 3 层 + 兄弟节点），否则大项目会直接超时。
             target_file = source.file if source and source.file else fallback_file
             current_source = (current_files or {}).get(target_file)
             nested_target = annotation_payload.get("target")
             if current_source and isinstance(nested_target, dict):
                 snippet = nested_target.get("snippet")
                 if isinstance(snippet, dict):
-                    snippet["content"] = current_source
-                    snippet["startLine"] = 1
-                    snippet["endLine"] = len(current_source.splitlines())
+                    window = extract_jsx_window(
+                        current_source,
+                        selector=target.selector if target else None,
+                        component=source.component if source else None,
+                    )
+                    snippet["content"] = window.text
+                    snippet["startLine"] = window.start_line
+                    snippet["endLine"] = window.end_line
+                    snippet["totalLines"] = window.total_lines
+                    snippet["truncated"] = window.truncated
             annotation_payload["threadContext"] = (
                 thread_contexts.get(thread_id)
                 if thread_contexts
@@ -1994,6 +2018,19 @@ class RunExecutionService:
                     "chatHistory": [],
                     "previousRuns": [],
                 }
+            )
+            snippet_meta = (
+                nested_target.get("snippet")
+                if isinstance(nested_target, dict)
+                else None
+            )
+            window_meta = (
+                {
+                    key: snippet_meta.get(key)
+                    for key in ("startLine", "endLine", "totalLines", "truncated")
+                }
+                if isinstance(snippet_meta, dict)
+                else {}
             )
             contexts.append(
                 {
@@ -2023,6 +2060,10 @@ class RunExecutionService:
                         if target and target.snippet
                         else None
                     ),
+                    # 源码窗口元数据：只做审计 / 调试，不直接进入 UI Prompt。
+                    # 完整源码仍保留在 state.current_files，供 Applier / Verifier
+                    # 写入与构建使用。
+                    "source_window": window_meta,
                 }
             )
         return {
@@ -2082,6 +2123,8 @@ class RunExecutionService:
             approval=approval,
             token_usage=dict(state.get("token_usage") or {}),
             error=state.get("error"),
+            error_code=state.get("error_code"),
+            background_available=bool(state.get("background_available")),
         )
 
     def _maybe_destroy(self, sandbox_id: str, request: ExecuteRunRequest) -> None:

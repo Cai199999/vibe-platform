@@ -23,6 +23,12 @@ from typing import Any, Callable, TypeVar
 
 from ai_core.adapters.model.deepseek import DeepSeekClient
 from ai_core.agent.memory import fallback_summary
+from ai_core.agent.ui_context import (
+    UI_CONTEXT_TOKEN_BUDGET,
+    UI_DIFF_TOKEN_THRESHOLD,
+    UI_FULL_FILE_TOKEN_LIMIT,
+    build_ui_coder_context,
+)
 from ai_core.agent.preferences import (
     CRITICAL,
     MINOR,
@@ -141,7 +147,15 @@ class AgentLLM:
         target_files: list[str],
         verify_result: dict[str, Any],
         retry_count: int,
+        *,
+        compact: bool = False,
+        prefer_fast: bool = False,
     ) -> CodeResult:
+        """生成代码修改。
+
+        ``compact``：超时后的降级重试，进一步压缩上下文并强制局部 Diff；
+        ``prefer_fast``：切换到低延迟模型，优先尽快返回可构建结果。
+        """
         raise NotImplementedError
 
     def summarize_history(self, text: str, max_chars: int = 200) -> str:
@@ -288,6 +302,9 @@ class MockAgentLLM(AgentLLM):
         target_files: list[str],
         verify_result: dict[str, Any],
         retry_count: int,
+        *,
+        compact: bool = False,
+        prefer_fast: bool = False,
     ) -> CodeResult:
         primary_file = (
             target_files[0]
@@ -517,11 +534,10 @@ class DeepSeekAgentLLM(AgentLLM):
             "时，计划只能写“给目标元素追加 transform: translate3d(dx,dy,0)”，"
             "禁止规划 width / height / left / top / position / margin 变更；"
             "拖拽浮层是画布交互，不是最终代码的一部分。\n"
-            "- **API 路径规划铁律**：前端请求路径必须与后端 Express 路由逐字符"
-            "一致（/api/v1 前缀、静态集合根路径）；禁止把 `:id` / `{id}` / "
-            "`/stream` 路由当作集合接口。\n"
-            "- **导航规划铁律**：侧边栏 / 顶部导航必须规划真实内容切换"
-            "（react-router-dom 或 useState 页面状态），禁止只做静态 DOM 高亮。\n"
+            "- **职责边界铁律**：你只规划前端视觉与 DOM（组件结构、样式、"
+            "布局、文案、可访问性）。接口路径、数据库、鉴权、业务分支由 "
+            "Architect / BackendCoder 负责；即使需求涉及业务逻辑，本轮 UI "
+            "计划也只安排可点击的视觉占位与交互状态，绝不设计后端契约。\n"
             "- **响应式网格铁律**：页面主容器、卡片列表、数据看板必须规划为"
             "响应式 Grid，禁止把所有卡片写成一列 flex-col 垂直堆叠。"
             "项目已配置 Tailwind 时，主容器必须使用 "
@@ -570,36 +586,40 @@ class DeepSeekAgentLLM(AgentLLM):
             "description/recommended/questionId/value；\n"
             "- 问题字段固定为 questionId/type/prompt/required/options/"
             "defaultValue。\n\n"
-            "全栈引导：\n"
-            "- 登录界面本身属于 MINOR；但密码校验放前端还是"
-            "后端接口、是否新增用户表 / 认证服务属于 CRITICAL；\n"
-            "- 缺少业务范围时 needs_clarification=true，问题必须引导用户确认："
-            "本次先生成前端界面，还是同时生成后端接口和数据库？\n"
-            "- 当前能力只有前端时，不得擅自承诺或生成后端 / 数据库代码；"
-            "用户明确要求全栈时在 plan 中标注 fullstack_requested=true，"
-            "由上层能力开关决定是否继续。"
+            "UI 视觉边界：\n"
+            "- 你的计划只描述“看到什么、怎么排布、如何验收”；不要写接口、"
+            "数据库、鉴权或全栈实现细节。需要业务逻辑时，规划可点击的按钮"
+            "占位（onClick 输出 `待绑定逻辑`），把真实逻辑留给上层架构决策。"
             f"{self._skill_system}"
             f"{self._memory_block()}"
             f"{self._preference_block()}"
         )
-        files_block = _format_files(current_files, 16000)
+        # Planner 与 UI Coder 共用同一套极简上下文：只给标注附近的
+        # JSX 窗口与视觉验收，不把整份业务文件 / 后端契约塞进 Prompt。
+        ui_context = build_ui_coder_context(
+            current_files,
+            sorted(current_files),
+            annotations,
+            budget_tokens=UI_CONTEXT_TOKEN_BUDGET,
+            full_file_token_limit=UI_FULL_FILE_TOKEN_LIMIT,
+            diff_token_threshold=UI_DIFF_TOKEN_THRESHOLD,
+        )
         answers_block = (
             json.dumps(clarification_answers, ensure_ascii=False, default=str)
             if clarification_answers
             else "无"
         )
         knowledge_block = (
-            _truncate(knowledge_context.strip(), 3600)
+            _truncate(knowledge_context.strip(), 2400)
             if knowledge_context and knowledge_context.strip()
             else "无"
         )
         human = (
-            f"画布标注（AnnotationEnvelope[]）:\n"
-            f"{json.dumps(annotations, ensure_ascii=False, default=str)}\n\n"
-            f"目标文件当前内容:\n{files_block}\n\n"
+            f"视觉标注:\n{ui_context.annotations_text}\n\n"
+            f"目标源码（只保留标注附近窗口）:\n{ui_context.files_text}\n\n"
             f"用户已澄清的回答:\n{answers_block}\n\n"
             f"内部知识库检索结果（Hybrid RAG）:\n{knowledge_block}\n\n"
-            f"上一轮错误（如有）:\n{_truncate(previous_errors or '无', 4000)}"
+            f"上一轮错误（如有）:\n{_truncate(previous_errors or '无', 2000)}"
         )
         # 真实模型偶发输出 Markdown 围栏或截断 JSON。先按严格 JSON 解析，
         # 失败时把错误回传模型自修复；自修复仍失败才降级为纯文本计划，
@@ -621,100 +641,117 @@ class DeepSeekAgentLLM(AgentLLM):
         target_files: list[str],
         verify_result: dict[str, Any],
         retry_count: int,
+        *,
+        compact: bool = False,
+        prefer_fast: bool = False,
     ) -> CodeResult:
+        """只生成 React UI 与样式修改。
+
+        职责解耦：UI Coder 不设计业务接口、数据库或路由。上下文只包含
+        目标组件附近的 JSX 窗口；当窗口被裁剪或超出 Token 预算时，强制
+        输出局部 unified diff，避免大模型整文件重写造成超时。
+        """
+        budget = 2600 if compact else UI_CONTEXT_TOKEN_BUDGET
+        full_file_limit = 900 if compact else UI_FULL_FILE_TOKEN_LIMIT
+        diff_threshold = 1800 if compact else UI_DIFF_TOKEN_THRESHOLD
+        ui_context = build_ui_coder_context(
+            current_files,
+            target_files,
+            annotations,
+            budget_tokens=budget,
+            full_file_token_limit=full_file_limit,
+            diff_token_threshold=diff_threshold,
+        )
+        force_diff = ui_context.force_diff or compact or prefer_fast
+        plan_text = _truncate(str(plan or "").strip(), 500 if compact else 1600)
+        verify_text = json.dumps(
+            _compact_verify_result(verify_result),
+            ensure_ascii=False,
+            default=str,
+        )
+
         system = (
-            "你是前端代码修改 Agent。一次请求最多包含 3 个画布标注，你必须"
-            "一次性完成全部标注对应的修改，禁止只处理第一个标注。\n"
-            "支持任意 UI 修改：颜色、文字、字号、间距、布局、响应式样式、"
-            "组件结构与少量交互；不要把自己限制为“把按钮变红”。\n"
-            "只输出一个 JSON 对象，不要输出 Markdown 代码围栏或解释文字。\n"
-            "JSON 格式二选一：\n"
-            '1) {"mode":"diff","patch":"--- a/<file>\\n+++ b/<file>\\n...",'
-            '"summary":"..."}\n'
-            '2) {"mode":"files","files":{"<file>":"完整文件内容"},"summary":"..."}\n'
-            "硬性要求：\n"
-            "- 多个标注 / 多个文件时优先使用 mode=files，files 必须包含每个目标"
-            "文件的完整内容；\n"
-            "- **AST 节点替换铁律**：新增按钮 / 卡片 / 表单项等结构变更，必须"
-            "替换完整 JSX AST 节点（连同父容器与闭合标签），优先直接返回 "
-            "mode=files 的完整文件。禁止输出“第 N 行插入…”“在某个片段后追加…”"
-            "这类模糊行号补丁；禁止只给半截标签或省略上下文。\n"
-            "- 只有能保证上下文逐字符匹配时才使用 mode=diff：unified diff 的每个 "
-            "hunk 必须包含完整变更节点，并在前后各保留至少 3 行未修改上下文；"
-            "上下文对不上会导致 Applier 写入失败，平台会判定本轮失败并重试。\n"
-            "- 不要修改无关文件、路由、未提及的文案与样式；\n"
-            "- 如果多个标注作用在同一元素，按标注顺序叠加修改，后写的属性覆盖"
-            "先写的同名属性；\n"
-            "- 同一标注可能带 threadContext：当前文件已经包含上一轮修改。必须"
-            "基于历史对话与当前源码做增量修改，以最新用户指令为准；用户否定"
-            "上一轮方案时（如“不，我要蓝色”），最终代码只能体现新方案，同时"
-            "保留其它未被否定的属性；\n"
-            "- 标注的 action 字段决定操作类型：\n"
-            "  · CREATE_NEW（旧协议别名 ADD）：新增组件。必须保留原有 DOM "
-            "结构，不得删除或覆盖已有节点；在 target.selector 指向的父容器"
-            "内部插入完整、可编译的 JSX。**只生成组件主体，不要写 position:"
-            "absolute / left / top，也不要根据旧 relativeTarget 写死坐标**；"
-            "按父容器现有 flex/grid 自然流插入即可。每个新增节点带 "
-            'data-vibe-created="<annotationId>" 仅用于审计，禁止再引入拖拽层。'
-            "绝不能把新增内容塞进 button / p / h1 等叶子元素内部；target 为空"
-            "时，从页面主容器（main / 根 section）末尾插入；\n"
-            "  · MODIFY_EXISTING（旧协议别名 MODIFY）：修改已有元素。\n"
+            "你是 FrontendCoder（视觉与 DOM 修改器）。你的唯一职责是"
+            "生成 / 修改 React UI 组件与 Tailwind / CSS 样式。\n"
+            "**职责边界（最高优先级）**：\n"
+            "- 业务逻辑、API 请求、数据库、鉴权、路由与状态架构由 Architect / "
+            "BackendCoder 负责；你不设计、不猜测、不补全这些内容。\n"
+            "- 用户要求“加一个按钮 / 卡片 / 输入框”但未给出逻辑时，只生成"
+            "视觉完整、可编译的 JSX；点击行为写成占位："
+            "`onClick={() => console.log('待绑定逻辑')}`，并加注释 "
+            "`{/* TODO(interaction): 等业务契约绑定 */}`。\n"
+            "- **严禁**凭空编造 fetch / axios URL、接口路径、请求体、数据库"
+            "字段、Express 路由、DDL 或鉴权逻辑。上下文里没有的业务契约一律"
+            "视为不存在。\n"
+            "- 用户明确要求视觉交互（展开/收起、Tab 切换、本地表单校验）时，"
+            "可以用 useState 实现纯前端状态；不得因此新增后端调用。\n"
+            "**视觉与结构要求**：\n"
+            "- 支持颜色、文字、字号、间距、布局、响应式、组件结构与纯视觉"
+            "交互；不要把自己限制为“把按钮变红”。\n"
             "- **移动指令铁律**：当指令表达“挪 / 移动 / 往左 / 往右 / 上移 / "
             "下移 / 拖到某处”时，只允许给目标元素追加 CSS "
             "`transform: translate3d(dx, dy, 0) !important`（或等价 transform），"
             "禁止修改 width / height / max-width / min-width / left / top / "
             "position / margin 来模拟位移。移动是可叠加的相对位移，量级参考："
-            "一点≈24px，一些≈48px，未给方向时默认向右。画布拖拽只负责生成"
-            "这条自然语言指令，最终代码中绝不能出现辅助线、虚线框或拖拽浮层。\n"
-            "- **前端 API 路径铁律**：任何 fetch / axios 请求的 URL 必须与后端 "
-            "Express 路由逐字符一致（包含 /api/v1 前缀与静态集合根路径）。"
-            "禁止把带路径参数的 `:id` / `{id}` / `/stream` 路由当成集合接口；"
-            "数据面板默认只请求集合根路径，例如后端 "
-            "`app.get('/api/v1/resumes', ...)` 时前端必须请求 `/api/v1/resumes`。"
-            "若项目中存在 server/api-routes.json，以其中的 collection / item 为准。\n"
-            "- **侧边栏路由铁律**：如果页面包含侧边栏或顶部导航，必须实现真实的"
-            "内容切换：使用 react-router-dom，或至少用 useState 维护 activePath，"
-            "并为每个导航项渲染独立的页面 / 区块内容。禁止只生成静态 DOM 让点击"
-            "仅改变高亮；每个导航项都要有可验证的内容差异。\n"
-            "- **响应式网格铁律（最高优先级）**：生成的页面主容器、卡片列表、"
-            "统计面板必须使用响应式 Grid，**绝对禁止所有卡片用 flex-col / "
-            "单列纵向堆叠**。项目已配置 Tailwind 时，主容器必须使用 "
-            "`grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6`"
-            "（数量不匹配时按 2/3/4 列调整，但必须有 sm / md / lg 断点）；"
-            "未配置 Tailwind 时，必须写等价 CSS："
-            "`display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,"
-            "1fr)); gap:24px;`，并在 640px / 1024px 媒体查询中显式调整列数。"
-            "新增单个卡片时也必须插入已有 Grid，不得为了省事改成 flex-col。\n"
-            "- CREATE_NEW 生成的新元素必须有可辨识的文本与样式（如 className /"
-            " style / 已有 CSS 类），新增按钮需保证点击区域可见；同一 thread "
-            "多轮 CREATE_NEW 时不要重复插入完全相同的组件，除非用户明确要求"
-            "再来一个；\n"
+            "一点≈24px，一些≈48px，未给方向时默认向右。最终代码中绝不能出现"
+            "辅助线、虚线框或拖拽浮层。\n"
+            "- **响应式网格铁律**：页面主容器、卡片列表、统计面板必须使用"
+            "响应式 Grid，禁止全部用 flex-col 单列堆叠。项目已配置 Tailwind "
+            "时使用 `grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6`；"
+            "未配置时写等价 CSS `display:grid; grid-template-columns:"
+            "repeat(auto-fit,minmax(280px,1fr)); gap:24px;` 并补媒体查询。"
+            "新增单个卡片时插入已有 Grid。\n"
+            "- 标注 action=CREATE_NEW（旧别名 ADD）：保留原 DOM，在 "
+            "target.selector 指向的父容器内按现有 flex/grid 自然流插入完整"
+            '可编译 JSX；每个新增节点带 `data-vibe-created="<annotationId>"`。'
+            "禁止写 position:absolute / 写死坐标，也不能塞进 button / p / h1 "
+            "等叶子元素内部；target 为空时插到 main / 根 section 末尾。\n"
+            "- 标注 action=MODIFY_EXISTING（旧别名 MODIFY）：只改目标元素的"
+            "视觉属性，不删除无关节点。\n"
             "- 兼容旧客户端：relativeX / relativeY 等像素字段只能用于判断 "
             "flex/grid 插入顺序或 margin 粗调，不得写死绝对坐标；旧版 "
             "payload.position 仅作为历史审计信息，不再驱动 left/top 定位。\n"
-            "- 如果上一轮构建失败，必须针对错误日志修复，同时保证全部标注仍然"
-            "生效，而不是重复原方案。"
+            "- 多个标注作用同一元素时按顺序叠加；以最新用户指令为准，用户"
+            "否定上一轮方案时不得同时保留冲突样式。\n"
+            "- 只修改已加载的目标文件，不要改路由、配置文件或未提及的文件。\n"
+            "**输出格式**：只输出一个 JSON 对象，不要 Markdown 围栏或解释。\n"
+            '1) {"mode":"diff","patch":"--- a/<file>\\n+++ b/<file>\\n...",'
+            '"summary":"..."}\n'
+            '2) {"mode":"files","files":{"<file>":"完整文件内容"},"summary":"..."}\n'
+            "- mode=diff：每个 hunk 必须包含完整变更节点，并在前后保留至少 3 行"
+            "逐字符一致的上下文；上下文对不上会导致 Applier 失败。\n"
+            "- mode=files：仅在小文件且上下文完整时使用，files 必须覆盖全部"
+            "目标文件。\n"
             f"{self._skill_system}"
             f"{self._memory_block()}"
             f"{self._preference_block()}"
         )
+        if force_diff:
+            system += (
+                "\n\n【本轮强制局部 Diff】上下文已精简 / 目标文件较大，"
+                "**只允许 mode=diff**，禁止 mode=files，禁止整文件重写。"
+                f"已加载文件：{', '.join(ui_context.included_files) or '无'}；"
+                f"未加载文件禁止修改：{', '.join(ui_context.omitted_files) or '无'}。"
+            )
         human = (
             f"目标文件列表: {json.dumps(target_files, ensure_ascii=False, default=str)}\n\n"
-            f"画布标注（AnnotationEnvelope[]）:\n"
-            f"{json.dumps(annotations, ensure_ascii=False, default=str)}\n\n"
-            f"修改计划:\n{plan}\n\n"
-            f"当前文件内容:\n{_format_files(current_files, 24000)}\n\n"
-            f"上一轮验证结果:\n{json.dumps(verify_result, ensure_ascii=False, default=str)}\n\n"
+            f"{ui_context.render()}\n\n"
+            f"视觉修改计划:\n{plan_text or '按标注直接做最小视觉修改'}\n\n"
+            f"上一轮验证结果:\n{verify_text}\n\n"
             f"当前重试次数: {retry_count}"
         )
-        # Coder 输出必须同时满足：合法 JSON、目标文件全覆盖、patch 可用。
-        # 任一校验失败都把「原始输出 + 校验错误」回传模型自修复；连续失败
-        # 才抛 AgentLLMError，交给 Graph 的构建错误修复循环处理。
+        # 超时降级：上下文已压到最小，优先走 FAST 模型；解析失败仍按原有
+        # JSON 自修复流程回传错误，不把格式漂移误判为业务失败。
+        task = "coder_fast" if prefer_fast else "coder"
         return self._generate_with_repair(
-            task="coder",
+            task=task,
             system=system,
             human=human,
-            parse=lambda raw: self._parse_code_result(raw, target_files),
+            parse=lambda raw: self._parse_code_result(
+                raw,
+                target_files,
+                force_diff=force_diff,
+            ),
             label="代码修改",
         )
 
@@ -796,10 +833,22 @@ class DeepSeekAgentLLM(AgentLLM):
         except ModelClientError as exc:
             raise AgentLLMError(f"DeepSeek 调用失败: {exc}") from exc
 
-    def _parse_code_result(self, raw: str, target_files: list[str]) -> CodeResult:
+    def _parse_code_result(
+        self,
+        raw: str,
+        target_files: list[str],
+        *,
+        force_diff: bool = False,
+    ) -> CodeResult:
         payload = _extract_json(raw)
         summary = str(payload.get("summary", "模型生成代码修改"))
         mode = str(payload.get("mode", "")).lower()
+
+        if force_diff and (mode == "files" or (not mode and payload.get("files"))):
+            raise AgentLLMError(
+                "本轮上下文已精简，只允许 mode=diff 的局部补丁；"
+                "禁止 mode=files 整文件重写。请只输出目标节点附近的 unified diff。"
+            )
 
         if mode == "diff" or (not mode and payload.get("patch")):
             patch = payload.get("patch")
@@ -1715,6 +1764,24 @@ def _diff_paths(patch: str) -> list[str]:
         if path and path != "/dev/null" and path not in paths:
             paths.append(path)
     return paths
+
+
+def _compact_verify_result(verify_result: dict[str, Any] | None) -> dict[str, Any]:
+    """只保留修复所需的构建错误，不把完整 stdout / 依赖日志塞进 Coder。"""
+    if not isinstance(verify_result, dict) or not verify_result:
+        return {}
+    compact: dict[str, Any] = {
+        "success": verify_result.get("success"),
+    }
+    for key in ("message", "error", "error_context", "exit_code"):
+        value = verify_result.get(key)
+        if value in (None, "", []):
+            continue
+        compact[key] = _truncate(str(value), 1200)
+    errors = verify_result.get("errors")
+    if isinstance(errors, list):
+        compact["errors"] = [str(item)[:300] for item in errors[:5]]
+    return compact
 
 
 def _format_files(files: dict[str, str], limit: int) -> str:

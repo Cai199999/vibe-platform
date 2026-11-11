@@ -623,6 +623,8 @@ export default function RuntimePanel({
   active = true,
   visible = true,
   onRetry,
+  // 大型重构超时后的“转后台运行”：不阻塞画布，完成后 Toast 通知。
+  onRunInBackground,
   onGoToCanvas,
   onApprovalDecision,
   onCancelRun,
@@ -656,6 +658,7 @@ export default function RuntimePanel({
     approval = null,
     cancelRequested = false,
     pendingAction = null,
+    backgroundRun = null,
   } = run
   const previewUrl = result?.previewUrl
   // 本地秒表：与页面级状态解耦，执行期间不再每 400ms 重渲染整个工作区。
@@ -666,7 +669,9 @@ export default function RuntimePanel({
   const previewOffline = connection === 'offline'
   const modelLabel = MODEL_LABELS[modelProvider] ?? modelProvider
   // 沙盒实时状态：运行中 > 预览探活结果 > 是否有 sandboxId。
-  const sandboxState = submitting
+  // 后台 Run 不占用 submitting，但沙盒依然在跑，状态灯要显示“运行中”。
+  const busy = submitting || Boolean(backgroundRun)
+  const sandboxState = busy
     ? { label: '运行中', tone: 'busy' }
     : result?.sandboxId
       ? connection === 'offline'
@@ -680,6 +685,13 @@ export default function RuntimePanel({
     : sandboxState.label
   // 只有真正的“执行”可以取消；回滚 / 审批决策提交中不显示取消。
   const cancellable = Boolean(onCancelRun) && pendingAction !== 'rollback'
+  // 可恢复超时：后端已精简上下文重试仍超时，允许一键转后台继续生成。
+  // 必须具备原始提交快照（backgroundRequest），否则无从重放。
+  const canRunInBackground =
+    Boolean(onRunInBackground) &&
+    Boolean(run.backgroundRequest) &&
+    (Boolean(result?.backgroundAvailable) ||
+      result?.errorCode === 'CODER_TIMEOUT_RECOVERABLE')
 
   let stateLabel = 'IDLE'
   let stateClass = 'is-idle'
@@ -693,6 +705,9 @@ export default function RuntimePanel({
     stateLabel = cancelRequested
       ? 'CANCELLING…'
       : `RUNNING · ${elapsed < 1 ? '<1' : elapsed}s`
+    stateClass = 'is-running'
+  } else if (backgroundRun) {
+    stateLabel = 'BACKGROUND · 后台执行中'
     stateClass = 'is-running'
   } else if (error) {
     stateLabel = 'FAILED'
@@ -812,13 +827,44 @@ export default function RuntimePanel({
           </div>
         )}
 
+        {backgroundRun && (
+          <div
+            className="runtime-background-banner"
+            role="status"
+            aria-live="polite"
+          >
+            <span className="runtime-background-dot" aria-hidden="true" />
+            <div className="runtime-background-copy">
+              <strong>后台生成中，画布可以继续操作</strong>
+              <span>完成后会弹 Toast 通知，无需停留在预览页。</span>
+            </div>
+          </div>
+        )}
+
         {!submitting && !approval && !clarification && error && (
           <div className="runtime-overlay">
             <div className="error-state runtime-error">
-              <span className="error-code">RUN_FAILED</span>
+              <span className="error-code">
+                {result?.errorCode || 'RUN_FAILED'}
+              </span>
               <h3>执行失败</h3>
               <p>{error}</p>
-              <p className="muted">请稍后重试。</p>
+              {canRunInBackground ? (
+                <>
+                  <p className="muted">
+                    当前草稿与标注已保留，可转后台继续生成；完成后会通知你。
+                  </p>
+                  <button
+                    className="ghost-button runtime-background-action"
+                    type="button"
+                    onClick={onRunInBackground}
+                  >
+                    转后台运行
+                  </button>
+                </>
+              ) : (
+                <p className="muted">请稍后重试。</p>
+              )}
             </div>
           </div>
         )}
@@ -840,7 +886,12 @@ export default function RuntimePanel({
             </div>
           )}
 
-        {!submitting && !approval && !clarification && !error && previewOffline && (
+        {!submitting &&
+          !backgroundRun &&
+          !approval &&
+          !clarification &&
+          !error &&
+          previewOffline && (
           <div className="runtime-overlay">
             <div className="error-state runtime-error">
               <span className="error-code">PREVIEW_OFFLINE</span>
@@ -858,6 +909,7 @@ export default function RuntimePanel({
         )}
 
         {!submitting &&
+          !backgroundRun &&
           !approval &&
           !clarification &&
           !error &&
@@ -869,6 +921,15 @@ export default function RuntimePanel({
             </div>
 
             <div className="runtime-result-actions">
+              {canRunInBackground && (
+                <button
+                  className="runtime-pill-button is-emphasis"
+                  type="button"
+                  onClick={onRunInBackground}
+                >
+                  转后台运行
+                </button>
+              )}
               {(diffLines > 0 || result.messages?.length > 0) && (
                 <button
                   className="runtime-pill-button"

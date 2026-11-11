@@ -128,11 +128,21 @@ const EMPTY_RUN = {
   // 保存快照后缓存的项目全局摘要 / 本次快照改动说明，随 Architect 请求发送。
   projectSummary: '',
   latestChanges: '',
+  // “转后台运行”：Run 在服务端继续执行，前端只保留轻量进度 / 终态通知，
+  // 用户可以继续圈选；backgroundRequest 保存原始指令供一键重试。
+  backgroundRun: null,
+  backgroundRequest: null,
 }
 
 // 成功终态：M2 的旧快照仍可能是 AWAITING_APPROVAL，统一按成功渲染。
 const SUCCESS_STATUSES = new Set(['SUCCEEDED', 'AWAITING_APPROVAL'])
 const isSuccessStatus = (status) => SUCCESS_STATUSES.has(status)
+const TERMINAL_EVENT_TYPES = new Set([
+  'run.succeeded',
+  'run.failed',
+  'run.cancelled',
+  'run.rejected',
+])
 
 // 已完成 Run 的轻量会话快照：刷新页面后仍能显示「查看效果」，
 // 且 sandboxIds 不丢失，关闭 Tab 时仍能正确销毁容器。
@@ -813,6 +823,11 @@ function resultFromTerminalEvent(run, event) {
       event.type === 'run.failed'
         ? payload.message || '构建验证未通过'
         : null,
+    // 可恢复超时（CODER_TIMEOUT_RECOVERABLE）会展示“转后台运行”，
+    // 而不是把用户钉死在普通失败页。
+    errorCode: event.type === 'run.failed' ? payload.code ?? null : null,
+    backgroundAvailable:
+      event.type === 'run.failed' ? Boolean(payload.backgroundAvailable) : false,
     generatedPatch: success ? run.patchPreview || '' : '',
     verifyResult: null,
     messages: timelineMessages(run.timeline),
@@ -1080,6 +1095,9 @@ export default function WorkspacePage() {
   const inflightRef = useRef(new Set())
   // 每个项目最多一个 SSE 连接；关闭 Tab / 重新提交时主动 abort。
   const streamControllersRef = useRef(new Map())
+  // 后台 Run 使用独立 SSE 连接：不占用项目当前 epoch，用户可继续圈选。
+  // key = `${projectId}:${runId}`。
+  const backgroundControllersRef = useRef(new Map())
   // 记录已关闭项目，防止关闭瞬间仍在执行的 Run 回写状态或泄漏沙盒。
   const closedProjectsRef = useRef(new Set())
   // 门控释放只允许一个在途请求；自动释放每个 gate 只尝试一次，失败后由用户
@@ -1166,6 +1184,8 @@ export default function WorkspacePage() {
       workspaceMountedRef.current = false
       streamControllersRef.current.forEach((controller) => controller.abort())
       streamControllersRef.current.clear()
+      backgroundControllersRef.current.forEach((controller) => controller.abort())
+      backgroundControllersRef.current.clear()
       annotationAbortRef.current.forEach((controller) => controller.abort())
       annotationAbortRef.current.clear()
       snapshotDiffAbortRef.current.forEach((controller) => controller.abort())
@@ -1940,6 +1960,7 @@ export default function WorkspacePage() {
       scopeHint = 'auto',
       targetAgent = null,
       requireManualApproval: approvalOverride,
+      background = false,
     } = {},
   ) => {
     const project = projects.find((item) => item.id === projectId)
@@ -1995,6 +2016,8 @@ export default function WorkspacePage() {
             approvalOverride === undefined
               ? requireManualApproval
               : approvalOverride,
+          // 后台模式使用更长的 Coder 超时；普通模式仍严格 30s 熔断。
+          background: Boolean(background),
         },
         architect: {
           llmProvider: modelProvider,
@@ -2078,6 +2101,113 @@ export default function WorkspacePage() {
   }
 
   /**
+   * 后台 Run：dispatch 后立即释放前端，SSE 在独立连接里继续。
+   *
+   * 与普通 attach 的区别：
+   *  - 不改 `submitting`，用户可以继续圈选 / 浏览；
+   *  - 不占用项目 epoch，后续普通提交不会中止后台任务；
+   *  - 只有终态才回写 result / 标注聊天，并弹 Toast。
+   */
+  const startBackgroundUiRun = (
+    projectId,
+    { runId, streamPath, annotationId },
+  ) => {
+    const key = `${projectId}:${runId}`
+    backgroundControllersRef.current.get(key)?.abort()
+    const controller = new AbortController()
+    backgroundControllersRef.current.set(key, controller)
+    patchRun(projectId, (previous) => ({
+      ...previous,
+      submitting: false,
+      pendingAnnotationId: null,
+      pendingAction: null,
+      error: null,
+      runId,
+      lastSeq: 0,
+      timeline: [],
+      patchPreview: '',
+      clarification: null,
+      approval: null,
+      cancelRequested: false,
+      targetAnnotationId: annotationId,
+      supervisorHandoff: 'handoff_ui',
+      supervisorPhase: 'background_running',
+      backgroundRun: {
+        runId,
+        streamPath,
+        annotationId,
+        startedAt: Date.now(),
+      },
+    }))
+
+    void (async () => {
+      let terminal = null
+      try {
+        await streamRun({
+          runId,
+          attach: true,
+          streamPath,
+          token: session?.token,
+          signal: controller.signal,
+          onEvent: (event) => {
+            if (TERMINAL_EVENT_TYPES.has(event.type)) terminal = event
+          },
+        })
+      } catch (cause) {
+        if (
+          cause?.name !== 'AbortError' &&
+          workspaceMountedRef.current &&
+          !closedProjectsRef.current.has(projectId)
+        ) {
+          const message = `后台任务事件流中断：${cause?.message || cause}`
+          patchRun(projectId, (previous) => ({
+            ...previous,
+            backgroundRun: null,
+            error: message,
+          }))
+          showToast('error', message)
+        }
+        return
+      } finally {
+        backgroundControllersRef.current.delete(key)
+      }
+      if (
+        !workspaceMountedRef.current ||
+        closedProjectsRef.current.has(projectId)
+      ) {
+        return
+      }
+      if (!terminal) {
+        patchRun(projectId, (previous) => ({
+          ...previous,
+          backgroundRun: null,
+          error: '后台任务事件流已结束，但未收到终态，请刷新查看结果',
+        }))
+        return
+      }
+      const current = runStatesRef.current?.[projectId] ?? EMPTY_RUN
+      const result = resultFromTerminalEvent(current, terminal)
+      patchRun(projectId, (previous) => ({
+        ...finalizeFromResult(previous, result, annotationId),
+        backgroundRun: null,
+        // 成功即清空重试快照；失败保留，便于再次转后台。
+        backgroundRequest: isSuccessStatus(result.status)
+          ? null
+          : previous.backgroundRequest,
+      }))
+      if (isSuccessStatus(result.status)) {
+        showToast('success', '后台任务已完成，预览已更新')
+        focusPreview(projectId)
+      } else {
+        showToast(
+          'error',
+          `后台任务失败：${result.error || '构建验证未通过'}`,
+        )
+      }
+    })()
+  }
+
+  /**
    * 统一入口：route → 检查 handoff / 可派发性 → dispatch。
    *
    * 既处理画布“发送 / 提交”，也处理工具栏“下一步”；两者都不再硬编码
@@ -2097,12 +2227,18 @@ export default function WorkspacePage() {
       requireManualApproval: approvalOverride,
       // 静默拖拽同步传 false：成功后仍停留在画布，不切到预览。
       switchToPreview = true,
+      // 后台模式：dispatch 后立即释放前端，不阻塞用户继续圈选。
+      background = false,
     },
   ) => {
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
     if (!project || run.submitting || inflightRef.current.has(projectId)) {
       return { ok: false, reason: 'busy' }
+    }
+    if (run.backgroundRun) {
+      showToast('info', '后台任务执行中，完成后会自动通知你')
+      return { ok: false, reason: 'background' }
     }
     if (run.clarification || run.approval) {
       showToast('error', '请先处理当前的澄清或审批，再发起新的请求')
@@ -2119,6 +2255,7 @@ export default function WorkspacePage() {
       scopeHint,
       targetAgent,
       requireManualApproval: approvalOverride,
+      background,
     })
     if (!payload) return { ok: false, reason: 'payload' }
 
@@ -2165,6 +2302,20 @@ export default function WorkspacePage() {
       supervisorHandoff: null,
       supervisorPhase: 'analyzing',
       supervisorDecision: null,
+      backgroundRun: null,
+      // 失败后“转后台运行”必须能拿回原始指令；sendEntries 在成功提交时
+      // 会被清空 intent，因此这里先保存一份不可变快照。
+      // 转后台的重放不携带 sendEntries（避免重复写用户气泡），此时保留
+      // 上一次快照，确保再次失败仍能继续转后台。
+      backgroundRequest:
+        annotations.length > 0 && sendEntries.length > 0
+          ? {
+              message,
+              sendEntries,
+              annotationId,
+              createdAt: new Date().toISOString(),
+            }
+          : previous.backgroundRequest,
     }))
 
     try {
@@ -2258,6 +2409,22 @@ export default function WorkspacePage() {
           supervisorDecision: decisionView,
           supervisorHandoff: handoff,
         })
+        if (background) {
+          // 后台模式：立即释放 submitting，用户可继续圈选；SSE 独立订阅。
+          releaseInflight()
+          startBackgroundUiRun(projectId, {
+            runId: ui.runId,
+            streamPath: ui.streamPath,
+            annotationId,
+          })
+          showToast('info', '已转后台运行，完成后会通知你')
+          return {
+            ok: true,
+            reason: 'background',
+            runId: ui.runId,
+            decision: decisionView,
+          }
+        }
         const terminal = await attachUiDispatch(projectId, {
           runId: ui.runId,
           streamPath: ui.streamPath,
@@ -3779,6 +3946,37 @@ export default function WorkspacePage() {
     void handleSubmit(projectId)
   }
 
+  /**
+   * 大型重构失败后的“转后台运行”。
+   *
+   * 复用失败前保存的 sendEntries（包含用户原始指令），以 background=true
+   * 重新派发；后端使用 240s 超时，前端不显示阻塞浮层。
+   */
+  const handleRunInBackground = (projectId) => {
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const request = run.backgroundRequest
+    if (!request?.sendEntries?.length) {
+      showToast('info', '没有可转后台的修改，请在画布重新标注')
+      return
+    }
+    if (run.submitting || run.backgroundRun) {
+      showToast('info', '当前已有任务在运行，请稍候')
+      return
+    }
+    showToast('info', '已提交后台任务，你可以继续圈选其他内容')
+    void submitViaSupervisor(projectId, {
+      message: request.message,
+      annotations: request.sendEntries,
+      annotationId: request.annotationId ?? null,
+      // 首次提交已经写过用户气泡并清空 intent；重放只派发 Run，
+      // 不再重复提交聊天记录。preload 快照仍通过 previous 保留。
+      sendEntries: [],
+      commitOnSuccess: false,
+      background: true,
+      switchToPreview: false,
+    })
+  }
+
   // ------------------------------------------------------------------
   // 项目快照（沙盒 Git checkpoint）
   // ------------------------------------------------------------------
@@ -4284,6 +4482,7 @@ export default function WorkspacePage() {
       handleCancelRun,
       handleSubmit,
       handleRetry,
+      handleRunInBackground,
       handleExport,
       handleArchitectExport,
       openSnapshotSave,
@@ -4349,6 +4548,7 @@ export default function WorkspacePage() {
         onCancelRun: () => call('handleCancelRun'),
         onSubmit: () => call('handleSubmit'),
         onRetry: () => call('handleRetry'),
+        onRunInBackground: () => call('handleRunInBackground'),
         onExport: () => call('handleExport'),
         onArchitectExport: (target) =>
           call('handleArchitectExport', target),

@@ -63,6 +63,8 @@ function ProjectWorkspaceInner({
   onCancelRun,
   onSubmit,
   onRetry,
+  // 大型重构超时后的“转后台运行”；不阻塞用户继续圈选。
+  onRunInBackground,
   onExport,
   canExport = false,
   exporting = false,
@@ -881,6 +883,7 @@ function ProjectWorkspaceInner({
               active={active}
               visible={active && previewVisible}
               onRetry={submitReady ? onRetry : undefined}
+              onRunInBackground={onRunInBackground}
               onGoToCanvas={() => setMode('canvas')}
               onApprovalDecision={onApprovalDecision}
               onCancelRun={onCancelRun}

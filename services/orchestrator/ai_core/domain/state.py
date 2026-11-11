@@ -171,6 +171,14 @@ class AgentState(TypedDict, total=False):
     apply_failed: bool
     # Coder 超时 / 结构化输出耗尽：终态错误，禁止进入构建自愈循环。
     fatal_error: bool
+    # 本次 Run 是否为“转后台运行”；后台模式使用更长的 Coder 超时。
+    background_run: bool
+    # Coder 实际使用的硬超时（秒）；Service 从 options / Settings 注入。
+    coder_timeout_seconds: float
+    # 首次超时后是否已用精简上下文 + FAST 模型重试。
+    coder_fallback_used: bool
+    # 超时是否可恢复：前端据此展示“转后台运行”，而不是只能重来。
+    background_available: bool
     retry_count: int
     max_retries: int
     # 上一次自愈时的错误指纹；本次失败指纹与之相同则直接 FAILED。

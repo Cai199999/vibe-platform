@@ -120,6 +120,13 @@ class CoderTimeoutError(Exception):
 
 
 CODER_TIMEOUT_MESSAGE = "由于代码结构复杂，AI 生成超时，请尝试缩小标注范围"
+# 首次超时后自动降级重试；让用户看到“系统在自救”，而不是干等 30s 后失败。
+CODER_FALLBACK_PROGRESS = "已精简上下文并切换快速模型重试"
+# 降级仍失败：不再把用户钉死在失败页，而是提供“转后台运行”的可恢复出口。
+CODER_BACKGROUND_AVAILABLE_MESSAGE = (
+    "本次修改较大，已自动精简上下文重试仍未完成。"
+    "可点击“转后台运行”继续生成，完成后会通知你；当前草稿已保留。"
+)
 # 只有真正调用模型的节点才需要 token 流；其余节点保持零开销。
 STREAMING_NODES = {"planner", "coder"}
 
@@ -1127,15 +1134,26 @@ class AgentGraphRunner:
     def _generate_with_coder_timeout(
         self,
         *args: Any,
+        timeout_seconds: float | None = None,
         **kwargs: Any,
     ) -> CodeResult:
-        """在 30s 硬超时内执行 Coder 模型调用。
+        """在硬超时内执行 Coder 模型调用。
 
         ``ThreadPoolExecutor`` 无法强杀阻塞的 HTTP 请求，但能保证 Graph
-        立即收到超时并进入 FAILED；后台线程的迟到结果被丢弃。用
+        立即收到超时并进入降级 / 后台分支；后台线程的迟到结果被丢弃。用
         ``copy_context()`` 把当前节点的 TokenSink 带进线程，流式输出不丢。
+
+        ``timeout_seconds`` 为空时读取服务端默认（普通 30s / 后台 240s）；
+        降级重试会显式传入更短预算，确保用户尽快得到反馈。
         """
-        timeout = max(1.0, float(self._settings.agent_coder_timeout_seconds))
+        timeout = max(
+            1.0,
+            float(
+                timeout_seconds
+                if timeout_seconds is not None
+                else getattr(self._settings, "agent_coder_timeout_seconds", 30.0)
+            ),
+        )
         context = contextvars.copy_context()
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="coder")
         future = executor.submit(context.run, self._llm.generate, *args, **kwargs)
@@ -1148,6 +1166,32 @@ class AgentGraphRunner:
         finally:
             # 绝不能 wait=True：超时的 HTTP 调用仍可能在后台阻塞。
             executor.shutdown(wait=False, cancel_futures=True)
+
+    @staticmethod
+    def _coder_failure_result(
+        *,
+        code: str,
+        message: str,
+        background_available: bool = False,
+    ) -> dict[str, Any]:
+        """构造 Coder 失败增量。
+
+        ``CODER_TIMEOUT_RECOVERABLE`` 表示本次失败可以通过“转后台运行”
+        继续；其余错误仍按不可恢复处理，避免把格式错误无限重试。
+        """
+        return {
+            "generated_patch": "",
+            "generated_files": {},
+            "apply_failed": True,
+            "fatal_error": True,
+            "next_action": "fail",
+            "status": "FAILED",
+            "error_code": code,
+            "error": message,
+            "background_available": background_available,
+            "verify_result": _failure(message),
+            "messages": [_message("coder", message, error=True)],
+        }
 
     def _coder(self, state: AgentState) -> dict[str, Any]:
         context = state["annotation_context"]
@@ -1173,50 +1217,86 @@ class AgentGraphRunner:
         )
         if move_result is not None:
             return move_result
+        # 普通请求 30s 熔断；用户显式选择“转后台运行”时使用 240s。
+        timeout_seconds = float(
+            state.get("coder_timeout_seconds")
+            or getattr(self._settings, "agent_coder_timeout_seconds", 30.0)
+        )
+        background = bool(state.get("background_run"))
+        generate_kwargs = {
+            "annotations": annotations,
+            "plan": state.get("plan", ""),
+            "current_files": current_files,
+            "target_files": state["target_files"],
+            # 只把 Error Message + 报错行附近代码交给模型，
+            # 完整 stdout/stderr 仅保留在状态里供 UI 与审计使用。
+            "verify_result": _repair_payload(verify_result),
+            "retry_count": retry_count,
+        }
+        fallback_used = False
         try:
             result = self._generate_with_coder_timeout(
-                annotations=annotations,
-                plan=state.get("plan", ""),
-                current_files=current_files,
-                target_files=state["target_files"],
-                # 只把 Error Message + 报错行附近代码交给模型，
-                # 完整 stdout/stderr 仅保留在状态里供 UI 与审计使用。
-                verify_result=_repair_payload(verify_result),
-                retry_count=retry_count,
+                **generate_kwargs,
+                compact=False,
+                prefer_fast=False,
+                timeout_seconds=timeout_seconds,
             )
-            # files 模式必须经过 FileCreator 落地：已有文件 REWRITE_FILE，
-            # 新文件 CREATE_FILE。路径校验 / 覆盖保护由 CodeEditor 负责。
-            generated_files = _materialize_generated_files(current_files, result.files)
-        except (CoderTimeoutError, AgentLLMError) as exc:
-            # 超时 / 结构化输出连续失败：直接熔断，不再进入 Coder -> 构建
-            # -> 修复的多轮循环。前端必须立刻收到可执行的收敛提示。
+        except CoderTimeoutError as exc:
+            logger.warning("coder timeout: %s", exc)
+            if background:
+                return self._coder_failure_result(
+                    code="CODER_TIMEOUT_RECOVERABLE",
+                    message=CODER_BACKGROUND_AVAILABLE_MESSAGE,
+                    background_available=True,
+                )
+            # 第一次超时先自救：压缩到目标节点窗口 + FAST 模型 + 更短预算。
+            # 这能覆盖大多数“标注范围略大 / 强模型偶发卡顿”的情况。
+            self._emit(
+                "node.progress",
+                {"node": "coder", "message": CODER_FALLBACK_PROGRESS},
+                dedupe_key=f"node.progress:coder:fallback:{retry_count}",
+            )
+            try:
+                result = self._generate_with_coder_timeout(
+                    **generate_kwargs,
+                    compact=True,
+                    prefer_fast=True,
+                    timeout_seconds=float(
+                        getattr(
+                            self._settings,
+                            "agent_coder_retry_timeout_seconds",
+                            20.0,
+                        )
+                    ),
+                )
+                fallback_used = True
+            except (CoderTimeoutError, AgentLLMError) as retry_exc:
+                # 降级仍失败：保留可恢复出口，前端可一键转后台，而不是
+                # 把整轮需求直接判死。草稿由前端自行保留。
+                logger.warning("coder fallback failed: %s", retry_exc)
+                return self._coder_failure_result(
+                    code="CODER_TIMEOUT_RECOVERABLE",
+                    message=CODER_BACKGROUND_AVAILABLE_MESSAGE,
+                    background_available=True,
+                )
+        except AgentLLMError as exc:
+            # 结构化输出连续失败：不做后台重试（换更长超时也无济于事），
+            # 让用户缩小标注范围或重新表述。
             logger.warning("coder failed without repair loop: %s", exc)
-            return {
-                "generated_patch": "",
-                "generated_files": {},
-                "apply_failed": True,
-                "fatal_error": True,
-                "next_action": "fail",
-                "status": "FAILED",
-                "error_code": "CODER_GENERATION_FAILED",
-                "error": CODER_TIMEOUT_MESSAGE,
-                "verify_result": _failure(CODER_TIMEOUT_MESSAGE),
-                "messages": [_message("coder", CODER_TIMEOUT_MESSAGE, error=True)],
-            }
+            return self._coder_failure_result(
+                code="CODER_GENERATION_FAILED",
+                message=CODER_TIMEOUT_MESSAGE,
+            )
         except Exception as exc:  # noqa: BLE001 - 未预期异常同样不能再阻塞
             logger.exception("coder crashed")
-            return {
-                "generated_patch": "",
-                "generated_files": {},
-                "apply_failed": True,
-                "fatal_error": True,
-                "next_action": "fail",
-                "status": "FAILED",
-                "error_code": "CODER_INTERNAL_ERROR",
-                "error": f"Coder 生成失败: {exc}",
-                "verify_result": _failure(f"Coder 生成失败: {exc}"),
-                "messages": [_message("coder", f"代码生成失败: {exc}", error=True)],
-            }
+            return self._coder_failure_result(
+                code="CODER_INTERNAL_ERROR",
+                message=f"Coder 生成失败: {exc}",
+            )
+
+        # files 模式必须经过 FileCreator 落地：已有文件 REWRITE_FILE，
+        # 新文件 CREATE_FILE。路径校验 / 覆盖保护由 CodeEditor 负责。
+        generated_files = _materialize_generated_files(current_files, result.files)
 
         # files 模式：用修改前后的完整内容合成展示用 diff（一次性展示全部改动）。
         patch = result.patch or ""
@@ -1245,6 +1325,10 @@ class AgentGraphRunner:
             "patch_id": patch_id,
             "apply_failed": False,
             "status": "CODING",
+            # 后台 / 降级状态透传给 UI：前端可展示“已精简上下文重试成功”。
+            "coder_fallback_used": fallback_used,
+            "background_available": False,
+            "error_code": None,
             "messages": [
                 _message(
                     "coder",

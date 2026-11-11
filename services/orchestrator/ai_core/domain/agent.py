@@ -190,6 +190,9 @@ class RunOptions(CamelModel):
     # 产品前端开关：代码生成并验证通过后是否暂停等待人工审批。
     # None 表示未显式传值，此时回退到旧字段 approval_mode。
     require_manual_approval: bool | None = None
+    # “转后台运行”：大型重构不占用前端阻塞浮层，使用更长的 Coder 超时；
+    # 前端可继续圈选 / 浏览，完成后通过 SSE 终态 + Toast 通知。
+    background: bool = False
     # 旧字段：required / off。保留以兼容既有 E2E 与外部调用方。
     approval_mode: Literal["required", "off"] = "off"
 
@@ -511,6 +514,10 @@ class ExecuteRunResponse(CamelModel):
     # 本次 Run 的 Token 用量与费用（含所有模型调用）。
     token_usage: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+    # 结构化错误码与可恢复标记：CODER_TIMEOUT_RECOVERABLE 会展示
+    # “转后台运行”，而不是普通失败。
+    error_code: str | None = None
+    background_available: bool = False
 
 
 class RollbackRunRequest(CamelModel):
