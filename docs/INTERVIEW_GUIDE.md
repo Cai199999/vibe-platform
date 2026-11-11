@@ -219,7 +219,7 @@ A：检索结果只作为“数据”注入，明确分隔并附带引用；不�
 
 - Planner / Coder 强制 JSON；
 - Pydantic 校验失败时，把**原始输出 + 校验错误**一起回传模型重试；
-- `AGENT_JSON_RETRY_LIMIT=2`；
+- `AGENT_JSON_RETRY_LIMIT=1`（总尝试 2 次）；Coder 节点另有 30s 硬超时，超时或校验耗尽直接 `FAILED`，不再进入构建自愈死循环；
 - Planner 耗尽后降级为文本计划，不让整个 Run 崩掉；
 - 文件路径拒绝 `..` / 绝对路径，只允许沙盒目标文件。
 

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import copy
 import difflib
 import json
@@ -23,6 +24,8 @@ import logging
 import math
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -44,6 +47,8 @@ from ai_core.agent.error_context import (
 from ai_core.agent.events import EventSink, NullEventSink
 from ai_core.agent.llm import (
     AgentLLM,
+    AgentLLMError,
+    CodeResult,
     PlanResult,
     annotation_selector,
     annotation_target_file,
@@ -65,6 +70,10 @@ from ai_core.agent.preferences import (
 from ai_core.context_memory import get_project_memory
 from ai_core.domain.state import AgentState
 from ai_core.config import get_settings
+from ai_core.observability.streaming import (
+    TokenStreamEmitter,
+    collect_tokens,
+)
 from ai_core.observability.token_usage import TokenUsage, UsageCollector, collect_usage
 from ai_core.editor import (
     CodeEdit,
@@ -100,6 +109,19 @@ class RunCancelledError(Exception):
     Graph 在节点安全点抛出，Service 捕获后回滚沙盒并发送
     ``run.cancelled`` 终态事件。放在 graph 模块避免依赖 Service 层。
     """
+
+
+class CoderTimeoutError(Exception):
+    """Coder 节点超过硬超时。
+
+    模型调用没有可用的同步取消手段；超时后立即熔断本次 Run，后台线程的
+    迟到结果会被丢弃。绝不进入构建自愈循环，否则前端会继续阻塞。
+    """
+
+
+CODER_TIMEOUT_MESSAGE = "由于代码结构复杂，AI 生成超时，请尝试缩小标注范围"
+# 只有真正调用模型的节点才需要 token 流；其余节点保持零开销。
+STREAMING_NODES = {"planner", "coder"}
 
 
 @dataclass
@@ -325,7 +347,7 @@ class AgentGraphRunner:
         builder.add_conditional_edges(
             "coder",
             self._route_after_coder,
-            {"applier": "applier", "evaluator": "evaluator"},
+            {"applier": "applier", "evaluator": "evaluator", "failed": "failed"},
         )
         builder.add_conditional_edges(
             "applier",
@@ -392,10 +414,28 @@ class AgentGraphRunner:
             # 采集器只覆盖当前节点：模型适配器在每次真实调用后写入 usage，
             # 节点结束后聚合为 node.finished.usage / state.token_usage。
             collector = UsageCollector()
+            # 模型流式输出：按节点聚合为低频 token 事件，前端据此做打字机。
+            emitter: TokenStreamEmitter | None = None
+            token_scope = nullcontext()
+            if name in STREAMING_NODES:
+                emitter = TokenStreamEmitter(
+                    lambda text, task: self._emit(
+                        "token",
+                        {
+                            "node": name,
+                            "task": task,
+                            "text": text,
+                        },
+                    )
+                )
+                token_scope = collect_tokens(emitter.feed)
             try:
-                with collect_usage(collector):
+                with token_scope, collect_usage(collector):
                     update = fn(state)
             except GraphInterrupt:
+                if emitter is not None:
+                    emitter.flush()
+                    emitter.close()
                 usage = collector.snapshot()
                 self._usage_total.add(usage)
                 self._emit(
@@ -415,6 +455,9 @@ class AgentGraphRunner:
                 )
                 raise
             except Exception as exc:  # noqa: BLE001 - 事件后继续向上抛
+                if emitter is not None:
+                    emitter.flush()
+                    emitter.close()
                 usage = collector.snapshot()
                 self._usage_total.add(usage)
                 self._emit(
@@ -430,6 +473,9 @@ class AgentGraphRunner:
                 )
                 raise
 
+            if emitter is not None:
+                emitter.flush()
+                emitter.close()
             usage = collector.snapshot()
             self._usage_total.add(usage)
             # 节点执行期间用户可能已取消：返回值不写回状态，交给 Service
@@ -957,6 +1003,31 @@ class AgentGraphRunner:
             ],
         }
 
+    def _generate_with_coder_timeout(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> CodeResult:
+        """在 30s 硬超时内执行 Coder 模型调用。
+
+        ``ThreadPoolExecutor`` 无法强杀阻塞的 HTTP 请求，但能保证 Graph
+        立即收到超时并进入 FAILED；后台线程的迟到结果被丢弃。用
+        ``copy_context()`` 把当前节点的 TokenSink 带进线程，流式输出不丢。
+        """
+        timeout = max(1.0, float(self._settings.agent_coder_timeout_seconds))
+        context = contextvars.copy_context()
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="coder")
+        future = executor.submit(context.run, self._llm.generate, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout)
+        except FutureTimeout as exc:
+            future.cancel()
+            logger.warning("coder timeout after %.1fs", timeout)
+            raise CoderTimeoutError(CODER_TIMEOUT_MESSAGE) from exc
+        finally:
+            # 绝不能 wait=True：超时的 HTTP 调用仍可能在后台阻塞。
+            executor.shutdown(wait=False, cancel_futures=True)
+
     def _coder(self, state: AgentState) -> dict[str, Any]:
         context = state["annotation_context"]
         annotations = [item["annotation"] for item in context["annotations"]]
@@ -982,7 +1053,7 @@ class AgentGraphRunner:
         if move_result is not None:
             return move_result
         try:
-            result = self._llm.generate(
+            result = self._generate_with_coder_timeout(
                 annotations=annotations,
                 plan=state.get("plan", ""),
                 current_files=current_files,
@@ -995,14 +1066,34 @@ class AgentGraphRunner:
             # files 模式必须经过 FileCreator 落地：已有文件 REWRITE_FILE，
             # 新文件 CREATE_FILE。路径校验 / 覆盖保护由 CodeEditor 负责。
             generated_files = _materialize_generated_files(current_files, result.files)
-        except Exception as exc:  # noqa: BLE001 - 模型错误转入失败/重试
-            logger.warning("coder failed: %s", exc)
+        except (CoderTimeoutError, AgentLLMError) as exc:
+            # 超时 / 结构化输出连续失败：直接熔断，不再进入 Coder -> 构建
+            # -> 修复的多轮循环。前端必须立刻收到可执行的收敛提示。
+            logger.warning("coder failed without repair loop: %s", exc)
             return {
                 "generated_patch": "",
                 "generated_files": {},
                 "apply_failed": True,
+                "fatal_error": True,
+                "next_action": "fail",
+                "status": "FAILED",
+                "error_code": "CODER_GENERATION_FAILED",
+                "error": CODER_TIMEOUT_MESSAGE,
+                "verify_result": _failure(CODER_TIMEOUT_MESSAGE),
+                "messages": [_message("coder", CODER_TIMEOUT_MESSAGE, error=True)],
+            }
+        except Exception as exc:  # noqa: BLE001 - 未预期异常同样不能再阻塞
+            logger.exception("coder crashed")
+            return {
+                "generated_patch": "",
+                "generated_files": {},
+                "apply_failed": True,
+                "fatal_error": True,
+                "next_action": "fail",
+                "status": "FAILED",
+                "error_code": "CODER_INTERNAL_ERROR",
+                "error": f"Coder 生成失败: {exc}",
                 "verify_result": _failure(f"Coder 生成失败: {exc}"),
-                "status": "CODING",
                 "messages": [_message("coder", f"代码生成失败: {exc}", error=True)],
             }
 
@@ -1418,6 +1509,10 @@ class AgentGraphRunner:
         return "coder"
 
     def _route_after_coder(self, state: AgentState) -> str:
+        # Coder 自身超时 / 结构化输出失败属于终态错误，直接 failed；
+        # 只有“已生成代码但应用失败”才交给 evaluator 做修复预算判断。
+        if state.get("fatal_error") or state.get("next_action") == "fail":
+            return "failed"
         return "evaluator" if state.get("apply_failed") else "applier"
 
     def _route_after_applier(self, state: AgentState) -> str:

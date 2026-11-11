@@ -169,6 +169,8 @@ class AgentState(TypedDict, total=False):
     # ---- 校验与修复 ----
     verify_result: VerifyState
     apply_failed: bool
+    # Coder 超时 / 结构化输出耗尽：终态错误，禁止进入构建自愈循环。
+    fatal_error: bool
     retry_count: int
     max_retries: int
     # 上一次自愈时的错误指纹；本次失败指纹与之相同则直接 FAILED。

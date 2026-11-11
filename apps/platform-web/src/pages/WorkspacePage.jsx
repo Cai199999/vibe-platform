@@ -47,9 +47,11 @@ import { INITIAL_APP } from '../mockProject.js'
 
 const TARGET_FILE = 'src/App.jsx'
 const MAX_ANNOTATIONS = 3
-// 直接拖拽的静默同步超时：超过后前端必须回滚视觉位置，不能无限等待。
-const MOVE_SYNC_TIMEOUT_MS = 120000
-const MOVE_SYNC_DEBOUNCE_MS = 500
+// 直接拖拽的静默同步超时：Coder 已在后端 30s 熔断，这里留出构建与
+// HMR 的余量；超过后前端必须回滚视觉位置，不能无限等待。
+const MOVE_SYNC_TIMEOUT_MS = 60000
+// 松手后只提交一次最终位移；300ms 足以合并连续微调手势。
+const MOVE_SYNC_DEBOUNCE_MS = 300
 const MOVE_BATCH_LIMIT = 3
 
 /** Promise + 超时竞速；超时返回 `{ timedOut: true }`，不拒绝。 */
@@ -651,6 +653,27 @@ function reduceTimeline(timeline, event) {
     )
   }
 
+  // 轻量 token 流：只取最后 2000 字展示，避免长代码把 React 状态拖慢。
+  // node.finished 会清空 message，最终仍以结构化 summary 为准。
+  if (event.type === 'token') {
+    const text = String(payload.text || '')
+    if (!text) return timeline
+    let index = -1
+    timeline.forEach((item, itemIndex) => {
+      if (item.node === payload.node && item.status === 'running') index = itemIndex
+    })
+    if (index < 0) return timeline
+    return timeline.map((item, itemIndex) =>
+      itemIndex === index
+        ? {
+            ...item,
+            message: `${String(item.message || '')}${text}`.slice(-2000),
+            streaming: true,
+          }
+        : item,
+    )
+  }
+
   if (event.type === 'node.finished') {
     const index = [...timeline]
       .map((item, itemIndex) => ({ item, itemIndex }))
@@ -1063,6 +1086,10 @@ export default function WorkspacePage() {
   // 静默同步期间仍然保持拖拽模式：submitting=true 只是后台在写代码，
   // 不应该让用户重新点一次【拖拽】才能继续调整布局。
   const [dragSyncStates, setDragSyncStates] = useState({})
+  // 等待 submitting=false 真正渲染后再清除同步态，避免中间帧退出拖拽模式。
+  // 用事件驱动（runStates effect）替代 120ms 轮询。
+  const dragSyncReleaseRef = useRef(new Set())
+  const [dragReleaseNonce, setDragReleaseNonce] = useState(0)
   // 异步回调里需要读取最新 run 状态（state 本身是渲染快照）。
   const runStatesRef = useRef(runStates)
   // 会话快照的延迟写盘句柄；卸载 / pagehide 时立即 flush。
@@ -1071,6 +1098,22 @@ export default function WorkspacePage() {
   useEffect(() => {
     runStatesRef.current = runStates
   }, [runStates])
+
+  // 拖拽同步结束：等本项目的 submitting 真正落回 false 后再解除。
+  // runStates 变化会触发本 effect，不需要任何轮询。
+  useEffect(() => {
+    const ready = [...dragSyncReleaseRef.current].filter(
+      (projectId) => !(runStates[projectId] ?? EMPTY_RUN).submitting,
+    )
+    if (ready.length === 0) return
+    ready.forEach((projectId) => dragSyncReleaseRef.current.delete(projectId))
+    setDragSyncStates((previous) => {
+      if (!ready.some((projectId) => previous[projectId])) return previous
+      const next = { ...previous }
+      ready.forEach((projectId) => delete next[projectId])
+      return next
+    })
+  }, [runStates, dragReleaseNonce])
 
   const persistRunStates = useCallback(() => {
     try {
@@ -3184,24 +3227,29 @@ export default function WorkspacePage() {
   /**
    * 等 runStates 真正落回 submitting=false 后再解除“静默同步”标记。
    *
-   * 若在 await 返回后立刻解除，React 可能尚未提交 submitting=false，
-   * CanvasStage 会短暂看到 disabled=true 而强制退出拖拽模式。
+   * 由 runStates effect 事件驱动；此处只登记 pending，不再 setInterval
+   * / setTimeout 轮询。若当前快照已经是 false，nonce 会立即唤醒 effect。
    */
   const releaseDragSync = (projectId) => {
-    const poll = () => {
-      const current = runStatesRef.current[projectId] ?? EMPTY_RUN
-      if (current.submitting) {
-        window.setTimeout(poll, 120)
-        return
-      }
-      setDragSyncStates((previous) => {
-        if (!previous[projectId]) return previous
-        const next = { ...previous }
-        delete next[projectId]
-        return next
-      })
-    }
-    window.setTimeout(poll, 0)
+    dragSyncReleaseRef.current.add(projectId)
+    setDragReleaseNonce((previous) => previous + 1)
+  }
+
+  /**
+   * 失败 / 超时必须强制解除同步态。
+   *
+   * 正常成功路径要等 submitting 落回 false，避免中间帧退出拖拽模式；
+   * 但超时后后端 Run 可能已经失去响应，若继续等待 submitting 会让
+   * “代码同步中...”永久挂住，反而阻塞用户下一次拖拽。
+   */
+  const clearDragSync = (projectId) => {
+    dragSyncReleaseRef.current.delete(projectId)
+    setDragSyncStates((previous) => {
+      if (!previous[projectId]) return previous
+      const next = { ...previous }
+      delete next[projectId]
+      return next
+    })
   }
 
   const flushComponentDrags = async (projectId) => {
@@ -3273,6 +3321,7 @@ export default function WorkspacePage() {
       if (runId) cancelRunSilently(runId)
       restore()
       triggerDragRollback(projectId, rollbackItems, '代码同步超时，位置已还原')
+      clearDragSync(projectId)
       return
     }
     if (outcome?.ok) {
@@ -3291,9 +3340,10 @@ export default function WorkspacePage() {
     }
     restore()
     triggerDragRollback(projectId, rollbackItems)
+    clearDragSync(projectId)
   }
 
-  /** SDK 松手回调：先乐观记录，再 500ms 防抖提交最后一次位置。 */
+  /** SDK 松手回调：先乐观记录，再 300ms 防抖提交最后一次位置。 */
   const handleComponentDragEnd = (projectId, payload) => {
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN

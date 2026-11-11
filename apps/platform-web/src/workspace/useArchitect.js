@@ -271,6 +271,17 @@ function reduceArchitect(state, event) {
         appShape: payload.appShape ?? state.appShape,
         confidenceScore: payload.confidenceScore ?? state.confidenceScore,
       }
+    // 轻量 token 流：只保留尾部文本做打字机，最终结构仍以 completed
+    // 事件为准。不写入 messages，避免流式片段污染对话历史。
+    case 'token': {
+      const text = String(payload.text || '')
+      if (!text) return base
+      return {
+        ...base,
+        streamingText: `${state.streamingText || ''}${text}`.slice(-1200),
+        streamingNode: payload.node ?? state.streamingNode ?? null,
+      }
+    }
     case 'architect.analysis.completed':
       return {
         ...base,
@@ -289,6 +300,8 @@ function reduceArchitect(state, event) {
         threshold: payload.threshold ?? state.threshold,
         round: payload.round ?? state.round,
         maxRounds: payload.maxRounds ?? state.maxRounds,
+        streamingText: '',
+        streamingNode: null,
         submitting: false,
         answerSubmitting: false,
         messages: appendMessage(state.messages, {
@@ -337,6 +350,8 @@ function reduceArchitect(state, event) {
         threshold: payload.contract?.threshold ?? state.threshold,
         submitting: false,
         decisionSubmitting: false,
+        streamingText: '',
+        streamingNode: null,
         messages: appendMessage(state.messages, {
           id: `contract:${payload.contract?.contractId}:${event.seq}`,
           role: 'assistant',
@@ -407,6 +422,8 @@ function reduceArchitect(state, event) {
         error: payload.error || '架构澄清失败',
         errorCode: payload.errorCode ?? null,
         clarification: null,
+        streamingText: '',
+        streamingNode: null,
         submitting: false,
         decisionSubmitting: false,
         messages: appendMessage(state.messages, {

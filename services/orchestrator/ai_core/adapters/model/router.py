@@ -76,6 +76,15 @@ TASK_SETTING_FIELD: dict[str, str] = {
     "architect_helper": "model_architect_helper_name",
 }
 
+# 任务级温度覆盖：只给需要“确定性”的节点单独降低温度，不影响 Coder
+# 这类需要一定创造力的生成任务。留空则回退到 FAST / STRONG 层级温度。
+TASK_TEMPERATURE_FIELD: dict[str, str] = {
+    "planner": "model_planner_temperature",
+    "architect_analyze": "model_architect_temperature",
+    "architect_contract": "model_architect_temperature",
+    "architect_helper": "model_architect_temperature",
+}
+
 
 @dataclass(frozen=True)
 class ModelProfile:
@@ -127,6 +136,9 @@ class ModelRouter:
             if capability == "fast"
             else self._settings.model_strong_temperature
         )
+        temperature_field = TASK_TEMPERATURE_FIELD.get(task)
+        if temperature_field:
+            temperature = float(getattr(self._settings, temperature_field))
         profile = ModelProfile(
             task=task,
             capability=capability,
@@ -168,6 +180,10 @@ class ModelRouter:
             "base_url": self._settings.deepseek_base_url,
             "timeout": 120,
             "max_retries": 2,
+            # 流式默认拿不到 usage；显式让 OpenAI 兼容网关在最后一个
+            # chunk 返回 token 用量，否则 Planner/Coder 的流式改造会把
+            # 成本统计变成 0。
+            "stream_usage": True,
         }
         # deepseek-reasoner 不接受 temperature / top_p 等采样参数；
         # 显式省略，避免切换到推理模型时 400。

@@ -9,7 +9,10 @@
 
 from __future__ import annotations
 
+import time
 import unittest
+from types import SimpleNamespace
+from typing import Any
 
 from ai_core.agent.error_context import (
     extract_error_context,
@@ -17,7 +20,9 @@ from ai_core.agent.error_context import (
     extract_error_location,
 )
 from ai_core.agent.graph import (
+    CODER_TIMEOUT_MESSAGE,
     AgentGraphRunner,
+    CoderTimeoutError,
     _repair_feedback,
     _repair_payload,
 )
@@ -28,6 +33,11 @@ from ai_core.agent.memory import (
 )
 from ai_core.config import Settings
 from ai_core.model_router import ModelRouter
+from ai_core.observability.streaming import (
+    TokenStreamEmitter,
+    collect_tokens,
+    get_token_sink,
+)
 
 
 class ModelRouterTest(unittest.TestCase):
@@ -47,13 +57,20 @@ class ModelRouterTest(unittest.TestCase):
             profile = self.router.resolve(task)
             self.assertEqual(profile.model, "fast-model", task)
             self.assertEqual(profile.capability, "fast")
-            self.assertEqual(profile.temperature, 0.0)
+            # Planner 是长 JSON 决策节点，必须用确定性温度；
+            # 其余快速任务仍沿用模型档位默认值。
+            expected = 0.1 if task == "planner" else 0.0
+            self.assertEqual(profile.temperature, expected, task)
 
     def test_strong_tasks_use_strong_tier(self) -> None:
         profile = self.router.resolve("architect_contract")
         self.assertEqual(profile.model, "strong-model")
         self.assertEqual(profile.capability, "strong")
-        self.assertEqual(profile.temperature, 0.6)
+        # Architect 契约生成同样固定为 0.1，消除随机反问。
+        self.assertEqual(profile.temperature, 0.1)
+        # 未声明任务级温度覆盖的强模型任务保持档位默认值。
+        coder = self.router.resolve("coder")
+        self.assertEqual(coder.temperature, 0.6)
 
     def test_task_override_wins_over_tier(self) -> None:
         profile = self.router.resolve("coder")
@@ -94,6 +111,9 @@ class ModelRouterTest(unittest.TestCase):
         # 同名模型但温度不同，必须拿到不同客户端。
         self.assertIsNot(planner, coder)
         self.assertEqual(len(router._clients), 2)
+        # 流式调用必须要求网关回传 usage，保证 token 成本不丢失。
+        self.assertTrue(planner.stream_usage)
+        self.assertTrue(coder.stream_usage)
 
 
 class HistoryCompressionTest(unittest.TestCase):
@@ -320,6 +340,90 @@ class GraphSummaryNodeTest(unittest.TestCase):
         self.assertEqual(len(thread["chatHistory"]), 3)
         self.assertIn("核心需求", thread["chatHistory"][0]["content"])
         self.assertTrue(runner.events)
+
+
+class _SlowCoderLLM:
+    """模拟真实模型调用：阻塞时间超过节点硬超时。"""
+
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
+
+    def generate(self, **kwargs: Any) -> Any:  # noqa: ARG002
+        time.sleep(self.delay)
+        return SimpleNamespace(files={}, patch="", summary="late")
+
+
+class TokenStreamingTest(unittest.TestCase):
+    def test_context_sink_receives_model_deltas(self) -> None:
+        events: list[tuple[str, str]] = []
+        emitter = TokenStreamEmitter(
+            lambda text, task: events.append((task, text)),
+            min_interval_ms=0,
+            max_chars=1,
+        )
+        with collect_tokens(emitter.feed):
+            sink = get_token_sink()
+            self.assertIsNotNone(sink)
+            sink("coder", "你")
+            sink("coder", "好")
+        emitter.flush()
+        self.assertEqual(events, [("coder", "你"), ("coder", "好")])
+
+    def test_close_drops_late_tokens_after_timeout(self) -> None:
+        events: list[tuple[str, str]] = []
+        emitter = TokenStreamEmitter(
+            lambda text, task: events.append((task, text)),
+            min_interval_ms=0,
+            max_chars=1,
+        )
+        emitter.feed("coder", "first")
+        emitter.close()
+        # Coder 超时后后台 HTTP 线程仍可能收到 chunk，必须被丢弃。
+        emitter.feed("coder", "late")
+        emitter.flush()
+        self.assertEqual(events, [("coder", "first")])
+
+    def test_collect_tokens_resets_after_node(self) -> None:
+        emitter = TokenStreamEmitter(lambda text, task: None, max_chars=1)
+        with collect_tokens(emitter.feed):
+            self.assertIsNotNone(get_token_sink())
+        self.assertIsNone(get_token_sink())
+
+
+class CoderCircuitBreakerTest(unittest.TestCase):
+    @staticmethod
+    def _runner(llm: Any) -> AgentGraphRunner:
+        # 只测试超时辅助方法，跳过 LLM / sandbox / checkpoint 初始化。
+        runner = object.__new__(AgentGraphRunner)
+        runner._settings = SimpleNamespace(agent_coder_timeout_seconds=1.0)
+        runner._llm = llm
+        return runner
+
+    def test_coder_timeout_raises_with_actionable_message(self) -> None:
+        runner = self._runner(_SlowCoderLLM(delay=1.4))
+        started = time.monotonic()
+        with self.assertRaises(CoderTimeoutError) as ctx:
+            runner._generate_with_coder_timeout(annotations=[], plan="")
+        elapsed = time.monotonic() - started
+        self.assertEqual(str(ctx.exception), CODER_TIMEOUT_MESSAGE)
+        self.assertLess(elapsed, 1.35, "超时熔断必须立即返回，不能等模型收尾")
+
+    def test_fast_coder_returns_normally(self) -> None:
+        result = self._runner(_SlowCoderLLM(delay=0))._generate_with_coder_timeout(
+            annotations=[], plan=""
+        )
+        self.assertEqual(result.summary, "late")
+
+    def test_coder_fatal_error_routes_directly_to_failed(self) -> None:
+        runner = object.__new__(AgentGraphRunner)
+        self.assertEqual(
+            runner._route_after_coder({"fatal_error": True, "apply_failed": True}),
+            "failed",
+        )
+        self.assertEqual(
+            runner._route_after_coder({"apply_failed": True, "next_action": "retry"}),
+            "evaluator",
+        )
 
 
 if __name__ == "__main__":

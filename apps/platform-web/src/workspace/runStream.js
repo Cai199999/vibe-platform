@@ -65,6 +65,27 @@ export function createFrameBatcher(
         return
       }
     }
+    // token 事件在同一时间窗内按节点拼接，避免打字机把队列打爆。
+    if (event.type === 'token') {
+      const node = event.payload?.node
+      const index = queue.findIndex(
+        (item) => item.type === 'token' && item.payload?.node === node,
+      )
+      if (index >= 0) {
+        const previous = queue[index]
+        queue[index] = {
+          ...event,
+          payload: {
+            ...event.payload,
+            text:
+              String(previous.payload?.text || '') +
+              String(event.payload?.text || ''),
+          },
+        }
+        if (!timer) timer = setTimeout(flush, windowMs)
+        return
+      }
+    }
     queue.push(event)
     if (immediateTypes.has(event.type)) {
       flush()

@@ -225,7 +225,7 @@ def _normalize_questions(
     covered: set[str] = set()
     # 1) 必需槽位：优先使用 LLM 的定制问题，否则用模板兜底。
     for slot in missing:
-        if len(questions) >= 3:
+        if len(questions) >= 2:
             break
         if slot in filled_required or slot in covered:
             continue
@@ -236,7 +236,7 @@ def _normalize_questions(
         covered.add(slot)
     # 2) 仍有空位时，允许 LLM 追问可选信息（最多 3 个问题）。
     for question in extras:
-        if len(questions) >= 3:
+        if len(questions) >= 2:
             break
         if question.slot in covered:
             continue
@@ -252,7 +252,7 @@ def fallback_questions(
     round_no: int,
 ) -> list[ArchitectQuestion]:
     questions: list[ArchitectQuestion] = []
-    for slot in missing[:3]:
+    for slot in missing[:2]:
         template = question_for_slot(slot, shape)
         if template is None:
             continue

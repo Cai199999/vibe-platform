@@ -862,14 +862,20 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "空白主内容区。\n"
             "- business_flows / entities / slots 只能来自用户明确说出的名词与"
             "动作；不确定时宁可留空，禁止猜测。\n"
-            "- 每次追问最多只提出 3 个最核心的问题，禁止一次抛出整份需求问卷。\n\n"
+            "- **提问模板铁律（最高优先级）**：每次追问最多抛出 2 个具体"
+            "问题；每个问题必须给出 A/B/C 三个可执行选项（single_choice，"
+            "或带 3 个选项的 multi_choice），选项 label 以“A. / B. / C.”"
+            "开头。禁止发散性、开放式、问卷式提问，禁止一次抛出整份需求问卷。\n"
+            "- 每个问题必须指向一个可拍板的技术或业务分支；禁止问“你还想要"
+            "什么”“请详细描述”这类无法直接执行的问题。\n\n"
             "【交互行为澄清 · 强制规则】\n"
             "- 需求澄清阶段不仅要问“有什么组件”，还必须主动询问关键组件的"
             "交互行为：点击提交 / 保存 / 删除 / 搜索 / 导出 / 登录之后，到底"
             "是写入数据库、跳转页面、弹出提示，还是只做本地状态切换？\n"
-            "- 交互问题必须绑定到用户已明确提到的组件与动作；最多占用 3 个"
-            "追问名额中的 1 个，用 type=free_text 或 multi_choice 的 "
-            "slot=ui.interactions 承载，不要为每个按钮单独提问。\n"
+            "- 交互问题必须绑定到用户已明确提到的组件与动作；最多占用 2 个"
+            "追问名额中的 1 个，用 type=single_choice 或 multi_choice 的 "
+            "slot=ui.interactions 承载，并提供三个明确选项，不要为每个按钮"
+            "单独提问。\n"
             "- 用户回答“只要展示 / 没有交互 / 先做静态页”时，必须在 slots 写入 "
             'ui.interactions="none"，并在 assumptions 中记录“静态展示，无点击'
             "行为”；后续契约只能生成静态占位符，禁止编造 onClick 与网络请求。\n"
@@ -916,7 +922,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "- auth.required / api.style 是可选槽位：用户明确“不需要登录”时"
             "写入 auth.required=no，之后不得再作为缺失项或追问理由；\n"
             "- 不要重复追问已出现在 slots 或 ui_history 中的槽位；每轮问题必须"
-            "优先覆盖仍缺失的必需槽位，最多 3 个；\n"
+            "优先覆盖仍缺失的必需槽位，最多 2 个；\n"
             "- 当所有必需槽位都有合理值或可采用默认值时，confidence_score 必须"
             "不低于 0.86；不要为了追求完美细节而压低分数；\n"
             "- 可采用合理默认值（Spring Boot / MySQL / RESTful 等），但必须写入"
@@ -932,8 +938,9 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             '"default_value":null}],"tech_stack":{},'
             '"business_flows":[],"entities":[],"assumptions":[],'
             '"reasoning":"..."}\n\n'
-            "问题最多 3 个；不得重复已问过且已回答的槽位；已确认的槽位必须"
-            "写入 slots。不要把“怕不确定”当作全栈的理由。"
+            "问题最多 2 个，每个问题必须带 A/B/C 三个选项；不得重复已问过"
+            "且已回答的槽位；已确认的槽位必须写入 slots。不要把“怕不确定”"
+            "当作全栈的理由。"
         )
         human = _analysis_human(context)
 
@@ -1352,7 +1359,7 @@ def _normalize_analysis_payload(payload: dict[str, Any]) -> dict[str, Any]:
     else:
         normalized["questions"] = [
             item
-            for item in questions[:3]
+            for item in questions[:2]
             if isinstance(item, dict) and item.get("prompt")
         ]
 

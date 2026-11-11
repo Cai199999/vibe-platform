@@ -40,6 +40,7 @@ import json
 import logging
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -79,6 +80,10 @@ from ai_core.domain.architect import (
 )
 from ai_core.domain.state import ArchitectState
 from ai_core.config import get_settings
+from ai_core.observability.streaming import (
+    TokenStreamEmitter,
+    collect_tokens,
+)
 from ai_core.observability.token_usage import TokenUsage, UsageCollector, collect_usage
 from ai_core.adapters.rag import get_rag_provider
 from ai_core.ports.rag import RAGProvider, RAGProviderError
@@ -105,6 +110,13 @@ NODE_LABELS = {
     "cancelled": "已取消",
     "confidence_exhausted": "澄清轮次耗尽",
     "failed": "架构澄清失败",
+}
+
+# 真正调用模型且需要打字机效果的 Architect 节点。
+ARCHITECT_STREAMING_NODES = {
+    "architect_analyze",
+    "draft_contract",
+    "revise_contract",
 }
 
 
@@ -211,8 +223,29 @@ class ArchitectGraphRunner:
         def wrapped(state: ArchitectState) -> dict[str, Any]:
             started = time.perf_counter()
             collector = UsageCollector()
-            with collect_usage(collector):
-                update = fn(state)
+            emitter: TokenStreamEmitter | None = None
+            token_scope = nullcontext()
+            if name in ARCHITECT_STREAMING_NODES:
+                emitter = TokenStreamEmitter(
+                    lambda text, task: self._emit(
+                        "token",
+                        {
+                            "runId": state.get("run_id"),
+                            "node": name,
+                            "label": NODE_LABELS.get(name, name),
+                            "task": task,
+                            "text": text,
+                        },
+                    )
+                )
+                token_scope = collect_tokens(emitter.feed)
+            try:
+                with token_scope, collect_usage(collector):
+                    update = fn(state)
+            finally:
+                if emitter is not None:
+                    emitter.flush()
+                    emitter.close()
             usage = collector.snapshot()
             self._usage_total.add(usage)
             if isinstance(update, dict) and usage.calls:

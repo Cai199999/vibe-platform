@@ -192,7 +192,7 @@ planner → coder → applier → verifier → evaluator
 | 闸门 | 拦什么 | 机制 |
 |---|---|---|
 | `should_use_skeleton` | 抽象目标被脑补成完整业务 | “做个工作台”这类目标确定性拦截，**完全不调用 LLM**；契约标记 `skeletonMode=true`，只渲染 Header + Sidebar + 占位主区 |
-| JSON / Pydantic Gate | 结构错误的模型输出 | 校验失败把**原始输出 + 错误**回传模型重试，`AGENT_JSON_RETRY_LIMIT=2`；Planner 耗尽降级文本计划 |
+| JSON / Pydantic Gate | 结构错误的模型输出 | 校验失败把**原始输出 + 错误**回传模型重试，`AGENT_JSON_RETRY_LIMIT=1`（共 2 次）；Planner 耗尽降级文本计划，Coder 30s 超时或耗尽直接 `FAILED` |
 | Build Verifier | 能说不能跑 | 沙盒内真实 `npm run build`，错误日志回传 Coder 整体重试，上限 3 次 |
 | ConsistencyVerifier | 前端调不存在的后端接口 | 比对前端 Method / Path / Payload 与 `api-routes.json.routes`，缺失路由只让 BackendCoder 补，最多 2 次；仍失败才阻断构建 |
 
@@ -285,7 +285,8 @@ docker compose ps
 | `CHROMA_HYBRID_COLLECTION_NAME` | `knowledge_corpus` | Hybrid 使用的 collection |
 | `RAG_HYBRID_RRF_K` | `60` | RRF 平滑常数 |
 | `EMBEDDING_MODEL` | 空 | 预留：空 = 内置 MiniLM；可指向 BGE-M3 |
-| `AGENT_JSON_RETRY_LIMIT` | `2` | 结构化输出校验失败重试次数 |
+| `AGENT_JSON_RETRY_LIMIT` | `1` | 结构化输出校验失败重试次数（总尝试 = 1 + 重试） |
+| `AGENT_CODER_TIMEOUT_SECONDS` | `30` | Coder 节点硬超时，超时立即熔断为 FAILED |
 | `SANDBOX_MEMORY_MB` | `768` | 单沙盒内存上限 |
 | `SANDBOX_CPU_LIMIT` | `1.0` | 单沙盒 CPU 上限 |
 

@@ -3590,6 +3590,39 @@ body.is-viewport-panning * {
   min-height: 0;
 }
 
+/* 拖拽松手后的静默同步提示：不阻塞指针、不改变布局。 */
+.canvas-sync-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.82);
+  color: #e2e8f0;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  transform: translateX(-50%);
+  backdrop-filter: blur(8px);
+  animation: canvas-sync-fade-in 180ms ease-out both;
+}
+
+@keyframes canvas-sync-fade-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
 .view-result-cta {
   position: absolute;
   right: 16px;
@@ -6032,6 +6065,18 @@ body.is-viewport-panning * {
   color: var(--muted);
   font-size: 10.5px;
   line-height: 1.6;
+}
+
+/* 流式片段：最多显示数行，避免原始 JSON 把工作卡撑高。 */
+.architect-working p.architect-stream-text {
+  max-height: 72px;
+  overflow: hidden;
+  color: rgba(199, 210, 254, 0.82);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  white-space: pre-wrap;
+  word-break: break-all;
+  -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent);
+  mask-image: linear-gradient(to bottom, #000 72%, transparent);
 }
 
 .architect-orbit {

@@ -1266,10 +1266,12 @@ export default function ArchitectPanel({
               </span>
               <div>
                 <strong>{workingLabel}</strong>
-                <p>
-                  {status === 'REPAIRING_CONTRACT'
-                    ? '校验规则会阻止缺少接口或 DDL 的全栈契约进入确认。'
-                    : '全局澄清与画布局部修改使用独立状态机和事件流。'}
+                <p className={state?.streamingText ? 'architect-stream-text' : undefined}>
+                  {state?.streamingText
+                    ? state.streamingText
+                    : status === 'REPAIRING_CONTRACT'
+                      ? '校验规则会阻止缺少接口或 DDL 的全栈契约进入确认。'
+                      : '全局澄清与画布局部修改使用独立状态机和事件流。'}
                 </p>
               </div>
             </div>

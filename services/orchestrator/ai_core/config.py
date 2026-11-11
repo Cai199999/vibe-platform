@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     model_strong_name: str = ""
     model_fast_temperature: float = 0.0
     model_strong_temperature: float = 0.2
+    # 确定性节点：Planner / Architect 负责需求理解与提问，温度必须足够低，
+    # 否则同一份输入会在“直接执行”和“随机反问”之间漂移。
+    model_planner_temperature: float = 0.1
+    model_architect_temperature: float = 0.1
     # 任务级覆盖：只配置需要偏离层级的节点。
     model_routing_name: str = ""
     model_validation_name: str = ""
@@ -137,7 +141,10 @@ class Settings(BaseSettings):
     # Planner / Coder 结构化输出校验失败后的自修复重试次数。
     # 每次重试都会把上一次原始输出与校验错误回传模型，要求只修复不合法字段；
     # 0 表示关闭（首次失败直接走节点级重试 / 降级）。
-    agent_json_retry_limit: int = 2
+    agent_json_retry_limit: int = 1
+    # Coder 节点硬超时：结构化输出 + 模型调用整体超过该秒数立即熔断。
+    # 30 秒足够生成常规页面，超时通常意味着标注范围过大或模型卡死。
+    agent_coder_timeout_seconds: float = 30.0
     # 每个 Run 的内存事件缓冲上限；生产切换 Redis Stream 后由 stream TTL 管理。
     agent_event_buffer_size: int = 2000
 
@@ -223,7 +230,7 @@ class Settings(BaseSettings):
     architect_contract_repair_limit: int = 1
     # JSON 结构化输出：DeepSeek JSON Output + Pydantic 校验失败回传重试。
     architect_structured_output: bool = True
-    architect_json_retry_limit: int = 2
+    architect_json_retry_limit: int = 1
     architect_graph_recursion_limit: int = 80
     # 混合 RAG：BM25（硬性规范）+ Chroma 向量检索（企业长文档）。
     architect_rag_provider: str = "hybrid"

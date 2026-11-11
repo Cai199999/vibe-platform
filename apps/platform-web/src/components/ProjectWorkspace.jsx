@@ -864,6 +864,13 @@ function ProjectWorkspaceInner({
             />
           </ErrorBoundary>
         </div>
+
+        {dragSyncActive && (
+          <div className="canvas-sync-hint" role="status" aria-live="polite">
+            <span className="mini-spinner" aria-hidden="true" />
+            代码同步中...
+          </div>
+        )}
       </div>
 
       {architectState?.open && (
