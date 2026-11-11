@@ -21,8 +21,9 @@ React + Vite → Java 21 BFF → Python 3.12 FastAPI/LangGraph → Docker 沙盒
 - **Architect 上下文**：进入澄清前自动 flush 画布草稿，并以 `system` 消息注入未保存变更摘要。
 - **样式澄清 + 迷你多轮对话**：Graph 新增 `clarify_gate → style_check → coder`；新增组件未说明颜色/大小/主次时 `interrupt()` 追问，回答（如“和登录按钮一样”）写回标注与 Plan。悬浮框澄清期间切换为 Chatbox，问题/回答进入 `chatHistory`，主输入可直接作答。
 - **重复按钮 / 全局污染修复**：SSE `run.succeeded` 与 Vite HMR 到达时立即撤掉 `pendingAdditions` 幽灵节点，澄清回答按 `annotationId` 原地更新；后端 `finalIntent` 覆盖历史颜色/方案，Coder 剥离 chatHistory；SDK 回传 `instance/instanceCount/instanceId/callSite`，Applier 新增 `INSTANCE_SCOPE_VIOLATION` 守卫，改基础组件直接打回 Coder。
+- **实例解耦**：SDK 从 React fiber 提取 `instanceKey` / `instanceProps`（item.id 等），全链路进入 Coder；Applier 新增 `INSTANCE_GUARD_MISSING`，多实例补丁必须在 callSite 或根组件源码写入真实身份比较（或 `index === instance-1`），禁止无条件写进 map 返回体；diff 模式同样校验 `+` 行。
 - **可视化选型（禁止脑补样式）**：澄清回答命中“和登录按钮一样”时不再直接提交文本，画布 / 预览进入 Inspect 取色；SDK 回传 `tailwindClasses` + computed CSS，后端生成 `reference_styles`，Coder 被强约束逐字复用。新增 `design_system` 静态提取 Tailwind 主题色 / CSS 变量，新组件优先 `bg-primary` 等语义类名。
-- 验证：`test_visual_reference` 6 项 + 相关后端套件 58 项全绿；全量 379 项（仅容器缺 `eval_suite` 的历史问题）；前端 build 通过。
+- 验证：`test_instance_scope` 14 项 + 相关后端套件 61 项全绿；全量 382 项（仅容器缺 `eval_suite` 的历史问题）；前端 build 通过。
 
 ## 真假边界
 

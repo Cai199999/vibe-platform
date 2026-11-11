@@ -168,6 +168,28 @@ def _compact_style_signature(raw: Any) -> dict[str, Any]:
     return compact
 
 
+def _compact_instance_props(raw: Any) -> dict[str, Any]:
+    """实例身份 props：只保留可直接写进比较条件的基本类型。"""
+    if not isinstance(raw, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key, value in raw.items():
+        if len(compact) >= 12:
+            break
+        name = str(key).strip()
+        if not name or len(name) > 64:
+            continue
+        if isinstance(value, bool):
+            compact[name] = value
+        elif isinstance(value, (int, float)):
+            compact[name] = value
+        elif isinstance(value, str):
+            text = value.strip()
+            if text and len(text) <= 80:
+                compact[name] = text
+    return compact
+
+
 def compact_annotations(
     annotations: list[dict[str, Any]],
     *,
@@ -249,11 +271,15 @@ def compact_annotations(
                 "instance",
                 "instanceCount",
                 "instanceId",
+                "instanceKey",
                 "callSite",
                 "styleSignature",
             )
             if source.get(key) not in (None, "", 0)
         }
+        instance_props = _compact_instance_props(source.get("instanceProps"))
+        if instance_props:
+            source_view["instanceProps"] = instance_props
         style_signature = _compact_style_signature(source.get("styleSignature"))
         if style_signature:
             # 目标节点当前的绝对样式：模型做“更大 / 更圆 / 换个色”时

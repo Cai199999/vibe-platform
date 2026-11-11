@@ -274,6 +274,75 @@
     return false
   }
 
+  // 实例身份：同一个组件可能被 map 渲染多次，仅仅知道“第几个”还不足以
+  // 让 Coder 写出稳定的局部条件。这里从最近的组件 fiber 上提取 React key
+  // 与安全的基本类型 props（如 item.id / item.title），模型可以直接写成
+  // `item.id === 'xxx'` 这样的守卫，而不是靠 index 猜。
+  var IDENTITY_PROP_KEYS = [
+    'id',
+    'key',
+    'slug',
+    'name',
+    'title',
+    'label',
+    'code',
+    'type',
+    'variant',
+    'status',
+  ]
+  var IDENTITY_VALUE_MAX = 80
+  var IDENTITY_PROP_LIMIT = 12
+
+  function identityValue(value) {
+    if (typeof value === 'string') {
+      var text = value.trim()
+      if (!text || text.length > IDENTITY_VALUE_MAX) return undefined
+      return text
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') return value
+    return undefined
+  }
+
+  function instanceIdentityOfFiber(fiber) {
+    var identity = { instanceKey: '', instanceProps: {} }
+    if (!fiber) return identity
+    // React 内部 key（以 . 开头）对业务代码没有意义，直接忽略。
+    if (
+      fiber.key != null &&
+      String(fiber.key) &&
+      String(fiber.key).charAt(0) !== '.'
+    ) {
+      identity.instanceKey = String(fiber.key).slice(0, IDENTITY_VALUE_MAX)
+    }
+    var props = fiber.memoizedProps
+    if (!props || typeof props !== 'object') return identity
+    var names = Object.keys(props)
+    var count = 0
+    for (var i = 0; i < names.length && count < IDENTITY_PROP_LIMIT; i++) {
+      var name = names[i]
+      if (name === 'children' || name === 'style' || name === 'ref') continue
+      if (name === 'className' || name.indexOf('on') === 0) continue
+      var value = props[name]
+      var direct = identityValue(value)
+      if (direct !== undefined) {
+        identity.instanceProps[name] = direct
+        count++
+        continue
+      }
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+      // 只下钻一层：item.id / user.name 这类列表常见结构。
+      for (var j = 0; j < IDENTITY_PROP_KEYS.length; j++) {
+        var nestedName = IDENTITY_PROP_KEYS[j]
+        var nested = identityValue(value[nestedName])
+        if (nested === undefined) continue
+        identity.instanceProps[name + '.' + nestedName] = nested
+        count++
+        if (count >= IDENTITY_PROP_LIMIT) break
+      }
+    }
+    return identity
+  }
+
   function callSiteFor(node) {
     var fiber = fiberFromNode(node)
     var current = fiber
@@ -285,11 +354,14 @@
         if (!hasComponentAncestor(current)) return null
         var location = debugLocationOfFiber(current)
         if (!location) return null
+        var identity = instanceIdentityOfFiber(current)
         return {
           file: location.file,
           line: location.line,
           column: location.column,
           component: name,
+          instanceKey: identity.instanceKey,
+          instanceProps: identity.instanceProps,
         }
       }
       current = current.return
@@ -308,6 +380,8 @@
       instance: 1,
       instanceCount: 1,
       instanceId: '',
+      instanceKey: '',
+      instanceProps: {},
       callSite: null,
     }
     if (!file || !line) return result
@@ -320,6 +394,10 @@
     result.instanceId =
       sourceKeyOf(file, line, column) + '#' + result.instance
     result.callSite = callSiteFor(node)
+    if (result.callSite) {
+      result.instanceKey = result.callSite.instanceKey || ''
+      result.instanceProps = result.callSite.instanceProps || {}
+    }
     return result
   }
 
@@ -490,6 +568,8 @@
       instance: instanceInfo.instance,
       instanceCount: instanceInfo.instanceCount,
       instanceId: instanceInfo.instanceId,
+      instanceKey: instanceInfo.instanceKey,
+      instanceProps: instanceInfo.instanceProps,
       callSite: instanceInfo.callSite,
       // 绝对视觉事实：参考组件 / 目标节点当前真实使用的类名与样式。
       styleSignature: withStyles ? styleSignature(node) : null,
@@ -582,6 +662,8 @@
       instance: source.instance,
       instanceCount: source.instanceCount,
       instanceId: source.instanceId,
+      instanceKey: source.instanceKey,
+      instanceProps: source.instanceProps,
       callSite: source.callSite,
       styleSignature: source.styleSignature,
     }

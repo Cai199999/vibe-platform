@@ -55,6 +55,8 @@ def _annotation(
     instance_count: int = 1,
     call_site_file: str | None = None,
     call_site_line: int = 0,
+    instance_key: str | None = None,
+    instance_props: dict | None = None,
     text: str = "把按钮改成蓝色",
 ) -> dict:
     source = {
@@ -66,6 +68,10 @@ def _annotation(
         "instanceCount": instance_count,
         "instanceId": f"{source_file}:{source_line}:3#{instance}",
     }
+    if instance_key:
+        source["instanceKey"] = instance_key
+    if instance_props:
+        source["instanceProps"] = instance_props
     if call_site_file:
         source["callSite"] = {
             "file": call_site_file,
@@ -129,12 +135,91 @@ class InstanceScopeGuardTest(unittest.TestCase):
         violation = _instance_scope_violation(state, {BUTTON_FILE: new_button}, None)
         self.assertIsNotNone(violation)
 
-    def test_allows_call_site_parent_edit(self) -> None:
+    def test_allows_call_site_parent_edit_with_instance_guard(self) -> None:
+        old_app = _numbered(30)
+        new_app = _replace_line(
+            old_app,
+            18,
+            "      {item.id === 'card-2' && <Button variant=\"primary\" />}",
+        )
+        annotation = _annotation(
+            source_file=BUTTON_FILE,
+            source_line=4,
+            instance=2,
+            instance_count=2,
+            call_site_file=APP_FILE,
+            call_site_line=18,
+            instance_props={"item.id": "card-2"},
+        )
+        state = _state(annotation, {BUTTON_FILE: _numbered(12), APP_FILE: old_app})
+
+        violation = _instance_scope_violation(state, {APP_FILE: new_app}, None)
+
+        self.assertIsNone(violation)
+
+    def test_rejects_unguarded_map_callsite_insertion(self) -> None:
+        """在共享 map 返回体里无条件插按钮，会让所有容器都出现按钮。"""
         old_app = _numbered(30)
         new_app = _replace_line(old_app, 18, '      <Button variant="primary" />')
         annotation = _annotation(
             source_file=BUTTON_FILE,
             source_line=4,
+            action="CREATE_NEW",
+            instance=2,
+            instance_count=2,
+            call_site_file=APP_FILE,
+            call_site_line=18,
+            instance_props={"item.id": "card-2"},
+        )
+        state = _state(annotation, {BUTTON_FILE: _numbered(12), APP_FILE: old_app})
+
+        violation = _instance_scope_violation(state, {APP_FILE: new_app}, None)
+
+        self.assertIsNotNone(violation)
+        assert violation is not None
+        self.assertTrue(violation["apply_failed"])
+        self.assertEqual(violation["error_code"], "INSTANCE_GUARD_MISSING")
+        self.assertIn("card-2", violation["messages"][0]["content"])
+
+    def test_rejects_unguarded_diff_mode_insertion(self) -> None:
+        """diff 模式（generated_files 为空）也必须读取 + 行做守卫校验。"""
+        old_app = _numbered(30)
+        annotation = _annotation(
+            source_file=BUTTON_FILE,
+            source_line=4,
+            action="CREATE_NEW",
+            instance=2,
+            instance_count=2,
+            call_site_file=APP_FILE,
+            call_site_line=18,
+            instance_props={"item.id": "card-2"},
+        )
+        state = _state(annotation, {BUTTON_FILE: _numbered(12), APP_FILE: old_app})
+        patch = (
+            "--- a/src/App.jsx\n"
+            "+++ b/src/App.jsx\n"
+            "@@ -18,1 +18,1 @@\n"
+            '-      <Button variant="secondary" />\n'
+            '+      <Button variant="primary" />\n'
+        )
+
+        violation = _instance_scope_violation(state, {}, patch)
+
+        self.assertIsNotNone(violation)
+        assert violation is not None
+        self.assertEqual(violation["error_code"], "INSTANCE_GUARD_MISSING")
+
+    def test_allows_map_callsite_insertion_guarded_by_index(self) -> None:
+        old_app = _numbered(30)
+        new_app = _replace_line(
+            old_app,
+            18,
+            '      {index === 1 && <Button variant="primary" />}',
+        )
+        annotation = _annotation(
+            source_file=BUTTON_FILE,
+            source_line=4,
+            action="CREATE_NEW",
             instance=2,
             instance_count=2,
             call_site_file=APP_FILE,
@@ -158,8 +243,10 @@ class InstanceScopeGuardTest(unittest.TestCase):
         )
         state = _state(annotation, {APP_FILE: old_app})
 
-        # 改 callSite 附近：允许（局部变体 / 条件渲染）。
-        near_call_site = _replace_line(old_app, 8, '  <Button variant="outline" />')
+        # 改 callSite 附近且带实例守卫：允许（局部变体 / 条件渲染）。
+        near_call_site = _replace_line(
+            old_app, 8, '  {index === 1 && <Button variant="outline" />}'
+        )
         self.assertIsNone(
             _instance_scope_violation(state, {APP_FILE: near_call_site}, None)
         )
@@ -208,7 +295,8 @@ class InstanceScopeGuardTest(unittest.TestCase):
 
         self.assertIsNotNone(violation)
 
-    def test_plain_list_item_without_call_site_is_not_blocked(self) -> None:
+    def test_plain_list_item_without_call_site_requires_guard(self) -> None:
+        """根组件直接 map 渲染时 callSite 为空，但多实例仍需实例守卫。"""
         old_app = _numbered(30)
         annotation = _annotation(
             source_file=APP_FILE,
@@ -220,7 +308,17 @@ class InstanceScopeGuardTest(unittest.TestCase):
         state = _state(annotation, {APP_FILE: old_app})
 
         edit = _replace_line(old_app, 12, "        <li>条件渲染后的文本</li>")
-        self.assertIsNone(_instance_scope_violation(state, {APP_FILE: edit}, None))
+        violation = _instance_scope_violation(state, {APP_FILE: edit}, None)
+        self.assertIsNotNone(violation)
+        assert violation is not None
+        self.assertEqual(violation["error_code"], "INSTANCE_GUARD_MISSING")
+
+        guarded = _replace_line(
+            old_app,
+            12,
+            '        <li>{index === 2 && "条件渲染后的文本"}</li>',
+        )
+        self.assertIsNone(_instance_scope_violation(state, {APP_FILE: guarded}, None))
 
 
 class FinalIntentTest(unittest.TestCase):

@@ -34,6 +34,10 @@ class AnnotationCallSite(CamelModel):
     line: int | None = None
     column: int | None = None
     component: str | None = None
+    # React fiber 上的实例身份：key（如 item.id）与基本类型 props。
+    # 同一个组件被 map 多次渲染时，模型据此写出精确的局部守卫条件。
+    instance_key: str | None = None
+    instance_props: dict[str, Any] = Field(default_factory=dict)
 
 
 class AnnotationSource(CamelModel):
@@ -50,6 +54,10 @@ class AnnotationSource(CamelModel):
     instance: int | None = Field(default=None, ge=1)
     instance_count: int | None = Field(default=None, ge=1)
     instance_id: str | None = None
+    # 实例身份：key 优先，props 作为兜底（如 item.id / item.title）。
+    # instanceCount > 1 时，Applier 要求补丁里出现其中之一作为守卫。
+    instance_key: str | None = None
+    instance_props: dict[str, Any] = Field(default_factory=dict)
     # React dev 模式下由运行时 fiber 读取的父级调用点。
     call_site: AnnotationCallSite | None = None
     # SDK snapshot 提取的绝对视觉指纹：className 集合 + computed CSS。

@@ -3242,6 +3242,156 @@ def _changed_lines_for_scope(
     return changed
 
 
+def _patch_added_lines(patch: str | None, path: str) -> str:
+    """从 unified diff 中提取指定文件的 + 行（diff 模式兜底）。"""
+    added: list[str] = []
+    current: str | None = None
+    for raw in (patch or "").splitlines():
+        if raw.startswith("+++ "):
+            target = raw[4:].strip().split("\t")[0]
+            target = _scope_path(target)
+            if target.startswith("b/"):
+                target = target[2:]
+            current = target
+            continue
+        if raw.startswith("--- ") or current != path:
+            continue
+        if raw.startswith("+") and not raw.startswith("+++"):
+            added.append(raw[1:])
+    return "\n".join(added)
+
+
+def _added_lines_for_scope(
+    state: AgentState,
+    files: dict[str, str],
+    path: str,
+    patch: str | None = None,
+) -> str:
+    """提取补丁在指定文件中新增 / 替换后的行，用于检查实例守卫。"""
+    content = ""
+    found = False
+    for candidate, value in (files or {}).items():
+        if _scope_path(candidate) == path:
+            content = str(value)
+            found = True
+            break
+    current = state.get("current_files") or {}
+    before: str | None = None
+    for candidate, value in current.items():
+        if _scope_path(candidate) == path:
+            before = str(value)
+            break
+    if found and before is not None:
+        matcher = difflib.SequenceMatcher(a=before.splitlines(), b=content.splitlines())
+        added: list[str] = []
+        for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+            if tag in ("insert", "replace"):
+                added.extend(content.splitlines()[j1:j2])
+        return "\n".join(added)
+    if found:
+        # 新建文件：整份内容都算新增。
+        return content
+    # diff 模式：generated_files 为空，只能从 patch 的 + 行读取。
+    return _patch_added_lines(patch, path)
+
+
+_GUARD_OPERATOR_RE = re.compile(
+    r"(?:===|!==|==|!=|\?|&&|\|\||includes\(|indexOf\(|\.has\()"
+)
+
+
+def _guarded_literal_present(text: str, value: str) -> bool:
+    """字面量必须出现在比较 / 条件表达式中，避免把渲染文案当成守卫。"""
+    for line in text.splitlines():
+        if value not in line:
+            continue
+        if _GUARD_OPERATOR_RE.search(line):
+            return True
+    return False
+
+
+def _instance_guard_present(
+    source: dict[str, Any],
+    added_text: str,
+    instance: int,
+) -> bool:
+    """补丁里是否出现能唯一定位目标实例的条件。
+
+    判定顺序与 Prompt 一致：
+      1. React key（instanceKey）作为字符串字面量出现；
+      2. 任意 instanceProps 的字符串值作为字面量出现；
+      3. 数值 prop 出现在 === / == / !== 比较中；
+      4. 实在没有身份信息时，允许 map 的 index === instance-1。
+    """
+    text = added_text or ""
+    if not text.strip():
+        return False
+
+    key = str(source.get("instanceKey") or source.get("instance_key") or "")
+    props = source.get("instanceProps") or source.get("instance_props") or {}
+    if key.strip():
+        name = key.strip()
+        if _guarded_literal_present(text, f"'{name}'") or _guarded_literal_present(
+            text, f'"{name}"'
+        ):
+            return True
+    if isinstance(props, dict):
+        for value in props.values():
+            if isinstance(value, str):
+                literal = value.strip()
+                if literal and (
+                    _guarded_literal_present(text, f"'{literal}'")
+                    or _guarded_literal_present(text, f'"{literal}"')
+                ):
+                    return True
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                if re.search(rf"(?:===?|!==?)\s*{re.escape(str(value))}\b", text):
+                    return True
+
+    if instance > 1:
+        for candidate in {instance - 1, instance}:
+            if re.search(rf"\b(?:index|idx|i)\s*===?\s*{candidate}\b", text):
+                return True
+    return False
+
+
+def _instance_guard_payload(
+    *,
+    action: str,
+    file: str,
+    source_line: int,
+    instance: int,
+    instance_count: int,
+    instance_key: str,
+    instance_props: dict[str, Any],
+    call_site_file: str,
+    call_site_line: int,
+) -> dict[str, Any]:
+    identity = f"instanceKey={instance_key!r}" if instance_key else ""
+    if instance_props:
+        identity = (
+            f"{identity} instanceProps={json.dumps(instance_props, ensure_ascii=False)}"
+        ).strip()
+    identity = identity or f"instance={instance}"
+    message = (
+        f"检测到实例守卫缺失：{action} 目标 {file}:{source_line}，"
+        f"页面共 {instance_count} 个实例，父级调用点 "
+        f"{call_site_file or '未知'}:{call_site_line or 0}。"
+        f"本次补丁修改了 callSite 但没有任何实例判别条件，"
+        "会把变更渲染到所有同类容器。请使用真实身份 "
+        f"{identity} 作为条件（如 item.id === 'xxx'），"
+        "或至少使用 index === instance-1，把新增 / 修改节点包在条件内，"
+        "禁止无条件写进 map 返回体。"
+    )
+    return {
+        "apply_failed": True,
+        "verify_result": _failure(message),
+        "error_code": "INSTANCE_GUARD_MISSING",
+        "status": "APPLYING",
+        "messages": [_message("applier", message, error=True)],
+    }
+
+
 def _scope_violation_payload(
     *,
     action: str,
@@ -3292,40 +3442,30 @@ def _instance_scope_violation(
             if not isinstance(source, dict):
                 continue
             file = _scope_path(source.get("file"))
-            if not file or file not in changed:
-                continue
             source_line = int(source.get("line") or 0)
+            instance = int(source.get("instance") or 1)
             instance_count = int(
                 source.get("instanceCount") or source.get("instance_count") or 1
             )
+            instance_key = str(
+                source.get("instanceKey") or source.get("instance_key") or ""
+            )
+            instance_props = (
+                source.get("instanceProps") or source.get("instance_props") or {}
+            )
+            if not isinstance(instance_props, dict):
+                instance_props = {}
             call_site = source.get("callSite") or source.get("call_site")
             call_site = call_site if isinstance(call_site, dict) else {}
             call_site_file = _scope_path(call_site.get("file"))
             call_site_line = int(call_site.get("line") or 0)
 
-            # 情况一：基础组件与父级调用点分属不同文件。Prompt 铁律要求
-            # 局部变更必须通过父级 JSX 调用完成；只要补丁改了基础组件
-            # 文件，就直接打回，避免“当前页面恰好只有一个实例”时侥幸
-            # 放行、后续其他页面复用后再次被污染。
-            if call_site_file and call_site_file != file:
-                return _scope_violation_payload(
-                    action=action,
-                    file=file,
-                    source_line=source_line,
-                    instance_count=instance_count,
-                    call_site_file=call_site_file,
-                    call_site_line=call_site_line,
-                )
-
-            # 情况二：组件与父级在同一文件。允许在 callSite 周围做局部
-            # 变体（条件渲染 / 传 props）；但只要改到组件主体源码行，
-            # 就会同时改变所有实例的渲染结果，必须打回。
-            if instance_count > 1 and call_site_file == file and call_site_line:
-                lines = changed.get(file)
-                body_touched = lines is None or any(
-                    abs(line - source_line) <= 2 for line in lines
-                )
-                if body_touched:
+            if file and file in changed:
+                # 情况一：基础组件与父级调用点分属不同文件。Prompt 铁律
+                # 要求局部变更必须通过父级 JSX 调用完成；只要补丁改了
+                # 基础组件文件，就直接打回，避免“当前页面恰好只有一个
+                # 实例”时侥幸放行、后续其他页面复用后再次被污染。
+                if call_site_file and call_site_file != file:
                     return _scope_violation_payload(
                         action=action,
                         file=file,
@@ -3334,6 +3474,63 @@ def _instance_scope_violation(
                         call_site_file=call_site_file,
                         call_site_line=call_site_line,
                     )
+
+                # 情况二：组件与父级在同一文件。允许在 callSite 周围做
+                # 局部变体（条件渲染 / 传 props）；但只要改到组件主体
+                # 源码行，就会同时改变所有实例的渲染结果，必须打回。
+                if instance_count > 1 and call_site_file == file and call_site_line:
+                    lines = changed.get(file)
+                    body_touched = lines is None or any(
+                        abs(line - source_line) <= 2 for line in lines
+                    )
+                    if body_touched:
+                        return _scope_violation_payload(
+                            action=action,
+                            file=file,
+                            source_line=source_line,
+                            instance_count=instance_count,
+                            call_site_file=call_site_file,
+                            call_site_line=call_site_line,
+                        )
+
+            # 情况三：补丁只改了 callSite 父级文件，没有任何语法越界，
+            # 但多实例场景下仍可能把新增节点无条件塞进 map 返回体，
+            # 导致“我在一个卡片里加按钮，所有卡片都出现按钮”。这里
+            # 要求补丁里出现真实实例身份（key / props）或 index 守卫。
+            if instance_count <= 1:
+                continue
+            if call_site_file and call_site_file in changed:
+                guard_file = call_site_file
+                guard_line = call_site_line
+            elif not call_site_file and file and file in changed:
+                # 根组件直接 map 渲染、或 SDK 取不到父级组件时，callSite
+                # 为空；但 instanceCount 已证明同一行渲染了多次，修改该
+                # 行同样必须带实例守卫，否则会一次性改掉全部实例。
+                guard_file = file
+                guard_line = source_line
+            else:
+                continue
+            lines = changed.get(guard_file)
+            touched = (
+                lines is None
+                or not guard_line
+                or any(abs(line - guard_line) <= 4 for line in lines)
+            )
+            if not touched:
+                continue
+            added = _added_lines_for_scope(state, files, guard_file, patch)
+            if not _instance_guard_present(source, added, instance):
+                return _instance_guard_payload(
+                    action=action,
+                    file=file,
+                    source_line=source_line,
+                    instance=instance,
+                    instance_count=instance_count,
+                    instance_key=instance_key,
+                    instance_props=instance_props,
+                    call_site_file=call_site_file,
+                    call_site_line=call_site_line,
+                )
     return None
 
 

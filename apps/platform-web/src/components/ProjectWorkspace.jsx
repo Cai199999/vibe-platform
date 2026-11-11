@@ -493,6 +493,11 @@ function ProjectWorkspaceInner({
         instance: Number(source.instance) || undefined,
         instanceCount: Number(source.instanceCount) || undefined,
         instanceId: source.instanceId || undefined,
+        instanceKey: source.instanceKey || undefined,
+        instanceProps:
+          source.instanceProps && Object.keys(source.instanceProps).length > 0
+            ? source.instanceProps
+            : undefined,
         callSite: source.callSite || null,
         // 绝对视觉签名：Inspect 草稿同样携带真实 computed 样式，
         // 后续转成标注时可作为 current_styles 供 Coder 复用。
@@ -562,6 +567,12 @@ function ProjectWorkspaceInner({
       instance: Number(sourceItem.instance) || undefined,
       instanceCount: Number(sourceItem.instanceCount) || undefined,
       instanceId: sourceItem.instanceId || undefined,
+      instanceKey: sourceItem.instanceKey || undefined,
+      instanceProps:
+        sourceItem.instanceProps &&
+        Object.keys(sourceItem.instanceProps).length > 0
+          ? sourceItem.instanceProps
+          : undefined,
       callSite: sourceItem.callSite || null,
       styleSignature: sourceItem.styleSignature || fallback.styleSignature || undefined,
     })
@@ -597,6 +608,12 @@ function ProjectWorkspaceInner({
         instance: Number(effective.instance) || undefined,
         instanceCount: Number(effective.instanceCount) || undefined,
         instanceId: effective.instanceId || undefined,
+        instanceKey: effective.instanceKey || undefined,
+        instanceProps:
+          effective.instanceProps &&
+          Object.keys(effective.instanceProps).length > 0
+            ? effective.instanceProps
+            : undefined,
         callSite: effective.callSite || null,
         styleSignature: effective.styleSignature || undefined,
       },

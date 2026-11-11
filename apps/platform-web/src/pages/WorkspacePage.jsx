@@ -609,6 +609,14 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
               undefined,
             instanceId:
               precise?.instanceId ?? target?.instanceId ?? undefined,
+            // React fiber 上的稳定身份：key 或列表项基本类型 props。
+            // Coder 用它写出 item.id === 'xxx' 之类的局部守卫。
+            instanceKey:
+              precise?.instanceKey ?? target?.instanceKey ?? undefined,
+            instanceProps:
+              precise?.instanceProps ??
+              target?.instanceProps ??
+              undefined,
             callSite: precise?.callSite ?? target?.callSite ?? undefined,
             // 绝对视觉指纹：SDK 从真实 DOM 提取的类名 + computed CSS。
             // Coder 修改 / 参考组件时必须基于这些事实，而不是猜样式。
@@ -4105,6 +4113,8 @@ export default function WorkspacePage() {
         instance: Number(firstSource.instance) || undefined,
         instanceCount: Number(firstSource.instanceCount) || undefined,
         instanceId: firstSource.instanceId || undefined,
+        instanceKey: firstSource.instanceKey || undefined,
+        instanceProps: firstSource.instanceProps || undefined,
         callSite: firstSource.callSite || null,
         styleSignature: firstSource.styleSignature || null,
       },
@@ -4118,6 +4128,8 @@ export default function WorkspacePage() {
         instance: Number(firstSource.instance) || undefined,
         instanceCount: Number(firstSource.instanceCount) || undefined,
         instanceId: firstSource.instanceId || undefined,
+        instanceKey: firstSource.instanceKey || undefined,
+        instanceProps: firstSource.instanceProps || undefined,
         callSite: firstSource.callSite || null,
         styleSignature: firstSource.styleSignature || null,
       },
@@ -4203,6 +4215,8 @@ export default function WorkspacePage() {
           instance: firstAddition.target.source.instance,
           instanceCount: firstAddition.target.source.instanceCount,
           instanceId: firstAddition.target.source.instanceId,
+          instanceKey: firstAddition.target.source.instanceKey,
+          instanceProps: firstAddition.target.source.instanceProps,
           callSite: firstAddition.target.source.callSite,
           styleSignature: firstAddition.target.source.styleSignature,
         }
