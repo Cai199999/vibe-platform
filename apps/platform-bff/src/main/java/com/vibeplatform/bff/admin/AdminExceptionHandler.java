@@ -45,6 +45,26 @@ public class AdminExceptionHandler {
         return ResponseEntity.status(HttpStatus.FORBIDDEN).body(body);
     }
 
+    /**
+     * 指标代理失败必须显式报 502，禁止返回 200 + 全零数据：后者会让
+     * 运维把“AI Core 挂了”误判成“系统健康且零拦截”。
+     */
+    @ExceptionHandler(FullstackMetricsUnavailableException.class)
+    public ResponseEntity<ObjectNode> handleMetricsUnavailable(
+            FullstackMetricsUnavailableException ex,
+            HttpServletRequest request
+    ) {
+        String requestId = resolveRequestId(request);
+        log.warn("admin fullstack metrics unavailable path={} requestId={}: {}",
+                request.getRequestURI(), requestId, ex.getMessage());
+
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("code", "AI_CORE_METRICS_UNAVAILABLE");
+        body.put("message", "AI Core 全栈指标暂不可用，请稍后重试");
+        body.put("requestId", requestId);
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(body);
+    }
+
     private String resolveRequestId(HttpServletRequest request) {
         String header = request.getHeader("X-Request-Id");
         return header == null || header.isBlank()

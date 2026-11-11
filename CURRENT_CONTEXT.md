@@ -29,7 +29,10 @@ React + Vite → Java 21 BFF → Python 3.12 FastAPI/LangGraph → Docker 沙盒
 - **契约缺陷 vs 代码缺陷**：`contract_audit.py` 确定性审计（缺 DDL/核心表、集合无表、非法关系、嵌套路由缺表/缺 JOIN、未声明交互路由）；统一错误码 `CONTRACT_REVISION_REQUIRED`，载荷带 `failureKind=CONTRACT` / `defectKind=CONTRACT_DEFECT` / `needsClarification` / `clarification`；前端回传 `REVISE`。
 - **责任隔离 + Applier 门禁**：BackendCoder 只消费 `schema.core.json` 且不再自检；ConsistencyVerifier 只做 AST 诊断；所有 `server/` 落盘经 `Applier` 无条件 Babel 门禁，拦截后由 `audit_contract` 判 `CODE_DEFECT`（重试 ≤2）或 `CONTRACT_DEFECT`（立即退回契约）；Architect 确认前调用同一 `validate_contract` 自检。
 - **核心指标**：`Applier_Block_Rate` / `Contract_Misretry_Count` / `MultiTable_AST_Pass_Rate` / `Contract_Revision_Rate`，经 SSE 终态事件与 `GET /api/v1/internal/fullstack/metrics` 输出。
-- 验证：全量 Python 单测 428 项通过（排除历史 `test_eval_suite`）；新增 JOIN 错位自愈与缺表契约回改两条 E2E；Java BFF 全栈生成 / CRUD 联调通过。
+- **LLM BackendCoder 自愈**：模板仍是默认路径；仅 Applier 判 `CODE_DEFECT` 或一致性要求重建 JOIN 时，把完整 `server/index.js` + 明确诊断交给 LLM，只允许改该文件，产物仍过 Applier；失败自动回退模板。开关 `FULLSTACK_LLM_REPAIR_ENABLED`，事件 `fullstack.applier.llm_repair`。
+- **监控闭环前端化**：BFF 新增 `GET /api/v1/admin/fullstack/metrics` 透传 AI Core；Admin 新增“系统健康与缺陷拦截”卡片（拦截率进度条、契约误重试计数、多表通过率、JOIN/ORM 明细）；上游故障显式 502，不伪造成全零健康数据。
+- **子资源契约铁律**：Architect 起草与修订 Prompt 均要求嵌套路由必须显式建子表并在 `relations` 声明外键，禁止 Coder 隐式推断。
+- 验证：全量 Python 单测 440 项通过（仅排除历史 `test_eval_suite`）；Java BFF 9 项测试通过；前端 `vite build` 通过；live 验证 admin 指标 200 / 匿名 403。
 
 ## 真假边界
 

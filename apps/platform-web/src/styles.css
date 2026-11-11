@@ -8964,6 +8964,213 @@ body.is-viewport-panning * {
   white-space: nowrap;
 }
 
+/* System health ------------------------------------------------------ */
+.admin-health-panel {
+  background:
+    radial-gradient(420px 180px at 8% 0%, rgba(25, 158, 112, 0.07), transparent 68%),
+    linear-gradient(180deg, rgba(11, 16, 27, 0.9), rgba(7, 11, 19, 0.84));
+}
+
+.admin-health-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.admin-health-status i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.admin-health-status.is-online i {
+  background: #34d399;
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.14);
+}
+
+.admin-health-status.is-offline i {
+  background: #fb7185;
+  box-shadow: 0 0 0 3px rgba(251, 113, 133, 0.14);
+}
+
+.admin-health-status.is-loading i {
+  background: #fbbf24;
+  animation: admin-health-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes admin-health-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.admin-health-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(150px, 0.8fr);
+  gap: 14px;
+}
+
+.admin-health-metric,
+.admin-health-count,
+.admin-health-split {
+  padding: 14px 16px;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  border-radius: 12px;
+  background: rgba(4, 8, 15, 0.42);
+}
+
+.admin-health-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.admin-health-metric-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+}
+
+.admin-health-metric-head strong {
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+.admin-health-track {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.admin-health-bar {
+  height: 100%;
+  min-width: 0;
+  border-radius: 999px;
+  background: #3987e5;
+  box-shadow: 0 0 16px rgba(57, 135, 229, 0.22);
+  transition: width 0.45s ease, background 0.2s ease;
+}
+
+.admin-health-metric.is-success .admin-health-bar {
+  background: linear-gradient(90deg, #199e70, #34d399);
+  box-shadow: 0 0 16px rgba(52, 211, 153, 0.22);
+}
+
+.admin-health-metric.is-warn .admin-health-bar {
+  background: linear-gradient(90deg, #c98500, #fbbf24);
+  box-shadow: 0 0 16px rgba(251, 191, 36, 0.2);
+}
+
+.admin-health-metric.is-danger .admin-health-bar {
+  background: linear-gradient(90deg, #d95926, #fb7185);
+  box-shadow: 0 0 16px rgba(251, 113, 133, 0.22);
+}
+
+.admin-health-hint {
+  color: var(--faint);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+}
+
+.admin-health-count {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+}
+
+.admin-health-count > span:first-child {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.admin-health-count strong {
+  font-size: 30px;
+  font-weight: 780;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.04em;
+  line-height: 1.05;
+}
+
+.admin-health-count.is-success strong {
+  color: #34d399;
+}
+
+.admin-health-count.is-warn strong {
+  color: #fbbf24;
+}
+
+.admin-health-count.is-danger strong {
+  color: #fb7185;
+}
+
+.admin-health-split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.admin-health-split div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.admin-health-split span {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.admin-health-split strong {
+  color: var(--text);
+  font-size: 19px;
+  font-weight: 740;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-health-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 18px;
+  border: 1px dashed rgba(251, 113, 133, 0.28);
+  border-radius: 12px;
+  background: rgba(251, 113, 133, 0.04);
+}
+
+.admin-health-empty strong {
+  color: #fecdd3;
+  font-size: 12.5px;
+}
+
+.admin-health-empty span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.admin-health-empty code {
+  color: var(--faint);
+  font-size: 10px;
+}
+
 /* Agent distribution ------------------------------------------------- */
 .admin-agent-chart {
   display: flex;
@@ -9485,6 +9692,10 @@ body.is-viewport-panning * {
   .admin-agent-row {
     grid-template-columns: minmax(150px, 190px) minmax(0, 1fr) 78px;
     gap: 12px;
+  }
+
+  .admin-health-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .admin-page-head h1 {

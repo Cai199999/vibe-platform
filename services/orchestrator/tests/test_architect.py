@@ -50,6 +50,7 @@ from ai_core.domain.architect import (
     ArchitectRunRequest,
     ArchitectTableRelation,
 )
+from ai_core.ports.model import ModelClient, ModelClientError
 
 SHAPES = ("lightweight_web", "script_automation", "full_stack_system")
 
@@ -864,6 +865,81 @@ class ContractTierValidationTest(unittest.TestCase):
         validation = validate_draft("mobile_app", draft)
         self.assertFalse(validation.valid)
         self.assertTrue(any("未知应用形态" in issue for issue in validation.issues))
+
+
+class _PromptCaptureClient(ModelClient):
+    """记录 Architect 实际发送的 system prompt，然后主动失败。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+
+    def generate(self, task: str, system: str, human: str) -> str:
+        self.calls.append((task, system, human))
+        raise ModelClientError("prompt captured")
+
+    def generate_json(
+        self,
+        task: str,
+        system: str,
+        human: str,
+        *,
+        json_schema: dict | None = None,
+    ) -> str:
+        self.calls.append((task, system, human))
+        raise ModelClientError("prompt captured")
+
+
+class ArchitectSubresourcePromptTest(unittest.TestCase):
+    """嵌套子资源必须有显式表与外键，不能靠 Coder 隐式猜测。"""
+
+    def _llm(self) -> tuple[DeepSeekArchitectLLM, _PromptCaptureClient]:
+        settings = Settings(
+            deepseek_api_key="test-key",
+            architect_json_retry_limit=0,
+        )
+        client = _PromptCaptureClient()
+        return DeepSeekArchitectLLM(settings, client=client), client
+
+    @staticmethod
+    def _context() -> ArchitectContext:
+        return ArchitectContext(
+            project_id="p1",
+            project_name="用户中心",
+            source_files={"src/App.jsx": "export default () => null"},
+            ui_history=[],
+            slots={},
+            app_shape="full_stack_system",
+            round=1,
+            threshold=0.85,
+        )
+
+    def test_draft_prompt_requires_explicit_child_table(self) -> None:
+        llm, client = self._llm()
+        with self.assertRaises(ArchitectLLMError):
+            llm.draft_contract(self._context())
+
+        self.assertEqual(len(client.calls), 1)
+        task, system, _ = client.calls[0]
+        self.assertEqual(task, "architect_contract")
+        self.assertIn("子资源契约铁律", system)
+        self.assertIn("/users/{user_id}/profile", system)
+        self.assertIn("profiles", system)
+        self.assertIn("relations", system)
+        self.assertIn("禁止", system)
+
+    def test_revise_prompt_requires_explicit_child_table(self) -> None:
+        llm, client = self._llm()
+        previous = MockArchitectLLM().draft_contract(self._context())
+        with self.assertRaises(ArchitectLLMError):
+            llm.revise_contract(self._context(), previous, "补充 /users/{id}/profile")
+
+        self.assertEqual(len(client.calls), 1)
+        task, system, human = client.calls[0]
+        self.assertEqual(task, "architect_contract")
+        self.assertIn("/users/{user_id}/profile", system)
+        self.assertIn("databaseDdl", system)
+        self.assertIn("禁止依赖隐式推断", system)
+        self.assertIn("补充 /users/{id}/profile", human)
 
 
 class ArchitectHelperTest(unittest.TestCase):

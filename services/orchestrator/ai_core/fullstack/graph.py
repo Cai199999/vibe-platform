@@ -12,8 +12,10 @@
 
   - 每个节点只操作沙盒文件与本次 Run 的临时状态，不依赖 LangGraph
     Checkpoint：生成失败时重新点一次“开始生成全栈代码”即可幂等重跑；
-  - DBACoder / BackendCoder / FrontendCoder / InfraCoder 使用确定性模板，
-    保证离线、Mock 与真实模型环境行为一致；
+  - DBACoder / BackendCoder / FrontendCoder / InfraCoder 默认使用确定性
+    模板，保证离线、Mock 与真实模型环境行为一致；
+  - BackendCoder 被 Applier 拦截为 CODE_DEFECT 时，把完整诊断反馈给真实
+    LLM 修复 ``server/index.js``；LLM 产物仍需再次通过 Applier AST 门禁；
   - BackendCoder 为契约中的每个业务动作注册独立路由，通用 CRUD 不能替代
     抓取 / 改写 / 投递 / 对话等语义端点；
   - ConsistencyVerifier 在构建前比对前端请求与后端实际路由；缺失路由时
@@ -58,6 +60,10 @@ from ai_core.fullstack.contract_audit import (
     audit_contract,
 )
 from ai_core.fullstack.diagnostics import DIAG_AST_UNAVAILABLE
+from ai_core.fullstack.llm_backend import (
+    LLMBackendCoder,
+    LLMBackendRepairUnavailable,
+)
 from ai_core.fullstack.schema_mcp import verify_schema_with_mcp
 from ai_core.observability.fullstack_metrics import FULLSTACK_METRICS
 from ai_core.ports.sandbox import SandboxProvider
@@ -192,6 +198,10 @@ class FullstackState(TypedDict, total=False):
     # Applier AST 门禁：拦截后先分类，再决定重生成 Backend 还是要求改契约。
     applier_retry_count: int
     needs_backend_retry: bool
+    # Applier / 一致性诊断原文：下一次 BackendCoder 把这段错误反馈给 LLM。
+    applier_feedback: list[str]
+    applier_feedback_attempt: int
+    llm_repair_count: int
 
 
 class FullstackGraphRunner:
@@ -202,9 +212,12 @@ class FullstackGraphRunner:
         sandbox: SandboxProvider,
         *,
         event_sink: EventSink | None = None,
+        backend_llm: LLMBackendCoder | None = None,
     ) -> None:
         self._sandbox = sandbox
         self._event_sink = event_sink or NullEventSink()
+        # 允许测试注入可观测的修复器；生产环境按配置惰性创建。
+        self._backend_llm = backend_llm
         # 两套拓扑共用节点实现：
         #  - fullstack：契约确认后的完整生成；
         #  - frontend：新建项目契约确认后的前端骨架初始化。
@@ -406,6 +419,19 @@ class FullstackGraphRunner:
                 extra_routes=applied_routes,
                 dba_schema=dba_schema,
             )
+            feedback = [
+                str(item).strip()
+                for item in state.get("applier_feedback") or []
+                if str(item).strip()
+            ]
+            llm_repaired = False
+            if feedback:
+                bundle, llm_repaired = self._repair_backend_with_llm(
+                    state,
+                    bundle,
+                    feedback,
+                    dba_schema,
+                )
             try:
                 files = self._write_bundle(state, bundle)
             except ApplierSafetyBlock as exc:
@@ -430,6 +456,11 @@ class FullstackGraphRunner:
                 "consistency_applied_routes": applied_routes,
                 "needs_backend_repair": False,
                 "needs_backend_retry": False,
+                # 诊断已消费：下一次普通生成不应继续携带旧错误。
+                "applier_feedback": [],
+                "applier_feedback_attempt": 0,
+                "llm_repair_count": int(state.get("llm_repair_count") or 0)
+                + (1 if llm_repaired else 0),
             }
         except FullstackGenerationError:
             raise
@@ -438,6 +469,116 @@ class FullstackGraphRunner:
             raise FullstackGenerationError(
                 f"BackendCoder 生成失败: {exc}", node="BackendCoder"
             ) from exc
+
+    def _repair_backend_with_llm(
+        self,
+        state: FullstackState,
+        bundle: GeneratedBundle,
+        feedback: list[str],
+        dba_schema: str,
+    ) -> tuple[GeneratedBundle, bool]:
+        """把 Applier 诊断交给 LLM，返回 ``(修复后产物, 是否成功)``。
+
+        LLM 失败必须降级回模板产物，而不是把整个 Run 变成“环境失败”：
+        Applier 仍是最终裁决者，下一轮仍可继续拦截并重试。
+        """
+        attempt = int(state.get("applier_feedback_attempt") or 1)
+        max_attempts = max(MAX_APPLIER_REPAIRS, MAX_JOIN_REPAIRS)
+        coder = self._resolve_backend_llm()
+        if coder is None or not coder.available:
+            self._emit(
+                "fullstack.applier.llm_repair",
+                {
+                    "runId": state["run_id"],
+                    "node": "BackendCoder",
+                    "attempt": attempt,
+                    "maxAttempts": max_attempts,
+                    "status": "SKIPPED",
+                    "reason": "LLM_REPAIR_DISABLED",
+                    "diagnostics": feedback,
+                },
+            )
+            return bundle, False
+        try:
+            repaired = coder.repair(
+                contract=state["contract"],
+                bundle=bundle,
+                dba_schema=dba_schema,
+                diagnostics=feedback,
+                attempt=attempt,
+                max_attempts=max_attempts,
+            )
+        except LLMBackendRepairUnavailable as exc:
+            logger.warning(
+                "LLM BackendCoder 不可用，回退模板 run_id=%s: %s",
+                state.get("run_id"),
+                exc,
+            )
+            self._emit(
+                "fullstack.applier.llm_repair",
+                {
+                    "runId": state["run_id"],
+                    "node": "BackendCoder",
+                    "attempt": attempt,
+                    "maxAttempts": max_attempts,
+                    "status": "SKIPPED",
+                    "reason": "LLM_REPAIR_UNAVAILABLE",
+                    "error": str(exc),
+                    "diagnostics": feedback,
+                },
+            )
+            return bundle, False
+        except Exception as exc:  # noqa: BLE001 - LLM 失败必须降级回模板
+            logger.warning(
+                "LLM BackendCoder 修复失败，回退模板 run_id=%s: %s",
+                state.get("run_id"),
+                exc,
+            )
+            self._emit(
+                "fullstack.applier.llm_repair",
+                {
+                    "runId": state["run_id"],
+                    "node": "BackendCoder",
+                    "attempt": attempt,
+                    "maxAttempts": max_attempts,
+                    "status": "FAILED",
+                    "error": str(exc),
+                    "diagnostics": feedback,
+                },
+            )
+            return bundle, False
+
+        self._emit(
+            "fullstack.applier.llm_repair",
+            {
+                "runId": state["run_id"],
+                "node": "BackendCoder",
+                "attempt": attempt,
+                "maxAttempts": max_attempts,
+                "status": "SUCCEEDED",
+                "files": sorted(
+                    (repaired.metadata.get("llmRepair") or {}).get("files") or []
+                ),
+                "diagnostics": feedback,
+            },
+        )
+        logger.info(
+            "LLM BackendCoder 已按诊断修复 run_id=%s attempt=%d/%d",
+            state.get("run_id"),
+            attempt,
+            max_attempts,
+        )
+        return repaired, True
+
+    def _resolve_backend_llm(self) -> LLMBackendCoder | None:
+        if self._backend_llm is not None:
+            return self._backend_llm
+        try:
+            self._backend_llm = LLMBackendCoder(get_settings())
+        except Exception as exc:  # noqa: BLE001 - 配置损坏不应阻断模板主路径
+            logger.warning("初始化 LLM BackendCoder 失败: %s", exc)
+            return None
+        return self._backend_llm
 
     def _handle_applier_block(
         self,
@@ -512,6 +653,10 @@ class FullstackGraphRunner:
         return {
             "needs_backend_retry": True,
             "applier_retry_count": next_count,
+            # 下一轮 BackendCoder 不再盲目重跑模板，而是携带这些诊断
+            # 调用 LLM；模板仍作为 LLM 不可用时的降级产物。
+            "applier_feedback": report.messages(),
+            "applier_feedback_attempt": next_count,
             "consistency_ok": False,
         }
 
@@ -773,12 +918,21 @@ class FullstackGraphRunner:
                 [],
                 started,
             )
+            join_messages = [
+                issue.message
+                for issue in report.issues
+                if issue.fix_action == "REPAIR_BACKEND_JOIN"
+            ]
             return {
                 "consistency_ok": False,
                 "needs_backend_repair": True,
                 "needs_dba_repair": False,
                 "consistency_join_repair_count": next_count,
                 "consistency_fix_routes": [],
+                # JOIN 别名错位同样属于模板无法自我修复的代码缺陷，
+                # 把诊断交给下一轮 LLM BackendCoder。
+                "applier_feedback": join_messages,
+                "applier_feedback_attempt": next_count,
             }
 
         repair_count = int(state.get("consistency_repair_count") or 0)

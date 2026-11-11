@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import AdminHeader from '../components/AdminHeader.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
-import { fetchAdminMetrics } from '../admin/adminClient.js'
+import {
+  fetchAdminFullstackMetrics,
+  fetchAdminMetrics,
+} from '../admin/adminClient.js'
 
 const REFRESH_MS = 30_000
 
@@ -245,6 +248,159 @@ function RecentRunsTable({ runs }) {
   )
 }
 
+function healthTone(rate, { warn = 0.05, danger = 0.2 } = {}) {
+  const value = Number(rate)
+  if (!Number.isFinite(value)) return 'neutral'
+  if (value >= danger) return 'danger'
+  if (value >= warn) return 'warn'
+  return 'success'
+}
+
+function HealthBar({ label, ratio, hint, tone }) {
+  const rate = Number(ratio?.rate)
+  const safeRate = Number.isFinite(rate) ? Math.max(0, Math.min(1, rate)) : 0
+  const hasSample = Number(ratio?.denominator) > 0
+  return (
+    <div className={`admin-health-metric is-${tone}`}>
+      <div className="admin-health-metric-head">
+        <span>{label}</span>
+        <strong>{hasSample ? formatPercent(safeRate) : '—'}</strong>
+      </div>
+      <div
+        className="admin-health-track"
+        role="progressbar"
+        aria-label={label}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(safeRate * 100)}
+      >
+        <div
+          className="admin-health-bar"
+          style={{ width: hasSample ? `${Math.max(safeRate * 100, 1.5)}%` : '0%' }}
+        />
+      </div>
+      <span className="admin-health-hint">
+        {hint ?? (
+          hasSample
+            ? `${NUMBER.format(ratio.numerator)} / ${NUMBER.format(ratio.denominator)} 次`
+            : '暂无门禁样本'
+        )}
+      </span>
+    </div>
+  )
+}
+
+/**
+ * “系统健康与缺陷拦截”卡片。
+ *
+ * 指标来自 Python AI Core 进程内聚合，由 BFF 透传。健康接口失败必须
+ * 独立降级，不能影响上方主看板数据。
+ */
+function SystemHealthCard({ health }) {
+  const data = health?.data
+  const applierRate = data?.applierBlockRate
+  const misretry = Number(data?.contractMisretryCount ?? 0)
+  const misretryTone = misretry <= 0 ? 'success' : misretry <= 2 ? 'warn' : 'danger'
+  const hasBlockSample = Number(applierRate?.denominator) > 0
+  const blockTone = hasBlockSample ? healthTone(applierRate?.rate) : 'neutral'
+  // 多表 AST 通过率越高越好，与“拦截率越低越好”的方向相反。
+  const passRate = Number(data?.multiTableAstPassRate?.rate)
+  const hasPassSample = Number(data?.multiTableAstPassRate?.denominator) > 0
+  const multiTableTone = !hasPassSample
+    ? 'neutral'
+    : passRate >= 0.95
+      ? 'success'
+      : passRate >= 0.8
+        ? 'warn'
+        : 'danger'
+
+  return (
+    <section className="admin-panel admin-health-panel" aria-labelledby="system-health-title">
+      <div className="admin-panel-head">
+        <div>
+          <h2 id="system-health-title">系统健康与缺陷拦截</h2>
+          <p>Applier AST 门禁与契约缺陷归因的实时聚合，指标来自 Python AI Core。</p>
+        </div>
+        <span
+          className={`admin-health-status ${
+            health?.status === 'ready'
+              ? 'is-online'
+              : health?.status === 'error'
+                ? 'is-offline'
+                : 'is-loading'
+          }`}
+        >
+          <i aria-hidden="true" />
+          {health?.status === 'ready'
+            ? 'AI Core 指标在线'
+            : health?.status === 'error'
+              ? 'AI Core 指标不可用'
+              : '读取中'}
+        </span>
+      </div>
+
+      {health?.status === 'error' && (
+        <div className="admin-health-empty" role="status">
+          <strong>监控闭环暂不可用</strong>
+          <span>{health.error?.message || 'BFF 未能从 AI Core 读取指标。'}</span>
+          <code>{health.error?.code || 'AI_CORE_METRICS_UNAVAILABLE'}</code>
+        </div>
+      )}
+
+      {health?.status !== 'error' && (
+        <div className="admin-health-grid">
+          <HealthBar
+            label="Applier 拦截率"
+            ratio={applierRate}
+            tone={blockTone}
+            hint={
+              applierRate?.denominator > 0
+                ? `${NUMBER.format(applierRate.numerator)} 次拦截 / ${NUMBER.format(
+                    applierRate.denominator,
+                  )} 次 AST 门禁`
+                : '暂无门禁样本'
+            }
+          />
+
+          <div className={`admin-health-count is-${misretryTone}`}>
+            <span>契约缺陷误重试</span>
+            <strong>{NUMBER.format(misretry)}</strong>
+            <span className="admin-health-hint">
+              {misretry === 0 ? '未发生本可避免的重试' : '目标为 0 次，需检查契约审计'}
+            </span>
+          </div>
+
+          <HealthBar
+            label="多表 AST 通过率"
+            ratio={data?.multiTableAstPassRate}
+            tone={multiTableTone}
+            hint={
+              data?.multiTableAstPassRate?.denominator > 0
+                ? `${NUMBER.format(
+                    data.multiTableAstPassRate.numerator,
+                  )} 次通过 / ${NUMBER.format(
+                    data.multiTableAstPassRate.denominator,
+                  )} 次检查`
+                : '暂无多表契约样本'
+            }
+          />
+
+          <div className="admin-health-split">
+            <div>
+              <span>JOIN 拦截</span>
+              <strong>{NUMBER.format(data?.details?.applierBlockedByJoin ?? 0)}</strong>
+            </div>
+            <div>
+              <span>其他 ORM 拦截</span>
+              <strong>{NUMBER.format(data?.details?.applierBlockedOther ?? 0)}</strong>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
 function DashboardSkeleton() {
   return (
     <>
@@ -285,6 +441,11 @@ export default function AdminPage() {
     refreshing: false,
     fetchedAt: null,
   })
+  const [health, setHealth] = useState({
+    status: 'loading',
+    data: null,
+    error: null,
+  })
 
   const load = useCallback(
     async ({ silent = false } = {}) => {
@@ -300,15 +461,41 @@ export default function AdminPage() {
       })
 
       try {
-        const payload = await fetchAdminMetrics({
-          token: session?.token,
-          role: user?.role,
-          signal: controller.signal,
-        })
+        // 健康指标与主看板并行拉取；健康接口失败不得阻断主指标。
+        const [metricsResult, healthResult] = await Promise.allSettled([
+          fetchAdminMetrics({
+            token: session?.token,
+            role: user?.role,
+            signal: controller.signal,
+          }),
+          fetchAdminFullstackMetrics({
+            token: session?.token,
+            role: user?.role,
+            signal: controller.signal,
+          }),
+        ])
         if (controller.signal.aborted) return
+
+        if (healthResult.status === 'fulfilled') {
+          setHealth({
+            status: 'ready',
+            data: healthResult.value?.data ?? null,
+            error: null,
+          })
+        } else {
+          setHealth({
+            status: 'error',
+            data: null,
+            error: healthResult.reason,
+          })
+        }
+
+        if (metricsResult.status === 'rejected') {
+          throw metricsResult.reason
+        }
         setState({
           status: 'ready',
-          data: payload?.data ?? null,
+          data: metricsResult.value?.data ?? null,
           error: null,
           refreshing: false,
           fetchedAt: Date.now(),
@@ -429,6 +616,8 @@ export default function AdminPage() {
                 hint="成功与失败 Run 墙钟均值"
               />
             </section>
+
+            <SystemHealthCard health={health} />
 
             <section className="admin-panel admin-chart-panel" aria-labelledby="agent-distribution-title">
               <div className="admin-panel-head">

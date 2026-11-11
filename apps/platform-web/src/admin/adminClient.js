@@ -27,8 +27,8 @@ async function readJson(response) {
 /**
  * GET /api/v1/admin/metrics
  */
-export async function fetchAdminMetrics({ token, role, signal } = {}) {
-  const response = await fetch('/api/v1/admin/metrics', {
+async function requestAdminJson(path, { token, role, signal } = {}) {
+  const response = await fetch(path, {
     method: 'GET',
     headers: {
       Accept: 'application/json',
@@ -50,4 +50,24 @@ export async function fetchAdminMetrics({ token, role, signal } = {}) {
     )
   }
   return body
+}
+
+/**
+ * GET /api/v1/admin/metrics
+ */
+export async function fetchAdminMetrics({ token, role, signal } = {}) {
+  return requestAdminJson('/api/v1/admin/metrics', { token, role, signal })
+}
+
+/**
+ * GET /api/v1/admin/fullstack/metrics
+ *
+ * BFF 透传 Python AI Core 的 Applier / 契约审计指标。
+ */
+export async function fetchAdminFullstackMetrics({ token, role, signal } = {}) {
+  return requestAdminJson('/api/v1/admin/fullstack/metrics', {
+    token,
+    role,
+    signal,
+  })
 }

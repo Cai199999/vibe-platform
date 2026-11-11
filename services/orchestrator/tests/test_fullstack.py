@@ -1789,6 +1789,271 @@ class GraphTests(unittest.TestCase):
             if event.payload["truncated"]:
                 self.assertEqual(len(event.payload["content"]), 500)
 
+    def test_applier_code_defect_triggers_llm_repair_with_feedback(self) -> None:
+        """E2E：模板连续产出错误 JOIN -> LLM 携带 Applier 诊断修复。
+
+        第一个断言证明“同一输入模板必然重试出同一错误”；第二个断言证明
+        LLM 的输入包含真实诊断与完整文件，输出仍要再次经过 Applier 才能落盘。
+        """
+        FULLSTACK_METRICS.reset()
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        contract = _master_detail_contract()
+        buffer = RunEventBuffer("fsk_llm_repair")
+        calls: list[dict] = []
+
+        class _FakeLLMBackendCoder:
+            available = True
+
+            def repair(
+                self,
+                *,
+                contract,
+                bundle,
+                dba_schema,
+                diagnostics,
+                attempt,
+                max_attempts,
+            ):
+                calls.append(
+                    {
+                        "contract": contract,
+                        "bundle": bundle,
+                        "dba_schema": dba_schema,
+                        "diagnostics": list(diagnostics),
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                    }
+                )
+                files = dict(bundle.files)
+                code = files["server/index.js"]
+                self_test.assertIn("/:id/resumez", code)
+                files["server/index.js"] = code.replace("/:id/resumez", "/:id/resumes")
+                metadata = dict(bundle.metadata)
+                metadata["llmRepair"] = {
+                    "used": True,
+                    "files": ["server/index.js"],
+                }
+                return GeneratedBundle(
+                    files=files,
+                    summary="fake LLM repaired",
+                    metadata=metadata,
+                )
+
+        self_test = self
+        runner = FullstackGraphRunner(
+            sandbox,
+            event_sink=buffer,
+            backend_llm=_FakeLLMBackendCoder(),
+        )
+
+        from ai_core.fullstack import graph as graph_module
+
+        real_generator = generate_backend_bundle
+        template_calls = {"count": 0}
+
+        def generate_with_bad_join(*args, **kwargs):
+            bundle = real_generator(*args, **kwargs)
+            template_calls["count"] += 1
+            files = dict(bundle.files)
+            files["server/index.js"] = files["server/index.js"].replace(
+                "/:id/resumes", "/:id/resumez"
+            )
+            return GeneratedBundle(
+                files=files,
+                summary=bundle.summary,
+                metadata=bundle.metadata,
+            )
+
+        with patch.object(
+            graph_module,
+            "generate_backend_bundle",
+            side_effect=generate_with_bad_join,
+        ):
+            result = runner.run(
+                {
+                    "run_id": "fsk_llm_repair",
+                    "project_id": "proj_fullstack",
+                    "sandbox_id": sandbox.handle.sandbox_id,
+                    "preview_url": sandbox.handle.preview_url,
+                    "contract": contract,
+                    "files": [],
+                }
+            )
+
+        # 模板跑了两次（首次 + 重试），第二次仍错误，由 LLM 修复。
+        self.assertEqual(template_calls["count"], 2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["attempt"], 1)
+        self.assertEqual(calls[0]["max_attempts"], 2)
+        self.assertEqual(calls[0]["contract"].database_ddl, contract.database_ddl)
+        self.assertTrue(calls[0]["dba_schema"])
+        feedback = "\n".join(calls[0]["diagnostics"])
+        self.assertIn("resumez", feedback)
+        self.assertIn("JOIN", feedback.upper())
+        self.assertIn("/:id/resumez", calls[0]["bundle"].files["server/index.js"])
+        self.assertEqual(result["llm_repair_count"], 1)
+
+        self.assertNotIn("resumez", sandbox.files["server/index.js"])
+        self.assertIn("/api/v1/users/:id/resumes", sandbox.files["server/index.js"])
+        self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/api/health")])
+
+        repair_events = [
+            event
+            for event in buffer.snapshot()
+            if event.type == "fullstack.applier.llm_repair"
+        ]
+        self.assertEqual(len(repair_events), 1)
+        self.assertEqual(repair_events[0].payload["status"], "SUCCEEDED")
+        self.assertEqual(repair_events[0].payload["files"], ["server/index.js"])
+
+    def test_llm_repair_failure_falls_back_to_template(self) -> None:
+        """LLM 不可用/失败时不得伪装修复：Applier 继续拦截并最终报错。"""
+
+        class _BrokenLLM:
+            available = True
+
+            def repair(self, **kwargs):
+                raise RuntimeError("model timeout")
+
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        buffer = RunEventBuffer("fsk_llm_repair_failed")
+        runner = FullstackGraphRunner(
+            sandbox,
+            event_sink=buffer,
+            backend_llm=_BrokenLLM(),
+        )
+
+        from ai_core.fullstack import graph as graph_module
+
+        real_generator = generate_backend_bundle
+
+        def generate_with_bad_join(*args, **kwargs):
+            bundle = real_generator(*args, **kwargs)
+            files = dict(bundle.files)
+            files["server/index.js"] = files["server/index.js"].replace(
+                "/:id/resumes", "/:id/resumez"
+            )
+            return GeneratedBundle(
+                files=files,
+                summary=bundle.summary,
+                metadata=bundle.metadata,
+            )
+
+        with patch.object(
+            graph_module,
+            "generate_backend_bundle",
+            side_effect=generate_with_bad_join,
+        ):
+            with self.assertRaises(Exception) as ctx:
+                runner.run(
+                    {
+                        "run_id": "fsk_llm_repair_failed",
+                        "project_id": "proj_fullstack",
+                        "sandbox_id": sandbox.handle.sandbox_id,
+                        "preview_url": sandbox.handle.preview_url,
+                        "contract": _master_detail_contract(),
+                        "files": [],
+                    }
+                )
+
+        self.assertIn("Applier AST 门禁连续拦截", str(ctx.exception))
+        # 沙盒从未写入被拦截的 server/index.js。
+        self.assertNotIn("server/index.js", sandbox.files)
+        failed_events = [
+            event
+            for event in buffer.snapshot()
+            if event.type == "fullstack.applier.llm_repair"
+            and event.payload["status"] == "FAILED"
+        ]
+        self.assertEqual(len(failed_events), 2)
+
+    def test_consistency_join_repair_passes_feedback_to_llm(self) -> None:
+        """一致性检查发现 JOIN 关系错位时，同样把诊断交给 LLM。
+
+        Applier 静态门禁通常会更早拦截同类错误；这里注入一致性报告，
+        单独验证 ``ConsistencyVerifier -> applier_feedback -> LLM`` 链路。
+        """
+
+        class _RecordingLLM:
+            available = True
+
+            def __init__(self) -> None:
+                self.diagnostics: list[list[str]] = []
+
+            def repair(self, *, bundle, diagnostics, **kwargs):
+                self.diagnostics.append(list(diagnostics))
+                return bundle
+
+        llm = _RecordingLLM()
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        buffer = RunEventBuffer("fsk_join_feedback")
+        runner = FullstackGraphRunner(
+            sandbox,
+            event_sink=buffer,
+            backend_llm=llm,
+        )
+
+        from ai_core.fullstack import graph as graph_module
+        from ai_core.fullstack.consistency import (
+            BackendRoute,
+            ConsistencyIssue,
+            ConsistencyReport,
+        )
+
+        bad_report = ConsistencyReport(
+            calls_checked=1,
+            backend_routes=(BackendRoute("GET", "/api/v1/users"),),
+            issues=(
+                ConsistencyIssue(
+                    kind="join_schema",
+                    component="BackendCoder",
+                    method="",
+                    path="server/index.js",
+                    message=(
+                        "JOIN 报错：resumez 字段不存在；include 别名必须与 "
+                        "RELATIONS 的 as 完全一致"
+                    ),
+                    suggestion="按 relations 重建 include 与嵌套路由",
+                    fix_action="REPAIR_BACKEND_JOIN",
+                ),
+            ),
+        )
+        original = graph_module.verify_consistency
+        calls: list[int] = []
+
+        def fake_verify(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                return bad_report
+            return original(*args, **kwargs)
+
+        with patch.object(graph_module, "verify_consistency", side_effect=fake_verify):
+            runner.run(
+                {
+                    "run_id": "fsk_join_feedback",
+                    "project_id": "proj_fullstack",
+                    "sandbox_id": sandbox.handle.sandbox_id,
+                    "preview_url": sandbox.handle.preview_url,
+                    "contract": _master_detail_contract(),
+                    "files": [],
+                }
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(llm.diagnostics), 1)
+        self.assertTrue(any("resumez" in item for item in llm.diagnostics[0]))
+        repairs = [
+            event
+            for event in buffer.snapshot()
+            if event.type == "fullstack.consistency.repair"
+        ]
+        self.assertEqual(len(repairs), 1)
+        self.assertEqual(repairs[0].payload["reason"], "JOIN_SCHEMA_MISMATCH")
+        self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/api/health")])
+
     def test_applier_blocks_bad_join_then_backend_self_heals(self) -> None:
         """E2E：JOIN 别名写错 -> Applier 拦截 -> 代码缺陷 -> 重试成功。
 

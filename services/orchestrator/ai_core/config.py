@@ -229,6 +229,13 @@ class Settings(BaseSettings):
     schema_mcp_strict: bool = True
 
     # ------------------------------------------------------------
+    # BackendCoder LLM 自愈
+    # ------------------------------------------------------------
+    # 模板默认生成；仅当 Applier 判为 CODE_DEFECT / 一致性要求重建 JOIN
+    # 时，才把诊断反馈交给 LLM 重写 server/index.js。关闭后退化为纯模板。
+    fullstack_llm_repair_enabled: bool = True
+
+    # ------------------------------------------------------------
     # Architect（M2.5 全栈架构澄清与 Path 生成）
     # ------------------------------------------------------------
     architect_confidence_threshold: float = 0.85
