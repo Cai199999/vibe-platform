@@ -13,6 +13,8 @@
    - 契约路由是否真的出现在后端；
    - 上传业务是否引入 multer 类中间件与文件字段；
    - 存在 API 交互时前端是否有成功态提示；
+   - ``semantic.runtime: true`` 的用例再做真实容器验收：
+     真实 multipart 上传回读 + 宿主机 MySQL 建表/CRUD/直连查库；
 5. 输出“业务通过率 / 契约理解准确率 / 产物语义通过率”，并写 Markdown。
 
 运行::
@@ -96,6 +98,7 @@ class CaseSpec:
     run_fullstack: bool
     requires_upload: bool
     requires_success_state: bool
+    runtime: bool
 
 
 @dataclass
@@ -199,6 +202,7 @@ def load_cases(path: Path) -> list[CaseSpec]:
                 requires_success_state=bool(
                     semantic.get("requires_success_state", False)
                 ),
+                runtime=bool(semantic.get("runtime", False)),
             )
         )
         if not cases[-1].prompt:
@@ -361,8 +365,19 @@ def singular(name: str) -> str:
 
 
 def table_matches(actual: str, expected: str) -> bool:
-    return actual.casefold() == expected.casefold() or singular(actual) == singular(
-        expected
+    """表名语义匹配：允许复数与业务前后缀。
+
+    模型可能把 ``resumes`` 命名为 ``resume_submissions``，
+    只要单数化后的词元互为前缀就视为同一业务实体。
+    """
+    actual_name = singular(actual.casefold())
+    expected_name = singular(expected.casefold())
+    if actual_name == expected_name:
+        return True
+    actual_tokens = actual_name.split("_")
+    expected_tokens = expected_name.split("_")
+    return actual_tokens[: len(expected_tokens)] == expected_tokens or (
+        expected_tokens[: len(actual_tokens)] == actual_tokens
     )
 
 
@@ -462,12 +477,70 @@ def contract_checks(case: CaseSpec, contract: dict[str, Any]) -> list[Check]:
     return checks
 
 
+def runtime_checks(
+    contract: dict[str, Any],
+    package_root: Path,
+    collection_path: str | None,
+) -> list[Check]:
+    """可选：对生成产物做真实容器运行验收（SQLite + multipart + MySQL）。
+
+    只在用例声明 ``semantic.runtime: true`` 时执行，避免整套 Eval 每条都
+    docker build。复用 ``acceptance_test`` 的实现，保证与全栈产物验收
+    完全同一条链路。
+    """
+    report = acceptance.Report()
+    containers: list[str] = []
+    tag = ""
+    try:
+        if not acceptance.ensure_docker(report):
+            return [
+                Check(
+                    "真实运行验收",
+                    False,
+                    "; ".join(report.failures) or "docker 不可用",
+                    category="artifact",
+                )
+            ]
+        tag = acceptance.docker_build(package_root, report) or ""
+        if tag:
+            sqlite_container = acceptance.docker_run_and_verify_sqlite(
+                tag,
+                collection_path,
+                package_root,
+                contract,
+                report,
+            )
+            if sqlite_container:
+                containers.append(sqlite_container)
+            if acceptance.MYSQL_ENABLED:
+                mysql_container = acceptance.docker_run_and_verify_mysql(
+                    tag,
+                    collection_path,
+                    report,
+                )
+                if mysql_container:
+                    containers.append(mysql_container)
+            else:
+                print("   - ACCEPTANCE_MYSQL=0，跳过真实 MySQL 验收")
+    finally:
+        acceptance.cleanup_docker(containers, tag)
+    return [
+        Check(
+            "真实运行验收",
+            not report.failures,
+            "; ".join(report.failures) or "SQLite / multipart / MySQL 全链路通过",
+            category="artifact",
+        )
+    ]
+
+
 def artifact_checks(
     case: CaseSpec,
     contract: dict[str, Any],
     run_id: str,
     sandbox_id: str,
     work_dir: Path,
+    collection_path: str | None = None,
 ) -> list[Check]:
     checks: list[Check] = []
     archive_path = work_dir / "project-export.tar.gz"
@@ -508,6 +581,8 @@ def artifact_checks(
             category="artifact",
         )
     )
+    if case.runtime:
+        checks.extend(runtime_checks(contract, package_root, collection_path))
     return checks
 
 
@@ -563,7 +638,14 @@ def run_case(case: CaseSpec, provider: str, fullstack_enabled: bool) -> CaseResu
                 if not sandbox_id:
                     raise BusinessEvalError(f"全栈终态缺少 sandboxId: {payload}")
                 result.checks.extend(
-                    artifact_checks(case, contract, run_id, sandbox_id, work_dir)
+                    artifact_checks(
+                        case,
+                        contract,
+                        run_id,
+                        sandbox_id,
+                        work_dir,
+                        payload.get("collectionPath"),
+                    )
                 )
     except Exception as exc:  # noqa: BLE001 - 单用例失败不能中断整套评测
         result.error = str(exc)

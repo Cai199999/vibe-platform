@@ -25,6 +25,7 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒；中间�
 - **Architect 面板收尾**：移除架构确认/随意提问双 Tab，主状态机与影子助手问答合并为统一时间轴，正式提问高亮；正式推进只保留正文“追加修改需求…”，底部仅保留只读助手输入（标题已删），提问绝不触发决策；全栈 SUCCEEDED 且一致性通过后成功卡一键导出 tar.gz。E2E 覆盖路由隔离与真实下载。
 - **全栈产物验收**：新增 `scripts/acceptance_test.py`，生成→导出→安全解压→校验三件套→前后端路由比对→纯净容器 npm build→无 DB env 跑通 SQLite CRUD；生成 Dockerfile 已改为保留 `server/` 层级，修复 `/data` EACCES。
 - **业务 Eval**：`business_cases.yaml` 4 例（纯前端/CRUD/上传），真实 DeepSeek 契约 + 产物语义断言 4/4；上传契约自动注入 multer，构建前安装 `server/` 依赖。
+- **P0 真实业务验收（2026-11-11）**：验收脚本新增真实 `multipart/form-data` 上传→静态回读→字节比对，以及宿主机 MySQL 临时库建表/CRUD/直连查行；业务 Eval `semantic.runtime` 复用同一链路，`biz_003` 100% 通过（101.9s / ¥0.0289）。实测修复：Dockerfile 二次 COPY 后 uploads/data `EACCES`、`resume_file_*` 字段漏映射、上传响应缺标准 `upload` 元数据、常量路由解析、表名语义匹配。
 
 ## 真假边界
 
@@ -32,4 +33,4 @@ DeepSeek=真实调用+Eval；鉴权=Mock Token；持久化=BFF 无 DB；中间�
 
 ## 下一步
 
-P0 全栈真实业务验收（multipart/MySQL/多服务）；P1 业务 Eval 扩至 15–20 例、圈选精度、Redis checkpoint；P2 部署按钮；P3 M3.2 知识中台。
+P0 剩余：生成产物多服务编排（web/api/db），multipart + MySQL 同请求落库；P1 业务 Eval 扩至 15–20 例、圈选精度、Redis checkpoint；P2 部署按钮；P3 M3.2 知识中台。

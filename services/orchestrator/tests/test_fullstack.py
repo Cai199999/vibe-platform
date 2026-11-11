@@ -392,6 +392,7 @@ class CoderTests(unittest.TestCase):
         # 普通 CRUD 契约不得被强行注入上传依赖。
         self.assertNotIn("multer", code)
         self.assertNotIn('"multer"', package)
+        self.assertNotIn("__UPLOAD_RESPONSE_FIELDS__", code)
 
     def test_backend_bundle_adds_multer_for_upload_contract(self) -> None:
         ddl = (
@@ -435,10 +436,57 @@ class CoderTests(unittest.TestCase):
         self.assertIn('body["file_path"] = `/uploads/${request.file.filename}`', code)
         self.assertIn('body["file_size"] = request.file.size', code)
         self.assertIn('"multer": "2.5.0"', bundle.files["server/package.json"])
+        self.assertIn("upload: {", code)
+        self.assertNotIn("__UPLOAD_RESPONSE_FIELDS__", code)
         self.assertTrue(bundle.metadata["upload"]["enabled"])
         self.assertEqual(
             bundle.metadata["upload"]["fileColumns"]["file_name"], "file_name"
         )
+
+    def test_backend_bundle_maps_prefixed_upload_columns(self) -> None:
+        """resume_file_name / resume_file_path 等业务前缀字段也必须映射。"""
+        ddl = (
+            "CREATE TABLE resume_submissions (\n"
+            "  id BIGINT PRIMARY KEY AUTO_INCREMENT,\n"
+            "  applicant_name VARCHAR(64),\n"
+            "  email VARCHAR(128),\n"
+            "  position VARCHAR(128),\n"
+            "  resume_file_name VARCHAR(255),\n"
+            "  resume_file_path VARCHAR(512),\n"
+            "  resume_file_size BIGINT,\n"
+            "  created_at DATETIME\n"
+            ");"
+        )
+        contract = _contract(
+            contractMarkdown="# 简历投递\n求职者上传 PDF 简历并保存记录。",
+            databaseDdl=ddl,
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/resumes",
+                    response="list",
+                    description="简历列表",
+                ),
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/resumes",
+                    request="multipart/form-data",
+                    response="Resume",
+                    description="上传简历并写入数据库",
+                ),
+            ],
+        )
+        bundle = generate_backend_bundle(contract)
+        code = bundle.files["server/index.js"]
+        self.assertIn('body["resume_file_name"] = request.file.originalname', code)
+        self.assertIn(
+            'body["resume_file_path"] = `/uploads/${request.file.filename}`', code
+        )
+        self.assertIn('body["resume_file_size"] = request.file.size', code)
+        columns = bundle.metadata["upload"]["fileColumns"]
+        self.assertEqual(columns["file_name"], "resume_file_name")
+        self.assertEqual(columns["file_path"], "resume_file_path")
+        self.assertEqual(columns["file_size"], "resume_file_size")
 
     def test_frontend_bundle_patches_main_vite_and_package(self) -> None:
         main = (
@@ -662,6 +710,17 @@ class CoderTests(unittest.TestCase):
         self.assertIn("COPY server/package.json ./server/package.json", dockerfile)
         # 保留 server/ 层级，SQLite 默认写入 /app/data（../data）。
         self.assertIn("COPY server/ ./server", dockerfile)
+        # 第二次 COPY 以 root 写入，必须在 USER node 之前重新 chown；
+        # 否则 multer 上传目录与 SQLite data 目录都会 EACCES。
+        self.assertIn("mkdir -p /app/server/uploads /app/data", dockerfile)
+        self.assertLess(
+            dockerfile.index("COPY server/ ./server"),
+            dockerfile.index("chown -R node:node /app"),
+        )
+        self.assertLess(
+            dockerfile.index("chown -R node:node /app"),
+            dockerfile.index("USER node"),
+        )
         self.assertIn('CMD ["node", "server/index.js"]', dockerfile)
         render = bundle.files["render.yaml"]
         self.assertIn("runtime: docker", render)

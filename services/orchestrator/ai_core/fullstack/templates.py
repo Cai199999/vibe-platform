@@ -454,7 +454,7 @@ __UPLOAD_BODY_PATCH__
   const record = await createRecord(body)
   response.status(201).json({
     ...record,
-    success: true,
+__UPLOAD_RESPONSE_FIELDS__    success: true,
     message: '提交成功，数据已写入数据库',
   })
 })
@@ -610,10 +610,14 @@ ENV NODE_ENV=production
 # 保留 server/ 目录层级：db.js 默认把 SQLite 放在 /app/data，
 # 与沙盒目录结构一致，未配置 DATABASE_URL 时也能直接写库。
 COPY server/package.json ./server/package.json
-RUN cd server && npm install --omit=dev --no-audit --no-fund \
-    && chown -R node:node /app
+RUN cd server && npm install --omit=dev --no-audit --no-fund
 
 COPY server/ ./server
+# 第二次 COPY 以 root 写入，必须在切换用户前再次移交属主；
+# 否则 node 用户无法创建 server/uploads（multer 落盘）与 data/（SQLite），
+# 上传会直接 500 EACCES。
+RUN mkdir -p /app/server/uploads /app/data \
+    && chown -R node:node /app
 USER node
 
 EXPOSE 3000

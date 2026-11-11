@@ -61,17 +61,22 @@ _UPLOAD_INTENT = re.compile(
     re.IGNORECASE,
 )
 _UPLOAD_PATH = re.compile(r"(upload|attachment|file)", re.IGNORECASE)
+# 上传字段允许业务前缀：resume_file_name / resume_file_path / attachment_size
+# 都是契约里常见的写法，不能被漏判成“没有文件字段”。
 _FILE_NAME_COLUMN = re.compile(
-    r"^(file_?name|filename|original_?name|attachment_?name|"
-    r"(resume|file|attachment)_(name|file))$",
+    r"(?:^|_)(?:file_?name|filename|original_?name|attachment_?name)$"
+    r"|^(?:resume|attachment)_(?:name|file)$",
     re.IGNORECASE,
 )
 _FILE_PATH_COLUMN = re.compile(
-    r"^(file_?(path|url|key)|filepath|attachment_?(path|url)|"
-    r"(resume|file)_(path|url|key))$",
+    r"(?:^|_)(?:file_?(?:path|url|key)|filepath|attachment_?(?:path|url))$"
+    r"|^(?:resume|attachment)_(?:path|url|key)$",
     re.IGNORECASE,
 )
-_FILE_SIZE_COLUMN = re.compile(r"^(file_?size|filesize|size)$", re.IGNORECASE)
+_FILE_SIZE_COLUMN = re.compile(
+    r"(?:^|_)(?:file_?size|filesize)$" r"|^(?:resume|attachment)_(?:file_?size|size)$",
+    re.IGNORECASE,
+)
 
 _SQL_IDENTIFIER = re.compile(r"[^a-zA-Z0-9_]")
 _CREATE_TABLE = re.compile(
@@ -633,7 +638,7 @@ def _contract_mentions_upload(contract: ArchitectContract) -> bool:
 
 def _pick_upload_column(columns: Iterable[str], pattern: re.Pattern[str]) -> str | None:
     for column in columns:
-        if pattern.match(column):
+        if pattern.search(column):
             return column
     return None
 
@@ -653,6 +658,7 @@ def build_upload_support(
         "middleware": "",
         "body_patch": "",
         "post_middleware": "",
+        "response_fields": "",
         "dependency": None,
         "file_columns": {},
     }
@@ -708,6 +714,19 @@ def build_upload_support(
                 "app.use('/uploads', express.static(UPLOAD_DIR))\n"
             ),
             "body_patch": body_patch,
+            # 即使契约字段名千奇百怪，响应也始终返回标准 upload 元数据，
+            # 前端与验收脚本无需猜 /uploads/ 地址落在哪个业务字段里。
+            "response_fields": (
+                "    ...(request.file\n"
+                "      ? {\n"
+                "          upload: {\n"
+                "            name: request.file.originalname,\n"
+                "            path: `/uploads/${request.file.filename}`,\n"
+                "            size: request.file.size,\n"
+                "          },\n"
+                "        }\n"
+                "      : {}),\n"
+            ),
             "post_middleware": "upload.single('file'), ",
             "dependency": MULTER_VERSION,
             "file_columns": {
@@ -768,6 +787,18 @@ def _business_route_code(
     else:
         status = 201 if method == "POST" else 200
         message_js = json.dumps(f"{description}（沙盒 Mock 响应）", ensure_ascii=False)
+        # 独立上传动作同样返回标准 upload 元数据，避免前端只能拿到 Mock 字段。
+        upload_data = (
+            ", request.file\n"
+            "      ? { upload: {\n"
+            "          name: request.file.originalname,\n"
+            "          path: `/uploads/${request.file.filename}`,\n"
+            "          size: request.file.size,\n"
+            "        } }\n"
+            "      : {}"
+            if upload_enabled
+            else ""
+        )
         payload = (
             "  const body = request.body && typeof request.body === 'object'"
             " ? { ...request.body } : {}\n"
@@ -776,7 +807,8 @@ def _business_route_code(
             "    success: true,\n"
             f"    route: {label_js},\n"
             f"    description: {description_js},\n"
-            "    data: Object.assign({ id: `mock-${Date.now()}` }, body),\n"
+            f"    data: Object.assign({{ id: `mock-${{Date.now()}}` }}, body"
+            f"{upload_data}),\n"
             f"    message: {message_js},\n"
             "  })\n"
         )
@@ -832,6 +864,7 @@ def generate_backend_bundle(
         "__UPLOAD_IMPORTS__": upload["imports"],
         "__UPLOAD_MIDDLEWARE__": upload["middleware"],
         "__UPLOAD_BODY_PATCH__": upload["body_patch"],
+        "__UPLOAD_RESPONSE_FIELDS__": upload["response_fields"],
         "__COLLECTION_POST_MIDDLEWARE__": upload["post_middleware"],
     }
     server_code = EXPRESS_SERVER_TEMPLATE

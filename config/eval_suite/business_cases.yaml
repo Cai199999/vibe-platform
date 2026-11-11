@@ -20,6 +20,8 @@
 #   run_fullstack             是否继续生成并导出可部署产物
 #   semantic.requires_upload  是否断言上传中间件与文件字段
 #   semantic.requires_success_state 是否断言前端成功态提示
+#   semantic.runtime          是否对产物做真实容器运行验收
+#                             （SQLite + 真实 multipart + 真实 MySQL）
 # ============================================================
 
 - id: "biz_001"
@@ -117,6 +119,7 @@
   semantic:
     requires_upload: true
     requires_success_state: true
+    runtime: true
 
 - id: "biz_004"
   name: "待办事项 CRUD"

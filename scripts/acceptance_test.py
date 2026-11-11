@@ -15,7 +15,12 @@
   5. 文本比对前端 fetch 路径与后端实际路由，提示 404 风险；
   6. 在 node:22-alpine 纯净容器内执行 ``npm install`` / ``npm run build``；
   7. ``docker build`` 生成镜像，运行时不注入任何数据库环境变量，
-     验证 SQLite 回退可自动建表、健康检查与 CRUD 均正常。
+     验证 SQLite 回退可自动建表、健康检查与 CRUD 均正常；
+     若契约要求上传，再发送真实 ``multipart/form-data`` 请求，
+     校验文件落盘、静态 URL 可回读且内容逐字节一致；
+  8. 注入宿主机 MySQL（复用 ``~/Workspace/infra``，自动创建临时库），
+     验证 Sequelize 真实建表 / CRUD，并用宿主机连接直接查库，
+     证明数据确实写入 MySQL 而非仅回显。
 
 全程通过打印::
 
@@ -28,7 +33,12 @@
   - ``AI_BASE_URL``：默认 Java BFF ``http://127.0.0.1:8080``；
   - ``ACCEPTANCE_KEEP=1``：保留临时目录用于排查；
   - ``ACCEPTANCE_NPM_TIMEOUT``：npm 阶段超时秒数，默认 900；
-  - ``ACCEPTANCE_BUILD_TIMEOUT``：docker build 超时秒数，默认 900。
+  - ``ACCEPTANCE_BUILD_TIMEOUT``：docker build 超时秒数，默认 900；
+  - ``ACCEPTANCE_MYSQL=0``：跳过真实 MySQL 验收（默认执行）；
+  - ``ACCEPTANCE_MYSQL_HOST/PORT/USER/PASSWORD``：宿主机 MySQL 连接信息，
+    默认 ``127.0.0.1:3306`` / ``root`` / ``root``；
+  - ``ACCEPTANCE_MYSQL_CONTAINER_HOST``：容器内访问宿主机的地址，
+    默认 ``host.docker.internal``（通过 ``--add-host`` 注入）。
 """
 
 from __future__ import annotations
@@ -61,6 +71,16 @@ NPM_TIMEOUT = float(os.environ.get("ACCEPTANCE_NPM_TIMEOUT", "900"))
 BUILD_TIMEOUT = float(os.environ.get("ACCEPTANCE_BUILD_TIMEOUT", "900"))
 KEEP_WORKDIR = os.environ.get("ACCEPTANCE_KEEP") == "1"
 VERBOSE = os.environ.get("ACCEPTANCE_VERBOSE") == "1"
+MYSQL_ENABLED = os.environ.get("ACCEPTANCE_MYSQL", "1") != "0"
+MYSQL_HOST = os.environ.get("ACCEPTANCE_MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = int(os.environ.get("ACCEPTANCE_MYSQL_PORT", "3306"))
+MYSQL_USER = os.environ.get("ACCEPTANCE_MYSQL_USER", "root")
+MYSQL_PASSWORD = os.environ.get("ACCEPTANCE_MYSQL_PASSWORD", "root")
+# 容器访问宿主机 MySQL 的地址；Linux 下由 --add-host host-gateway 提供。
+MYSQL_CONTAINER_HOST = os.environ.get(
+    "ACCEPTANCE_MYSQL_CONTAINER_HOST", "host.docker.internal"
+)
+MYSQL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 REQUIRED_FILES = ("DEPLOY.md", "Dockerfile", "render.yaml")
@@ -997,112 +1017,499 @@ def wait_health(base_url: str, container: str, timeout: float = 90) -> dict[str,
     )
 
 
-def docker_run_and_verify(
+def start_container(
+    tag: str,
+    report: Report,
+    *,
+    env: dict[str, str] | None = None,
+    extra_args: list[str] | None = None,
+) -> tuple[str, str] | None:
+    """启动验收容器并等待端口映射，返回 ``(container, base_url)``。"""
+    container = f"vibe-acceptance-run-{uuid.uuid4().hex[:8]}"
+    command = [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        container,
+        "--label",
+        "vibe.acceptance=1",
+        "-p",
+        "127.0.0.1::3000",
+    ]
+    command.extend(extra_args or [])
+    for key, value in (env or {}).items():
+        command.extend(["-e", f"{key}={value}"])
+    command.append(tag)
+
+    proc = run_command(command, timeout=60)
+    if proc.returncode != 0:
+        report.fail(format_command_failure("docker run ", proc))
+        return None
+
+    port = ""
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not port:
+        port_proc = run_command(["docker", "port", container, "3000/tcp"], timeout=10)
+        output = (port_proc.stdout or "").strip().splitlines()
+        if output:
+            port = output[0].rsplit(":", 1)[-1]
+        else:
+            time.sleep(0.5)
+    if not port:
+        report.fail("docker port 未返回 3000 映射")
+        run_command(["docker", "rm", "-f", container], timeout=30)
+        return None
+    return container, f"http://127.0.0.1:{port}"
+
+
+def check_forbidden_db_env(container: str, report: Report) -> bool:
+    """确认容器没有夹带外部数据库配置；返回 True 表示检查通过。"""
+    forbidden = [
+        item
+        for item in container_env(container)
+        if FORBIDDEN_DB_ENV.match(item.split("=", 1)[0])
+    ]
+    if forbidden:
+        report.fail(f"容器携带数据库环境变量: {', '.join(forbidden)}")
+        return False
+    return True
+
+
+def verify_health(
+    base_url: str,
+    container: str,
+    report: Report,
+    *,
+    storage: str,
+    runtime: str,
+) -> dict[str, Any] | None:
+    health = wait_health(base_url, container)
+    if health.get("status") != "ok":
+        report.fail(f"健康检查 status 异常: {health}")
+        return None
+    if health.get("storage") != storage:
+        report.fail(f"期望 storage={storage}，实际 {health}")
+        return None
+    if health.get("runtime") != runtime:
+        report.fail(f"期望 runtime={runtime}，实际 {health}")
+        return None
+    return health
+
+
+def verify_crud(
+    base_url: str,
+    collection: str,
+    report: Report,
+) -> dict[str, Any] | None:
+    """GET 列表 + POST 新增 + 再 GET 校验，返回新增记录。"""
+    status, listing = http_json(f"{base_url}{collection}")
+    if status != 200:
+        report.fail(f"GET {collection} -> HTTP {status}: {listing}")
+        return None
+    name = f"acceptance-{uuid.uuid4().hex[:8]}"
+    status, created = http_json(
+        f"{base_url}{collection}",
+        method="POST",
+        payload={"name": name, "title": name, "status": "todo"},
+    )
+    if status not in (200, 201) or not isinstance(created, dict):
+        report.fail(f"POST {collection} -> HTTP {status}: {created}")
+        return None
+    record_id = created.get("id")
+    status, listing = http_json(f"{base_url}{collection}")
+    items = listing.get("items") if isinstance(listing, dict) else listing
+    if status != 200 or not isinstance(items, list):
+        report.fail(f"再次 GET {collection} 失败: HTTP {status} {listing}")
+        return None
+    if record_id is not None and not any(
+        isinstance(item, dict) and item.get("id") == record_id for item in items
+    ):
+        report.fail(f"写入后未在列表查到记录 id={record_id}")
+        return None
+    report.ok(f"CRUD 正常：{collection} GET/POST 已落库（id={record_id}）")
+    return created
+
+
+# ------------------------------------------------------------
+# 3.1 真实 multipart 上传
+# ------------------------------------------------------------
+UPLOAD_ROUTE_PATTERN = re.compile(
+    r"app\.(post|put|patch)\(\s*"
+    r"(?:(?P<quote>['\"`])(?P<literal>[^'\"`]+)(?P=quote)"
+    r"|(?P<identifier>[A-Za-z_$][\w$]*))"
+    r"\s*,\s*upload\.single\(\s*"
+    r"(?P<fieldquote>['\"`])(?P<field>[^'\"`]+)(?P=fieldquote)",
+    re.IGNORECASE,
+)
+STRING_CONSTANT_PATTERN = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*" r"(['\"`])([^'\"`]+)\2"
+)
+
+
+def find_upload_route(
+    package_root: Path,
+    preferred_path: str | None = None,
+) -> tuple[str, str, str] | None:
+    """从生成的 ``server/index.js`` 提取 multer 挂载的 ``(method, path, field)``。
+
+    契约上传路由有时就是集合路径（POST /api/v1/resumes 同时接收文件与字段），
+    有时是独立动作路径；优先返回集合路径，保证拿到真正落库的那条。
+
+    模板里的路由也可能写成 ``app.post(COLLECTION_PATH, upload.single('file'))``，
+    因此需要把字符串常量解析回真实路径，不能只匹配字面量。
+    """
+    index_file = package_root / "server" / "index.js"
+    if not index_file.is_file():
+        return None
+    text = index_file.read_text(encoding="utf-8", errors="replace")
+    constants = {
+        match.group(1): match.group(3)
+        for match in STRING_CONSTANT_PATTERN.finditer(text)
+    }
+    matches: list[tuple[str, str, str]] = []
+    for match in UPLOAD_ROUTE_PATTERN.finditer(text):
+        path = match.group("literal")
+        if path is None:
+            path = constants.get(match.group("identifier") or "")
+        if not path:
+            continue
+        matches.append((match.group(1).upper(), path, match.group("field")))
+    if not matches:
+        return None
+    if preferred_path:
+        for item in matches:
+            if normalize_route(item[1]) == normalize_route(preferred_path):
+                return item
+    return matches[0]
+
+
+def iter_strings(value: Any) -> list[str]:
+    """递归收集 JSON 中的所有字符串，用于定位上传后的文件 URL。"""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [item for child in value.values() for item in iter_strings(child)]
+    if isinstance(value, list):
+        return [item for child in value for item in iter_strings(child)]
+    return []
+
+
+def http_multipart(
+    url: str,
+    *,
+    field: str,
+    filename: str,
+    content: bytes,
+    fields: dict[str, str] | None = None,
+) -> tuple[int, Any]:
+    """构造并发送真实 multipart/form-data 请求。"""
+    boundary = f"----vibeaccept{uuid.uuid4().hex}"
+    chunks: list[bytes] = []
+    for name, value in (fields or {}).items():
+        chunks.append(
+            (
+                f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"'
+                f"\r\n\r\n{value}\r\n"
+            ).encode("utf-8")
+        )
+    chunks.append(
+        (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; '
+            f'filename="{filename}"\r\nContent-Type: application/octet-stream'
+            "\r\n\r\n"
+        ).encode("utf-8")
+        + content
+        + b"\r\n"
+    )
+    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+    request = urllib_request.Request(
+        url,
+        data=b"".join(chunks),
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=30) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            return response.status, json.loads(body) if body else None
+    except urllib_error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            return exc.code, json.loads(body)
+        except json.JSONDecodeError:
+            return exc.code, body
+    except urllib_error.URLError as exc:
+        return 0, str(exc)
+
+
+def contract_requires_upload(contract: dict[str, Any]) -> bool:
+    """与 ``check_business_semantics`` 保持一致的上传意图判断。"""
+    return bool(UPLOAD_INTENT_PATTERN.search(_contract_text(contract)))
+
+
+def verify_upload(
+    base_url: str,
+    package_root: Path,
+    report: Report,
+    *,
+    preferred_path: str | None = None,
+) -> None:
+    """发送真实 multipart 请求，并回读静态文件校验内容。"""
+    route = find_upload_route(package_root, preferred_path)
+    if not route:
+        report.fail(
+            "契约要求文件上传，但生成代码中未找到 "
+            "upload.single(...) 挂载的 POST/PUT/PATCH 路由"
+        )
+        return
+    method, path, field = route
+    if method != "POST":
+        report.fail(f"上传路由方法异常: {method} {path}")
+        return
+
+    filename = f"acceptance-{uuid.uuid4().hex[:8]}.pdf"
+    content = b"%PDF-1.4\n% vibe acceptance upload\n"
+    status, payload = http_multipart(
+        f"{base_url}{path}",
+        field=field,
+        filename=filename,
+        content=content,
+        fields={
+            "name": "验收用户",
+            "email": "acceptance@example.com",
+            "position": "QA",
+        },
+    )
+    if status not in (200, 201):
+        report.fail(f"multipart POST {path} -> HTTP {status}: {payload}")
+        return
+
+    upload_urls = [value for value in iter_strings(payload) if "/uploads/" in value]
+    if not upload_urls:
+        report.fail(f"上传响应未返回 /uploads/ 文件地址: {payload}")
+        return
+    upload_url = upload_urls[0]
+    try:
+        with urllib_request.urlopen(f"{base_url}{upload_url}", timeout=15) as response:
+            stored = response.read()
+    except urllib_error.URLError as exc:
+        report.fail(f"上传文件静态回读失败 {upload_url}: {exc}")
+        return
+    if stored != content:
+        report.fail(
+            f"上传文件内容不一致: 期望 {len(content)} 字节，实际 {len(stored)} 字节"
+        )
+        return
+    report.ok(f"multipart 上传真实落盘：POST {path} -> {upload_url}，回读一致")
+
+
+# ------------------------------------------------------------
+# 3.2 真实 MySQL 持久化
+# ------------------------------------------------------------
+def _pymysql() -> Any:
+    try:
+        import pymysql
+    except ImportError as exc:  # pragma: no cover - 依赖缺失时给出明确指令
+        raise AcceptanceFailure(
+            "缺少 pymysql，无法执行真实 MySQL 验收（pip install pymysql）"
+        ) from exc
+    return pymysql
+
+
+def mysql_provision(report: Report) -> str | None:
+    """在宿主机 MySQL 创建一次性验收库，返回库名。"""
+    pymysql = _pymysql()
+    database = f"vibe_acc_{uuid.uuid4().hex[:8]}"
+    try:
+        connection = pymysql.connect(
+            host=MYSQL_HOST,
+            port=MYSQL_PORT,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            connect_timeout=5,
+            autocommit=True,
+        )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"CREATE DATABASE `{database}` CHARACTER SET utf8mb4 "
+                "COLLATE utf8mb4_unicode_ci"
+            )
+        connection.close()
+    except Exception as exc:  # noqa: BLE001 - 连接失败统一转为验收结论
+        report.fail(
+            f"连接宿主机 MySQL 失败（{MYSQL_HOST}:{MYSQL_PORT}）: {exc}；"
+            "确认 ~/Workspace/infra 已启动，或设置 ACCEPTANCE_MYSQL=0 跳过"
+        )
+        return None
+    return database
+
+
+def mysql_drop(database: str) -> None:
+    if not MYSQL_IDENTIFIER.match(database):
+        return
+    try:
+        pymysql = _pymysql()
+        connection = pymysql.connect(
+            host=MYSQL_HOST,
+            port=MYSQL_PORT,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            connect_timeout=5,
+            autocommit=True,
+        )
+        with connection.cursor() as cursor:
+            cursor.execute(f"DROP DATABASE IF EXISTS `{database}`")
+        connection.close()
+    except Exception:  # noqa: BLE001 - 清理失败不影响主结论
+        print(f"   ! 清理 MySQL 临时库失败（可手动删除）: {database}")
+
+
+def mysql_fetch_row(database: str, table: str, record_id: Any) -> dict[str, Any] | None:
+    """用宿主机连接直接查库，证明 API 写的是真 MySQL。"""
+    if not MYSQL_IDENTIFIER.match(table):
+        raise AcceptanceFailure(f"非法表名，拒绝查询: {table}")
+    pymysql = _pymysql()
+    connection = pymysql.connect(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=database,
+        connect_timeout=5,
+        cursorclass=pymysql.cursors.DictCursor,
+    )
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(f"SELECT * FROM `{table}` WHERE `id` = %s", (record_id,))
+            return cursor.fetchone()
+    finally:
+        connection.close()
+
+
+def docker_run_and_verify_sqlite(
     tag: str,
     collection_path: str | None,
+    package_root: Path,
+    contract: dict[str, Any],
     report: Report,
-) -> tuple[str, str] | None:
-    """启动无数据库配置的容器，验证 SQLite 自动建表与 CRUD。"""
-    container = f"vibe-acceptance-run-{uuid.uuid4().hex[:8]}"
+) -> str | None:
+    """无数据库配置启动，验证 SQLite 回退 + 真实 multipart 上传。"""
+    started = start_container(tag, report)
+    if not started:
+        return None
+    container, base_url = started
     keep_container = False
     try:
-        proc = run_command(
-            [
-                "docker",
-                "run",
-                "-d",
-                "--name",
-                container,
-                "--label",
-                "vibe.acceptance=1",
-                # 只映射端口，不传任何 DATABASE_URL / DB_* 环境变量。
-                "-p",
-                "127.0.0.1::3000",
-                tag,
-            ],
-            timeout=60,
+        if not check_forbidden_db_env(container, report):
+            return None
+        health = verify_health(
+            base_url,
+            container,
+            report,
+            storage="sqlite",
+            runtime="express-sqlite",
         )
-        if proc.returncode != 0:
-            report.fail(format_command_failure("docker run ", proc))
-            return None
-
-        # 确认镜像/容器没有夹带外部数据库配置。
-        forbidden = [
-            item
-            for item in container_env(container)
-            if FORBIDDEN_DB_ENV.match(item.split("=", 1)[0])
-        ]
-        if forbidden:
-            report.fail(f"容器携带数据库环境变量: {', '.join(forbidden)}")
-            return None
-
-        port = ""
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline and not port:
-            port_proc = run_command(
-                ["docker", "port", container, "3000/tcp"],
-                timeout=10,
-            )
-            output = (port_proc.stdout or "").strip().splitlines()
-            if output:
-                port = output[0].rsplit(":", 1)[-1]
-            else:
-                time.sleep(0.5)
-        if not port:
-            report.fail("docker port 未返回 3000 映射")
-            return None
-
-        base_url = f"http://127.0.0.1:{port}"
-        health = wait_health(base_url, container)
-        if health.get("status") != "ok":
-            report.fail(f"健康检查 status 异常: {health}")
-            return None
-        if health.get("storage") != "sqlite":
-            report.fail(f"未回退到 SQLite: {health}")
-            return None
-        if health.get("runtime") != "express-sqlite":
-            report.fail(f"运行时不是 express-sqlite: {health}")
+        if health is None:
             return None
         report.ok(
             "无数据库配置启动成功："
             f"storage={health.get('storage')} runtime={health.get('runtime')} "
             f"db={health.get('dbPath')}"
         )
-
-        collection = collection_path or "/api/data"
-        status, listing = http_json(f"{base_url}{collection}")
-        if status != 200:
-            report.fail(f"GET {collection} -> HTTP {status}: {listing}")
+        if verify_crud(base_url, collection_path or "/api/data", report) is None:
             return None
-        name = f"acceptance-{uuid.uuid4().hex[:8]}"
-        status, created = http_json(
-            f"{base_url}{collection}",
-            method="POST",
-            payload={"name": name, "title": name, "status": "todo"},
-        )
-        if status not in (200, 201):
-            report.fail(f"POST {collection} -> HTTP {status}: {created}")
-            return None
-        record_id = created.get("id") if isinstance(created, dict) else None
-        status, listing = http_json(f"{base_url}{collection}")
-        items = listing.get("items") if isinstance(listing, dict) else listing
-        if status != 200 or not isinstance(items, list):
-            report.fail(f"再次 GET {collection} 失败: HTTP {status} {listing}")
-            return None
-        if record_id is not None and not any(
-            isinstance(item, dict) and item.get("id") == record_id for item in items
-        ):
-            report.fail(f"SQLite 写入后未查到记录 id={record_id}")
-            return None
-        report.ok(f"SQLite CRUD 正常：{collection} GET/POST 已落库")
+        if contract_requires_upload(contract):
+            verify_upload(
+                base_url,
+                package_root,
+                report,
+                preferred_path=collection_path,
+            )
         keep_container = True
-        return container, tag
+        return container
     except AcceptanceFailure as exc:
         report.fail(str(exc))
         return None
     finally:
         if not keep_container:
             run_command(["docker", "rm", "-f", container], timeout=30)
+
+
+def docker_run_and_verify_mysql(
+    tag: str,
+    collection_path: str | None,
+    report: Report,
+) -> str | None:
+    """注入宿主机 MySQL，验证 Sequelize 建表 / CRUD / 直连查库。"""
+    database = mysql_provision(report)
+    if not database:
+        return None
+    container = ""
+    keep_container = False
+    try:
+        credentials = (
+            f"{urllib_parse.quote(MYSQL_USER, safe='')}:"
+            f"{urllib_parse.quote(MYSQL_PASSWORD, safe='')}"
+        )
+        database_url = (
+            f"mysql://{credentials}@{MYSQL_CONTAINER_HOST}:{MYSQL_PORT}/"
+            f"{database}?charset=utf8mb4"
+        )
+        started = start_container(
+            tag,
+            report,
+            env={
+                "DATABASE_URL": database_url,
+                "DB_ENGINE": "mysql",
+                # 验收库是空库，允许 ORM 自动建表；生产仍由 migrate 脚本负责。
+                "DB_AUTO_MIGRATE": "true",
+            },
+            extra_args=[
+                "--add-host",
+                f"{MYSQL_CONTAINER_HOST}:host-gateway",
+            ],
+        )
+        if not started:
+            return None
+        container, base_url = started
+        health = verify_health(
+            base_url,
+            container,
+            report,
+            storage="mysql",
+            runtime="express-sequelize-mysql",
+        )
+        if health is None:
+            return None
+        report.ok(
+            f"MySQL ORM 启动成功：table={health.get('table')} "
+            f"records={health.get('records')}"
+        )
+
+        created = verify_crud(base_url, collection_path or "/api/data", report)
+        if created is None:
+            return None
+        record_id = created.get("id")
+        table = str(health.get("table") or "")
+        row = mysql_fetch_row(database, table, record_id)
+        if row is None:
+            report.fail(f"MySQL 直连查询未找到记录：table={table} id={record_id}")
+            return None
+        report.ok(f"MySQL 真实持久化：直连 {database}.{table} 查到 id={record_id}")
+        keep_container = True
+        return container
+    except AcceptanceFailure as exc:
+        report.fail(str(exc))
+        return None
+    finally:
+        if not keep_container and container:
+            run_command(["docker", "rm", "-f", container], timeout=30)
+        # 验收库始终清理，避免污染宿主机 MySQL。
+        mysql_drop(database)
 
 
 # ------------------------------------------------------------
@@ -1125,8 +1532,8 @@ def cleanup_sandbox(sandbox_id: str) -> None:
         print(f"   ! 清理沙盒失败（可手动删除）: {sandbox_id}")
 
 
-def cleanup_docker(container: str | None, tag: str | None) -> None:
-    if container:
+def cleanup_docker(containers: list[str], tag: str | None) -> None:
+    for container in containers:
         run_command(["docker", "rm", "-f", container], timeout=30)
     if tag:
         run_command(["docker", "image", "rm", "-f", tag], timeout=60)
@@ -1139,12 +1546,12 @@ def main() -> int:
     archive_path = work_dir / "project-export.tar.gz"
     package_dir = work_dir / "package"
     sandbox_id = ""
-    container = ""
+    containers: list[str] = []
     image_tag = ""
     docker_ready = ensure_docker(report)
 
     try:
-        stage("1/7 生成全栈代码")
+        stage("1/8 生成全栈代码")
         try:
             run_id, sandbox_id, payload, contract = generate_fullstack()
             print(
@@ -1155,7 +1562,7 @@ def main() -> int:
             report.fail(f"全栈代码生成失败: {exc}")
             return report.finish()
 
-        stage("2/7 下载导出包")
+        stage("2/8 下载导出包")
         try:
             size = download_export(run_id, sandbox_id, archive_path)
             report.ok(f"已下载 project-export.tar.gz（{size / 1024:.1f} KB）")
@@ -1163,7 +1570,7 @@ def main() -> int:
             report.fail(f"导出包下载失败: {exc}")
             return report.finish()
 
-        stage("3/7 解压与必需文件")
+        stage("3/8 解压与必需文件")
         try:
             extract_archive(archive_path, package_dir)
             package_root = resolve_package_root(package_dir)
@@ -1178,7 +1585,7 @@ def main() -> int:
         else:
             report.ok("DEPLOY.md / Dockerfile / render.yaml 均存在")
 
-        stage("4/7 前后端路由一致性")
+        stage("4/8 前后端路由一致性")
         try:
             backend_count, route_issues = check_route_consistency(package_root)
             if route_issues:
@@ -1189,7 +1596,7 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             report.fail(f"路由检查失败: {exc}")
 
-        stage("5/7 业务语义断言")
+        stage("5/8 业务语义断言")
         try:
             semantic_issues = check_business_semantics(package_root, contract)
             if semantic_issues:
@@ -1200,7 +1607,7 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             report.fail(f"业务语义检查失败: {exc}")
 
-        stage("6/7 纯净容器 npm install / build")
+        stage("6/8 纯净容器 npm install / build")
         if not docker_ready:
             report.fail("跳过容器内 npm 与 docker build（docker 不可用）")
         elif not (package_root / "Dockerfile").is_file():
@@ -1209,21 +1616,35 @@ def main() -> int:
             npm_install_and_build(package_root, report)
             image_tag = docker_build(package_root, report) or ""
 
-            stage("7/7 无数据库配置运行 + SQLite 自检")
-            if image_tag:
-                result = docker_run_and_verify(
+            if not image_tag:
+                report.fail("docker build 未产出镜像，跳过运行验收")
+            else:
+                stage("7/8 无数据库配置运行 + SQLite + multipart")
+                sqlite_container = docker_run_and_verify_sqlite(
                     image_tag,
                     payload.get("collectionPath"),
+                    package_root,
+                    contract,
                     report,
                 )
-                if result:
-                    container = result[0]
-            else:
-                report.fail("docker build 未产出镜像，跳过运行验收")
+                if sqlite_container:
+                    containers.append(sqlite_container)
+
+                stage("8/8 真实 MySQL 持久化")
+                if not MYSQL_ENABLED:
+                    print("   - ACCEPTANCE_MYSQL=0，跳过真实 MySQL 验收")
+                else:
+                    mysql_container = docker_run_and_verify_mysql(
+                        image_tag,
+                        payload.get("collectionPath"),
+                        report,
+                    )
+                    if mysql_container:
+                        containers.append(mysql_container)
 
         return report.finish()
     finally:
-        cleanup_docker(container, image_tag)
+        cleanup_docker(containers, image_tag)
         cleanup_sandbox(sandbox_id)
         if KEEP_WORKDIR:
             print(f"\n📁 临时目录已保留: {work_dir}")
