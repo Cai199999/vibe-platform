@@ -271,11 +271,30 @@ function FullstackGeneration({
   contract,
   onGenerate,
   onExport,
+  onReclarify,
   exporting = false,
 }) {
   const state = fullstack ?? {}
   const status = state.status ?? 'IDLE'
   const running = Boolean(state.starting) || status === 'RUNNING'
+  // 契约矛盾与代码缺陷必须分开处理：矛盾时重试生成只会重复失败，
+  // 弹窗直接引导用户回到 Architect 修改契约。
+  const needsClarification =
+    status === 'FAILED' &&
+    Boolean(state.needsClarification) &&
+    (!state.contractId || state.contractId === contract?.contractId)
+  const clarification = state.clarification || {}
+  const clarificationProblems = Array.isArray(clarification.problems)
+    ? clarification.problems
+    : []
+  const clarificationPrompt =
+    clarification.prompt || state.error || '请修改契约后重新澄清'
+  const [clarifyOpen, setClarifyOpen] = useState(false)
+
+  useEffect(() => {
+    // 每个失败 Run 自动弹一次；用户关闭后仍可从错误卡片重新打开。
+    setClarifyOpen(needsClarification)
+  }, [needsClarification, state.runId])
   const steps = Array.isArray(state.steps) ? state.steps : []
   const outputs = Array.isArray(state.outputs) ? state.outputs : []
   const result = state.result
@@ -306,9 +325,11 @@ function FullstackGeneration({
         ? '契约缺少 REST 接口（apiRoutes 为空），已阻止生成；请修订契约补充接口后重新确认。'
         : !hasDdl
           ? '契约缺少数据库 DDL（databaseDdl 为空），已阻止生成；请修订契约补充数据实体后重新确认。'
-          : running
-            ? '全栈代码正在生成，按钮暂时锁定；完成后可重新生成。'
-            : ''
+          : needsClarification
+            ? '契约存在结构性矛盾，重试生成不会成功；请先回到契约修改并重新确认。'
+            : running
+              ? '全栈代码正在生成，按钮暂时锁定；完成后可重新生成。'
+              : ''
   const tooltip = contractReady
     ? running
       ? '生成中，请稍候'
@@ -328,11 +349,15 @@ function FullstackGeneration({
       disabledReason: disabledReason || null,
       starting: Boolean(state.starting),
       contractId: contract?.contractId ?? null,
+      failureKind: state.failureKind ?? null,
+      needsClarification,
     })
   }, [
     status,
     state.starting,
+    state.failureKind,
     running,
+    needsClarification,
     contract?.contractId,
     contract?.status,
     contract?.appShape,
@@ -373,7 +398,7 @@ function FullstackGeneration({
               type="button"
               className="architect-primary architect-fullstack-trigger"
               data-fullstack-generate
-              disabled={!contractReady || running}
+              disabled={!contractReady || running || needsClarification}
               aria-describedby={
                 disabledReason ? 'fullstack-disabled-reason' : undefined
               }
@@ -387,7 +412,7 @@ function FullstackGeneration({
               ) : status === 'SUCCEEDED' ? (
                 '↻ 重新生成全栈代码'
               ) : status === 'FAILED' ? (
-                '↻ 重试生成全栈代码'
+                needsClarification ? '请先修改契约' : '↻ 重试生成全栈代码'
               ) : (
                 '🚀 开始生成全栈代码'
               )}
@@ -407,10 +432,103 @@ function FullstackGeneration({
       </div>
 
       {state.error && (
-        <div className="architect-fullstack-error" role="alert" data-fullstack-error>
-          <strong>全栈生成失败</strong>
+        <div
+          className="architect-fullstack-error"
+          role="alert"
+          data-fullstack-error
+          data-failure-kind={state.failureKind ?? 'CODE'}
+        >
+          <strong>
+            {needsClarification ? '契约存在结构性矛盾' : '全栈生成失败'}
+          </strong>
           <span>{state.error}</span>
+          {state.failureKind === 'CONTRACT' && (
+            <span className="architect-fullstack-error-hint">
+              这不是代码生成缺陷：重试不会修复契约矛盾，请修改契约后重新确认。
+            </span>
+          )}
           {state.errorCode && <code>{state.errorCode}</code>}
+          {needsClarification && (
+            <button
+              type="button"
+              className="architect-ghost"
+              data-contract-reclarify-open
+              onClick={() => setClarifyOpen(true)}
+            >
+              查看需要修改的契约内容
+            </button>
+          )}
+        </div>
+      )}
+
+      {needsClarification && clarifyOpen && (
+        <div
+          className="dialog-backdrop"
+          role="presentation"
+          onClick={() => setClarifyOpen(false)}
+        >
+          <div
+            className="account-dialog architect-clarify-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="fullstack-clarify-title"
+            data-contract-clarification
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="dialog-head">
+              <h3 id="fullstack-clarify-title">契约需要重新澄清</h3>
+              <button
+                type="button"
+                className="dialog-close"
+                aria-label="关闭"
+                onClick={() => setClarifyOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="architect-clarify-body">
+              <p>
+                平台检测到契约本身存在矛盾，而不是生成代码违反了契约。
+                继续点击“重试生成”只会重复同一处错误，不会产生可用系统。
+              </p>
+              {clarificationProblems.length > 0 ? (
+                <ul>
+                  {clarificationProblems.map((problem, index) => (
+                    <li key={`${problem.code || 'problem'}-${index}`}>
+                      <strong>{problem.message}</strong>
+                      {problem.hint && <span>{problem.hint}</span>}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <pre>{state.error}</pre>
+              )}
+              <p className="architect-clarify-note">
+                点击下方按钮会把这份修正要求发给 Architect；请根据提示调整
+                需求、数据表或接口，再重新确认契约。
+              </p>
+            </div>
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="architect-ghost"
+                onClick={() => setClarifyOpen(false)}
+              >
+                稍后处理
+              </button>
+              <button
+                type="button"
+                className="architect-primary"
+                data-contract-reclarify
+                onClick={() => {
+                  setClarifyOpen(false)
+                  onReclarify?.(clarificationPrompt)
+                }}
+              >
+                回到契约并重新澄清
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1330,6 +1448,7 @@ export default function ArchitectPanel({
                   contract={contract}
                   onGenerate={onFullstackGenerate}
                   onExport={onExport}
+                  onReclarify={(prompt) => onDecide?.('REVISE', prompt)}
                   exporting={exporting}
                 />
               )}

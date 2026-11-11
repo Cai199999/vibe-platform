@@ -37,6 +37,24 @@ class SchemaAstUnavailable(SchemaAstError):
 
 
 @dataclass(frozen=True)
+class JsRelatedModel:
+    """主从表中的关联模型（静态解析结果）。"""
+
+    table: str
+    columns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class JsRelation:
+    """Sequelize hasMany / belongsTo 关联定义。"""
+
+    parent_table: str
+    child_table: str
+    foreign_key: str
+    type: str = "one_to_many"
+
+
+@dataclass(frozen=True)
 class JsFileSchema:
     """单个 JS 文件的 AST 分析结果。"""
 
@@ -47,11 +65,23 @@ class JsFileSchema:
     meta_columns: tuple[str, ...] = ()
     attribute_columns: tuple[str, ...] = ()
     define_tables: tuple[str, ...] = ()
+    related_models: tuple[JsRelatedModel, ...] = ()
+    relations: tuple[JsRelation, ...] = ()
     errors: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def ok(self) -> bool:
         return not self.errors
+
+    @property
+    def table_columns(self) -> dict[str, tuple[str, ...]]:
+        """核心表 + 关联表的字段集合，供一致性校验逐表对比 DDL。"""
+        tables: dict[str, tuple[str, ...]] = {}
+        if self.table:
+            tables[self.table] = self.columns
+        for model in self.related_models:
+            tables[model.table] = model.columns
+        return tables
 
 
 def _checker_script() -> Path:
@@ -200,6 +230,36 @@ def analyze_js_files(
         for pair in item.get("columnDefs") or []:
             if isinstance(pair, (list, tuple)) and len(pair) >= 2:
                 column_defs.append((str(pair[0]), str(pair[1])))
+        related_models: list[JsRelatedModel] = []
+        for model in item.get("relatedModels") or []:
+            if not isinstance(model, dict):
+                continue
+            table_name = str(model.get("table") or "").strip()
+            if not table_name:
+                continue
+            columns = tuple(
+                str(name).strip()
+                for name in (model.get("columns") or [])
+                if str(name).strip()
+            )
+            related_models.append(JsRelatedModel(table=table_name, columns=columns))
+        relations: list[JsRelation] = []
+        for relation in item.get("relations") or []:
+            if not isinstance(relation, dict):
+                continue
+            parent = str(relation.get("parentTable") or "").strip()
+            child = str(relation.get("childTable") or "").strip()
+            foreign_key = str(relation.get("foreignKey") or "").strip()
+            if not (parent and child and foreign_key):
+                continue
+            relations.append(
+                JsRelation(
+                    parent_table=parent,
+                    child_table=child,
+                    foreign_key=foreign_key,
+                    type=str(relation.get("type") or "one_to_many"),
+                )
+            )
         result[str(path)] = JsFileSchema(
             path=str(path),
             table=str(item.get("table") or "").strip(),
@@ -222,6 +282,8 @@ def analyze_js_files(
                 for name in (item.get("defineTables") or [])
                 if str(name).strip()
             ),
+            related_models=tuple(related_models),
+            relations=tuple(relations),
             errors=tuple(messages),
         )
     return result
@@ -231,6 +293,8 @@ __all__ = [
     "CHECKER_ENGINE",
     "DEFAULT_PATHS",
     "JsFileSchema",
+    "JsRelatedModel",
+    "JsRelation",
     "SchemaAstError",
     "SchemaAstUnavailable",
     "analyze_js_files",

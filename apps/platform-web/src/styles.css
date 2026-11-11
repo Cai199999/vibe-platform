@@ -2703,9 +2703,29 @@ body.is-viewport-panning * {
   margin-bottom: 20px;
 }
 
-.dialog-head h2 {
+.dialog-head h2,
+.dialog-head h3 {
   margin: 6px 0 0;
   font-size: 20px;
+}
+
+.dialog-close {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dialog-close:hover {
+  color: var(--text);
+  border-color: rgba(148, 163, 184, 0.42);
 }
 
 .icon-button {
@@ -7033,6 +7053,92 @@ body.is-viewport-panning * {
   align-self: flex-start;
   color: var(--faint);
   font-size: 9px;
+}
+
+.architect-fullstack-error[data-failure-kind="CONTRACT"] {
+  border-color: rgba(251, 191, 36, 0.4);
+  background: rgba(120, 53, 15, 0.18);
+}
+
+.architect-fullstack-error[data-failure-kind="CONTRACT"] strong {
+  color: #fcd34d;
+}
+
+.architect-fullstack-error-hint {
+  color: #fde68a !important;
+  font-size: 10px !important;
+}
+
+.architect-fullstack-error .architect-ghost {
+  align-self: flex-start;
+  margin-top: 6px;
+}
+
+.architect-clarify-dialog {
+  width: min(560px, 100%);
+}
+
+.architect-clarify-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.architect-clarify-body p {
+  margin: 0;
+}
+
+.architect-clarify-body ul {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.architect-clarify-body li {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid rgba(251, 191, 36, 0.26);
+  border-radius: 10px;
+  background: rgba(120, 53, 15, 0.14);
+}
+
+.architect-clarify-body li strong {
+  color: #fde68a;
+  font-size: 11.5px;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.architect-clarify-body li span {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.architect-clarify-body pre {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(2, 6, 12, 0.6);
+  color: #fecaca;
+  font-size: 10.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.architect-clarify-note {
+  color: var(--faint);
+  font-size: 10.5px;
 }
 
 .fullstack-steps {

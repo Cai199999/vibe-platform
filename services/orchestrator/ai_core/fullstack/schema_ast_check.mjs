@@ -379,6 +379,192 @@ function collectDefine(ast, bindings, errors) {
   return { attributeColumns, defineTables }
 }
 
+function normalizedStringList(value) {
+  if (!Array.isArray(value)) return null
+  const names = []
+  const seen = new Set()
+  for (const item of value) {
+    if (typeof item !== 'string' || !item.trim()) return null
+    const name = item.trim()
+    if (seen.has(name)) continue
+    seen.add(name)
+    names.push(name)
+  }
+  return names
+}
+
+/**
+ * 静态解析 RELATED_MODELS：主从表的关联模型也必须纳入 AST 门禁。
+ *
+ * 只校验核心表会漏掉 `Resume.findAll({ include: User })` 读取 users.iam_sub
+ * 这类关联字段漂移，因此每个关联模型的 table / columns 都要求是静态可验证的
+ * 字面量，并与 columnDefs / columnMeta 自洽。
+ */
+function collectRelatedModels(ast, bindings, errors, coreTable) {
+  const models = []
+  const node = bindings.get('RELATED_MODELS')
+  if (!node) return models
+  const value = staticValue(node, bindings, new Set(['RELATED_MODELS']))
+  if (!value.ok || !Array.isArray(value.value)) {
+    pushError(errors, node, 'RELATED_MODELS 必须是静态数组字面量，禁止运行时拼接')
+    return models
+  }
+  const seen = new Set()
+  value.value.forEach((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      pushError(errors, node, 'RELATED_MODELS 的每一项都必须是对象')
+      return
+    }
+    const name = typeof item.table === 'string' ? item.table.trim() : ''
+    if (!name) {
+      pushError(errors, node, 'RELATED_MODELS 的每一项都必须包含非空 table')
+      return
+    }
+    const key = name.toLowerCase()
+    if (coreTable && key === coreTable.toLowerCase()) {
+      pushError(errors, node, `RELATED_MODELS 不能重复声明核心表 ${name}`)
+      return
+    }
+    if (seen.has(key)) {
+      pushError(errors, node, `RELATED_MODELS 存在重复表：${name}`)
+      return
+    }
+    seen.add(key)
+
+    let columns = normalizedStringList(item.columns)
+    if (Array.isArray(item.columnDefs)) {
+      const defNames = []
+      for (const pair of item.columnDefs) {
+        if (!Array.isArray(pair) || typeof pair[0] !== 'string' || !pair[0].trim()) {
+          pushError(errors, node, `RELATED_MODELS.${name}.columnDefs 必须是 [字段名, 类型]`)
+          return
+        }
+        defNames.push(pair[0].trim())
+      }
+      if (!columns) {
+        columns = [...new Set(defNames)]
+      } else {
+        const declared = new Set(columns.map((column) => column.toLowerCase()))
+        const defined = new Set(defNames.map((column) => column.toLowerCase()))
+        const missing = columns.filter((column) => !defined.has(column.toLowerCase()))
+        const extra = defNames.filter((column) => !declared.has(column.toLowerCase()))
+        if (missing.length > 0 || extra.length > 0) {
+          pushError(
+            errors,
+            node,
+            `RELATED_MODELS.${name} 的 columns 与 columnDefs 不一致` +
+              (missing.length ? `，缺少列定义：${missing.join('、')}` : '') +
+              (extra.length ? `，多出列定义：${extra.join('、')}` : ''),
+          )
+        }
+      }
+    }
+    if (!columns || columns.length === 0) {
+      pushError(errors, node, `RELATED_MODELS.${name} 未声明任何字段，关联模型不可验证`)
+      return
+    }
+    if (item.columnMeta && typeof item.columnMeta === 'object') {
+      const declared = new Set(columns.map((column) => column.toLowerCase()))
+      const extraMeta = Object.keys(item.columnMeta).filter(
+        (column) => !declared.has(column.toLowerCase()),
+      )
+      if (extraMeta.length > 0) {
+        pushError(
+          errors,
+          node,
+          `RELATED_MODELS.${name}.columnMeta 包含不存在的字段：${extraMeta.join('、')}`,
+        )
+      }
+    }
+    models.push({ table: name, columns })
+  })
+  return models
+}
+
+/**
+ * 静态解析 RELATIONS：每条关联必须指向真实存在的核心表或关联模型，
+ * 且外键列必须真实存在于子表字段集合中。契约层面已经校验过一次，
+ * 这里校验的是“代码是否忠实实现了契约”，两者不能互相替代。
+ */
+function collectRelations(ast, bindings, errors, coreTable, coreColumns, relatedModels) {
+  const relations = []
+  const node = bindings.get('RELATIONS')
+  if (!node) return relations
+  const value = staticValue(node, bindings, new Set(['RELATIONS']))
+  if (!value.ok || !Array.isArray(value.value)) {
+    pushError(errors, node, 'RELATIONS 必须是静态数组字面量，禁止运行时拼接')
+    return relations
+  }
+  const tableColumns = new Map()
+  if (coreTable) {
+    tableColumns.set(coreTable.toLowerCase(), new Set(coreColumns.map((c) => c.toLowerCase())))
+  }
+  for (const model of relatedModels) {
+    tableColumns.set(model.table.toLowerCase(), new Set(model.columns.map((c) => c.toLowerCase())))
+  }
+  const seen = new Set()
+  const readString = (item, key) =>
+    typeof item[key] === 'string' && item[key].trim() ? item[key].trim() : ''
+  value.value.forEach((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      pushError(errors, node, 'RELATIONS 的每一项都必须是对象')
+      return
+    }
+    const parentTable = readString(item, 'parentTable')
+    const childTable = readString(item, 'childTable')
+    const foreignKey = readString(item, 'foreignKey')
+    const type = readString(item, 'type') || 'one_to_many'
+    if (!parentTable || !childTable || !foreignKey) {
+      pushError(
+        errors,
+        node,
+        'RELATIONS 的每一项都必须包含 parentTable / childTable / foreignKey',
+      )
+      return
+    }
+    if (!['one_to_many', 'many_to_one', 'one_to_one'].includes(type)) {
+      pushError(errors, node, `RELATIONS 存在未知关联类型：${type}`)
+      return
+    }
+    const key = `${parentTable.toLowerCase()}->${childTable.toLowerCase()}.${foreignKey.toLowerCase()}`
+    if (seen.has(key)) {
+      pushError(errors, node, `RELATIONS 存在重复关联：${parentTable} -> ${childTable}`)
+      return
+    }
+    seen.add(key)
+    if (tableColumns.size > 0) {
+      const parentColumns = tableColumns.get(parentTable.toLowerCase())
+      const childColumns = tableColumns.get(childTable.toLowerCase())
+      if (!parentColumns) {
+        pushError(
+          errors,
+          node,
+          `RELATIONS 引用了未声明的父表 ${parentTable}，请检查 TABLE / RELATED_MODELS`,
+        )
+        return
+      }
+      if (!childColumns) {
+        pushError(
+          errors,
+          node,
+          `RELATIONS 引用了未声明的子表 ${childTable}，请检查 TABLE / RELATED_MODELS`,
+        )
+        return
+      }
+      if (!childColumns.has(foreignKey.toLowerCase())) {
+        pushError(
+          errors,
+          node,
+          `RELATIONS 的外键 ${childTable}.${foreignKey} 不在子表字段中`,
+        )
+        return
+      }
+    }
+    relations.push({ parentTable, childTable, foreignKey, type })
+  })
+  return relations
+}
+
 function analyzeSource(source, file) {
   const errors = []
   // index.js 只承担 Express 会话层，不要求声明 COLUMN_DEFS；
@@ -401,6 +587,8 @@ function analyzeSource(source, file) {
       metaColumns: [],
       attributeColumns: [],
       defineTables: [],
+      relatedModels: [],
+      relations: [],
       errors: [
         {
           line: loc.line,
@@ -516,6 +704,12 @@ function analyzeSource(source, file) {
     pushError(errors, ast, '未解析出任何字段：COLUMN_DEFS / COLUMN_META / attributes 均为空')
   }
 
+  // 主从表常量与核心字段同等对待：运行期修改会让关联查询字段不可信。
+  collectMutations(ast, 'RELATED_MODELS', errors)
+  collectMutations(ast, 'RELATIONS', errors)
+  const relatedModels = collectRelatedModels(ast, bindings, errors, table)
+  const relations = collectRelations(ast, bindings, errors, table, columns, relatedModels)
+
   return {
     table,
     columns,
@@ -523,6 +717,8 @@ function analyzeSource(source, file) {
     metaColumns,
     attributeColumns: [...attributeColumns],
     defineTables,
+    relatedModels,
+    relations,
     errors,
   }
 }
@@ -558,6 +754,8 @@ async function main() {
         metaColumns: [],
         attributeColumns: [],
         defineTables: [],
+        relatedModels: [],
+        relations: [],
         errors: [{ line: 1, column: 1, message: '文件内容不是字符串' }],
       }
       ok = false
@@ -575,6 +773,8 @@ async function main() {
         metaColumns: [],
         attributeColumns: [],
         defineTables: [],
+        relatedModels: [],
+        relations: [],
         errors: [{ line: 1, column: 1, message: `AST 分析异常：${error.message}` }],
       }
       ok = false

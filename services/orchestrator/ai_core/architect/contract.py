@@ -22,7 +22,12 @@ from ai_core.domain.architect import (
     ArchitectComponentInteraction,
     ArchitectContract,
     ArchitectImplementationPhase,
+    ArchitectTableRelation,
     normalize_database_engine,
+)
+from ai_core.domain.relations import (
+    normalize_table_relations,
+    parse_ddl_table_columns,
 )
 
 
@@ -67,6 +72,7 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
 
     api_routes = list(draft.api_routes)
     database_ddl = draft.database_ddl.strip()
+    relations: list[ArchitectTableRelation] = list(draft.relations)
     interactions = list(draft.component_interactions)
     frontend_routes = list(draft.frontend_routes)
     page_layout = list(draft.page_layout)
@@ -115,6 +121,7 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
         # 即使模型多写了，装配时也要裁剪，保证契约分级干净。
         api_routes = []
         database_ddl = ""
+        relations = []
         script_spec = {}
 
     elif shape == "script_automation":
@@ -133,6 +140,7 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
                 issues.append(f"script_spec 缺少字段: {', '.join(missing)}")
         api_routes = []
         database_ddl = ""
+        relations = []
         interactions = []
         frontend_routes = []
         page_layout = []
@@ -151,6 +159,17 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
             issues.append("数据库 DDL 必须包含 CREATE TABLE")
         if re.search(r"FOREIGN\s+KEY", database_ddl, re.IGNORECASE):
             issues.append("数据库 DDL 禁止物理外键，关联字段由业务代码保证")
+        # 主从表关联：显式定义必须与 DDL 严格对齐；漏写时按外键列推导。
+        # 引用不存在的表 / 外键属于契约自相矛盾，必须在确认前修复。
+        tables = parse_ddl_table_columns(database_ddl)
+        normalized_relations, relation_problems = normalize_table_relations(
+            tables,
+            draft.relations,
+            derive_when_empty=True,
+        )
+        if draft.relations and relation_problems:
+            issues.extend(relation_problems)
+        relations = normalized_relations
         if not interactions:
             issues.append("full_stack_system 必须包含组件交互")
         if not draft.tech_stack.get("backend"):
@@ -167,6 +186,7 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
         tech_stack=draft.tech_stack,
         api_routes=api_routes,
         database_ddl=database_ddl,
+        relations=relations,
         component_interactions=interactions,
         frontend_routes=frontend_routes,
         page_layout=page_layout,
@@ -189,6 +209,7 @@ def draft_to_dict(draft: ContractDraft) -> dict:
         "techStack": draft.tech_stack,
         "apiRoutes": [item.model_dump(by_alias=True) for item in draft.api_routes],
         "databaseDdl": draft.database_ddl,
+        "relations": [item.model_dump(by_alias=True) for item in draft.relations],
         "componentInteractions": [
             item.model_dump(by_alias=True) for item in draft.component_interactions
         ],
@@ -223,6 +244,13 @@ def draft_from_dict(payload: dict) -> ContractDraft:
                 interactions.append(ArchitectComponentInteraction.model_validate(item))
             except Exception:  # noqa: BLE001
                 continue
+    relations = []
+    for item in payload.get("relations") or []:
+        if isinstance(item, dict):
+            try:
+                relations.append(ArchitectTableRelation.model_validate(item))
+            except Exception:  # noqa: BLE001
+                continue
     phases = []
     for item in payload.get("implementationPath") or []:
         if isinstance(item, dict):
@@ -239,6 +267,7 @@ def draft_from_dict(payload: dict) -> ContractDraft:
         ),
         api_routes=routes,
         database_ddl=str(payload.get("databaseDdl") or ""),
+        relations=relations,
         component_interactions=interactions,
         frontend_routes=[
             dict(item)
@@ -306,6 +335,7 @@ def assemble_contract(
     # 全栈契约必须把数据库引擎提升为一级字段：Coder 与部署配置都依赖它。
     # sqlite 仅用于本地测试；生产选型为 mysql / postgresql。
     database_engine = ""
+    relations = list(draft.relations)
     if shape == "full_stack_system":
         database_engine = (
             normalize_database_engine(
@@ -314,6 +344,13 @@ def assemble_contract(
             or "mysql"
         )
         tech_stack["databaseEngine"] = database_engine
+        if not relations:
+            # 旧 checkpoint / 模型漏写 relations：按 DDL 外键列确定性推导。
+            relations, _ = normalize_table_relations(
+                parse_ddl_table_columns(draft.database_ddl),
+                [],
+                derive_when_empty=True,
+            )
 
     return ArchitectContract(
         contract_id=contract_id,
@@ -328,6 +365,7 @@ def assemble_contract(
         database_engine=database_engine,
         api_routes=draft.api_routes,
         database_ddl=draft.database_ddl,
+        relations=relations,
         component_interactions=draft.component_interactions,
         frontend_routes=draft.frontend_routes,
         page_layout=draft.page_layout,

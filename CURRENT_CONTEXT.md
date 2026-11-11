@@ -25,7 +25,9 @@ React + Vite → Java 21 BFF → Python 3.12 FastAPI/LangGraph → Docker 沙盒
 - **可视化选型（禁止脑补样式）**：澄清回答命中“和登录按钮一样”时不再直接提交文本，画布 / 预览进入 Inspect 取色；SDK 回传 `tailwindClasses` + computed CSS，后端生成 `reference_styles`，Coder 被强约束逐字复用。新增 `design_system` 静态提取 Tailwind 主题色 / CSS 变量，新组件优先 `bg-primary` 等语义类名。
 - **Unknown column 三层门禁**：多表 DDL 按集合路由选核心业务表，禁止 `users`/`name` 兜底；DBA 产出 `schema.core.json`，Backend 强制绑定并在生成期断言；ConsistencyVerifier 新增 ORM↔迁移字段比对，错位自动回退 DBACoder（≤2 次）；验收脚本增加静态 ORM/DDL 对比与运行时“核心表 GET/POST 不因缺字段 500”断言。
 - **ORM 门禁 AST 化**：`schema_ast_check.mjs` 用 Babel 解析 `server/db.js` / `server/index.js`，静态求值常量 / 拼接 / `JSON.parse`，并阻断 `COLUMN_DEFS.push` 等运行期变更；`schema_ast.py` 封装为 `SchemaAstUnavailable` 硬失败（禁止回退正则，环境问题不触发模型自愈）；生成期、ConsistencyVerifier、验收脚本共用同一引擎；镜像补 `nodejs`。
-- 验证：schema_ast + fullstack + consistency 59 项全绿；全量 398 项（仅容器缺 `eval_suite` 的历史问题）；E2E 验收 8/8（SQLite + MySQL 迁移/CRUD/直连查行/幂等）。
+- **主从表契约**：`relations` 显式声明或从 `<parent>_id` 推导；DBA 生成 `RELATED_MODELS`/`RELATIONS`，Backend 生成 `hasMany`/`belongsTo`、`include + separate` 预加载与嵌套子资源路由；AST 门禁校验关系两端与外键，关联系统表敏感列剥离。
+- **契约缺陷 vs 代码缺陷**：`contract_audit.py` 确定性审计（缺 DDL/核心表、集合无表、非法关系、未声明交互路由）；生成前与重试耗尽时抛出 `FULLSTACK_CONTRACT_CONTRADICTION`，载荷带 `failureKind=CONTRACT` / `needsClarification` / `clarification`；前端弹出重新澄清对话框并回传 `REVISE`，禁用重试按钮。
+- 验证：全量 Python 单测 417 项通过（排除历史 `test_eval_suite`）；前端 `npm run build` 通过。
 
 ## 真假边界
 

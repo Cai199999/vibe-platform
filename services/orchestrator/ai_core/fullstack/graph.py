@@ -50,6 +50,7 @@ from ai_core.fullstack.consistency import (
     ConsistencyReport,
     verify_consistency,
 )
+from ai_core.fullstack.contract_audit import ContractAudit, audit_contract
 from ai_core.fullstack.schema_mcp import verify_schema_with_mcp
 from ai_core.ports.sandbox import SandboxProvider
 
@@ -95,9 +96,18 @@ NODE_LABELS = {
 
 
 class FullstackGenerationError(Exception):
-    """全栈生成失败；携带失败节点，便于事件归因。"""
+    """全栈生成失败；携带失败节点，便于事件归因。
+
+    ``failure_kind`` 是给用户看的归因结论：
+      - ``CODE``：契约没问题，生成代码违反契约，可自愈或重试；
+      - ``CONTRACT``：契约自相矛盾，重试只会重复失败，必须重新澄清；
+      - ``ENVIRONMENT``：构建 / 校验器环境不可用。
+    """
 
     code = "FULLSTACK_GENERATION_FAILED"
+    failure_kind = "CODE"
+    needs_clarification = False
+    clarification: dict[str, Any] | None = None
 
     def __init__(self, message: str, *, node: str | None = None) -> None:
         super().__init__(message)
@@ -106,6 +116,7 @@ class FullstackGenerationError(Exception):
 
 class FullstackBuildError(FullstackGenerationError):
     code = "FULLSTACK_BUILD_FAILED"
+    failure_kind = "ENVIRONMENT"
 
     def __init__(self, message: str) -> None:
         super().__init__(message, node="BuildVerifier")
@@ -119,6 +130,19 @@ class FullstackConsistencyError(FullstackGenerationError):
     def __init__(self, report: ConsistencyReport) -> None:
         super().__init__(report.failure_message(), node="ConsistencyVerifier")
         self.report = report
+
+
+class FullstackContractContradictionError(FullstackGenerationError):
+    """契约自相矛盾：停止重试，要求用户回到 Architect 修改契约。"""
+
+    code = "FULLSTACK_CONTRACT_CONTRADICTION"
+    failure_kind = "CONTRACT"
+    needs_clarification = True
+
+    def __init__(self, audit: ContractAudit) -> None:
+        super().__init__(audit.summary(), node="ConsistencyVerifier")
+        self.audit = audit
+        self.clarification = audit.payload()
 
 
 class FullstackState(TypedDict, total=False):
@@ -433,6 +457,21 @@ class FullstackGraphRunner:
         sandbox_id = state["sandbox_id"]
         started = time.monotonic()
         self._node_started("ConsistencyVerifier", state)
+        # 契约审计先于任何修复：契约自相矛盾时，重试模板只会得到同一个
+        # 错误。这里立即终止并把归因交给前端，引导用户重新澄清。
+        options = state.get("options") or FullstackRunOptions()
+        contract_audit = audit_contract(contract, mode=options.mode)
+        if not contract_audit.ok:
+            logger.warning(
+                "ConsistencyVerifier 契约自相矛盾，停止重试 run_id=%s problems=%s",
+                state.get("run_id"),
+                [problem.code for problem in contract_audit.problems],
+            )
+            self._node_failed(
+                "ConsistencyVerifier", state, RuntimeError(contract_audit.summary())
+            )
+            raise FullstackContractContradictionError(contract_audit)
+
         snapshot: dict[str, str] = {}
         for path in (
             "src/App.jsx",
@@ -595,6 +634,19 @@ class FullstackGraphRunner:
             }
 
         # 重试耗尽，或差异无法通过补齐路由解决（如 Payload 字段冲突）。
+        # 终止前再做一次契约审计：若矛盾来自契约，必须明确告知用户
+        # “改契约”而不是继续重跑代码生成。
+        final_audit = audit_contract(contract, mode=options.mode)
+        if not final_audit.ok:
+            logger.warning(
+                "ConsistencyVerifier 重试耗尽且契约自相矛盾 run_id=%s problems=%s",
+                state.get("run_id"),
+                [problem.code for problem in final_audit.problems],
+            )
+            self._node_failed(
+                "ConsistencyVerifier", state, RuntimeError(final_audit.summary())
+            )
+            raise FullstackContractContradictionError(final_audit)
         self._node_failed("ConsistencyVerifier", state, ConsistencyError(report))
         raise FullstackConsistencyError(report)
 

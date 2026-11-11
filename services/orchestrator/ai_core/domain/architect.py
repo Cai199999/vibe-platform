@@ -258,6 +258,53 @@ class ArchitectComponentInteraction(CamelModel):
     logic: str = ""
 
 
+class ArchitectTableRelation(CamelModel):
+    """主从表 / 关联表定义。
+
+    契约不允许物理外键，但必须显式声明业务关联，否则 BackendCoder 只能
+    生成单表 CRUD。``parent_table`` / ``child_table`` 指向 ``databaseDdl``
+    中真实存在的表，``foreign_key`` 必须是子表真实存在的列：
+
+        Users 1 ── N Resumes
+        {"parentTable": "users", "childTable": "resumes",
+         "foreignKey": "user_id", "type": "one_to_many"}
+    """
+
+    parent_table: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    child_table: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    foreign_key: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    type: Literal["one_to_many", "many_to_one", "one_to_one"] = "one_to_many"
+    # 父表被引用的键，默认主键 id。
+    parent_key: str = Field(default="id", max_length=64)
+    # Sequelize include 的别名；为空时由生成器按表名推导。
+    alias: str = Field(default="", max_length=64)
+    on_delete: Literal["CASCADE", "SET NULL", "RESTRICT", "NO ACTION"] = "CASCADE"
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _normalize_relation_type(cls, value: Any) -> str:
+        text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "has_many": "one_to_many",
+            "hasmany": "one_to_many",
+            "1_n": "one_to_many",
+            "1_to_n": "one_to_many",
+            "belongs_to": "many_to_one",
+            "belongsto": "many_to_one",
+            "n_1": "many_to_one",
+            "has_one": "one_to_one",
+            "hasone": "one_to_one",
+            "1_1": "one_to_one",
+        }
+        return aliases.get(text, text or "one_to_many")
+
+    @field_validator("on_delete", mode="before")
+    @classmethod
+    def _normalize_on_delete(cls, value: Any) -> str:
+        text = str(value or "").strip().upper().replace("_", " ")
+        return text or "CASCADE"
+
+
 class ArchitectImplementationPhase(CamelModel):
     phase: str
     title: str
@@ -294,6 +341,9 @@ class ArchitectContract(CamelModel):
     database_engine: str = Field(default="", max_length=32)
     api_routes: list[ArchitectApiRoute] = Field(default_factory=list)
     database_ddl: str = ""
+    # 主从表 / 关联表：DDL 只描述结构，relations 描述业务关联。
+    # 没有声明时 DBACoder 会从 <parent>_id 列确定性推导（不猜测业务含义）。
+    relations: list[ArchitectTableRelation] = Field(default_factory=list)
     component_interactions: list[ArchitectComponentInteraction] = Field(
         default_factory=list
     )

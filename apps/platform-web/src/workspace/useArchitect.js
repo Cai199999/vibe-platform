@@ -48,6 +48,11 @@ export const EMPTY_FULLSTACK = {
   result: null,
   error: null,
   errorCode: null,
+  // 失败归因：CODE（代码缺陷）/ CONTRACT（契约矛盾）/ ENVIRONMENT。
+  // 契约矛盾时前端弹窗引导用户修改契约，而不是再次点击生成。
+  failureKind: null,
+  needsClarification: false,
+  clarification: null,
   starting: false,
   updatedAt: null,
 }
@@ -527,6 +532,9 @@ function reduceFullstack(state, event) {
         ),
         error: null,
         errorCode: null,
+        failureKind: null,
+        needsClarification: false,
+        clarification: null,
       }
     case 'fullstack.node.started':
       return {
@@ -626,6 +634,9 @@ function reduceFullstack(state, event) {
         ),
         error: null,
         errorCode: null,
+        failureKind: null,
+        needsClarification: false,
+        clarification: null,
       }
     case 'fullstack.failed':
       return {
@@ -642,6 +653,9 @@ function reduceFullstack(state, event) {
           : current.steps,
         error: payload.error || '全栈代码生成失败',
         errorCode: payload.errorCode ?? null,
+        failureKind: payload.failureKind ?? null,
+        needsClarification: Boolean(payload.needsClarification),
+        clarification: payload.clarification ?? null,
       }
     default:
       return base
@@ -709,6 +723,9 @@ export function useArchitect({ token } = {}) {
                 result: state.fullstack.result,
                 error: state.fullstack.error,
                 errorCode: state.fullstack.errorCode,
+                failureKind: state.fullstack.failureKind,
+                needsClarification: state.fullstack.needsClarification,
+                clarification: state.fullstack.clarification,
                 updatedAt: state.fullstack.updatedAt,
               }
             : undefined,

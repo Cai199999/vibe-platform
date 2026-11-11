@@ -127,6 +127,10 @@ class FullstackRunSnapshot(CamelModel):
     files: list[str] = Field(default_factory=list)
     error: str | None = None
     error_code: str | None = None
+    # 失败归因：CODE / CONTRACT / ENVIRONMENT；契约矛盾时前端弹窗重新澄清。
+    failure_kind: str | None = None
+    needs_clarification: bool = False
+    clarification: dict[str, Any] = Field(default_factory=dict)
     last_seq: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None

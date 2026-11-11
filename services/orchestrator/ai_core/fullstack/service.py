@@ -38,6 +38,7 @@ from ai_core.fullstack.coders import (
     contract_database_engine,
     core_table_for_contract,
 )
+from ai_core.fullstack.contract_audit import audit_contract
 from ai_core.fullstack.graph import (
     MODE_NODE_ORDERS,
     FullstackGenerationError,
@@ -106,6 +107,10 @@ class ActiveFullstackRun:
     steps: list[FullstackStep] = field(default_factory=list)
     error: str | None = None
     error_code: str | None = None
+    # 失败归因：CODE（代码缺陷）/ CONTRACT（契约矛盾）/ ENVIRONMENT。
+    failure_kind: str | None = None
+    needs_clarification: bool = False
+    clarification: dict[str, Any] | None = None
     # 前端骨架模式下生成的完整 src/App.jsx，用于前端把真实源码写回项目。
     frontend_entry: str = ""
     table: str = ""
@@ -227,6 +232,21 @@ class FullstackService:
 
     def _run_worker(self, active: ActiveFullstackRun) -> None:
         started = time.monotonic()
+        # 契约结构审计先于任何生成节点：矛盾契约即使重跑一百次也会得到
+        # 同一个错误。这里直接失败并把“重新澄清”的提示送到前端。
+        audit = audit_contract(active.contract, mode=active.request.options.mode)
+        if not audit.ok:
+            self._complete_failure(
+                active,
+                audit.summary(),
+                "FULLSTACK_CONTRACT_CONTRADICTION",
+                node="ConsistencyVerifier",
+                failure_kind="CONTRACT",
+                needs_clarification=True,
+                clarification=audit.payload(),
+            )
+            return
+
         runner = FullstackGraphRunner(self._sandbox, event_sink=active.buffer)
         initial: FullstackState = {
             "run_id": active.run_id,
@@ -279,7 +299,15 @@ class FullstackService:
                 dedupe_key=f"fullstack.completed:{active.run_id}",
             )
         except FullstackGenerationError as exc:
-            self._complete_failure(active, str(exc), exc.code, node=exc.node)
+            self._complete_failure(
+                active,
+                str(exc),
+                exc.code,
+                node=exc.node,
+                failure_kind=getattr(exc, "failure_kind", "CODE"),
+                needs_clarification=bool(getattr(exc, "needs_clarification", False)),
+                clarification=getattr(exc, "clarification", None),
+            )
         except SandboxError as exc:
             self._complete_failure(
                 active, f"沙盒操作失败: {exc}", "FULLSTACK_SANDBOX_ERROR"
@@ -299,11 +327,17 @@ class FullstackService:
         code: str,
         *,
         node: str | None = None,
+        failure_kind: str = "CODE",
+        needs_clarification: bool = False,
+        clarification: dict[str, Any] | None = None,
     ) -> None:
         with _ACTIVE_LOCK:
             active.status = "FAILED"
             active.error = error
             active.error_code = code
+            active.failure_kind = failure_kind
+            active.needs_clarification = needs_clarification
+            active.clarification = clarification
             active.touch()
         active.buffer.emit(
             "fullstack.failed",
@@ -316,6 +350,10 @@ class FullstackService:
                 "node": node,
                 "error": error,
                 "errorCode": code,
+                # 前端据此决定是“重试生成”还是“回到契约澄清”。
+                "failureKind": failure_kind,
+                "needsClarification": needs_clarification,
+                "clarification": clarification or {},
             },
             dedupe_key=f"fullstack.failed:{active.run_id}:{code}",
         )
@@ -419,6 +457,9 @@ class FullstackService:
                 files=list(active.files),
                 error=active.error,
                 error_code=active.error_code,
+                failure_kind=active.failure_kind,
+                needs_clarification=active.needs_clarification,
+                clarification=active.clarification or {},
                 last_seq=active.buffer.last_seq,
                 created_at=active.created_at,
                 updated_at=active.updated_at,

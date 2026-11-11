@@ -603,11 +603,20 @@ def _orm_schema_issues(
         if migration_table is not None
         else list(core.column_names)
     )
+    # 主从表要求逐表对比：迁移存在时以迁移为准，否则用契约 DDL。
+    # 只校验核心表会放过关联模型的字段漂移。
+    ddl_source = migration_text or (contract.database_ddl or "")
+    expected_tables = {
+        table.name: table.column_names for table in parse_ddl_tables(ddl_source)
+    }
+    if core.name.lower() not in {name.lower() for name in expected_tables}:
+        expected_tables[core.name] = tuple(expected)
     try:
         messages = check_orm_schema(
             files,
             table=core.name,
             expected_columns=expected,
+            expected_tables=expected_tables,
         )
     except SchemaAstUnavailable as exc:
         # 校验器缺失属于环境问题，不能伪装成“代码可自愈”去重跑 DBACoder。

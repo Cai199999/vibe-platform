@@ -34,17 +34,25 @@ const COLUMN_DEFS = __COLUMN_DEFS_JSON__
 // DDL 约束元数据：NOT NULL / DEFAULT / UNIQUE / 主键。
 // 只生成字段名不够——缺少 NOT NULL 列的默认值，生产 MySQL 会直接 500。
 const COLUMN_META = __COLUMN_META_JSON__
-const ALL_COLUMNS = COLUMN_DEFS.map(([name]) => name)
-const WRITABLE_COLUMNS = ALL_COLUMNS.filter(
-  (name) => !['id', 'created_at', 'updated_at', 'deleted_at'].includes(name),
-)
-// 写入时必须提供值的列：NOT NULL、无默认值、非主键/自增。
-const REQUIRED_COLUMNS = Object.keys(COLUMN_META).filter((name) => {
-  const meta = COLUMN_META[name] || {}
-  return !meta.primary && !meta.autoIncrement && !meta.nullable && !meta.hasDefault
-})
-const UNIQUE_COLUMNS = Object.keys(COLUMN_META).filter(
-  (name) => Boolean(COLUMN_META[name]?.unique),
+// 主从表：RELATED_MODELS 只包含一跳关联表（已剔除鉴权敏感列），
+// RELATIONS 描述 hasMany / belongsTo 的方向与外键。
+const RELATED_MODELS = __RELATED_MODELS_JSON__
+const RELATIONS = __RELATIONS_JSON__
+const MODEL_DEFS = [
+  {
+    table: TABLE,
+    entity: ENTITY,
+    columns: COLUMN_DEFS.map(([name]) => name),
+    columnDefs: COLUMN_DEFS,
+    columnMeta: COLUMN_META,
+    displayKey: '__DISPLAY_KEY__',
+    payloadKey: '__PAYLOAD_KEY__',
+    isCore: true,
+  },
+  ...RELATED_MODELS.map((model) => ({ ...model, isCore: false })),
+]
+const MODEL_BY_TABLE = Object.fromEntries(
+  MODEL_DEFS.map((model) => [model.table, model]),
 )
 // 前端表单统一使用 name 输入框；真正落库字段由 DDL 决定。
 const DISPLAY_KEY = '__DISPLAY_KEY__'
@@ -71,12 +79,18 @@ function normalizeEngine(value) {
 const DATA_DIR = process.env.FULLSTACK_DATA_DIR || resolve(__dirname, '..', 'data')
 const DB_PATH = process.env.FULLSTACK_DB_PATH || resolve(DATA_DIR, 'fullstack.sqlite')
 
-const columnDdl = COLUMN_DEFS.filter(([name]) => name !== 'id')
-  .map(([name, type]) => `  "${name}" ${type}`)
-  .join(',\n')
-const SCHEMA_SQL = `CREATE TABLE IF NOT EXISTS "${TABLE}" (
+function schemaSqlFor(model) {
+  const columnDdl = model.columnDefs
+    .filter(([name]) => name !== 'id')
+    .map(([name, type]) => `  "${name}" ${type}`)
+    .join(',\n')
+  return `CREATE TABLE IF NOT EXISTS "${model.table}" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT${columnDdl ? ',\n' + columnDdl : ''}
 );`
+}
+
+// 预览库必须一次建好核心表与关联表；逐表执行也保证幂等。
+const SCHEMA_SQL = MODEL_DEFS.map(schemaSqlFor).join('\n')
 
 // ------------------------------------------------------------
 // 公共写入值构造：创建 / 更新共用默认值策略
@@ -84,10 +98,33 @@ const SCHEMA_SQL = `CREATE TABLE IF NOT EXISTS "${TABLE}" (
 // 为 NOT NULL 且无数据库默认值的列生成确定性默认值。
 // 这是 Unknown column 之后的第二道生产 500 门禁：
 // 例如 resumes.content 是 NOT NULL，旧模板只映射 name，必然写入失败。
-function defaultForColumn(column) {
-  const meta = COLUMN_META[column] || {}
+function modelFor(table = TABLE) {
+  return MODEL_BY_TABLE[table] || MODEL_DEFS[0]
+}
+
+function writableColumnsFor(model) {
+  return model.columns.filter(
+    (name) => !['id', 'created_at', 'updated_at', 'deleted_at'].includes(name),
+  )
+}
+
+function requiredColumnsFor(model) {
+  return Object.keys(model.columnMeta).filter((name) => {
+    const meta = model.columnMeta[name] || {}
+    return !meta.primary && !meta.autoIncrement && !meta.nullable && !meta.hasDefault
+  })
+}
+
+function uniqueColumnsFor(model) {
+  return Object.keys(model.columnMeta).filter(
+    (name) => Boolean(model.columnMeta[name]?.unique),
+  )
+}
+
+function defaultForColumn(column, model) {
+  const meta = model.columnMeta[column] || {}
   if (column === 'tenant_id') return 'tenant_local'
-  if (UNIQUE_COLUMNS.includes(column)) {
+  if (uniqueColumnsFor(model).includes(column)) {
     return `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   }
   if (/(^|_)id$/.test(column)) return 1
@@ -99,31 +136,34 @@ function defaultForColumn(column) {
   if (/status|state/i.test(column)) return 'ACTIVE'
   if (meta.sqliteType === 'INTEGER') return 1
   if (meta.sqliteType === 'REAL') return 0
-  return `示例${ENTITY}`
+  return `示例${model.entity || model.table}`
 }
 
-function buildValues(input = {}, { update = false } = {}) {
+function buildValues(input = {}, { update = false, table = TABLE } = {}) {
+  const model = modelFor(table)
   const body = { ...input }
   // 前端表单沿用 name/title；这里映射到 DDL 中真实的展示列。
   // 绝不把 name 当成固定列：resumes 的核心字段是 file_name。
-  if (PAYLOAD_KEY && body[PAYLOAD_KEY] === undefined) {
-    body[PAYLOAD_KEY] = body.name ?? body.title
+  if (model.payloadKey && body[model.payloadKey] === undefined) {
+    body[model.payloadKey] = body.name ?? body.title
   }
   const values = {}
-  for (const column of WRITABLE_COLUMNS) {
+  for (const column of writableColumnsFor(model)) {
     if (body[column] !== undefined) values[column] = body[column]
   }
   if (update) {
-    if (ALL_COLUMNS.includes('updated_at')) {
+    if (model.columns.includes('updated_at')) {
       values.updated_at = new Date().toISOString()
     }
     return values
   }
   // NOT NULL 且无 DEFAULT 的列必须补齐，否则 MySQL 返回 500。
-  for (const column of REQUIRED_COLUMNS) {
-    if (values[column] === undefined) values[column] = defaultForColumn(column)
+  for (const column of requiredColumnsFor(model)) {
+    if (values[column] === undefined) {
+      values[column] = defaultForColumn(column, model)
+    }
   }
-  if (ALL_COLUMNS.includes('tenant_id') && values.tenant_id === undefined) {
+  if (model.columns.includes('tenant_id') && values.tenant_id === undefined) {
     values.tenant_id = 'tenant_local'
   }
   return values
@@ -177,11 +217,14 @@ export async function createSequelize() {
   })
 }
 
-async function connectOrm() {
-  const { DataTypes } = await import('sequelize')
-  const instance = await createSequelize()
+function modelNameFor(table) {
+  const normalized = String(table || 'record').replace(/[^A-Za-z0-9_]/g, '_')
+  return `Record_${normalized}`
+}
+
+function attributesFor(model, DataTypes) {
   const attributes = {}
-  for (const [name, sqliteType] of COLUMN_DEFS) {
+  for (const [name, sqliteType] of model.columnDefs) {
     const isId = name === 'id'
     attributes[name] = {
       type: sequelizeType(name, sqliteType, DataTypes),
@@ -190,20 +233,53 @@ async function connectOrm() {
       autoIncrement: isId,
     }
   }
-  const model = instance.define('Record', attributes, {
-    tableName: TABLE,
-    timestamps: false,
-    freezeTableName: true,
-  })
+  return attributes
+}
+
+async function connectOrm() {
+  const { DataTypes } = await import('sequelize')
+  const instance = await createSequelize()
+  const models = {}
+  for (const def of MODEL_DEFS) {
+    models[def.table] = instance.define(
+      modelNameFor(def.table),
+      attributesFor(def, DataTypes),
+      {
+        tableName: def.table,
+        timestamps: false,
+        freezeTableName: true,
+      },
+    )
+  }
+
+  // 主从表关联：hasMany / belongsTo 必须成对声明。缺任何一侧，
+  // Sequelize 的 include 都会报 "X is not associated to Y"。
+  for (const relation of RELATIONS) {
+    const parent = models[relation.parentTable]
+    const child = models[relation.childTable]
+    if (!parent || !child) continue
+    parent.hasMany(child, {
+      foreignKey: relation.foreignKey,
+      sourceKey: relation.parentKey || 'id',
+      as: relation.childAlias,
+      onDelete: relation.onDelete || 'CASCADE',
+    })
+    child.belongsTo(parent, {
+      foreignKey: relation.foreignKey,
+      targetKey: relation.parentKey || 'id',
+      as: relation.parentAlias,
+      onDelete: relation.onDelete || 'CASCADE',
+    })
+  }
 
   await instance.authenticate()
   // 生产环境绝不调用 model.sync() 自动建表：表结构唯一来源是
   // server/migrations/*.sql，由 `npm run db:migrate` 显式执行。
   // 未迁移时健康检查返回 503，让部署平台在发布阶段就暴露问题。
   if (process.env.DB_SEED === 'true') {
-    await seedOrm(model)
+    await seedOrm(models[TABLE])
   }
-  return { instance, model }
+  return { instance, model: models[TABLE], models }
 }
 
 function getOrm() {
@@ -256,11 +332,11 @@ function sqliteRun(state, sql, params = []) {
   }
 }
 
-function sqliteInsert(state, values) {
+function sqliteInsert(state, values, table = TABLE) {
   const columns = Object.keys(values)
   if (columns.length === 0) throw new Error('没有可写入的字段')
   const sql =
-    `INSERT INTO "${TABLE}" (` +
+    `INSERT INTO "${table}" (` +
     columns.map((column) => `"${column}"`).join(', ') +
     ') VALUES (' +
     columns.map(() => '?').join(', ') +
@@ -270,11 +346,42 @@ function sqliteInsert(state, values) {
     sql,
     columns.map((column) => encodeSqlite(values[column])),
   )
-  return sqliteGetRecord(state, result.lastID)
+  return sqliteGetRecord(state, result.lastID, table)
 }
 
-function sqliteGetRecord(state, id) {
-  return sqliteGet(state, `SELECT * FROM "${TABLE}" WHERE "id" = ?`, [Number(id)])
+function sqliteGetRecord(state, id, table = TABLE) {
+  return sqliteGet(state, `SELECT * FROM "${table}" WHERE "id" = ?`, [Number(id)])
+}
+
+// 关联表只查询公开列（RELATED_MODELS 已剔除鉴权字段），
+// 禁止 SELECT * 把 password_hash / iam_sub 带回前端。
+function sqliteSelectColumns(table) {
+  const model = modelFor(table)
+  return model.columns.map((column) => `"${column}"`).join(', ')
+}
+
+function attachSqliteRelations(state, row) {
+  if (!row) return row
+  for (const relation of RELATIONS) {
+    if (relation.parentTable === TABLE) {
+      row[relation.childAlias] = sqliteAll(
+        state,
+        `SELECT ${sqliteSelectColumns(relation.childTable)} FROM "${
+          relation.childTable
+        }" WHERE "${relation.foreignKey}" = ? ORDER BY "id" DESC`,
+        [row[relation.parentKey || 'id']],
+      )
+    } else if (relation.childTable === TABLE) {
+      row[relation.parentAlias] = sqliteGet(
+        state,
+        `SELECT ${sqliteSelectColumns(relation.parentTable)} FROM "${
+          relation.parentTable
+        }" WHERE "${relation.parentKey || 'id'}" = ?`,
+        [row[relation.foreignKey]],
+      )
+    }
+  }
+  return row
 }
 
 function seedSqlite(state) {
@@ -290,16 +397,52 @@ let sqliteStatePromise = null
 // ------------------------------------------------------------
 // 对外仓储接口：ORM 与 SQLite 行为一致
 // ------------------------------------------------------------
+// Sequelize include 别名必须与 db.js 里的 hasMany / belongsTo 完全一致。
+function buildIncludes(models) {
+  const includes = []
+  for (const relation of RELATIONS) {
+    if (relation.parentTable === TABLE) {
+      const child = models[relation.childTable]
+      if (child) {
+        includes.push({
+          model: child,
+          as: relation.childAlias,
+          required: false,
+          // separate 让 hasMany 走独立查询，避免 LIMIT 被 JOIN 放大。
+          separate: true,
+          order: [['id', 'DESC']],
+        })
+      }
+    } else if (relation.childTable === TABLE) {
+      const parent = models[relation.parentTable]
+      if (parent) {
+        includes.push({ model: parent, as: relation.parentAlias, required: false })
+      }
+    }
+  }
+  return includes
+}
+
 export async function listRecords({ page = 1, size = 20 } = {}) {
   if (ORM_ENABLED) {
-    const { model } = await getOrm()
+    const { model, models } = await getOrm()
+    const includes = buildIncludes(models)
     const { rows, count } = await model.findAndCountAll({
       limit: size,
       offset: (page - 1) * size,
       order: [['id', 'DESC']],
-      raw: true,
+      ...(includes.length
+        ? { include: includes, distinct: true }
+        : { raw: true }),
     })
-    return { items: rows, total: Number(count), page, size }
+    return {
+      items: includes.length
+        ? rows.map((row) => row.get({ plain: true }))
+        : rows,
+      total: Number(count),
+      page,
+      size,
+    }
   }
   const state = await getSqliteState()
   const total = sqliteGet(
@@ -310,7 +453,7 @@ export async function listRecords({ page = 1, size = 20 } = {}) {
     state,
     `SELECT * FROM "${TABLE}" ORDER BY "id" DESC LIMIT ? OFFSET ?`,
     [size, (page - 1) * size],
-  )
+  ).map((row) => attachSqliteRelations(state, row))
   return {
     items,
     total: Number(total?.total ?? 0),
@@ -321,21 +464,32 @@ export async function listRecords({ page = 1, size = 20 } = {}) {
 
 export async function getRecord(id) {
   if (ORM_ENABLED) {
-    const { model } = await getOrm()
-    const row = await model.findByPk(Number(id), { raw: true })
-    return row ?? null
+    const { model, models } = await getOrm()
+    const includes = buildIncludes(models)
+    const row = await model.findByPk(Number(id), {
+      ...(includes.length ? { include: includes } : { raw: true }),
+    })
+    if (!row) return null
+    return includes.length ? row.get({ plain: true }) : row
   }
-  return sqliteGetRecord(await getSqliteState(), id)
+  const state = await getSqliteState()
+  return attachSqliteRelations(state, sqliteGetRecord(state, id))
 }
 
 export async function createRecord(input = {}) {
   const values = buildValues(input)
   if (ORM_ENABLED) {
-    const { model } = await getOrm()
+    const { model, models } = await getOrm()
     const row = await model.create(values)
-    return row.get({ plain: true })
+    const plain = row.get({ plain: true })
+    // 创建响应也带上关联集合，前端无需再发一次详情请求。
+    if (RELATIONS.some((relation) => relation.parentTable === TABLE)) {
+      return getRecord(plain.id)
+    }
+    return plain
   }
-  return sqliteInsert(await getSqliteState(), values)
+  const state = await getSqliteState()
+  return attachSqliteRelations(state, sqliteInsert(state, values))
 }
 
 export async function updateRecord(id, input = {}) {
@@ -345,11 +499,13 @@ export async function updateRecord(id, input = {}) {
     const row = await model.findByPk(Number(id))
     if (!row) return null
     if (Object.keys(values).length > 0) await row.update(values)
-    return row.get({ plain: true })
+    return getRecord(id)
   }
   const state = await getSqliteState()
   const columns = Object.keys(values)
-  if (columns.length === 0) return sqliteGetRecord(state, id)
+  if (columns.length === 0) {
+    return attachSqliteRelations(state, sqliteGetRecord(state, id))
+  }
   sqliteRun(
     state,
     `UPDATE "${TABLE}" SET ` +
@@ -360,7 +516,83 @@ export async function updateRecord(id, input = {}) {
       Number(id),
     ],
   )
-  return sqliteGetRecord(state, id)
+  return attachSqliteRelations(state, sqliteGetRecord(state, id))
+}
+
+// ------------------------------------------------------------
+// 主从表：子资源查询 / 创建（hasMany）
+// ------------------------------------------------------------
+function relationForAlias(alias) {
+  return RELATIONS.find(
+    (relation) =>
+      relation.parentTable === TABLE && relation.childAlias === String(alias),
+  )
+}
+
+export async function listRelatedRecords(
+  parentId,
+  alias,
+  { page = 1, size = 20 } = {},
+) {
+  const relation = relationForAlias(alias)
+  if (!relation) return null
+  if (ORM_ENABLED) {
+    const { models } = await getOrm()
+    const child = models[relation.childTable]
+    const parent = models[relation.parentTable]
+    if (!child || !parent) return null
+    const parentRow = await parent.findByPk(Number(parentId), { raw: true })
+    if (!parentRow) return null
+    const { rows, count } = await child.findAndCountAll({
+      where: { [relation.foreignKey]: Number(parentId) },
+      limit: size,
+      offset: (page - 1) * size,
+      order: [['id', 'DESC']],
+      raw: true,
+    })
+    return { items: rows, total: Number(count), page, size }
+  }
+  const state = await getSqliteState()
+  const parentRow = sqliteGetRecord(state, parentId, relation.parentTable)
+  if (!parentRow) return null
+  const total = sqliteGet(
+    state,
+    `SELECT COUNT(*) AS total FROM "${relation.childTable}" WHERE "${
+      relation.foreignKey
+    }" = ?`,
+    [Number(parentId)],
+  )
+  const items = sqliteAll(
+    state,
+    `SELECT ${sqliteSelectColumns(relation.childTable)} FROM "${
+      relation.childTable
+    }" WHERE "${relation.foreignKey}" = ? ORDER BY "id" DESC LIMIT ? OFFSET ?`,
+    [Number(parentId), size, (page - 1) * size],
+  )
+  return { items, total: Number(total?.total ?? 0), page, size }
+}
+
+export async function createRelatedRecord(parentId, alias, input = {}) {
+  const relation = relationForAlias(alias)
+  if (!relation) return null
+  const childTable = relation.childTable
+  const values = buildValues(input, { table: childTable })
+  // 外键由 URL 决定，禁止前端伪造把子记录挂到别的父记录下。
+  values[relation.foreignKey] = Number(parentId)
+  if (ORM_ENABLED) {
+    const { models } = await getOrm()
+    const child = models[childTable]
+    const parent = models[relation.parentTable]
+    if (!child || !parent) return null
+    const parentRow = await parent.findByPk(Number(parentId), { raw: true })
+    if (!parentRow) return null
+    const row = await child.create(values)
+    return row.get({ plain: true })
+  }
+  const state = await getSqliteState()
+  const parentRow = sqliteGetRecord(state, parentId, relation.parentTable)
+  if (!parentRow) return null
+  return sqliteInsert(state, values, childTable)
 }
 
 export async function deleteRecord(id) {
@@ -449,10 +681,12 @@ import {
   RUNTIME,
   STORAGE,
   createRecord,
+  createRelatedRecord,
   deleteRecord,
   getRecord,
   health,
   listRecords,
+  listRelatedRecords,
   updateRecord,
 } from './db.js'
 
@@ -589,6 +823,11 @@ if (ITEM_PATH && ITEM_PATH !== COLLECTION_PATH) {
 
 // ---- AI-Native 路由 ----
 __AI_ROUTES__
+
+// ---- 主从表嵌套路由 ----
+// 父资源下的子集合，例如 /api/v1/users/:id/resumes。
+// 列表 / 详情响应本身也通过 Sequelize include 带回关联数组。
+__RELATED_ROUTES__
 
 // ---- 契约业务路由 ----
 // BackendCoder 为契约里的每个业务动作生成独立端点；通用 CRUD 只是基础能力，

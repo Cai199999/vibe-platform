@@ -22,9 +22,12 @@ from typing import Any, Iterable, Mapping
 from ai_core.domain.architect import (
     ArchitectApiRoute,
     ArchitectContract,
+    ArchitectTableRelation,
     normalize_database_engine,
 )
+from ai_core.domain.relations import normalize_table_relations
 from ai_core.fullstack.schema_ast import (
+    JsFileSchema,
     SchemaAstUnavailable,
     analyze_js_files,
 )
@@ -527,11 +530,76 @@ def extract_orm_schema(db_code: str) -> tuple[str, list[str]]:
     return schema.table, list(schema.columns)
 
 
+def _check_related_models(
+    db_schema: JsFileSchema,
+    ddl_tables: Mapping[str, set[str]],
+) -> list[str]:
+    """逐表校验主从模型与 DDL 的一致性。
+
+    AST 已确认关联常量是静态字面量；这里回答的问题是“静态字面量是否
+    与真实 DDL 对齐”。两层缺一不可：前者防运行期注入，后者防契约漂移。
+    """
+    issues: list[str] = []
+    core_table = db_schema.table
+    ddl_core_columns = ddl_tables.get(core_table.lower()) if core_table else None
+
+    for model in db_schema.related_models:
+        ddl_columns = ddl_tables.get(model.table.lower())
+        if ddl_columns is None:
+            issues.append(
+                f"关联模型（RELATED_MODELS）引用了 DDL 中不存在的表：{model.table}"
+            )
+            continue
+        unknown = [
+            column for column in model.columns if column.lower() not in ddl_columns
+        ]
+        if unknown:
+            issues.append(
+                f"关联模型 {model.table} 引用了 DDL 中不存在的字段："
+                + "、".join(unknown)
+                + f"（DDL 字段：{'、'.join(sorted(ddl_columns)) or '无'}）"
+            )
+
+    if db_schema.related_models and not db_schema.relations:
+        issues.append(
+            "server/db.js 声明了关联模型但缺少 RELATIONS："
+            "主从表必须生成 hasMany / belongsTo 关联查询"
+        )
+    for relation in db_schema.relations:
+        parent_columns = ddl_tables.get(relation.parent_table.lower())
+        child_columns = ddl_tables.get(relation.child_table.lower())
+        if parent_columns is None:
+            issues.append(f"关联定义引用了 DDL 中不存在的父表：{relation.parent_table}")
+            continue
+        if child_columns is None:
+            issues.append(f"关联定义引用了 DDL 中不存在的子表：{relation.child_table}")
+            continue
+        if relation.foreign_key.lower() not in child_columns:
+            issues.append(
+                f"关联 {relation.parent_table} → {relation.child_table} 的外键 "
+                f"{relation.foreign_key} 不在 DDL 子表字段中"
+            )
+    if ddl_core_columns is not None:
+        # 反向确认：DDL 里存在的一跳子表必须被 ORM 建模，否则 include 会
+        # 直接引用未定义模型。这里只检查 RELATIONS 里出现的表，避免把
+        # 与核心表无关的 DDL 表误判为缺失。
+        modeled = {model.table.lower() for model in db_schema.related_models}
+        for relation in db_schema.relations:
+            for name in (relation.parent_table, relation.child_table):
+                lowered = name.lower()
+                if lowered != core_table.lower() and lowered not in modeled:
+                    issues.append(
+                        f"关联定义引用了未建模的表 {name}，" "请同步补充 RELATED_MODELS"
+                    )
+    return issues
+
+
 def check_orm_schema(
     files: Mapping[str, str],
     *,
     table: str,
     expected_columns: Iterable[str],
+    expected_tables: Mapping[str, Iterable[str]] | None = None,
     require_orm: bool = False,
 ) -> list[str]:
     """用 Babel AST 校验 ORM / Express 代码是否只引用真实 DDL 字段。
@@ -539,8 +607,13 @@ def check_orm_schema(
     这是 ``Unknown column`` 事故的生成期门禁：
       - ``server/db.js`` 的 ``TABLE`` 必须等于核心业务表；
       - ``COLUMN_DEFS`` / ``attributes`` 的每个字段必须存在于迁移 DDL；
+      - 主从表：``RELATED_MODELS`` 的每张表与字段都必须存在于 DDL，
+        且存在关联模型时必须声明 ``RELATIONS``；
       - ``server/index.js`` 的 ``TABLE`` 必须与 ORM 一致；
       - 任何运行期修改字段集合、或无法静态求值的写法都直接阻断。
+
+    ``expected_tables`` 由调用方从契约迁移 DDL 解析：``{表名: 字段集合}``。
+    缺少该参数时只校验核心表，保持旧调用点兼容。
     """
     issues: list[str] = []
     db_code = files.get("server/db.js") or ""
@@ -549,6 +622,10 @@ def check_orm_schema(
             issues.append("缺少 server/db.js，无法校验 ORM 模型与 DDL 一致性")
         return issues
     normalized_expected = {str(column).lower() for column in expected_columns}
+    ddl_tables = {
+        str(name).lower(): {str(column).lower() for column in columns}
+        for name, columns in (expected_tables or {}).items()
+    }
     analyzed = analyze_js_files(
         files,
         paths=("server/db.js", "server/index.js"),
@@ -577,6 +654,9 @@ def check_orm_schema(
         )
     if not orm_columns and not any("COLUMN_DEFS" in msg for msg in db_schema.errors):
         issues.append("server/db.js 未解析出任何 COLUMN_DEFS 字段，ORM 模型不可验证")
+
+    # ---- 主从表：关联模型必须逐表对齐 DDL，避免 include 查询未知字段 ----
+    issues.extend(_check_related_models(db_schema, ddl_tables) if ddl_tables else [])
 
     index_schema = analyzed.get("server/index.js")
     if index_schema is not None:
@@ -616,6 +696,7 @@ def _assert_generated_schema(
         files,
         table=table,
         expected_columns=expected,
+        expected_tables={item.name: item.column_names for item in tables.values()},
         require_orm=True,
     )
     if migration_table is None:
@@ -977,6 +1058,194 @@ def _seed_rows(columns: list[str], table: str, entity: str) -> list[dict[str, An
 
 
 # ------------------------------------------------------------
+# 主从表关联：契约声明优先，DDL 外键列兜底
+# ------------------------------------------------------------
+# 关联查询会把子表 / 父表整行返回给前端；系统表的鉴权字段必须剔除。
+_SENSITIVE_COLUMN_MARKERS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "salt",
+    "iam_sub",
+    "credential",
+)
+
+
+def _column_payload(column: DdlColumn) -> dict[str, Any]:
+    return {
+        "type": column.raw_type,
+        "sqliteType": column.sqlite_type,
+        "nullable": column.nullable,
+        "hasDefault": column.has_default,
+        "primary": column.is_primary,
+        "unique": column.is_unique,
+        "autoIncrement": column.auto_increment,
+    }
+
+
+def _public_columns(table: DdlTable, *, is_core: bool) -> list[DdlColumn]:
+    """关联表只暴露业务字段；核心表保持 DDL 全量。"""
+    if is_core:
+        return list(table.columns)
+    visible = [
+        column
+        for column in table.columns
+        if not any(
+            marker in column.name.lower() for marker in _SENSITIVE_COLUMN_MARKERS
+        )
+    ]
+    # 关联模型仍必须有主键，否则 Sequelize 无法建立 hasMany / belongsTo。
+    if visible and not any(column.is_primary for column in visible):
+        first = next(
+            (column for column in table.columns if column.is_primary),
+            table.columns[0] if table.columns else None,
+        )
+        if first is not None and first not in visible:
+            visible.insert(0, first)
+    return visible
+
+
+def resolve_contract_relations(
+    contract: ArchitectContract,
+    tables: Iterable[DdlTable],
+    core_table: str,
+) -> list[ArchitectTableRelation]:
+    """解析与核心表直接相关的一跳关联。
+
+    显式 ``contract.relations`` 优先；模型漏写时从 ``<parent>_id`` 列推导。
+    只保留触及核心表的关系：``users → resumes → resume_items`` 在核心表
+    为 resumes 时，两条边都会生成；与核心表无关的边不进入本次产物。
+    """
+    table_list = [table for table in tables if table.name]
+    by_name = {table.name.lower(): table for table in table_list}
+    relations, _problems = normalize_table_relations(
+        {table.name: table.column_names for table in table_list},
+        contract.relations,
+        core_table=core_table,
+        derive_when_empty=True,
+    )
+    core_lower = core_table.lower()
+    selected: list[ArchitectTableRelation] = []
+    seen: set[tuple[str, str, str]] = set()
+    for relation in relations:
+        parent = relation.parent_table.lower()
+        child = relation.child_table.lower()
+        if parent != core_lower and child != core_lower:
+            continue
+        if parent not in by_name or child not in by_name:
+            continue
+        key = (parent, child, relation.foreign_key.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(relation)
+    return selected
+
+
+def _relation_alias(relation: ArchitectTableRelation, core_table: str) -> str:
+    """生成 Sequelize include 的稳定别名。"""
+    if relation.alias:
+        return _safe_identifier(relation.alias, relation.child_table)
+    if relation.child_table.lower() == core_table.lower():
+        # 核心表是子表：返回父对象（belongsTo）。
+        return _singular_word(relation.parent_table) or relation.parent_table
+    return relation.child_table
+
+
+def related_table_names(
+    relations: Iterable[ArchitectTableRelation],
+    core_table: str,
+) -> list[str]:
+    """返回除核心表外、需要定义 ORM 模型的关联表名。"""
+    names: list[str] = []
+    core_lower = core_table.lower()
+    for relation in relations:
+        for name in (relation.parent_table, relation.child_table):
+            if name.lower() == core_lower:
+                continue
+            if name.lower() in {item.lower() for item in names}:
+                continue
+            names.append(name)
+    return names
+
+
+def _relation_payload(
+    relation: ArchitectTableRelation,
+    core_table: str,
+) -> dict[str, Any]:
+    alias = _relation_alias(relation, core_table)
+    is_core_parent = relation.parent_table.lower() == core_table.lower()
+    return {
+        "type": relation.type,
+        "parentTable": relation.parent_table,
+        "childTable": relation.child_table,
+        "foreignKey": relation.foreign_key,
+        "parentKey": relation.parent_key or "id",
+        "onDelete": relation.on_delete,
+        # 核心表为父：hasMany(as=childAlias)；核心表为子：belongsTo(as=parentAlias)。
+        "childAlias": alias if is_core_parent else relation.child_table,
+        "parentAlias": (
+            _singular_word(relation.parent_table) if is_core_parent else alias
+        ),
+    }
+
+
+def build_relation_schema(
+    contract: ArchitectContract,
+    core: DdlTable,
+) -> dict[str, list[dict[str, Any]]]:
+    """组装 ``schema.core.json`` 的 tables / relations 结构。
+
+    ``tables`` 同时包含核心表与一跳关联表，BackendCoder 直接消费，
+    不再自行解析 DDL 猜测主从关系。``core`` 仍保留在顶层，兼容旧调用。
+    """
+    tables = parse_ddl_tables(contract.database_ddl)
+    if not tables:
+        tables = [core]
+    by_name = {table.name.lower(): table for table in tables}
+    by_name.setdefault(core.name.lower(), core)
+    relations = resolve_contract_relations(contract, by_name.values(), core.name)
+    table_payloads: list[dict[str, Any]] = []
+    names = [core.name, *related_table_names(relations, core.name)]
+    for name in names:
+        table = by_name.get(name.lower())
+        if table is None:
+            continue
+        is_core = table.name.lower() == core.name.lower()
+        visible = _public_columns(table, is_core=is_core)
+        column_defs = [(column.name, column.sqlite_type) for column in visible]
+        column_names = [column_name for column_name, _ in column_defs]
+        entity = _entity_label(contract, table.name)
+        display_key = _pick_display_column(column_names)
+        # 核心表的表单字段来自契约交互；关联表使用自己的展示列，
+        # 不能把复用核心表的 payloadKey（例如 users 收到 file_name）。
+        payload_key = (
+            (_interaction_payload_key(contract, "POST") or display_key)
+            if is_core
+            else display_key
+        )
+        table_payloads.append(
+            {
+                "table": table.name,
+                "entity": entity,
+                "isCore": is_core,
+                "columns": column_names,
+                "columnDefs": column_defs,
+                "columnMeta": {
+                    column.name: _column_payload(column) for column in visible
+                },
+                "displayKey": display_key,
+                "payloadKey": payload_key,
+            }
+        )
+    relation_payloads = [
+        _relation_payload(relation, core.name) for relation in relations
+    ]
+    return {"tables": table_payloads, "relations": relation_payloads}
+
+
+# ------------------------------------------------------------
 # DBACoder
 # ------------------------------------------------------------
 def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
@@ -1009,6 +1278,17 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
     display_key = _pick_display_column(columns)
     payload_key = _interaction_payload_key(contract, "POST") or display_key
     entity = _entity_label(contract, table)
+    # 主从表：核心表 + 一跳关联表的 ORM 模型与 Sequelize 关联。
+    relation_schema = build_relation_schema(contract, core)
+    table_payloads = list(relation_schema["tables"])
+    relation_payloads = list(relation_schema["relations"])
+    related_models = [
+        payload for payload in table_payloads if not payload.get("isCore")
+    ]
+    parsed_tables = {
+        item.name.lower(): item for item in parse_ddl_tables(contract.database_ddl)
+    }
+    parsed_tables.setdefault(core.name.lower(), core)
     ddl = (contract.database_ddl or "").strip()
     if ddl and not ddl.endswith(";"):
         ddl += ";"
@@ -1028,6 +1308,12 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
         "__DB_ENGINE__": engine,
         "__COLUMN_DEFS_JSON__": json.dumps(column_defs, ensure_ascii=False, indent=2),
         "__COLUMN_META_JSON__": json.dumps(column_meta, ensure_ascii=False, indent=2),
+        "__RELATED_MODELS_JSON__": json.dumps(
+            related_models, ensure_ascii=False, indent=2
+        ),
+        "__RELATIONS_JSON__": json.dumps(
+            relation_payloads, ensure_ascii=False, indent=2
+        ),
         "__DISPLAY_KEY__": display_key,
         "__PAYLOAD_KEY__": payload_key,
         "__SEED_ROWS_JSON__": json.dumps(
@@ -1054,11 +1340,24 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
         "columnMeta": column_meta,
         "displayKey": display_key,
         "payloadKey": payload_key,
+        # 主从表结构：tables 含核心表与一跳关联表，relations 为关联定义。
+        # BackendCoder 用这两项生成 Sequelize include 与嵌套路由。
+        "tables": table_payloads,
+        "relations": relation_payloads,
         "source": "databaseDdl",
         "contractId": contract.contract_id,
     }
+    # SQLite 预览必须同时创建核心表与关联表，否则关联查询会报 no such table。
+    preview_schema = "".join(
+        sqlite_schema_sql(item.name, list(item.column_defs))
+        for item in (
+            parsed_tables[payload["table"].lower()]
+            for payload in table_payloads
+            if payload["table"].lower() in parsed_tables
+        )
+    )
     files = {
-        "server/schema.sql": header + sqlite_schema_sql(table, column_defs),
+        "server/schema.sql": header + preview_schema,
         schema_name: (
             f"-- 契约原始 {engine} DDL（contract: {contract.contract_id}）\n\n"
             + ddl
@@ -1099,6 +1398,8 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
             "coreSchema": "server/schema.core.json",
             "migration": "server/migrations/001_init.sql",
             "migrationRunner": "server/migrations.mjs",
+            "relations": relation_payloads,
+            "relatedTables": [payload["table"] for payload in related_models],
         },
     )
 
@@ -1736,6 +2037,98 @@ def _resolve_dba_table(
     return table
 
 
+def _relations_from_dba_payload(
+    payload: Mapping[str, Any] | None,
+) -> list[ArchitectTableRelation]:
+    if not isinstance(payload, Mapping):
+        return []
+    raw_relations = payload.get("relations")
+    if not isinstance(raw_relations, list):
+        return []
+    relations: list[ArchitectTableRelation] = []
+    for item in raw_relations:
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            relations.append(
+                ArchitectTableRelation.model_validate(
+                    {
+                        "parentTable": item.get("parentTable")
+                        or item.get("parent_table"),
+                        "childTable": item.get("childTable") or item.get("child_table"),
+                        "foreignKey": item.get("foreignKey") or item.get("foreign_key"),
+                        "type": item.get("type") or "one_to_many",
+                        "parentKey": item.get("parentKey")
+                        or item.get("parent_key")
+                        or "id",
+                        "alias": item.get("alias") or item.get("childAlias") or "",
+                        "onDelete": item.get("onDelete") or "CASCADE",
+                    }
+                )
+            )
+        except Exception:  # noqa: BLE001 - 单条脏关联直接忽略
+            continue
+    return relations
+
+
+def _resolve_backend_relations(
+    contract: ArchitectContract,
+    core: DdlTable,
+    dba_schema: Mapping[str, Any] | str | None,
+) -> list[ArchitectTableRelation]:
+    """优先读取 DBACoder 的 schema.core.json，缺失时按 DDL 重建。"""
+    if isinstance(dba_schema, str) and dba_schema.strip().startswith("{"):
+        try:
+            payload = json.loads(dba_schema)
+        except json.JSONDecodeError:
+            payload = None
+        relations = _relations_from_dba_payload(payload)
+        if relations:
+            return relations
+    if isinstance(dba_schema, Mapping):
+        relations = _relations_from_dba_payload(dba_schema)
+        if relations:
+            return relations
+    tables = parse_ddl_tables(contract.database_ddl)
+    if not tables:
+        tables = [core]
+    return resolve_contract_relations(contract, tables, core.name)
+
+
+def _related_route_code(relation: dict[str, Any], collection: str) -> str:
+    alias = str(relation["childAlias"])
+    path = f"{collection}/:id/{alias}"
+    return f"""// 主从表：{relation['parentTable']} 1 ── N {relation['childTable']}
+app.get('{path}', asyncHandler(async (request, response) => {{
+  const page = Math.max(1, Number(request.query.page || 1))
+  const size = Math.min(100, Math.max(1, Number(request.query.size || 20)))
+  const result = await listRelatedRecords(request.params.id, '{alias}', {{
+    page,
+    size,
+  }})
+  if (!result) {{
+    return response
+      .status(404)
+      .json({{ code: 'PARENT_NOT_FOUND', message: '父记录不存在' }})
+  }}
+  response.json({{ ...result, relation: '{alias}', storage: STORAGE }})
+}}))
+
+app.post('{path}', asyncHandler(async (request, response) => {{
+  const record = await createRelatedRecord(
+    request.params.id,
+    '{alias}',
+    request.body && typeof request.body === 'object' ? request.body : {{}},
+  )
+  if (!record) {{
+    return response
+      .status(404)
+      .json({{ code: 'PARENT_NOT_FOUND', message: '父记录不存在' }})
+  }}
+  response.status(201).json({{ ...record, success: true }})
+}}))"""
+
+
 def generate_backend_bundle(
     contract: ArchitectContract,
     *,
@@ -1773,6 +2166,18 @@ def generate_backend_bundle(
     _assert_route_pair(base, detail)
     express_base = _express_path(base)
     entity = _entity_label(contract, table)
+    # 主从表：只把“核心表作为父表”的一对多关系暴露为嵌套集合路由。
+    # 核心表作为子表时，列表 / 详情通过 belongsTo include 带回父对象。
+    relations = _resolve_backend_relations(contract, core, dba_schema)
+    relation_payloads = [_relation_payload(item, table) for item in relations]
+    child_relations = [
+        payload
+        for payload in relation_payloads
+        if str(payload["parentTable"]).lower() == table.lower()
+    ]
+    related_routes = "\n\n".join(
+        _related_route_code(payload, express_base) for payload in child_relations
+    )
 
     replacements = {
         "__API_PORT__": str(API_PORT),
@@ -1788,6 +2193,7 @@ def generate_backend_bundle(
         "__AI_IMPORTS__": ai["imports"],
         "__AI_MIDDLEWARE__": ai["middleware"],
         "__AI_ROUTES__": ai["routes"],
+        "__RELATED_ROUTES__": related_routes or "// 契约未声明主从表关联。",
     }
     server_code = EXPRESS_SERVER_TEMPLATE
     for key, value in replacements.items():
@@ -1821,6 +2227,10 @@ def generate_backend_bundle(
     if detail and detail != express_base:
         for method in ("GET", "PUT", "PATCH", "DELETE"):
             registered.append((method, detail, "express.item"))
+    for payload in child_relations:
+        nested = f"{express_base}/:id/{payload['childAlias']}"
+        registered.append(("GET", nested, "express.relation"))
+        registered.append(("POST", nested, "express.relation"))
     registered_keys = {(method, path) for method, path, _ in registered}
     for method, path, source in ai["routes_registered"]:
         key = (method, path)
@@ -1912,6 +2322,8 @@ def generate_backend_bundle(
                     }
                     for route in routes
                 ],
+                # 主从表关联事实来源：验收 / 前端据此确认嵌套路由与 include。
+                "relations": relation_payloads,
             },
             ensure_ascii=False,
             indent=2,
@@ -1944,6 +2356,7 @@ def generate_backend_bundle(
             f"生成 Express + Sequelize 后端（{engine_label}），"
             f"{len(routes) or 2} 条契约路由，"
             f"{len(business_snippets)} 条独立业务端点"
+            + (f"，{len(child_relations)} 组主从表嵌套路由" if child_relations else "")
             + ("，含 AI-Native OpenAI 路由" if ai["enabled"] else "")
         ),
         metadata={
@@ -1966,6 +2379,11 @@ def generate_backend_bundle(
                 for method, path, source in registered
             ],
             "businessRouteCount": len(business_snippets),
+            "relations": relation_payloads,
+            "nestedRelationRoutes": [
+                f"GET {express_base}/:id/{payload['childAlias']}"
+                for payload in child_relations
+            ],
             "upload": {
                 "enabled": bool(upload["enabled"]),
                 "dependency": upload["dependency"],

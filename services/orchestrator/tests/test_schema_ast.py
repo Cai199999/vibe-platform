@@ -20,6 +20,33 @@ DB_DYNAMIC = """const TABLE = 'resumes'
 const COLUMN_DEFS = JSON.parse(process.env.COLUMNS || '[]')
 """
 
+DB_RELATED_OK = """const TABLE = 'resumes'
+const COLUMN_DEFS = [['id', 'INTEGER'], ['user_id', 'INTEGER'], ['file_name', 'TEXT']]
+const COLUMN_META = { id: {}, user_id: {}, file_name: {} }
+const RELATED_MODELS = [
+  {
+    table: 'users',
+    columns: ['id', 'name'],
+    columnDefs: [['id', 'INTEGER'], ['name', 'TEXT']],
+    columnMeta: { id: {}, name: {} },
+  },
+]
+const RELATIONS = [
+  {
+    type: 'one_to_many',
+    parentTable: 'users',
+    childTable: 'resumes',
+    foreignKey: 'user_id',
+    parentKey: 'id',
+  },
+]
+"""
+
+DDL_TABLES = {
+    "resumes": ("id", "user_id", "file_name"),
+    "users": ("id", "name"),
+}
+
 
 class SchemaAstTest(unittest.TestCase):
     def test_babel_ast_extracts_table_and_columns(self) -> None:
@@ -116,6 +143,90 @@ const COLUMN_DEFS = [['id', 'INTEGER'], ['name', 'TEXT']]
         table, columns = extract_orm_schema(DB_OK)
         self.assertEqual(table, "resumes")
         self.assertEqual(columns, ["id", "file_name"])
+
+    def test_related_models_and_relations_are_extracted(self) -> None:
+        db = analyze_js_files({"server/db.js": DB_RELATED_OK})["server/db.js"]
+        self.assertEqual(db.errors, ())
+        self.assertEqual(
+            [(model.table, model.columns) for model in db.related_models],
+            [("users", ("id", "name"))],
+        )
+        self.assertEqual(len(db.relations), 1)
+        relation = db.relations[0]
+        self.assertEqual(relation.parent_table, "users")
+        self.assertEqual(relation.child_table, "resumes")
+        self.assertEqual(relation.foreign_key, "user_id")
+        self.assertEqual(
+            db.table_columns,
+            {
+                "resumes": ("id", "user_id", "file_name"),
+                "users": ("id", "name"),
+            },
+        )
+
+    def test_related_model_unknown_column_is_blocked(self) -> None:
+        """关联表 include 查询未知字段，和核心表一样必须阻断。"""
+        bad = (
+            DB_RELATED_OK.replace(
+                "columns: ['id', 'name']", "columns: ['id', 'iam_sub']"
+            )
+            .replace("['name', 'TEXT']", "['iam_sub', 'TEXT']")
+            .replace(
+                "columnMeta: { id: {}, name: {} }",
+                "columnMeta: { id: {}, iam_sub: {} }",
+            )
+        )
+        messages = check_orm_schema(
+            {"server/db.js": bad},
+            table="resumes",
+            expected_columns=DDL_TABLES["resumes"],
+            expected_tables=DDL_TABLES,
+        )
+        combined = " ".join(messages)
+        self.assertIn("users", combined)
+        self.assertIn("iam_sub", combined)
+
+    def test_related_model_runtime_mutation_is_blocked(self) -> None:
+        mutated = DB_RELATED_OK + (
+            "\nRELATED_MODELS.push({ table: 'jds', columns: ['id', 'title'] })\n"
+        )
+        db = analyze_js_files({"server/db.js": mutated})["server/db.js"]
+        self.assertTrue(any("RELATED_MODELS" in error for error in db.errors))
+        messages = check_orm_schema(
+            {"server/db.js": mutated},
+            table="resumes",
+            expected_columns=DDL_TABLES["resumes"],
+            expected_tables=DDL_TABLES,
+        )
+        self.assertTrue(any("运行期" in message for message in messages))
+
+    def test_related_model_without_relations_is_blocked(self) -> None:
+        """声明了关联模型却不生成 hasMany / belongsTo，等于退回单表 CRUD。"""
+        source = DB_RELATED_OK.replace(
+            """const RELATIONS = [
+  {
+    type: 'one_to_many',
+    parentTable: 'users',
+    childTable: 'resumes',
+    foreignKey: 'user_id',
+    parentKey: 'id',
+  },
+]
+""",
+            "const RELATIONS = []\n",
+        )
+        messages = check_orm_schema(
+            {"server/db.js": source},
+            table="resumes",
+            expected_columns=DDL_TABLES["resumes"],
+            expected_tables=DDL_TABLES,
+        )
+        self.assertTrue(any("RELATIONS" in message for message in messages))
+
+    def test_relation_foreign_key_must_exist_in_child(self) -> None:
+        bad = DB_RELATED_OK.replace("foreignKey: 'user_id'", "foreignKey: 'owner_id'")
+        db = analyze_js_files({"server/db.js": bad})["server/db.js"]
+        self.assertTrue(any("owner_id" in error for error in db.errors))
 
 
 if __name__ == "__main__":

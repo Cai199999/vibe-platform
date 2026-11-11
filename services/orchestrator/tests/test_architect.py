@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import unittest
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from ai_core.agent.checkpoint import MemoryCheckpointerProvider
@@ -47,6 +48,7 @@ from ai_core.domain.architect import (
     ArchitectHelperRequest,
     ArchitectQuestion,
     ArchitectRunRequest,
+    ArchitectTableRelation,
 )
 
 SHAPES = ("lightweight_web", "script_automation", "full_stack_system")
@@ -815,6 +817,44 @@ class ContractTierValidationTest(unittest.TestCase):
         self.assertIn("物理外键", joined)
         self.assertIn("backend", joined)
         self.assertIn("database", joined)
+
+    def test_full_stack_derives_master_detail_relation_from_ddl(self) -> None:
+        """LLM 漏写 relations 时，按 <parent>_id 确定性推导，而不是退化成单表。"""
+        draft = MockArchitectLLM().draft_contract(self._context("full_stack_system"))
+        with_tables = replace(
+            draft,
+            database_ddl=(
+                "CREATE TABLE projects (id INT, name TEXT);"
+                "CREATE TABLE tasks (id INT, project_id INT, title TEXT);"
+            ),
+        )
+        validation = validate_draft("full_stack_system", with_tables)
+        self.assertTrue(validation.valid, validation.issues)
+        self.assertEqual(len(validation.draft.relations), 1)
+        relation = validation.draft.relations[0]
+        self.assertEqual(relation.parent_table, "projects")
+        self.assertEqual(relation.child_table, "tasks")
+        self.assertEqual(relation.foreign_key, "project_id")
+
+    def test_full_stack_rejects_relation_to_missing_table(self) -> None:
+        """关联引用不存在的表属于契约自相矛盾，必须在确认前修复。"""
+        draft = MockArchitectLLM().draft_contract(self._context("full_stack_system"))
+        broken = replace(
+            draft,
+            database_ddl="CREATE TABLE tasks (id INT, title TEXT);",
+            relations=[
+                ArchitectTableRelation(
+                    parentTable="users",
+                    childTable="tasks",
+                    foreignKey="user_id",
+                )
+            ],
+        )
+        validation = validate_draft("full_stack_system", broken)
+        self.assertFalse(validation.valid)
+        joined = "；".join(validation.issues)
+        self.assertIn("users", joined)
+        self.assertIn("不存在", joined)
 
     def test_unknown_shape_is_rejected(self) -> None:
         draft = ContractDraft(

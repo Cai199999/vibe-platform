@@ -24,6 +24,7 @@ from ai_core.domain.architect import (
     ArchitectApiRoute,
     ArchitectComponentInteraction,
     ArchitectContract,
+    ArchitectTableRelation,
 )
 from ai_core.domain.fullstack import FullstackRunOptions, FullstackRunRequest
 from ai_core.fullstack.coders import (
@@ -42,7 +43,11 @@ from ai_core.fullstack.coders import (
     item_path,
     parse_ddl_tables,
 )
-from ai_core.fullstack.graph import FullstackConsistencyError, FullstackGraphRunner
+from ai_core.fullstack.graph import (
+    FullstackConsistencyError,
+    FullstackContractContradictionError,
+    FullstackGraphRunner,
+)
 from ai_core.fullstack.schema_mcp import verify_schema_with_mcp
 from ai_core.fullstack.service import FullstackService
 from ai_core.mcp.client import McpServerConfig, McpStdioClient
@@ -87,6 +92,25 @@ CREATE TABLE jds (
 
 
 def _resume_contract(**overrides) -> ArchitectContract:
+    # 交互必须与 apiRoutes 指向同一资源；否则契约审计会（正确地）
+    # 判定为“组件调用了未声明接口”。
+    overrides.setdefault(
+        "componentInteractions",
+        [
+            ArchitectComponentInteraction(
+                component="ResumeList",
+                event="load",
+                api_route="GET /api/v1/resumes",
+                logic="加载简历列表",
+            ),
+            ArchitectComponentInteraction(
+                component="ResumeForm",
+                event="submit",
+                api_route="POST /api/v1/resumes",
+                logic="创建简历后刷新列表",
+            ),
+        ],
+    )
     return _contract(
         apiRoutes=[
             ArchitectApiRoute(
@@ -305,13 +329,95 @@ class CoderTests(unittest.TestCase):
         self.assertNotIn("const TABLE = 'users'", db_code)
         # NOT NULL 列必须带约束元数据，供 buildValues 补默认值。
         self.assertIn('"nullable": false', db_code)
-        self.assertIn("REQUIRED_COLUMNS", db_code)
+        self.assertIn("function requiredColumnsFor", db_code)
         migration = bundle.files["server/migrations/001_init.sql"]
         self.assertIn("CREATE TABLE IF NOT EXISTS users", migration)
         self.assertIn("CREATE TABLE IF NOT EXISTS resumes", migration)
         core_json = json.loads(bundle.files["server/schema.core.json"])
         self.assertEqual(core_json["table"], "resumes")
         self.assertIn("content", core_json["columnMeta"])
+
+    def test_master_detail_relation_strips_sensitive_columns(self) -> None:
+        """核心表为子表：生成 belongsTo users，但绝不暴露 iam_sub。"""
+        contract = _resume_contract(
+            relations=[
+                ArchitectTableRelation(
+                    parentTable="users",
+                    childTable="resumes",
+                    foreignKey="user_id",
+                )
+            ]
+        )
+        bundle = generate_dba_bundle(contract)
+        db_code = bundle.files["server/db.js"]
+        self.assertIn("const TABLE = 'resumes'", db_code)
+        self.assertIn("child.belongsTo", db_code)
+        self.assertIn('"user"', db_code)
+        self.assertNotIn('"iam_sub"', db_code)
+        core_json = json.loads(bundle.files["server/schema.core.json"])
+        tables = {item["table"]: item for item in core_json["tables"]}
+        self.assertIn("users", tables)
+        self.assertNotIn("iam_sub", tables["users"]["columns"])
+        self.assertEqual(len(core_json["relations"]), 1)
+
+    def test_master_detail_parent_generates_nested_child_routes(self) -> None:
+        """核心表为父表：生成 hasMany + /users/:id/resumes 嵌套路由。"""
+        ddl = """CREATE TABLE users (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE resumes (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  user_id BIGINT NOT NULL,
+  file_name VARCHAR(255),
+  content MEDIUMTEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="GET", path="/api/v1/users", description="用户列表"
+                ),
+                ArchitectApiRoute(
+                    method="POST", path="/api/v1/users", description="创建用户"
+                ),
+                ArchitectApiRoute(
+                    method="GET", path="/api/v1/users/:id", description="用户详情"
+                ),
+            ],
+            databaseDdl=ddl,
+            relations=[
+                ArchitectTableRelation(
+                    parentTable="users",
+                    childTable="resumes",
+                    foreignKey="user_id",
+                )
+            ],
+        )
+        dba = generate_dba_bundle(contract)
+        db_code = dba.files["server/db.js"]
+        self.assertIn("parent.hasMany", db_code)
+        self.assertIn("listRelatedRecords", db_code)
+        self.assertIn("createRelatedRecord", db_code)
+        core_json = json.loads(dba.files["server/schema.core.json"])
+
+        backend = generate_backend_bundle(contract, dba_schema=core_json)
+        index_code = backend.files["server/index.js"]
+        self.assertIn("/api/v1/users/:id/resumes", index_code)
+        manifest = json.loads(backend.files["server/api-routes.json"])
+        relation_routes = [
+            route
+            for route in manifest["routes"]
+            if route.get("source") == "express.relation"
+        ]
+        self.assertEqual(
+            {(route["method"], route["path"]) for route in relation_routes},
+            {
+                ("GET", "/api/v1/users/:id/resumes"),
+                ("POST", "/api/v1/users/:id/resumes"),
+            },
+        )
 
     def test_missing_ddl_never_falls_back_to_users_or_name(self) -> None:
         """无 DDL 时兜底字段必须是中性的 title/created_at。"""
@@ -1390,6 +1496,44 @@ class GraphTests(unittest.TestCase):
         ]
         self.assertEqual([event.payload["attempt"] for event in repairs], [1, 2])
 
+    def test_contract_contradiction_stops_without_retry(self) -> None:
+        """前端调用了未声明接口：这是契约矛盾，不能靠重跑 BackendCoder 修复。"""
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        contract = _resume_contract(
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="ResumeSummary",
+                    event="load",
+                    api_route="GET /api/v1/resumes/summary",
+                    logic="加载统计卡片",
+                )
+            ]
+        )
+        buffer = RunEventBuffer("fsk_contract_contradiction")
+        runner = FullstackGraphRunner(sandbox, event_sink=buffer)
+        with self.assertRaises(FullstackContractContradictionError) as ctx:
+            runner.run(
+                {
+                    "run_id": "fsk_contract_contradiction",
+                    "project_id": "proj_resume",
+                    "sandbox_id": sandbox.handle.sandbox_id,
+                    "preview_url": sandbox.handle.preview_url,
+                    "contract": contract,
+                    "files": [],
+                }
+            )
+        self.assertEqual(ctx.exception.code, "FULLSTACK_CONTRACT_CONTRADICTION")
+        self.assertEqual(ctx.exception.failure_kind, "CONTRACT")
+        self.assertTrue(ctx.exception.needs_clarification)
+        self.assertIn("resumes/summary", ctx.exception.clarification["prompt"])
+        self.assertEqual(sandbox.verified, [])
+        events = buffer.snapshot()
+        repairs = [
+            event for event in events if event.type == "fullstack.consistency.repair"
+        ]
+        self.assertEqual(repairs, [])
+
     def test_resume_assistant_business_actions_are_all_registered(self) -> None:
         """回归用户用例：抓取 / 改写 / 投递 / 对话四个业务动作必须独立对齐。"""
         sandbox = _MemorySandbox()
@@ -1646,6 +1790,54 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaises(Exception) as ctx:
             service.start_stream(request)
         self.assertEqual(ctx.exception.code, "FULLSTACK_CONTRACT_INVALID")
+
+    def test_contract_contradiction_failure_carries_clarification(self) -> None:
+        """契约矛盾必须在生成前失败，并把“重新澄清”信息送到前端。"""
+        sandbox = _MemorySandbox()
+        service = FullstackService(sandbox=sandbox)
+        run_id = f"fsk_{uuid.uuid4().hex[:12]}"
+        contract = _resume_contract(
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="GhostButton",
+                    event="click",
+                    api_route="GET /api/v1/ghost",
+                    logic="不存在的接口",
+                )
+            ]
+        )
+        request = FullstackRunRequest.model_validate(
+            {
+                "runId": run_id,
+                "projectId": "proj_fullstack",
+                "contractId": contract.contract_id,
+                "contract": contract.model_dump(mode="json", by_alias=True),
+                "source": {"files": _base_files()},
+            }
+        )
+        active = service.start_stream(request)
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            snapshot = service.snapshot(run_id)
+            if snapshot.status in {"SUCCEEDED", "FAILED"}:
+                break
+            time.sleep(0.02)
+
+        snapshot = service.snapshot(run_id)
+        self.assertEqual(snapshot.status, "FAILED")
+        self.assertEqual(snapshot.error_code, "FULLSTACK_CONTRACT_CONTRADICTION")
+        self.assertEqual(snapshot.failure_kind, "CONTRACT")
+        self.assertTrue(snapshot.needs_clarification)
+        self.assertIn("/api/v1/ghost", snapshot.clarification["prompt"])
+        failed = next(
+            event
+            for event in active.buffer.snapshot()
+            if event.type == "fullstack.failed"
+        )
+        self.assertTrue(failed.payload["needsClarification"])
+        self.assertEqual(failed.payload["failureKind"], "CONTRACT")
+        self.assertEqual(sandbox.verified, [])
 
     def test_frontend_bootstrap_accepts_empty_source_and_returns_entry(self) -> None:
         """新项目没有源码：服务端必须能从空 files 建沙盒并回传真实 App.jsx。"""

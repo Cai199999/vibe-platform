@@ -31,6 +31,7 @@ from ai_core.domain.architect import (
     ArchitectComponentInteraction,
     ArchitectImplementationPhase,
     ArchitectQuestion,
+    ArchitectTableRelation,
     normalize_database_engine,
 )
 from ai_core.ports.model import ModelClient, ModelClientError
@@ -76,6 +77,9 @@ class ContractDraft:
     tech_stack: dict[str, Any] = field(default_factory=dict)
     api_routes: list[ArchitectApiRoute] = field(default_factory=list)
     database_ddl: str = ""
+    # 主从表 / 关联表定义：Users 1 ── N Resumes 等业务关联。
+    # LLM 漏写时由 DDL 的 <parent>_id 列确定性推导，不会阻断生成。
+    relations: list[ArchitectTableRelation] = field(default_factory=list)
     component_interactions: list[ArchitectComponentInteraction] = field(
         default_factory=list
     )
@@ -967,7 +971,9 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             '{"contract_markdown":"完整 Markdown 契约","tech_stack":{},'
             '"api_routes":[{"method":"GET","path":"/api/v1/...",'
             '"request":"","response":"","description":"","auth_required":true}],'
-            '"database_ddl":"SQL 字符串","component_interactions":'
+            '"database_ddl":"SQL 字符串","relations":[{"parent_table":"users",'
+            '"child_table":"resumes","foreign_key":"user_id",'
+            '"type":"one_to_many","alias":""}],"component_interactions":'
             '[{"component":"","event":"","api_route":"","logic":""}],'
             '"frontend_routes":[{"path":"/","name":"页面名","description":""}],'
             '"page_layout":[{"region":"header|main|sidebar","title":"",'
@@ -997,6 +1003,15 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "本地交互（弹窗、切换 Tab、本地校验）留空字符串；\n"
             "  · logic：请求前 Loading、成功后的数据刷新 / 跳转 / 提示、失败后"
             "的错误展示与重试，三者缺一不可。\n"
+            "- 【主从表关联铁律】只要一次需求包含“主表 + 明细 / 子记录”"
+            "（如 Users 对 Resumes、Orders 对 OrderItems），必须：\n"
+            "  · DDL 同时创建父表与子表，子表包含 `<父表单数>_id` 外键列"
+            "（禁止物理 FOREIGN KEY 约束）；\n"
+            "  · relations 显式声明 {parent_table, child_table, foreign_key,"
+            " type: one_to_many}，字段必须与 DDL 逐字一致；\n"
+            "  · 子表 API 路由挂在父资源下（如 GET/POST "
+            "/api/v1/users/{user_id}/resumes），或至少提供父表详情关联查询；\n"
+            "  · 不得把主从关系塞进一个 JSON 字段，也不得只生成父表 CRUD。\n"
             "- 如果用户明确表示“只展示 / 没有交互”，或某区域仍是待定占位："
             "该组件必须 is_placeholder=true，且不得出现在 component_interactions "
             "中；前端 Coder 会据此生成静态占位符，禁止伪造 onClick。\n"
@@ -1409,6 +1424,21 @@ def _parse_contract_draft(payload: dict[str, Any]) -> ContractDraft:
         except Exception:  # noqa: BLE001 - 单条非法路由直接跳过
             continue
 
+    raw_relations = (
+        payload.get("relations")
+        or payload.get("table_relations")
+        or payload.get("tableRelations")
+        or []
+    )
+    relations: list[ArchitectTableRelation] = []
+    for item in raw_relations if isinstance(raw_relations, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            relations.append(ArchitectTableRelation.model_validate(item))
+        except Exception:  # noqa: BLE001 - 单条非法关联交给契约校验报告
+            continue
+
     raw_interactions = (
         payload.get("component_interactions")
         or payload.get("componentInteractions")
@@ -1442,6 +1472,7 @@ def _parse_contract_draft(payload: dict[str, Any]) -> ContractDraft:
         database_ddl=str(
             payload.get("database_ddl") or payload.get("databaseDdl") or ""
         ).strip(),
+        relations=relations,
         component_interactions=interactions,
         frontend_routes=_as_list(
             payload.get("frontend_routes") or payload.get("frontendRoutes")
@@ -1478,6 +1509,7 @@ def _draft_to_payload(draft: ContractDraft) -> dict[str, Any]:
         "techStack": draft.tech_stack,
         "apiRoutes": [item.model_dump(by_alias=True) for item in draft.api_routes],
         "databaseDdl": draft.database_ddl,
+        "relations": [item.model_dump(by_alias=True) for item in draft.relations],
         "componentInteractions": [
             item.model_dump(by_alias=True) for item in draft.component_interactions
         ],

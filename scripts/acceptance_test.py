@@ -1131,6 +1131,50 @@ def check_orm_ddl_consistency(
                 + f"；{table} 真实字段："
                 + "、".join(expected)
             )
+
+    # ---- 主从表：关联模型同样必须逐表对齐迁移 DDL ----
+    related_models = [
+        item
+        for item in (db_schema.get("relatedModels") or [])
+        if isinstance(item, dict)
+    ]
+    relations = [
+        item for item in (db_schema.get("relations") or []) if isinstance(item, dict)
+    ]
+    for model in related_models:
+        related_table = str(model.get("table") or "").strip()
+        related_columns = [str(column) for column in (model.get("columns") or [])]
+        ddl_columns = schema.get(related_table)
+        if not related_table or ddl_columns is None:
+            issues.append(f"关联模型引用了迁移 DDL 中不存在的表：{related_table}")
+            continue
+        allowed = {str(column).lower() for column in ddl_columns}
+        unknown = [
+            column for column in related_columns if column.lower() not in allowed
+        ]
+        if unknown:
+            issues.append(
+                f"关联模型 {related_table} 使用了迁移 DDL 中不存在的字段："
+                + "、".join(unknown)
+            )
+    if related_models and not relations:
+        issues.append(
+            "server/db.js 声明了关联模型但缺少 RELATIONS，"
+            "主从表未生成 hasMany / belongsTo 关联查询"
+        )
+    for relation in relations:
+        parent = str(relation.get("parentTable") or "").strip()
+        child = str(relation.get("childTable") or "").strip()
+        foreign_key = str(relation.get("foreignKey") or "").strip()
+        if parent not in schema or child not in schema:
+            issues.append(f"关联定义引用了迁移 DDL 中不存在的表：{parent} → {child}")
+            continue
+        child_columns = {str(column).lower() for column in schema[child]}
+        if foreign_key.lower() not in child_columns:
+            issues.append(
+                f"关联 {parent} → {child} 的外键 {foreign_key} "
+                "不在迁移 DDL 的子表字段中"
+            )
     return issues
 
 
