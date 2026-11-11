@@ -19,7 +19,8 @@ React + Vite → Java 21 BFF → Python 3.12 FastAPI/LangGraph → Docker 沙盒
 - **画布视觉暂存**：CREATE_NEW 不再边画边写代码；前端 `pendingAdditions` + 半透明幽灵预览 + 右下角「未保存变更」浮窗，怎么画都不会白屏。
 - **BATCH_LAYOUT 统一提交**：保存布局 / 进入架构澄清 / 全栈生成时，位移与新增组件打包一次提交；Coder 一次生成新增 JSX，Python 合并 diff 后追加确定性 transform，只产出一份补丁与一次 HMR；Verifier 穿透校验每个 `data-vibe-created`。
 - **Architect 上下文**：进入澄清前自动 flush 画布草稿，并以 `system` 消息注入未保存变更摘要。
-- 验证：`test_layout_batch` 等 53 项测试全绿；前端 build 通过；真实沙盒 AST 探针（`<Plus />` 拦截 / 正常文件放行）通过。
+- **样式澄清 + 迷你多轮对话**：Graph 新增 `clarify_gate → style_check → coder`；新增组件未说明颜色/大小/主次时 `interrupt()` 追问，回答（如“和登录按钮一样”）写回标注与 Plan。悬浮框澄清期间切换为 Chatbox，问题/回答进入 `chatHistory`，主输入可直接作答。布局提交被澄清暂停时保留草稿，恢复 Run 成功后才清空。
+- 验证：`test_style_check` 10 项（含暂停→回答“和登录按钮一样”→Coder 收到约束→SUCCEEDED 的 E2E）+ 相关套件 39 项全绿；前端 build 通过；真实沙盒 AST 探针（`<Plus />` 拦截 / 正常文件放行）通过。
 
 ## 真假边界
 

@@ -326,6 +326,8 @@ const CLARIFICATION_REASON_TEXT = {
   low_confidence: '我还不确定你的具体意图，先确认一下：',
   fullstack_scope: '这看起来是一个业务需求，先确认改动范围：',
   core_business_decision: '这属于核心业务决策，确认实现范围后我再继续：',
+  // 新增组件缺少视觉描述：先对齐现有设计系统，再生成代码。
+  style_detail_missing: '新增组件需要先对齐现有视觉风格，确认后我再开始生成：',
 }
 
 /**
@@ -381,6 +383,9 @@ function AnnotationPopover({
   // 主输入栏始终保留，用户不必在“点选项”和“写补充说明”之间二选一。
   const [customOpen, setCustomOpen] = useState({})
   const [customText, setCustomText] = useState({})
+  // 澄清期间主输入栏切换为“回复 Agent”，与原修改意图分开存放：
+  // 用户可以连续回答多轮问题，而不会覆盖最初的需求描述。
+  const [reply, setReply] = useState('')
   const [confirmingClose, setConfirmingClose] = useState(false)
   const sending = Boolean(submitting && pending)
   // 关闭确认按项目级 submitting 判定：单圈 / 批量提交都要保护。
@@ -413,6 +418,8 @@ function AnnotationPopover({
 
   // 新一轮澄清使用独立草稿；默认值（如“颜色”）预选，用户可直接提交。
   useEffect(() => {
+    // 每一轮澄清都从空回复开始；上一轮文本不能自动带进下一轮。
+    setReply('')
     if (!clarification) {
       setAnswers({})
       setCustomOpen({})
@@ -472,39 +479,44 @@ function AnnotationPopover({
       ? overrides[question.questionId]
       : answers[question.questionId]
 
+  const hasAnswer = (question, overrides = {}) => {
+    const value = effectiveAnswer(question, overrides)
+    const extra = String(customText[question.questionId] ?? '').trim()
+    if (Array.isArray(value)) return value.length > 0 || extra !== ''
+    return (
+      (value !== undefined &&
+        value !== null &&
+        String(value).trim() !== '') ||
+      extra !== ''
+    )
+  }
+
   const answersAreComplete = (overrides = {}) =>
     Boolean(
-      clarification?.questions?.every((question) => {
-        if (!question.required) return true
-        const value = effectiveAnswer(question, overrides)
-        const extra = String(customText[question.questionId] ?? '').trim()
-        if (Array.isArray(value)) return value.length > 0 || extra !== ''
-        return (
-          (value !== undefined &&
-            value !== null &&
-            String(value).trim() !== '') ||
-          extra !== ''
-        )
-      }),
+      clarification?.questions?.every(
+        (question) => !question.required || hasAnswer(question, overrides),
+      ),
     )
 
-  const clarificationComplete = answersAreComplete()
+  const missingRequired = (overrides = {}) =>
+    clarification?.questions?.find(
+      (question) => question.required && !hasAnswer(question, overrides),
+    ) ?? null
 
-  // 全部为可选问题时，“完整”不代表有内容；至少要有一条答案或补充说明，
+  const replyText = String(reply).trim()
+  // 迷你聊天框的主输入可以代替“自定义”文本域：用户直接回复
+  // “和登录按钮一样”，就把它注入第一个尚未回答的必填问题。
+  const replyQuestion = replyText ? missingRequired() : null
+  const replyOverrides = replyQuestion
+    ? { [replyQuestion.questionId]: replyText }
+    : {}
+  const clarificationComplete = answersAreComplete(replyOverrides)
+
+  // 全部为可选问题时，“完整”不代表有内容；至少要有一条答案或回复，
   // 否则后端会以“至少回答一个澄清问题”拒绝。
   const clarificationHasInput = Boolean(
-    annotation.intent.trim() ||
-      clarification?.questions?.some((question) => {
-        const value = answers[question.questionId]
-        const extra = String(customText[question.questionId] ?? '').trim()
-        if (Array.isArray(value)) return value.length > 0 || extra !== ''
-        return (
-          (value !== undefined &&
-            value !== null &&
-            String(value).trim() !== '') ||
-          extra !== ''
-        )
-      }),
+    replyText ||
+      clarification?.questions?.some((question) => hasAnswer(question)),
   )
 
   const toggleCustom = (questionId) => {
@@ -546,12 +558,23 @@ function AnnotationPopover({
     }
   }
 
-  const submitClarification = (comment = '', overrides = {}) => {
-    const hasInput =
-      Object.keys(overrides).length > 0 || clarificationHasInput
+  const submitClarification = (comment = replyText, overrides = {}) => {
+    const replyValue = String(comment || '').trim()
+    // 用户直接在主输入栏回复时，把它补进第一个缺失的必填问题；
+    // 其余问题已经有选项 / 旧答案，不受影响。
+    const injected = replyValue ? missingRequired(overrides) : null
+    const finalOverrides = injected
+      ? { ...overrides, [injected.questionId]: replyValue }
+      : overrides
+    const hasInput = Boolean(
+      replyValue ||
+        clarification?.questions?.some((question) =>
+          hasAnswer(question, finalOverrides),
+        ),
+    )
     if (
       !clarification ||
-      !answersAreComplete(overrides) ||
+      !answersAreComplete(finalOverrides) ||
       !hasInput
     ) {
       return
@@ -559,7 +582,7 @@ function AnnotationPopover({
     const payload = clarification.questions
       .map((question) => {
         const extra = String(customText[question.questionId] ?? '').trim()
-        let value = effectiveAnswer(question, overrides)
+        let value = effectiveAnswer(question, finalOverrides)
         if (question.type === 'multi_choice') {
           const selected = Array.isArray(value) ? value : []
           const merged = extra && !selected.includes(extra)
@@ -580,14 +603,16 @@ function AnnotationPopover({
         return { questionId: question.questionId, value }
       })
       .filter(Boolean)
-    // 主输入栏的补充说明作为 comment 一起提交，不强制用户把长文本
-    // 拆成一个个问题答案。
+    // 已经作为问题答案提交的文本不再重复塞进 comment，避免 Planner /
+    // Coder 同时读到两份相同内容。
     onClarificationAnswer?.(
       annotation.id,
       clarification,
       payload,
-      String(comment || '').trim(),
+      injected ? '' : replyValue,
     )
+    // 回答已进入 chatHistory，清空输入框准备下一轮追问。
+    setReply('')
   }
 
   return (
@@ -618,10 +643,10 @@ function AnnotationPopover({
       }}
       onSubmit={(event) => {
         event.preventDefault()
-        // 澄清挂起期间，主输入栏不再关闭：发送时把当前问答 + 输入栏
-        // 补充说明一起提交，而不是启动一个新 Run（否则会撞 RUN_BUSY）。
+        // 澄清挂起期间，主输入栏切换为“回复 Agent”：发送时把当前
+        // 问答 + 回复一起提交，而不是启动新 Run（否则会撞 RUN_BUSY）。
         if (clarificationPending) {
-          submitClarification(annotation.intent)
+          if (clarification) submitClarification(reply)
           return
         }
         onSend?.(annotation.id)
@@ -925,7 +950,7 @@ function AnnotationPopover({
               disabled={
                 submitting || !clarificationComplete || !clarificationHasInput
               }
-              onClick={() => submitClarification(annotation.intent)}
+              onClick={() => submitClarification(reply)}
             >
               {submitting ? (
                 <span className="mini-spinner" aria-label="执行中" />
@@ -941,19 +966,25 @@ function AnnotationPopover({
         <input
           ref={inputRef}
           type="text"
-          value={annotation.intent}
-          maxLength={120}
+          value={clarificationPending && clarification ? reply : annotation.intent}
+          maxLength={clarificationPending && clarification ? 800 : 120}
           placeholder={
             blocked
               ? '请先在上方处理待审批的修改…'
               : clarificationPending
                 ? clarification
-                  ? '补充说明（可选），随确认一起提交…'
+                  ? '回复 Agent，例如“和登录按钮一样”…'
                   : '其他标注有待确认的问题…'
                 : '描述修改意图...'
           }
           disabled={blocked || submitting}
-          onChange={(event) => onChange?.(annotation.id, event.target.value)}
+          onChange={(event) => {
+            if (clarificationPending && clarification) {
+              setReply(event.target.value)
+              return
+            }
+            onChange?.(annotation.id, event.target.value)
+          }}
         />
         <button
           className="popover-send"
@@ -962,16 +993,26 @@ function AnnotationPopover({
             blocked ||
             submitting ||
             (clarificationPending
-              ? !clarificationComplete || !clarificationHasInput
+              ? !clarification ||
+                !clarificationComplete ||
+                !clarificationHasInput
               : !annotation.intent.trim())
           }
           title={
             clarificationPending
-              ? '把当前回答与输入栏说明一起提交'
+              ? clarification
+                ? '回复当前问题并继续生成'
+                : '请先在对应标注里回答待确认的问题'
               : '只对当前圈执行一次增量修改'
           }
         >
-          {sending ? <span className="mini-spinner" aria-label="执行中" /> : '发送'}
+          {sending ? (
+            <span className="mini-spinner" aria-label="执行中" />
+          ) : clarificationPending && clarification ? (
+            '回复'
+          ) : (
+            '发送'
+          )}
         </button>
       </div>
       {sending && (

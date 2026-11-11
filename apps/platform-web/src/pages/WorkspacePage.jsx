@@ -715,6 +715,118 @@ function appendAssistantMessage(annotation, result, fallback = '') {
   ]
 }
 
+/**
+ * 把澄清问题 / 用户回答写进对应标注的迷你聊天记录。
+ *
+ * HITL 暂停不是一次性的表单弹窗：问题和回答必须进入同一 chatHistory，
+ * 用户才能看到完整上下文，并在同一浮层里继续多轮对话。
+ */
+function appendClarificationQuestion(run, payload, fallbackAnnotationId) {
+  const targetId = payload?.annotationId || fallbackAnnotationId
+  if (!targetId) return run
+  const clarificationId = payload?.clarificationId
+  const questionText = (payload?.questions ?? [])
+    .map((question) => String(question.prompt || '').trim())
+    .filter(Boolean)
+    .join('\n')
+  const content =
+    questionText || payload?.decisionSummary || '需要确认一些信息后继续。'
+  let changed = false
+  const annotations = (run.annotations ?? []).map((annotation) => {
+    if (
+      annotation.id !== targetId &&
+      annotation.threadId !== targetId
+    ) {
+      return annotation
+    }
+    const history = annotation.chatHistory ?? []
+    // 重放 / 重连同一澄清时不能重复插入问题气泡。
+    if (
+      clarificationId &&
+      history.some(
+        (message) =>
+          message.clarificationId === clarificationId &&
+          message.role === 'assistant',
+      )
+    ) {
+      return annotation
+    }
+    changed = true
+    return {
+      ...annotation,
+      chatHistory: [
+        ...history,
+        newMessage('assistant', content, {
+          clarificationId,
+          kind: 'clarification_question',
+        }),
+      ],
+    }
+  })
+  return changed ? { ...run, annotations } : run
+}
+
+function _formatAnswerValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(_formatAnswerValue).filter(Boolean).join('、')
+  }
+  if (value && typeof value === 'object') {
+    return Object.values(value)
+      .map(_formatAnswerValue)
+      .filter(Boolean)
+      .join('；')
+  }
+  return String(value ?? '').trim()
+}
+
+function appendClarificationReply(
+  run,
+  annotationId,
+  clarification,
+  answers = [],
+  comment = '',
+) {
+  if (!annotationId) return run
+  const parts = [
+    ...(answers ?? []).map((item) => _formatAnswerValue(item?.value)),
+    String(comment || '').trim(),
+  ].filter(Boolean)
+  if (parts.length === 0) return run
+  const clarificationId = clarification?.clarificationId
+  let changed = false
+  const annotations = (run.annotations ?? []).map((annotation) => {
+    if (
+      annotation.id !== annotationId &&
+      annotation.threadId !== annotationId
+    ) {
+      return annotation
+    }
+    const history = annotation.chatHistory ?? []
+    if (
+      clarificationId &&
+      history.some(
+        (message) =>
+          message.clarificationId === clarificationId &&
+          message.role === 'user',
+      )
+    ) {
+      return annotation
+    }
+    changed = true
+    return {
+      ...annotation,
+      chatHistory: [
+        ...history,
+        newMessage('user', parts.join('；'), {
+          clarificationId,
+          kind: 'clarification_answer',
+        }),
+      ],
+    }
+  })
+  return changed ? { ...run, annotations } : run
+}
+
 async function extractError(response) {
   let body = null
   try {
@@ -1004,8 +1116,15 @@ function applyStreamEvent(run, event, annotationId) {
     return { ...base, patchPreview: payload.diffPreview || base.patchPreview }
   }
   if (event.type === 'clarification.required') {
+    // 问题同时进入时间轴与对应标注的迷你聊天框：用户看到的是一段
+    // 连续对话，而不是一个与历史割裂的表单。
+    const withQuestion = appendClarificationQuestion(
+      base,
+      payload,
+      annotationId,
+    )
     return {
-      ...base,
+      ...withQuestion,
       clarification: payload,
       submitting: false,
       pendingAnnotationId: null,
@@ -1211,6 +1330,9 @@ export default function WorkspacePage() {
   const [pendingAdditions, setPendingAdditions] = useState({})
   // 防止【保存布局】在 React 下一次渲染前被双击触发两次 Run。
   const layoutSaveInflightRef = useRef(new Set())
+  // 布局提交可能被样式澄清打断：保存 snapshot，等恢复后的 Run 成功再
+  // 统一清空 pendingAdditions / 位移草稿，避免“代码已生成、幽灵预览还在”。
+  const layoutFlushRef = useRef(new Map())
   // 已成功写入代码的累计位移；保存成功前绝不更新，失败才能保留草稿。
   const dragCommittedRef = useRef(new Map())
   const dragSeqRef = useRef(0)
@@ -3166,6 +3288,9 @@ export default function WorkspacePage() {
     streamControllersRef.current.set(projectId, controller)
     // 记录终态事件，供“静默拖拽同步”判断成功 / 失败；旧调用方忽略返回值。
     let terminalEvent = null
+    // 暂停事件同样需要返回给调用方：布局保存要靠它区分“失败”与
+    // “等待样式澄清”，否则会误删恢复成功后仍需使用的草稿快照。
+    let clarificationEvent = null
 
     // 同一时间窗内到达的多个 SSE 事件合并为**一次** runStates 更新：
     // 既减少状态对象拷贝，也保证 React 每批只渲染一次工作区。
@@ -3180,6 +3305,9 @@ export default function WorkspacePage() {
           event.type === 'run.rejected'
         ) {
           terminalEvent = event
+        }
+        if (event.type === 'clarification.required') {
+          clarificationEvent = event
         }
         if (closedProjectsRef.current.has(projectId)) {
           if (
@@ -3259,8 +3387,9 @@ export default function WorkspacePage() {
             : previous,
         )
       }
-      // 供静默拖拽同步判断结果；常规调用方无需消费。
-      return terminalEvent
+      // 供静默拖拽同步 / 布局暂存判断结果；常规调用方无需消费。
+      // 没有终态时返回澄清事件，调用方可据此区分“暂停”和“失败”。
+      return terminalEvent ?? clarificationEvent
     }
   }
 
@@ -3284,13 +3413,21 @@ export default function WorkspacePage() {
       return
     }
     inflightRef.current.add(projectId)
-    patchRun(projectId, {
+    patchRun(projectId, (previous) => ({
+      // 用户回答先进入聊天记录，再发请求；即使网络失败，回答也不会消失。
+      ...appendClarificationReply(
+        previous,
+        annotationId,
+        clarification,
+        answers,
+        comment,
+      ),
       submitting: true,
       pendingAnnotationId: annotationId,
       pendingAction: 'run',
       clarification: null,
       error: null,
-    })
+    }))
 
     try {
       const response = await fetch(
@@ -3315,11 +3452,42 @@ export default function WorkspacePage() {
       }
       // 202 已把 clarification.answered 写入事件缓冲；从 lastSeq 重放即可
       // 接上同一时间轴，不重复执行 Run。
-      await startRunStream(projectId, null, annotationId, {
+      const terminal = await startRunStream(projectId, null, annotationId, {
         replay: true,
         runId: run.runId,
         afterSeq: run.lastSeq,
       })
+      // 布局提交被样式澄清打断时，真正的落盘发生在恢复后的 Run；只有
+      // run.succeeded 才清空幽灵预览与草稿，失败 / 再次暂停都保留。
+      const snapshot = layoutFlushRef.current.get(projectId)
+      if (snapshot) {
+        const belongsToLayout =
+          (snapshot.runId === null || snapshot.runId === run.runId) &&
+          (snapshot.additionIds.includes(annotationId) ||
+            snapshot.moves.length === 0)
+        if (belongsToLayout && terminal?.type === 'run.succeeded') {
+          const committed = commitLayoutSnapshot(projectId, snapshot)
+          layoutFlushRef.current.delete(projectId)
+          showToast(
+            'success',
+            committed.additions
+              ? `已同步 ${committed.additions} 个新增组件${
+                  committed.moves ? `与 ${committed.moves} 处位置调整` : ''
+                }`
+              : '布局已同步',
+          )
+        } else if (
+          terminal?.type === 'run.failed' ||
+          terminal?.type === 'run.cancelled' ||
+          terminal?.type === 'run.rejected'
+        ) {
+          // 终态失败：保留画布草稿供重试，但删除过期快照，避免后续
+          // 无关的澄清成功误清用户草稿。
+          layoutFlushRef.current.delete(projectId)
+        } else if (snapshot.runId === null) {
+          snapshot.runId = run.runId
+        }
+      }
     } catch (cause) {
       patchRun(projectId, {
         submitting: false,
@@ -3936,6 +4104,65 @@ export default function WorkspacePage() {
   }
 
   /**
+   * 布局提交成功（含澄清恢复后成功）的统一收尾。
+   *
+   * 只移除快照里的条目：保存 / 澄清期间用户若又拖了新组件，新草稿
+   * 必须保留。新增组件真正落盘后才删除暂存标注与幽灵预览。
+   */
+  const commitLayoutSnapshot = (projectId, snapshot) => {
+    const batch = snapshot?.moves ?? []
+    const addedIds = snapshot?.additionIds ?? []
+    batch.forEach((item) => {
+      dragCommittedRef.current.set(
+        `${projectId}::${item.selector}`,
+        item.next,
+      )
+    })
+    const current = pendingLayoutChangesRef.current.get(projectId)
+    if (current) {
+      batch.forEach((item) => {
+        if (current.get(item.selector) === item) {
+          current.delete(item.selector)
+        }
+      })
+      if (current.size === 0) {
+        pendingLayoutChangesRef.current.delete(projectId)
+      }
+    }
+    publishPendingLayoutChanges(projectId)
+    if (addedIds.length) {
+      const addedSet = new Set(addedIds)
+      const addedMap = pendingAdditionsRef.current.get(projectId)
+      if (addedMap) {
+        addedIds.forEach((annotationId) => addedMap.delete(annotationId))
+        if (addedMap.size === 0) {
+          pendingAdditionsRef.current.delete(projectId)
+        }
+      }
+      publishPendingAdditions(projectId)
+      patchRun(projectId, (previous) => ({
+        ...previous,
+        annotations: previous.annotations.filter(
+          (annotation) => !addedSet.has(annotation.id),
+        ),
+      }))
+    }
+    if (batch.length) {
+      setDragCommits((previous) => ({
+        ...previous,
+        [projectId]: {
+          nonce: (previous[projectId]?.nonce ?? 0) + 1,
+          items: batch.map((item) => ({
+            token: item.token,
+            selector: item.selector,
+          })),
+        },
+      }))
+    }
+    return { moves: batch.length, additions: addedIds.length }
+  }
+
+  /**
    * 【保存布局】一次 Run 提交所有暂存变更（位移 + 新增组件）。
    *
    * 只有后端成功（补丁已应用且构建通过）才清空 pending；超时 / 失败
@@ -3972,6 +4199,9 @@ export default function WorkspacePage() {
       ? buildBatchLayoutEntry(project, batch, additions)
       : buildBatchMoveEntry(project, batch)
     const addedIds = additions.map((item) => item.annotationId)
+    // 快照必须基于本次提交的条目，而不是提交完成时的 ref 内容。
+    const snapshot = { moves: batch, additionIds: addedIds, runId: null }
+    layoutFlushRef.current.set(projectId, snapshot)
     layoutSaveInflightRef.current.add(projectId)
     setDragSyncStates((previous) => ({
       ...previous,
@@ -4000,65 +4230,15 @@ export default function WorkspacePage() {
         // 超时后后端 Run 可能仍在写代码：尽力取消，避免稍后 HMR 覆盖草稿。
         const runId = runStatesRef.current?.[projectId]?.runId
         if (runId) cancelRunSilently(runId)
+        layoutFlushRef.current.delete(projectId)
         clearDragSync(projectId)
         showToast('error', '画布变更同步超时，草稿已保留，可稍后重试')
         return false
       }
 
       if (outcome?.ok) {
-        // 提交成功：更新已提交基线，后续拖拽在此基础上继续叠加。
-        batch.forEach((item) => {
-          dragCommittedRef.current.set(
-            `${projectId}::${item.selector}`,
-            item.next,
-          )
-        })
-        // 只移除本次快照里的条目；若保存期间又产生了新草稿（极端竞态），
-        // 保留它们，不能把用户刚拖的内容一起清掉。
-        const current = pendingLayoutChangesRef.current.get(projectId)
-        if (current) {
-          batch.forEach((item) => {
-            if (current.get(item.selector) === item) {
-              current.delete(item.selector)
-            }
-          })
-          if (current.size === 0) {
-            pendingLayoutChangesRef.current.delete(projectId)
-          }
-        }
-        publishPendingLayoutChanges(projectId)
-        // 新增组件已真实落盘，才删除暂存标注；失败时保留供重试。
-        if (addedIds.length) {
-          const addedSet = new Set(addedIds)
-          const addedMap = pendingAdditionsRef.current.get(projectId)
-          if (addedMap) {
-            addedIds.forEach((annotationId) => addedMap.delete(annotationId))
-            if (addedMap.size === 0) {
-              pendingAdditionsRef.current.delete(projectId)
-            }
-          }
-          publishPendingAdditions(projectId)
-          patchRun(projectId, (previous) => ({
-            ...previous,
-            annotations: previous.annotations.filter(
-              (annotation) => !addedSet.has(annotation.id),
-            ),
-          }))
-        }
-        if (batch.length) {
-          setDragCommits((previous) => ({
-            ...previous,
-            [projectId]: {
-              nonce: (previous[projectId]?.nonce ?? 0) + 1,
-              // 同一 selector 多次拖动只保留最新 token；SDK 的 rollback /
-              // commit 记录本身也会按 selector 合并到最早基线。
-              items: batch.map((item) => ({
-                token: item.token,
-                selector: item.selector,
-              })),
-            },
-          }))
-        }
+        commitLayoutSnapshot(projectId, snapshot)
+        layoutFlushRef.current.delete(projectId)
         showToast(
           'success',
           additions.length
@@ -4070,7 +4250,18 @@ export default function WorkspacePage() {
         return true
       }
 
+      // 样式澄清：Run 暂停而不是失败。保留 snapshot 与全部草稿，等用户
+      // 回答后的恢复 Run 成功，再由 handleClarificationAnswer 统一收尾。
+      // 以事件流返回的 clarification 为准，不依赖 React 状态刷新时序。
+      if (outcome?.event?.type === 'clarification.required') {
+        snapshot.runId = outcome.event.runId ?? run.runId
+        // 暂停不是失败：解除“同步中”遮罩，让用户能回答迷你聊天框。
+        releaseDragSync(projectId)
+        return false
+      }
+
       // 失败：不 rollback、不清空 pending，保留用户的全部画布草稿。
+      layoutFlushRef.current.delete(projectId)
       clearDragSync(projectId)
       showToast('error', '画布变更同步失败，草稿已保留，可稍后重试')
       return false

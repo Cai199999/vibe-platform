@@ -143,6 +143,9 @@ class AgentState(TypedDict, total=False):
     clarification_round: int
     clarification_answers: list[dict[str, Any]]
     clarification_outcome: Literal["proceed", "replan", "exhausted"]
+    # 样式澄清节点结果：skipped（无需追问）/ proceed（已获得样式回答）/
+    # exhausted（达到轮次上限）。与业务澄清分开，避免 Coder 误读。
+    style_check_outcome: Literal["skipped", "proceed", "exhausted"]
     clarification_mode: Literal["auto", "always", "off"]
     max_clarification_rounds: int
     confidence_threshold: float

@@ -2,14 +2,17 @@
 
 拓扑：
 
-    START -> summarize_history -> planner -> clarify_gate -> coder -> applier
-                                    -> verifier -> evaluator
+    START -> summarize_history -> planner -> clarify_gate -> style_check -> coder
+              -> applier -> verifier -> evaluator
                 ▲              │           ▲                              │
                 │              │(澄清)     └──── repair (<= 3 次) ◄───────┤
                 │              ▼                                          │
                 └──── replan / interrupt()                                ├─ success + 审批 -> approval_gate -> awaiting_approval
                                                                           ├─ success + 免审批 -> succeeded (SUCCEEDED)
                                                                           └─ exhausted -> failed
+
+`style_check` 只对新增组件生效：用户未说明颜色 / 大小 / 主次时先追问，
+把回答写回标注上下文后再进入 Coder。
 
 节点内部通过 ``EventSink`` 推送 node.* 事件；执行与 SSE 连接解耦。
 """
@@ -91,6 +94,7 @@ NODE_LABELS = {
     "research": "检索外部资料",
     "planner": "理解修改意图",
     "clarify_gate": "检查信息完整性",
+    "style_check": "确认视觉样式",
     "coder": "生成修改方案",
     "applier": "写入沙盒",
     "verifier": "构建与校验",
@@ -453,6 +457,12 @@ class AgentGraphRunner:
             ),
         )
         builder.add_node(
+            "style_check",
+            self._instrument(
+                "style_check", NODE_LABELS["style_check"], self._style_check
+            ),
+        )
+        builder.add_node(
             "coder", self._instrument("coder", NODE_LABELS["coder"], self._coder)
         )
         builder.add_node(
@@ -492,7 +502,12 @@ class AgentGraphRunner:
         builder.add_conditional_edges(
             "clarify_gate",
             self._route_after_clarify,
-            {"planner": "planner", "coder": "coder", "failed": "failed"},
+            {"planner": "planner", "style_check": "style_check", "failed": "failed"},
+        )
+        builder.add_conditional_edges(
+            "style_check",
+            self._route_after_style_check,
+            {"coder": "coder", "failed": "failed"},
         )
         builder.add_conditional_edges(
             "coder",
@@ -904,7 +919,8 @@ class AgentGraphRunner:
             )
         if _is_explicit_layout_batch(annotations):
             # 视觉暂存统一提交：位移是几何事实，新增组件是用户明确意图，
-            # 不需要规划模型，也不能被澄清中断打断。
+            # 不需要规划模型。样式是否缺失交给后续 style_check 统一追问，
+            # Planner 不在这里重复打断。
             plan = PlanResult(
                 plan=(
                     "一次提交画布暂存变更：先用 move_component 的规则写入全部 "
@@ -1057,6 +1073,85 @@ class AgentGraphRunner:
                 _message(
                     "clarify_gate",
                     f"收到第 {next_round} 轮澄清回答，重新规划",
+                )
+            ],
+        }
+
+    def _style_check(self, state: AgentState) -> dict[str, Any]:
+        """新增组件前的视觉样式门禁（HITL 强制追问）。
+
+        只在“新增组件 + 用户没有说清样式”时打断：颜色、大小、圆角等
+        视觉细节如果让模型自由发挥，最容易出现风格割裂。已有明确样式
+        （例如“加一个红色按钮”“和登录按钮一样”）则直接放行，避免把
+        每一次新增都变成问卷。
+        """
+        mode = str(state.get("clarification_mode", "auto"))
+        targets = _style_targets(state.get("annotation_context") or {})
+        if mode == "off" or not targets:
+            return {"style_check_outcome": "skipped", "status": "PLANNING"}
+
+        missing = [item for item in targets if not _has_style_hints(item["text"])]
+        if not missing:
+            return {"style_check_outcome": "skipped", "status": "PLANNING"}
+
+        round_no = int(state.get("clarification_round", 0))
+        max_rounds = int(state.get("max_clarification_rounds", 3))
+        if round_no >= max_rounds:
+            error = f"连续 {max_rounds} 轮澄清后仍未获得可执行的样式信息"
+            return {
+                "style_check_outcome": "exhausted",
+                "status": "FAILED",
+                "error_code": "STYLE_CLARIFICATION_LIMIT",
+                "error": error,
+                "messages": [_message("style_check", error, error=True)],
+            }
+
+        next_round = round_no + 1
+        payload = _build_style_clarification_payload(state, missing, next_round)
+        attempt = int(state.get("retry_count", 0))
+        # 与 clarify_gate 相同：暂停帧必须先于 clarification.required，
+        # 否则带 afterSeq 重连的客户端拿不到 terminal 标记。
+        self._emit(
+            "node.finished",
+            {
+                "node": "style_check",
+                "status": "paused",
+                "durationMs": 0,
+                "summary": "等待用户确认视觉样式",
+            },
+            dedupe_key=(f"node.finished:style_check:{round_no}:{attempt}:paused"),
+        )
+        self._emit(
+            "clarification.required",
+            payload,
+            dedupe_key=f"clarification.required:{payload['clarificationId']}",
+        )
+        answers = interrupt(payload)
+        normalized_answers = _normalize_answers(answers)
+        merged = list(state.get("clarification_answers") or []) + normalized_answers
+        target_ids = {item["annotationId"] for item in missing}
+        context = _augment_style_answers(
+            state.get("annotation_context") or {},
+            normalized_answers,
+            target_ids,
+        )
+        style_text = "；".join(
+            filter(None, (_answer_text(item) for item in normalized_answers))
+        )
+        plan = str(state.get("plan") or "")
+        if style_text:
+            plan = f"{plan}\n\n视觉样式约束（必须严格复用现有组件类名）：{style_text}"
+        return {
+            "annotation_context": context,
+            "clarification_answers": merged,
+            "clarification_round": next_round,
+            "style_check_outcome": "proceed",
+            "plan": plan,
+            "status": "PLANNING",
+            "messages": [
+                _message(
+                    "style_check",
+                    f"收到第 {next_round} 轮样式回答，继续生成组件",
                 )
             ],
         }
@@ -2147,6 +2242,13 @@ class AgentGraphRunner:
             return "planner"
         if outcome == "exhausted":
             return "failed"
+        # 业务澄清完成后先做样式完整性检查，再进入 Coder；纯位移 /
+        # 已明确样式的请求会在 style_check 内直接跳过。
+        return "style_check"
+
+    def _route_after_style_check(self, state: AgentState) -> str:
+        if state.get("style_check_outcome") == "exhausted":
+            return "failed"
         return "coder"
 
     def _route_after_coder(self, state: AgentState) -> str:
@@ -2351,6 +2453,243 @@ def _approval_comment(raw: Any) -> str | None:
     return str(comment)[:1000] if comment else None
 
 
+# 用户已明确说出的视觉线索：命中任意一项就不再追问样式。
+# 注意不要把“按钮 / 组件”本身当样式，否则“加个按钮”永远不会触发澄清。
+_STYLE_HINT_PATTERN = re.compile(
+    r"("
+    r"主色|次要色|次色|主题色|主次|颜色|红色|蓝色|绿色|黄色|黑色|白色|灰色|紫色|橙色|"
+    r"圆角|rounded|字体|字号|字重|加粗|阴影|shadow|边框|描边|"
+    r"大小|尺寸|宽高|宽度|高度|内边距|padding|间距|margin|gap|"
+    r"primary|secondary|tailwind|class(?:name)?|样式|风格|"
+    r"复用|沿用|一致|一样|相同|"
+    r"\d+\s*(?:px|rem|em)"
+    r")",
+    re.IGNORECASE,
+)
+
+_COMPONENT_NOUNS = (
+    ("button", "按钮"),
+    ("按钮", "按钮"),
+    ("input", "输入框"),
+    ("输入框", "输入框"),
+    ("select", "下拉框"),
+    ("下拉", "下拉框"),
+    ("card", "卡片"),
+    ("卡片", "卡片"),
+    ("badge", "标签"),
+    ("标签", "标签"),
+    ("icon", "图标"),
+    ("图标", "图标"),
+)
+
+
+def _has_style_hints(text: str) -> bool:
+    """判断用户是否已经明确描述过颜色 / 尺寸 / 主次 / Tailwind 类名。"""
+    return bool(_STYLE_HINT_PATTERN.search(str(text or "")))
+
+
+def _annotation_style_text(annotation: dict[str, Any]) -> str:
+    payload = annotation.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    intent = annotation.get("intent")
+    intent = intent if isinstance(intent, dict) else {}
+    ui = intent.get("ui")
+    ui = ui if isinstance(ui, dict) else {}
+    return str(payload.get("text") or ui.get("summary") or "").strip()
+
+
+def _component_noun(target: dict[str, Any]) -> str:
+    raw = f"{target.get('componentType') or ''} {target.get('text') or ''}".lower()
+    for token, noun in _COMPONENT_NOUNS:
+        if token in raw:
+            return noun
+    return "组件"
+
+
+def _style_targets(context: dict[str, Any]) -> list[dict[str, Any]]:
+    """收集所有真正会“新增组件”的目标（含 BATCH_LAYOUT 嵌套新增项）。
+
+    纯位移、纯修改不参与样式追问：它们应复用既有元素样式，强行打断
+    只会制造噪音。
+    """
+    targets: list[dict[str, Any]] = []
+    for item in context.get("annotations") or []:
+        annotation = item.get("annotation") or {}
+        layout = _explicit_layout_batch(annotation)
+        if layout is not None:
+            for addition in layout["additions"]:
+                nested = addition["annotation"]
+                targets.append(
+                    {
+                        "annotationId": addition["annotationId"],
+                        "text": addition["intent"],
+                        "componentType": nested.get("componentType")
+                        or nested.get("component_type")
+                        or "",
+                    }
+                )
+            continue
+        if not is_create_action(annotation.get("action")):
+            continue
+        annotation_id = (
+            annotation.get("annotationId")
+            or annotation.get("annotation_id")
+            or item.get("annotation_id")
+        )
+        if not annotation_id:
+            continue
+        targets.append(
+            {
+                "annotationId": str(annotation_id),
+                "text": _annotation_style_text(annotation)
+                or str(item.get("instruction") or ""),
+                "componentType": annotation.get("componentType")
+                or annotation.get("component_type")
+                or "",
+            }
+        )
+    return targets
+
+
+def _merge_style_text(value: Any, style_text: str) -> str:
+    original = str(value or "").strip()
+    if not style_text:
+        return original
+    if style_text in original:
+        return original
+    return f"{original}（样式要求：{style_text}）" if original else style_text
+
+
+def _augment_style_answers(
+    context: dict[str, Any],
+    answers: list[dict[str, Any]],
+    target_ids: set[str],
+) -> dict[str, Any]:
+    """把样式回答写回标注上下文，Coder 从同一份 annotation_context 读取。
+
+    与业务澄清不同，本次只增强“样式缺失的新增项”，不能污染已有元素
+    的修改指令；BATCH_LAYOUT 需要同时更新嵌套信封与 entry.intent，
+    因为 `_explicit_layout_batch` 优先读取后者作为展示与合成指令。
+    """
+    style_text = "；".join(filter(None, (_answer_text(item) for item in answers)))
+    if not style_text or not target_ids:
+        return context
+
+    updated = copy.deepcopy(context)
+    for item in updated.get("annotations") or []:
+        annotation = item.get("annotation") or {}
+        layout = _explicit_layout_batch(annotation)
+        if layout is not None:
+            raw_additions = (annotation.get("payload") or {}).get("additions") or []
+            for addition in raw_additions:
+                if not isinstance(addition, dict):
+                    continue
+                nested = addition.get("annotation")
+                if not isinstance(nested, dict):
+                    continue
+                annotation_id = str(
+                    nested.get("annotationId") or nested.get("annotation_id") or ""
+                )
+                if annotation_id not in target_ids:
+                    continue
+                merged = _merge_style_text(_annotation_style_text(nested), style_text)
+                nested.setdefault("payload", {})["text"] = merged
+                intent = nested.get("intent")
+                if not isinstance(intent, dict):
+                    intent = {}
+                    nested["intent"] = intent
+                ui = intent.get("ui")
+                if not isinstance(ui, dict):
+                    ui = {}
+                    intent["ui"] = ui
+                ui["summary"] = merged
+                addition["intent"] = merged
+            continue
+
+        annotation_id = str(
+            annotation.get("annotationId")
+            or annotation.get("annotation_id")
+            or item.get("annotation_id")
+            or ""
+        )
+        if annotation_id not in target_ids:
+            continue
+        merged = _merge_style_text(
+            _annotation_style_text(annotation) or str(item.get("instruction") or ""),
+            style_text,
+        )
+        annotation.setdefault("payload", {})["text"] = merged
+        intent = annotation.get("intent")
+        if not isinstance(intent, dict):
+            intent = {}
+            annotation["intent"] = intent
+        ui = intent.get("ui")
+        if not isinstance(ui, dict):
+            ui = {}
+            intent["ui"] = ui
+        ui["summary"] = merged
+        item["instruction"] = merged
+        item["ui_summary"] = merged
+    return updated
+
+
+def _build_style_clarification_payload(
+    state: AgentState,
+    targets: list[dict[str, Any]],
+    round_no: int,
+) -> dict[str, Any]:
+    """构造样式澄清帧。
+
+    问题与选项都刻意引用“现有按钮”而不是给具体色值：目标是让用户做
+    选择，而不是让 Agent 猜一个十六进制颜色。
+    """
+    first = targets[0]
+    noun = _component_noun(first)
+    question = {
+        "questionId": "style.appearance",
+        "type": "single_choice",
+        "prompt": (
+            f"请问您希望这个{noun}是主色还是次要色？" "大小与现有的提交按钮一致吗？"
+        ),
+        "required": True,
+        "options": [
+            {
+                "value": "和现有主按钮一致",
+                "label": "和现有主按钮一致",
+                "description": "复用主色、圆角与内边距",
+                "recommended": True,
+            },
+            {
+                "value": "和现有次要按钮一致",
+                "label": "和现有次要按钮一致",
+                "description": "复用描边 / 幽灵按钮样式",
+            },
+            {
+                "value": "和登录按钮一样",
+                "label": "和登录按钮一样",
+                "description": "严格复用登录按钮的 Tailwind 类名",
+            },
+        ],
+    }
+    clarification = {
+        "annotationId": first["annotationId"],
+        "reason": "style_detail_missing",
+        "decisionImpact": "MAJOR",
+        "decisionSummary": (f"新增{noun}需要先确认视觉样式，避免与现有页面风格割裂。"),
+        "questions": [question],
+    }
+    # 借用标准澄清帧构造：统一 clarificationId / expiresAt / 一键选项，
+    # 前端无需为样式追问新增一套协议。
+    return _build_clarification_payload(
+        {
+            **state,
+            "clarification": clarification,
+            "plan_decision_impact": "MAJOR",
+        },
+        round_no,
+    )
+
+
 def _build_clarification_payload(
     state: AgentState,
     round_no: int,
@@ -2359,10 +2698,26 @@ def _build_clarification_payload(
     annotation_id = clarification.get("annotationId")
     thread_id = None
     for item in (state.get("annotation_context") or {}).get("annotations", []):
-        if annotation_id and item.get("annotation_id") != annotation_id:
+        if not annotation_id or item.get("annotation_id") == annotation_id:
+            thread_id = item.get("thread_id")
+            break
+        # BATCH_LAYOUT 的澄清目标可能是嵌套新增项，其 annotationId 不在
+        # 顶层 context 的 annotation_id 上；沿 additions 查找并复用同一
+        # 布局批次的 threadId，前端才能把问题投递到正确的迷你聊天框。
+        layout = _explicit_layout_batch(item.get("annotation") or {})
+        if layout is None:
             continue
-        thread_id = item.get("thread_id")
-        if annotation_id:
+        matched = next(
+            (
+                addition
+                for addition in layout["additions"]
+                if addition["annotationId"] == annotation_id
+            ),
+            None,
+        )
+        if matched is not None:
+            nested = matched["annotation"]
+            thread_id = nested.get("threadId") or nested.get("thread_id")
             break
     expires_at = datetime.now(timezone.utc) + timedelta(
         hours=int(state.get("clarification_ttl_hours", 24))
@@ -2554,6 +2909,13 @@ def _node_summary(
         if outcome == "exhausted":
             return "澄清轮次耗尽"
         return "信息充分，继续执行"
+    if name == "style_check":
+        outcome = update.get("style_check_outcome")
+        if outcome == "exhausted":
+            return "样式澄清轮次耗尽"
+        if outcome == "proceed":
+            return "已确认视觉样式，继续生成"
+        return "样式已明确或无需追问，直接生成"
     if name == "reflection":
         observations = update.get("reflection_preferences") or []
         if not observations:
