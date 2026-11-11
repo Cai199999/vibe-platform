@@ -31,10 +31,24 @@ const TABLE = '__TABLE__'
 const ENTITY = '__ENTITY__'
 const DB_ENGINE = (process.env.DB_ENGINE || '__DB_ENGINE__').toLowerCase()
 const COLUMN_DEFS = __COLUMN_DEFS_JSON__
+// DDL 约束元数据：NOT NULL / DEFAULT / UNIQUE / 主键。
+// 只生成字段名不够——缺少 NOT NULL 列的默认值，生产 MySQL 会直接 500。
+const COLUMN_META = __COLUMN_META_JSON__
 const ALL_COLUMNS = COLUMN_DEFS.map(([name]) => name)
 const WRITABLE_COLUMNS = ALL_COLUMNS.filter(
   (name) => !['id', 'created_at', 'updated_at', 'deleted_at'].includes(name),
 )
+// 写入时必须提供值的列：NOT NULL、无默认值、非主键/自增。
+const REQUIRED_COLUMNS = Object.keys(COLUMN_META).filter((name) => {
+  const meta = COLUMN_META[name] || {}
+  return !meta.primary && !meta.autoIncrement && !meta.nullable && !meta.hasDefault
+})
+const UNIQUE_COLUMNS = Object.keys(COLUMN_META).filter(
+  (name) => Boolean(COLUMN_META[name]?.unique),
+)
+// 前端表单统一使用 name 输入框；真正落库字段由 DDL 决定。
+const DISPLAY_KEY = '__DISPLAY_KEY__'
+const PAYLOAD_KEY = '__PAYLOAD_KEY__'
 const SEED_ROWS = __SEED_ROWS_JSON__
 
 // DATABASE_URL 是生产部署的唯一开关：存在时使用真实 ORM，缺失时走 SQLite。
@@ -67,9 +81,34 @@ const SCHEMA_SQL = `CREATE TABLE IF NOT EXISTS "${TABLE}" (
 // ------------------------------------------------------------
 // 公共写入值构造：创建 / 更新共用默认值策略
 // ------------------------------------------------------------
+// 为 NOT NULL 且无数据库默认值的列生成确定性默认值。
+// 这是 Unknown column 之后的第二道生产 500 门禁：
+// 例如 resumes.content 是 NOT NULL，旧模板只映射 name，必然写入失败。
+function defaultForColumn(column) {
+  const meta = COLUMN_META[column] || {}
+  if (column === 'tenant_id') return 'tenant_local'
+  if (UNIQUE_COLUMNS.includes(column)) {
+    return `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  }
+  if (/(^|_)id$/.test(column)) return 1
+  if (/(amount|price|total|count|qty|size|score)$/i.test(column)) return 0
+  if (/(^|_)(at|date)$/i.test(column) || /date|time/i.test(meta.type || '')) {
+    return new Date().toISOString()
+  }
+  if (/json|payload|metadata/i.test(column)) return {}
+  if (/status|state/i.test(column)) return 'ACTIVE'
+  if (meta.sqliteType === 'INTEGER') return 1
+  if (meta.sqliteType === 'REAL') return 0
+  return `示例${ENTITY}`
+}
+
 function buildValues(input = {}, { update = false } = {}) {
   const body = { ...input }
-  if (body.name === undefined && body.title !== undefined) body.name = body.title
+  // 前端表单沿用 name/title；这里映射到 DDL 中真实的展示列。
+  // 绝不把 name 当成固定列：resumes 的核心字段是 file_name。
+  if (PAYLOAD_KEY && body[PAYLOAD_KEY] === undefined) {
+    body[PAYLOAD_KEY] = body.name ?? body.title
+  }
   const values = {}
   for (const column of WRITABLE_COLUMNS) {
     if (body[column] !== undefined) values[column] = body[column]
@@ -80,21 +119,12 @@ function buildValues(input = {}, { update = false } = {}) {
     }
     return values
   }
+  // NOT NULL 且无 DEFAULT 的列必须补齐，否则 MySQL 返回 500。
+  for (const column of REQUIRED_COLUMNS) {
+    if (values[column] === undefined) values[column] = defaultForColumn(column)
+  }
   if (ALL_COLUMNS.includes('tenant_id') && values.tenant_id === undefined) {
     values.tenant_id = 'tenant_local'
-  }
-  if (ALL_COLUMNS.includes('name') && values.name === undefined) {
-    values.name = `新${ENTITY}`
-  }
-  if (ALL_COLUMNS.includes('status') && values.status === undefined) {
-    values.status = 'ACTIVE'
-  }
-  const now = new Date().toISOString()
-  if (ALL_COLUMNS.includes('created_at') && values.created_at === undefined) {
-    values.created_at = now
-  }
-  if (ALL_COLUMNS.includes('updated_at') && values.updated_at === undefined) {
-    values.updated_at = now
   }
   return values
 }

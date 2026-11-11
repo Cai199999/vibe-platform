@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from ai_core.domain.architect import (
     ArchitectApiRoute,
@@ -40,6 +40,13 @@ from ai_core.fullstack.templates import (
 API_PORT = 3000
 DEFAULT_COLLECTION_PATH = "/api/v1/records"
 DEFAULT_TABLE = "app_records"
+# 契约完全没有 DDL 时的兜底字段。绝不使用 users / name / status：
+# 它们是历史事故中“ORM 模型与迁移表结构脱节”的直接来源。
+DEFAULT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("id", "INTEGER"),
+    ("title", "TEXT"),
+    ("created_at", "TEXT"),
+)
 
 DATABASE_ENGINE_LABELS = {
     "mysql": "MySQL 8（生产部署）",
@@ -107,6 +114,42 @@ class GeneratedBundle:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class DdlColumn:
+    """DDL 中的一列及其约束。
+
+    约束信息不是装饰：生成 ``server/db.js`` 时必须知道哪些列
+    ``NOT NULL`` 且没有数据库默认值，否则 POST 会在生产 MySQL 上
+    报 ``Column 'content' cannot be null``，与 ``Unknown column``
+    属于同一类“生成代码与真实表结构脱节”的 500。
+    """
+
+    name: str
+    sqlite_type: str
+    raw_type: str = "TEXT"
+    nullable: bool = True
+    has_default: bool = False
+    is_primary: bool = False
+    is_unique: bool = False
+    auto_increment: bool = False
+
+
+@dataclass(frozen=True)
+class DdlTable:
+    """一张业务表及其字段定义。"""
+
+    name: str
+    columns: tuple[DdlColumn, ...]
+
+    @property
+    def column_names(self) -> tuple[str, ...]:
+        return tuple(column.name for column in self.columns)
+
+    @property
+    def column_defs(self) -> tuple[tuple[str, str], ...]:
+        return tuple((column.name, column.sqlite_type) for column in self.columns)
+
+
 # ------------------------------------------------------------
 # 契约解析
 # ------------------------------------------------------------
@@ -132,36 +175,26 @@ def contract_database_engine(contract: ArchitectContract) -> str:
 
 
 def extract_table_name(ddl: str) -> str:
-    """从 DDL 提取第一张表名；缺失时回退为 app_records。"""
-    match = _CREATE_TABLE.search(ddl or "")
-    if not match:
+    """从多表 DDL 中选出核心业务表；缺失时回退为 app_records。
+
+    旧实现固定取第一条 ``CREATE TABLE``，遇到
+    ``users + resumes + jds`` 这类多表 DDL 时会把鉴权表 ``users``
+    当成业务表，ORM 随之生成 ``users(name, status)``，而生产迁移
+    创建的是 ``resumes``，运行时直接 500 ``Unknown column``。
+    新实现优先选择非系统表，且不再把 ``users`` 当作默认占位符。
+    """
+    tables = parse_ddl_tables(ddl)
+    if not tables:
         return DEFAULT_TABLE
-    return _safe_identifier(match.group(1), DEFAULT_TABLE)
+    return select_core_table(tables, "").name
 
 
 def extract_columns(ddl: str) -> list[str]:
-    """从 ``CREATE TABLE (...)`` 中提取字段名。
-
-    只做轻量解析，用于生成种子数据和前端展示；它不是 SQL Parser，
-    遇到无法识别的行会跳过，不影响 DDL 原样落盘。
-    """
-    match = re.search(r"\((.*)\)\s*;?\s*$", ddl or "", re.DOTALL)
-    if not match:
-        return ["id", "name", "status"]
-    columns: list[str] = []
-    for raw_line in match.group(1).split(","):
-        line = raw_line.strip()
-        if not line:
-            continue
-        name_match = _COLUMN_LINE.match(line)
-        if not name_match:
-            continue
-        name = name_match.group(1).lower()
-        if name in _COLUMN_STOPWORDS:
-            continue
-        if name not in columns:
-            columns.append(name)
-    return columns or ["id", "name", "status"]
+    """提取核心业务表的字段名（多表 DDL 只解析选中的表）。"""
+    tables = parse_ddl_tables(ddl)
+    if not tables:
+        return [name for name, _type in DEFAULT_COLUMNS]
+    return list(select_core_table(tables, "").column_names)
 
 
 def _split_definitions(body: str) -> list[str]:
@@ -213,54 +246,439 @@ _SQLITE_INTEGER = {
 _SQLITE_REAL = {"REAL", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC", "MONEY"}
 _SQLITE_BLOB = {"BLOB", "BINARY", "VARBINARY", "BYTEA"}
 
+# 系统 / 鉴权表：只有当 API 资源名明确指向它时才可作为业务表。
+# 典型事故：多表 DDL 的第一条是 users，旧逻辑把它当成 CRUD 表。
+_SYSTEM_TABLE_NAMES = {
+    "user",
+    "users",
+    "account",
+    "accounts",
+    "session",
+    "sessions",
+    "role",
+    "roles",
+    "permission",
+    "permissions",
+    "user_role",
+    "user_roles",
+    "refresh_token",
+    "refresh_tokens",
+    "audit_log",
+    "audit_logs",
+    "_schema_migrations",
+    "schema_migrations",
+    "migrations",
+}
+_SYSTEM_TABLE_PREFIXES = ("auth_", "oauth_", "session_")
+_VERSION_SEGMENTS = {"api", "v1", "v2", "v3", "v4"}
+
+
+def _sqlite_affinity(raw_type: str) -> str:
+    """把 SQL 类型映射为 SQLite 类型亲和性。"""
+    upper = (raw_type or "").upper()
+    if upper in _SQLITE_INTEGER:
+        return "INTEGER"
+    if upper in _SQLITE_REAL:
+        return "REAL"
+    if upper in _SQLITE_BLOB:
+        return "BLOB"
+    # JSON / DATETIME / TIMESTAMP / VARCHAR / TEXT 等统一存 TEXT。
+    return "TEXT"
+
+
+def _parse_column_definition(part: str) -> DdlColumn | None:
+    """解析单列定义；表级约束（PRIMARY KEY (...) 等）返回 None。"""
+    stripped = part.strip()
+    name_match = _COLUMN_LINE.match(stripped)
+    if not name_match:
+        return None
+    name = name_match.group(1).lower()
+    if name in _COLUMN_STOPWORDS:
+        return None
+    rest = stripped[name_match.end() :].strip()
+    type_match = re.match(r"([A-Za-z]+)", rest)
+    raw_type = type_match.group(1).upper() if type_match else "TEXT"
+    upper = rest.upper()
+    is_primary = "PRIMARY KEY" in upper
+    return DdlColumn(
+        name=name,
+        sqlite_type=_sqlite_affinity(raw_type),
+        raw_type=raw_type,
+        # PRIMARY KEY 隐式 NOT NULL；其余列只有显式 NOT NULL 才不可空。
+        nullable=not is_primary and "NOT NULL" not in upper,
+        has_default=bool(re.search(r"\bDEFAULT\b", upper)),
+        is_primary=is_primary,
+        is_unique=bool(re.search(r"\bUNIQUE\b", upper)),
+        auto_increment=bool(re.search(r"\b(?:AUTO_INCREMENT|AUTOINCREMENT)\b", upper)),
+    )
+
+
+def _normalize_id_first(columns: list[DdlColumn]) -> list[DdlColumn]:
+    """SQLite / Sequelize 的主键统一命名为 id；契约没有时补一列。"""
+    if not columns:
+        return [
+            DdlColumn(
+                name=name,
+                sqlite_type=sqlite_type,
+                raw_type="INTEGER" if name == "id" else "TEXT",
+                nullable=name != "id",
+                has_default=name == "created_at",
+                is_primary=name == "id",
+                auto_increment=name == "id",
+            )
+            for name, sqlite_type in DEFAULT_COLUMNS
+        ]
+    primary = next((column for column in columns if column.name == "id"), None)
+    rest = [column for column in columns if column.name != "id"]
+    if primary is None:
+        primary = DdlColumn(
+            name="id",
+            sqlite_type="INTEGER",
+            raw_type="INTEGER",
+            nullable=False,
+            is_primary=True,
+            auto_increment=True,
+        )
+    elif not primary.is_primary:
+        primary = DdlColumn(
+            name="id",
+            sqlite_type="INTEGER",
+            raw_type=primary.raw_type or "INTEGER",
+            nullable=False,
+            has_default=primary.has_default,
+            is_primary=True,
+            is_unique=primary.is_unique,
+            auto_increment=primary.auto_increment,
+        )
+    return [primary, *rest]
+
+
+def _parse_table_body(body: str) -> tuple[DdlColumn, ...]:
+    columns: list[DdlColumn] = []
+    seen: set[str] = set()
+    for part in _split_definitions(body):
+        column = _parse_column_definition(part)
+        if column is None or column.name in seen:
+            continue
+        columns.append(column)
+        seen.add(column.name)
+    return tuple(_normalize_id_first(columns))
+
+
+def parse_ddl_tables(ddl: str) -> list[DdlTable]:
+    """解析多语句 DDL，返回**每一张**表的完整字段定义。
+
+    关键点：
+
+      1. 用括号配对截取每张表的字段区，而不是 ``\\((.*)\\)$`` 贪婪匹配；
+         后者会把整段多表 DDL 当成一张表，字段列表直接串表。
+      2. 保留 NOT NULL / DEFAULT / UNIQUE 等约束，供 ORM 写入补默认值，
+         避免 ``Unknown column`` 修完后继续踩 ``cannot be null``。
+    """
+    text = ddl or ""
+    tables: list[DdlTable] = []
+    seen: set[str] = set()
+    for match in _CREATE_TABLE.finditer(text):
+        name = _safe_identifier(match.group(1), "")
+        if not name or name.lower() in seen:
+            continue
+        open_index = text.find("(", match.end())
+        if open_index < 0:
+            continue
+        depth = 1
+        index = open_index + 1
+        quote: str | None = None
+        while index < len(text) and depth:
+            char = text[index]
+            if quote:
+                if char == quote:
+                    quote = None
+            elif char in "'\"`":
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            index += 1
+        if depth != 0:
+            continue
+        tables.append(
+            DdlTable(
+                name=name, columns=_parse_table_body(text[open_index + 1 : index - 1])
+            )
+        )
+        seen.add(name.lower())
+    return tables
+
+
+def _normalize_table_word(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def _singular_word(value: str) -> str:
+    """轻量单复数归一：resumes → resume、entries → entry。"""
+    word = _normalize_table_word(value)
+    if word.endswith("ies") and len(word) > 3:
+        return word[:-3] + "y"
+    if word.endswith(("ses", "xes", "zes", "ches", "shes")) and len(word) > 3:
+        return word[:-2]
+    if word.endswith("s") and not word.endswith("ss") and len(word) > 2:
+        return word[:-1]
+    return word
+
+
+def _collection_resource(collection: str) -> str:
+    """``/api/v1/tailored-resumes`` → ``tailoredresumes``。"""
+    segments = [
+        segment
+        for segment in str(collection or "").split("?", 1)[0].split("/")
+        if segment and not segment.startswith(("{", ":"))
+    ]
+    for segment in reversed(segments):
+        normalized = _normalize_table_word(segment)
+        if normalized and normalized not in _VERSION_SEGMENTS:
+            return normalized
+    return ""
+
+
+def _is_system_table(name: str) -> bool:
+    lowered = str(name or "").lower()
+    return lowered in _SYSTEM_TABLE_NAMES or lowered.startswith(_SYSTEM_TABLE_PREFIXES)
+
+
+def select_core_table(
+    tables: Iterable[DdlTable],
+    collection: str = "",
+) -> DdlTable:
+    """从多表 DDL 中选出与 API 资源匹配的核心业务表。
+
+    选择顺序：
+
+      1. 表名与集合路由资源名完全一致（``/api/v1/resumes`` → ``resumes``）；
+      2. 单复数归一后一致（``entry`` ↔ ``entries``）；
+      3. 第一张非系统表（排除 users / sessions / migrations 等）；
+      4. 第一张表（DDL 只有鉴权表时，它确实就是业务表）。
+
+    选择结果必须同时驱动 DBACoder 的 ORM 与 BackendCoder 的会话层，
+    否则就会出现“迁移建 resumes、ORM 查 users”的致命错位。
+    """
+    table_list = [table for table in tables if table.name]
+    if not table_list:
+        return DdlTable(DEFAULT_TABLE, _parse_table_body(""))
+    resource = _collection_resource(collection)
+    if resource:
+        for table in table_list:
+            if _normalize_table_word(table.name) == resource:
+                return table
+        for table in table_list:
+            if _singular_word(table.name) == _singular_word(resource):
+                return table
+    for table in table_list:
+        if not _is_system_table(table.name):
+            return table
+    return table_list[0]
+
+
+def core_table_for_contract(contract: ArchitectContract) -> DdlTable:
+    """解析契约的权威表结构；所有 Coder 必须共用这一结果。"""
+    return select_core_table(
+        parse_ddl_tables(contract.database_ddl),
+        collection_path(contract.api_routes or []),
+    )
+
 
 def extract_column_defs(ddl: str) -> list[tuple[str, str]]:
-    """把 DDL 字段映射为 SQLite ``(name, type)`` 列表。
+    """把核心业务表的字段映射为 SQLite ``(name, type)`` 列表。
 
-    只保留字段名与 SQLite 类型亲和性；``NOT NULL`` / 默认值等约束
-    交给生成的 ``server/db.js`` 在写入时补全，避免不同数据库方言
-    导致沙盒启动即失败。
+    多表 DDL 只解析选中的业务表；完全没有 DDL 时使用
+    ``id/title/created_at`` 兜底，绝不再生成 ``users(id, name, status)``。
     """
-    match = re.search(r"\((.*)\)\s*;?\s*$", ddl or "", re.DOTALL)
-    if not match:
-        return [
-            ("id", "INTEGER"),
-            ("name", "TEXT"),
-            ("status", "TEXT"),
-        ]
-    defs: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for part in _split_definitions(match.group(1)):
-        name_match = _COLUMN_LINE.match(part.strip())
-        if not name_match:
-            continue
-        name = name_match.group(1).lower()
-        if name in _COLUMN_STOPWORDS or name in seen:
-            continue
-        rest = part.strip()[name_match.end() :].strip()
-        type_match = re.match(r"([A-Za-z]+)", rest)
-        raw_type = type_match.group(1).upper() if type_match else "TEXT"
-        if raw_type in _SQLITE_INTEGER:
-            sqlite_type = "INTEGER"
-        elif raw_type in _SQLITE_REAL:
-            sqlite_type = "REAL"
-        elif raw_type in _SQLITE_BLOB:
-            sqlite_type = "BLOB"
-        else:
-            # JSON / DATETIME / TIMESTAMP / VARCHAR / TEXT 等统一存 TEXT。
-            sqlite_type = "TEXT"
-        defs.append((name, sqlite_type))
-        seen.add(name)
-    if not defs:
-        return [("id", "INTEGER"), ("name", "TEXT"), ("status", "TEXT")]
-    # SQLite 自增主键必须命名为 id 且类型为 INTEGER；契约没有 id 时补一列。
-    if "id" not in seen:
-        defs.insert(0, ("id", "INTEGER"))
-    else:
-        defs = [("id", "INTEGER")] + [
-            (name, sqlite_type) for name, sqlite_type in defs if name != "id"
-        ]
-    return defs
+    tables = parse_ddl_tables(ddl)
+    if not tables:
+        return list(DEFAULT_COLUMNS)
+    return [
+        (column.name, column.sqlite_type)
+        for column in select_core_table(tables).columns
+    ]
+
+
+_TABLE_CONSTANT = re.compile(r"\bconst\s+TABLE\s*=\s*(['\"])([^'\"]+)\1")
+_ATTRIBUTE_ASSIGNMENT = re.compile(
+    r"\battributes(?:\[\s*['\"]([^'\"]+)['\"]\s*\]|\.([A-Za-z_]\w*))\s*="
+)
+
+
+def _js_literal_after(content: str, marker: str) -> str:
+    """截取 ``marker = [ ... ]`` / ``{ ... }`` 的平衡字面量。
+
+    生成模板里的 COLUMN_DEFS 是多行 JSON；用正则 ``\\[.*?\\]`` 会在
+    第一个内层 ``]`` 处提前结束，因此必须做括号配对扫描。
+    """
+    index = content.find(marker)
+    if index < 0:
+        return ""
+    equals = content.find("=", index + len(marker))
+    if equals < 0:
+        return ""
+    starts = [
+        pos
+        for pos in (content.find("[", equals), content.find("{", equals))
+        if pos >= 0
+    ]
+    if not starts:
+        return ""
+    start = min(starts)
+    opening = content[start]
+    closing = "]" if opening == "[" else "}"
+    depth = 1
+    quote: str | None = None
+    position = start + 1
+    while position < len(content) and depth:
+        char = content[position]
+        if quote:
+            if char == "\\":
+                position += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in "'\"`":
+            quote = char
+        elif char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+        position += 1
+    if depth:
+        return ""
+    return content[start:position]
+
+
+def extract_orm_schema(db_code: str) -> tuple[str, list[str]]:
+    """从 ``server/db.js`` 提取 ORM 表名与字段名。
+
+    表的唯一事实来源是 Sequelize ``define(..., { tableName: TABLE })``；
+    字段唯一事实来源是模板注入的 ``COLUMN_DEFS``。若模板演化为显式
+    ``attributes`` 对象，也兼容读取键名。
+    """
+    table_match = _TABLE_CONSTANT.search(db_code or "")
+    table = table_match.group(2).strip() if table_match else ""
+    columns: list[str] = []
+    literal = _js_literal_after(db_code or "", "const COLUMN_DEFS")
+    if literal:
+        try:
+            payload = json.loads(literal)
+        except json.JSONDecodeError:
+            payload = []
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, (list, tuple)) and item:
+                    name = str(item[0]).strip()
+                    if name:
+                        columns.append(name)
+    if not columns:
+        for bracket_name, dotted_name in _ATTRIBUTE_ASSIGNMENT.findall(db_code or ""):
+            name = (bracket_name or dotted_name).strip()
+            if name and name not in columns:
+                columns.append(name)
+    return table, columns
+
+
+def check_orm_schema(
+    files: Mapping[str, str],
+    *,
+    table: str,
+    expected_columns: Iterable[str],
+    require_orm: bool = False,
+) -> list[str]:
+    """静态校验 ORM / Express 代码是否只引用真实 DDL 字段。
+
+    这是 ``Unknown column`` 事故的生成期门禁：
+      - ``server/db.js`` 的 ``TABLE`` 必须等于核心业务表；
+      - ``COLUMN_DEFS`` 中每个字段必须存在于迁移 DDL；
+      - ``server/index.js`` 的 ``TABLE`` 必须与 ORM 一致。
+    """
+    issues: list[str] = []
+    db_code = files.get("server/db.js") or ""
+    if not db_code:
+        if require_orm:
+            issues.append("缺少 server/db.js，无法校验 ORM 模型与 DDL 一致性")
+        return issues
+    normalized_expected = {str(column).lower() for column in expected_columns}
+    orm_table, orm_columns = extract_orm_schema(db_code)
+    if not orm_table:
+        issues.append("server/db.js 未声明 const TABLE，无法确认 ORM 目标表")
+    elif orm_table.lower() != str(table).lower():
+        issues.append(
+            f"ORM 目标表与核心业务表不一致：db.js TABLE={orm_table}，"
+            f"DDL 核心表={table}"
+        )
+    unknown = [
+        column for column in orm_columns if column.lower() not in normalized_expected
+    ]
+    if unknown:
+        issues.append(
+            "ORM 模型引用了 DDL 中不存在的字段："
+            + "、".join(unknown)
+            + f"（DDL 字段：{'、'.join(sorted(normalized_expected)) or '无'}）"
+        )
+    if not orm_columns:
+        issues.append("server/db.js 未解析出任何 COLUMN_DEFS 字段，ORM 模型不可验证")
+    index_code = files.get("server/index.js") or ""
+    if index_code:
+        index_match = _TABLE_CONSTANT.search(index_code)
+        if index_match and index_match.group(2).lower() != str(table).lower():
+            issues.append(
+                f"Express 会话层表名不一致：index.js TABLE={index_match.group(2)}，"
+                f"DDL 核心表={table}"
+            )
+    return issues
+
+
+def _assert_generated_schema(
+    files: Mapping[str, str],
+    *,
+    table: str,
+    column_defs: Iterable[tuple[str, str]],
+    contract: ArchitectContract,
+) -> None:
+    """生成期硬断言：写盘前就拦住 ORM ↔ 迁移 DDL 的字段漂移。
+
+    ConsistencyVerifier 是最后一道门，但生成器本身也不允许产出
+    “模型查 users.name、迁移建 resumes”的包；这里直接抛错，
+    让 DBACoder 节点失败并暴露真实原因，而不是等部署后 500。
+    """
+    migration = files.get("server/migrations/001_init.sql") or ""
+    tables = {item.name.lower(): item for item in parse_ddl_tables(migration)}
+    migration_table = tables.get(str(table).lower())
+    expected = (
+        list(migration_table.column_names)
+        if migration_table is not None
+        else [name for name, _type in column_defs]
+    )
+    issues = check_orm_schema(
+        files,
+        table=table,
+        expected_columns=expected,
+        require_orm=True,
+    )
+    if migration_table is None:
+        issues.insert(
+            0,
+            f"迁移 001_init.sql 未包含核心业务表 {table}，"
+            "生产部署后必然出现表不存在或字段错位",
+        )
+    # 双保险：当前契约同样必须能解析出这张表，防止上游传错 DDL。
+    contract_table = core_table_for_contract(contract)
+    if contract_table.name.lower() != str(table).lower():
+        issues.insert(
+            0,
+            f"DBACoder 选表与契约核心表不一致：生成={table}，"
+            f"契约={contract_table.name}",
+        )
+    if issues:
+        raise ValueError(
+            "代码与迁移 DDL 不一致，已阻止写入沙盒：\n- " + "\n- ".join(issues)
+        )
 
 
 def sqlite_schema_sql(table: str, column_defs: list[tuple[str, str]]) -> str:
@@ -356,16 +774,14 @@ def _normalize_contract_ddl(ddl: str, engine: str) -> str:
             result,
             flags=re.IGNORECASE,
         )
-    if re.search(r"\bCREATE\s+TABLE\b", result, re.IGNORECASE) and not re.search(
-        r"\bCREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\b", result, re.IGNORECASE
-    ):
-        result = re.sub(
-            r"\bCREATE\s+TABLE\b",
-            "CREATE TABLE IF NOT EXISTS",
-            result,
-            count=1,
-            flags=re.IGNORECASE,
-        )
+    # 多表 DDL 必须逐条补 IF NOT EXISTS：旧逻辑只处理第一条，第二张表
+    # 重复执行迁移会直接报 "table already exists"。
+    result = re.sub(
+        r"\bCREATE\s+TABLE\b(?!\s+IF\s+NOT\s+EXISTS)",
+        "CREATE TABLE IF NOT EXISTS",
+        result,
+        flags=re.IGNORECASE,
+    )
     if not result.endswith(";"):
         result += ";"
     if engine == "mysql" and "ENGINE=" not in result.upper() and result.count(";") == 1:
@@ -613,10 +1029,28 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
     沙盒没有 DATABASE_URL 时，``server/db.js`` 自动回退到 Node 22 内置
     SQLite，保证预览与 E2E 不依赖外部数据库。
     """
-    table = extract_table_name(contract.database_ddl)
+    # 表名 / 字段的唯一事实来源：多表 DDL 中与 API 集合资源匹配的业务表。
+    # BackendCoder 与 InfraCoder 都会重新解析出同一结果，但 BackendCoder
+    # 还会显式读取本节点产出的 server/schema.core.json 作为二次确认。
+    core = core_table_for_contract(contract)
+    table = core.name
     engine = contract_database_engine(contract)
-    column_defs = extract_column_defs(contract.database_ddl)
+    column_defs = [(column.name, column.sqlite_type) for column in core.columns]
     columns = [name for name, _ in column_defs]
+    column_meta = {
+        column.name: {
+            "type": column.raw_type,
+            "sqliteType": column.sqlite_type,
+            "nullable": column.nullable,
+            "hasDefault": column.has_default,
+            "primary": column.is_primary,
+            "unique": column.is_unique,
+            "autoIncrement": column.auto_increment,
+        }
+        for column in core.columns
+    }
+    display_key = _pick_display_column(columns)
+    payload_key = _interaction_payload_key(contract, "POST") or display_key
     entity = _entity_label(contract, table)
     ddl = (contract.database_ddl or "").strip()
     if ddl and not ddl.endswith(";"):
@@ -636,6 +1070,9 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
         "__ENTITY__": entity,
         "__DB_ENGINE__": engine,
         "__COLUMN_DEFS_JSON__": json.dumps(column_defs, ensure_ascii=False, indent=2),
+        "__COLUMN_META_JSON__": json.dumps(column_meta, ensure_ascii=False, indent=2),
+        "__DISPLAY_KEY__": display_key,
+        "__PAYLOAD_KEY__": payload_key,
         "__SEED_ROWS_JSON__": json.dumps(
             _seed_rows(columns, table, entity),
             ensure_ascii=False,
@@ -650,6 +1087,19 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
         if engine == "sqlite"
         else f"server/schema.{engine}.sql"
     )
+    migration = migration_sql(contract, table, column_defs, engine)
+    core_schema = {
+        "table": table,
+        "entity": entity,
+        "engine": engine,
+        "columns": columns,
+        "columnDefs": column_defs,
+        "columnMeta": column_meta,
+        "displayKey": display_key,
+        "payloadKey": payload_key,
+        "source": "databaseDdl",
+        "contractId": contract.contract_id,
+    }
     files = {
         "server/schema.sql": header + sqlite_schema_sql(table, column_defs),
         schema_name: (
@@ -657,16 +1107,22 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
             + ddl
             + "\n"
         ),
+        # 机器可读的核心表结构：BackendCoder 生成 HTTP 层前显式读取，
+        # 不再各自从原始契约“猜”表名与字段。
+        "server/schema.core.json": json.dumps(core_schema, ensure_ascii=False, indent=2)
+        + "\n",
         "server/db.js": db_code,
         "server/migrate.mjs": MIGRATE_SCRIPT_TEMPLATE,
         "server/migrations.mjs": MIGRATION_RUNNER_TEMPLATE,
-        "server/migrations/001_init.sql": migration_sql(
-            contract,
-            table,
-            column_defs,
-            engine,
-        ),
+        "server/migrations/001_init.sql": migration,
     }
+    # 生成期门禁：ORM 表名 / 字段必须与迁移 DDL 完全对齐，否则拒绝写盘。
+    _assert_generated_schema(
+        files,
+        table=table,
+        column_defs=column_defs,
+        contract=contract,
+    )
     return GeneratedBundle(
         files=files,
         summary=(
@@ -677,9 +1133,13 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
             "table": table,
             "columns": columns,
             "columnTypes": column_defs,
+            "columnMeta": column_meta,
             "databaseEngine": engine,
             "orm": "sequelize",
             "previewStorage": "sqlite",
+            "displayKey": display_key,
+            "payloadKey": payload_key,
+            "coreSchema": "server/schema.core.json",
             "migration": "server/migrations/001_init.sql",
             "migrationRunner": "server/migrations.mjs",
         },
@@ -1227,10 +1687,103 @@ def build_ai_support(
     }
 
 
+def _table_from_schema_payload(payload: Mapping[str, Any]) -> DdlTable | None:
+    """把 ``server/schema.core.json`` 还原成 DdlTable。"""
+    name = _safe_identifier(str(payload.get("table") or ""), "")
+    if not name:
+        return None
+    meta = payload.get("columnMeta")
+    meta = meta if isinstance(meta, Mapping) else {}
+    raw_defs = payload.get("columnDefs") or []
+    columns: list[DdlColumn] = []
+    if isinstance(raw_defs, list):
+        for item in raw_defs:
+            if isinstance(item, (list, tuple)) and item:
+                column_name = _safe_identifier(str(item[0]), "")
+                sqlite_type = str(item[1] if len(item) > 1 else "TEXT").upper()
+            elif isinstance(item, str):
+                column_name = _safe_identifier(item, "")
+                sqlite_type = "TEXT"
+            else:
+                continue
+            if not column_name:
+                continue
+            info = meta.get(column_name) if isinstance(meta, Mapping) else None
+            info = info if isinstance(info, Mapping) else {}
+            columns.append(
+                DdlColumn(
+                    name=column_name,
+                    sqlite_type=sqlite_type,
+                    raw_type=str(info.get("type") or sqlite_type),
+                    nullable=bool(info.get("nullable", True)),
+                    has_default=bool(info.get("hasDefault", False)),
+                    is_primary=bool(
+                        info.get(
+                            "primary",
+                            column_name.lower() == "id",
+                        )
+                    ),
+                    is_unique=bool(info.get("unique", False)),
+                    auto_increment=bool(info.get("autoIncrement", False)),
+                )
+            )
+    if not columns:
+        return None
+    return DdlTable(name=name, columns=tuple(_normalize_id_first(columns)))
+
+
+def _resolve_dba_table(
+    contract: ArchitectContract,
+    dba_schema: Mapping[str, Any] | str | None,
+) -> DdlTable:
+    """优先采用 DBACoder 刚产出的表结构，并与契约核心表硬对齐。
+
+    ``dba_schema`` 可以是 ``server/schema.core.json`` 的 JSON 字符串 /
+    字典，也可以是 ``server/migrations/001_init.sql`` 的 SQL 文本。
+    BackendCoder 必须读取 DBACoder 的真实产物，而不是各自重新“猜”；
+    一旦两者表名不一致，直接抛错阻断，禁止把错位代码写进沙盒。
+    """
+    expected = core_table_for_contract(contract)
+    if dba_schema is None:
+        return expected
+    table: DdlTable | None = None
+    if isinstance(dba_schema, Mapping):
+        table = _table_from_schema_payload(dba_schema)
+    elif isinstance(dba_schema, str):
+        stripped = dba_schema.strip()
+        if stripped.startswith("{"):
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, Mapping):
+                table = _table_from_schema_payload(payload)
+        else:
+            tables = parse_ddl_tables(stripped)
+            table = next(
+                (item for item in tables if item.name.lower() == expected.name.lower()),
+                None,
+            )
+            if table is None and tables:
+                table = select_core_table(
+                    tables, collection_path(contract.api_routes or [])
+                )
+    if table is None:
+        return expected
+    if contract.database_ddl.strip() and table.name.lower() != expected.name.lower():
+        raise ValueError(
+            "BackendCoder 读取的 DDL 与契约核心业务表不一致："
+            f"DBA 产物={table.name}，契约={expected.name}；"
+            "已阻止生成，避免 ORM / HTTP 层指向不同表"
+        )
+    return table
+
+
 def generate_backend_bundle(
     contract: ArchitectContract,
     *,
     extra_routes: Iterable[ArchitectApiRoute | dict[str, Any]] | None = None,
+    dba_schema: Mapping[str, Any] | str | None = None,
 ) -> GeneratedBundle:
     """按契约 apiRoutes 生成 Express + Sequelize 后端。
 
@@ -1246,8 +1799,10 @@ def generate_backend_bundle(
     把 ``{method, path, description}`` 列表回传给 BackendCoder 补齐。
     """
     routes = _merge_routes(contract.api_routes or [], extra_routes)
-    table = extract_table_name(contract.database_ddl)
-    column_defs = extract_column_defs(contract.database_ddl)
+    # 显式绑定 DBACoder 的产出：表名与字段必须来自同一份 DDL。
+    core = _resolve_dba_table(contract, dba_schema)
+    table = core.name
+    column_defs = list(core.column_defs)
     columns = [name for name, _ in column_defs]
     upload = build_upload_support(contract, columns)
     ai = build_ai_support(contract, upload)
@@ -1280,6 +1835,13 @@ def generate_backend_bundle(
     server_code = EXPRESS_SERVER_TEMPLATE
     for key, value in replacements.items():
         server_code = server_code.replace(key, value)
+    # 生成期门禁：Express 会话层表名必须与 DBACoder 的 ORM / 迁移一致。
+    index_table = _TABLE_CONSTANT.search(server_code)
+    if index_table and index_table.group(2).lower() != table.lower():
+        raise ValueError(
+            "BackendCoder 生成的 server/index.js 表名与 DDL 不一致："
+            f"index={index_table.group(2)}，DDL={table}"
+        )
 
     # 通用 CRUD 已覆盖的路由不再重复注册；其余契约动作逐个生成独立端点。
     # 前端请求路径与 Express 注册路径都经过 _express_path，保证逐字符一致。
@@ -1365,6 +1927,10 @@ def generate_backend_bundle(
         "server/api-routes.json": json.dumps(
             {
                 "prefix": "/api",
+                # 表结构事实来源：验收脚本据此确认运行期 CRUD 命中的是
+                # 核心业务表，而不是 DDL 中第一张 users 鉴权表。
+                "table": table,
+                "coreSchema": "server/schema.core.json",
                 "collection": express_base,
                 "item": detail,
                 # routes 是后端**实际注册**的完整路由表；一致性检查以它为准，
@@ -1835,7 +2401,8 @@ function normalizeItems(payload) {
 
 function displayName(item) {
   return String(
-    item?.name ??
+    item?.__DISPLAY_KEY__ ??
+      item?.name ??
       item?.title ??
       item?.label ??
       `${ENTITY} #${item?.id ?? '?'}`,
@@ -1888,7 +2455,7 @@ export default function FullstackDataPanel() {
           'Idempotency-Key': `ui-${Date.now()}`,
         },
         // 提交字段必须与 DDL 可写列一致，避免后端静默丢弃请求体。
-        body: JSON.stringify({ __PAYLOAD_KEY__: name.trim() || `新${ENTITY}` }),
+        body: JSON.stringify(__PAYLOAD_OBJECT__),
       })
       const payload = await response.json()
       // 兼容直接返回记录与 { data, message } 两种后端响应。
@@ -3088,27 +3655,72 @@ def _resolve_interaction_method(
     return methods[0]
 
 
+_NON_WRITABLE_COLUMNS = {
+    "id",
+    "tenant_id",
+    "created_at",
+    "updated_at",
+    "deleted_at",
+    "status",
+}
+# 表单展示 / 提交字段的语义优先级。file_name 等业务文本字段必须排在
+# user_id 这类外键之前，否则数据面板会把用户输入写进外键列。
+_PREFERRED_TEXT_COLUMNS = (
+    "name",
+    "title",
+    "label",
+    "display_name",
+    "file_name",
+    "subject",
+    "email",
+    "content",
+    "description",
+    "summary",
+)
+
+
+def _is_text_like_column(name: str, sqlite_type: str) -> bool:
+    lowered = name.lower()
+    if lowered.endswith("_id") or lowered in _NON_WRITABLE_COLUMNS:
+        return False
+    if sqlite_type in {"INTEGER", "REAL", "BLOB"}:
+        return False
+    return not re.search(r"(^|_)(amount|price|count|qty|size|score|total)$", lowered)
+
+
+def _pick_display_column(columns: Iterable[str]) -> str:
+    """选择列表展示字段；找不到时退回 id。"""
+    available = {column.lower(): column for column in columns}
+    for preferred in _PREFERRED_TEXT_COLUMNS:
+        if preferred in available:
+            return available[preferred]
+    for column in columns:
+        if column.lower() not in _NON_WRITABLE_COLUMNS:
+            return column
+    return "id"
+
+
 def _interaction_payload_key(contract: ArchitectContract, method: str) -> str:
     """选择 POST/PUT/PATCH 的默认写入字段。
 
     BackendCoder 的 ``buildValues`` 只接收 DDL 中的可写列；前端必须用
-    同一个列名提交，否则请求体结构会与后端 DTO 不一致。
+    同一个列名提交，否则请求体结构会与后端 DTO 不一致。字段必须来自
+    DBA 解析出的核心业务表，不能假设存在 ``name``。
     """
     if method not in {"POST", "PUT", "PATCH"}:
         return ""
-    columns = [name for name, _ in extract_column_defs(contract.database_ddl)]
-    writable = [
-        column
-        for column in columns
-        if column.lower()
-        not in {"id", "tenant_id", "created_at", "updated_at", "deleted_at", "status"}
-    ]
-    if not writable:
-        return ""
-    for preferred in ("name", "title", "label"):
-        if preferred in (column.lower() for column in writable):
-            return next(column for column in writable if column.lower() == preferred)
-    return writable[0]
+    table = core_table_for_contract(contract)
+    available = {column.name.lower(): column for column in table.columns}
+    for preferred in _PREFERRED_TEXT_COLUMNS:
+        column = available.get(preferred)
+        if column is None:
+            continue
+        if _is_text_like_column(column.name, column.sqlite_type):
+            return column.name
+    for column in table.columns:
+        if _is_text_like_column(column.name, column.sqlite_type):
+            return column.name
+    return ""
 
 
 def _interaction_label(method: str, event: str) -> str:
@@ -3258,20 +3870,35 @@ def generate_frontend_bundle(
 ) -> GeneratedBundle:
     """生成 API 面板、开发启动脚本，并注入 main.jsx / vite / package。"""
     routes = contract.api_routes or []
-    table = extract_table_name(contract.database_ddl)
+    core = core_table_for_contract(contract)
+    table = core.name
     # 与 BackendCoder 使用完全相同的路由选择函数与 Express 转换，
     # 保证前端请求路径与 server/index.js 注册路径逐字符一致。
     base = _express_path(collection_path(routes))
     entity = _entity_label(contract, table)
     _assert_route_pair(base, _express_path(item_path(routes, base)))
 
-    # 面板的提交字段同样取自 DDL：没有 name 列时退回 title / label / 首个可写列。
-    payload_key = _interaction_payload_key(contract, "POST") or "name"
+    # 面板的提交字段同样取自 DDL 核心业务表：没有 name 列时使用
+    # title / file_name / 首个文本列；完全无可写文本列时提交空对象，
+    # 由后端 buildValues 补 NOT NULL 默认值，绝不臆造 name 字段。
+    payload_key = _interaction_payload_key(contract, "POST")
+    display_key = _pick_display_column(core.column_names)
+    key_literal = (
+        payload_key
+        if re.fullmatch(r"[A-Za-z_$][\w$]*", payload_key)
+        else json.dumps(payload_key)
+    )
+    payload_object = (
+        "{\n          " + f"{key_literal}: name.trim() || `新${{ENTITY}}`,\n        }}"
+        if payload_key
+        else "{}"
+    )
     panel = (
         _FRONTEND_PANEL.replace("__COLLECTION_PATH__", base)
         .replace("__ENTITY__", entity)
         .replace("__TABLE__", table)
-        .replace("__PAYLOAD_KEY__", payload_key)
+        .replace("__DISPLAY_KEY__", display_key)
+        .replace("__PAYLOAD_OBJECT__", payload_object)
     )
     ai_enabled = bool(contract.include_ai_capability)
     files: dict[str, str] = {
@@ -3378,7 +4005,8 @@ def generate_infra_bundle(contract: ArchitectContract) -> GeneratedBundle:
     目标不是“能跑起来的沙盒玩具”，而是可以直接导出、推送到 Git 仓库，
     再由 Render / Railway / Vercel / 任意容器平台部署的生产级项目包。
     """
-    table = extract_table_name(contract.database_ddl)
+    core = core_table_for_contract(contract)
+    table = core.name
     entity = _entity_label(contract, table)
     engine = contract_database_engine(contract)
     engine_label = DATABASE_ENGINE_LABELS.get(engine, engine)
@@ -3443,12 +4071,17 @@ def generate_infra_bundle(contract: ArchitectContract) -> GeneratedBundle:
 __all__ = [
     "API_PORT",
     "DATABASE_ENGINE_LABELS",
+    "DdlColumn",
+    "DdlTable",
     "GeneratedBundle",
     "PRODUCTION_ENGINES",
+    "check_orm_schema",
     "collection_path",
     "contract_database_engine",
+    "core_table_for_contract",
     "extract_column_defs",
     "extract_columns",
+    "extract_orm_schema",
     "extract_table_name",
     "generate_backend_bundle",
     "generate_dba_bundle",
@@ -3456,5 +4089,7 @@ __all__ = [
     "generate_frontend_skeleton_bundle",
     "generate_infra_bundle",
     "item_path",
+    "parse_ddl_tables",
+    "select_core_table",
     "sqlite_schema_sql",
 ]

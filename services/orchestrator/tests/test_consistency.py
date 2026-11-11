@@ -21,6 +21,7 @@ from ai_core.domain.architect import (
 )
 from ai_core.fullstack.coders import (
     generate_backend_bundle,
+    generate_dba_bundle,
     generate_frontend_skeleton_bundle,
 )
 from ai_core.fullstack.consistency import (
@@ -46,6 +47,7 @@ def _contract(
     *,
     routes: list[ArchitectApiRoute] | None = None,
     interactions: list[ArchitectComponentInteraction] | None = None,
+    database_ddl: str | None = None,
 ) -> ArchitectContract:
     return ArchitectContract.model_validate(
         {
@@ -70,7 +72,7 @@ def _contract(
                     ArchitectApiRoute(method="DELETE", path="/api/v1/tasks/:id"),
                 ]
             ),
-            "databaseDdl": DDL,
+            "databaseDdl": database_ddl or DDL,
             "components": [
                 {"name": "TaskList", "section": "主内容区"},
                 {"name": "SubmitButton", "role": "button", "section": "主内容区"},
@@ -380,6 +382,67 @@ class ConsistencyTest(unittest.TestCase):
         self.assertIn(("GET", "/api/v1/tasks"), pairs)
         self.assertIn(("POST", "/api/v1/tasks"), pairs)
         self.assertEqual(checked, ["src/fullstack-api.jsx"])
+
+    def test_orm_schema_mismatch_blocks_build(self) -> None:
+        """回归 500 Unknown column：db.js 引用 DDL 不存在的字段必须阻断。
+
+        构造真实事故现场：迁移创建 users + resumes，集合路由是
+        /api/v1/resumes，但 ORM 仍按第一张 users 表生成 name/status。
+        正确产物必须通过；被污染产物必须产出 REGENERATE_ORM。
+        """
+        multi_ddl = """CREATE TABLE users (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  iam_sub VARCHAR(128) NOT NULL UNIQUE,
+  display_name VARCHAR(128),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE resumes (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  user_id BIGINT NOT NULL,
+  file_name VARCHAR(255),
+  content MEDIUMTEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"""
+        contract = _contract(
+            routes=[
+                ArchitectApiRoute(method="GET", path="/api/v1/resumes"),
+                ArchitectApiRoute(method="POST", path="/api/v1/resumes"),
+                ArchitectApiRoute(method="GET", path="/api/v1/resumes/:id"),
+            ],
+            interactions=[],
+            database_ddl=multi_ddl,
+        )
+        dba = generate_dba_bundle(contract)
+        backend = generate_backend_bundle(
+            contract, dba_schema=dba.files["server/schema.core.json"]
+        )
+        files = {**dba.files, **backend.files}
+
+        baseline = verify_consistency(files, contract)
+        self.assertTrue(baseline.ok, baseline.failure_message())
+
+        broken = dict(files)
+        broken["server/db.js"] = (
+            "const TABLE = 'users'\n"
+            'const COLUMN_DEFS = [["id", "INTEGER"],'
+            ' ["name", "TEXT"], ["status", "TEXT"]]\n'
+        )
+        broken["server/index.js"] = broken["server/index.js"].replace(
+            "const TABLE = 'resumes'", "const TABLE = 'users'"
+        )
+
+        report = verify_consistency(broken, contract)
+        self.assertFalse(report.ok)
+        self.assertTrue(report.needs_orm_repair)
+        self.assertIn(
+            ("orm_schema", "REGENERATE_ORM"),
+            {(issue.kind, issue.fix_action) for issue in report.issues},
+        )
+        messages = " ".join(issue.message for issue in report.issues)
+        self.assertIn("users", messages)
+        self.assertIn("name", messages)
+        self.assertIn("server/db.js", report.checked_files)
 
 
 if __name__ == "__main__":

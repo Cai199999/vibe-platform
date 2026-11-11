@@ -27,8 +27,10 @@ from ai_core.domain.architect import (
 )
 from ai_core.domain.fullstack import FullstackRunOptions, FullstackRunRequest
 from ai_core.fullstack.coders import (
+    check_orm_schema,
     collection_path,
     contract_database_engine,
+    core_table_for_contract,
     extract_column_defs,
     extract_columns,
     extract_table_name,
@@ -38,6 +40,7 @@ from ai_core.fullstack.coders import (
     generate_frontend_skeleton_bundle,
     generate_infra_bundle,
     item_path,
+    parse_ddl_tables,
 )
 from ai_core.fullstack.graph import FullstackConsistencyError, FullstackGraphRunner
 from ai_core.fullstack.schema_mcp import verify_schema_with_mcp
@@ -55,6 +58,52 @@ DDL = """CREATE TABLE todos (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   deleted_at TIMESTAMP NULL
 );"""
+
+
+# 真实事故契约：第一条是鉴权表 users，业务表 resumes 在其后。
+MULTI_TABLE_DDL = """CREATE TABLE users (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  iam_sub VARCHAR(128) NOT NULL UNIQUE,
+  tenant_id VARCHAR(64),
+  display_name VARCHAR(128),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE resumes (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  user_id BIGINT NOT NULL,
+  file_name VARCHAR(255),
+  content MEDIUMTEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_resumes_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE jds (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  user_id BIGINT NOT NULL,
+  title VARCHAR(255),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"""
+
+
+def _resume_contract(**overrides) -> ArchitectContract:
+    return _contract(
+        apiRoutes=[
+            ArchitectApiRoute(
+                method="GET", path="/api/v1/resumes", description="简历列表"
+            ),
+            ArchitectApiRoute(
+                method="POST", path="/api/v1/resumes", description="创建简历"
+            ),
+            ArchitectApiRoute(
+                method="GET",
+                path="/api/v1/resumes/:id",
+                description="简历详情",
+            ),
+        ],
+        databaseDdl=MULTI_TABLE_DDL,
+        **overrides,
+    )
 
 
 def _contract(**overrides) -> ArchitectContract:
@@ -232,6 +281,79 @@ class CoderTests(unittest.TestCase):
         self.assertEqual(defs["payload"], "TEXT")
         # 契约没有 id 时自动补 SQLite 自增主键。
         self.assertEqual(extract_column_defs("CREATE TABLE t (title TEXT)")[0][0], "id")
+
+    def test_multi_table_ddl_selects_collection_business_table(self) -> None:
+        """回归 500 Unknown column：多表 DDL 不能把 users 当业务表。
+
+        旧解析器取第一条 CREATE TABLE 且贪婪匹配全部字段，生成
+        ``TABLE=users / COLUMN_DEFS=[id,name,status]``，而迁移创建的是
+        resumes，线上 GET/POST 直接 500。
+        """
+        contract = _resume_contract()
+        core = core_table_for_contract(contract)
+        self.assertEqual(core.name, "resumes")
+        self.assertIn("file_name", core.column_names)
+        self.assertIn("content", core.column_names)
+        self.assertNotIn("iam_sub", core.column_names)
+
+        bundle = generate_dba_bundle(contract)
+        db_code = bundle.files["server/db.js"]
+        self.assertIn("const TABLE = 'resumes'", db_code)
+        self.assertIn('"file_name"', db_code)
+        self.assertIn('"content"', db_code)
+        self.assertNotIn('"iam_sub"', db_code)
+        self.assertNotIn("const TABLE = 'users'", db_code)
+        # NOT NULL 列必须带约束元数据，供 buildValues 补默认值。
+        self.assertIn('"nullable": false', db_code)
+        self.assertIn("REQUIRED_COLUMNS", db_code)
+        migration = bundle.files["server/migrations/001_init.sql"]
+        self.assertIn("CREATE TABLE IF NOT EXISTS users", migration)
+        self.assertIn("CREATE TABLE IF NOT EXISTS resumes", migration)
+        core_json = json.loads(bundle.files["server/schema.core.json"])
+        self.assertEqual(core_json["table"], "resumes")
+        self.assertIn("content", core_json["columnMeta"])
+
+    def test_missing_ddl_never_falls_back_to_users_or_name(self) -> None:
+        """无 DDL 时兜底字段必须是中性的 title/created_at。"""
+        self.assertEqual(extract_table_name("-- 没有 DDL"), "app_records")
+        self.assertEqual(extract_columns("-- 没有 DDL"), ["id", "title", "created_at"])
+        self.assertEqual(
+            extract_column_defs("-- 没有 DDL"),
+            [("id", "INTEGER"), ("title", "TEXT"), ("created_at", "TEXT")],
+        )
+
+    def test_parse_ddl_tables_keeps_each_table_isolated(self) -> None:
+        tables = {table.name: table for table in parse_ddl_tables(MULTI_TABLE_DDL)}
+        self.assertEqual(set(tables), {"users", "resumes", "jds"})
+        self.assertIn("iam_sub", tables["users"].column_names)
+        self.assertIn("file_name", tables["resumes"].column_names)
+        self.assertNotIn("file_name", tables["jds"].column_names)
+        # INDEX 等表级约束不能混进字段。
+        self.assertNotIn("index", tables["resumes"].column_names)
+
+    def test_backend_reads_dba_schema_core_before_generating(self) -> None:
+        """BackendCoder 必须显式绑定 DBACoder 产出的核心表结构。"""
+        contract = _resume_contract()
+        dba = generate_dba_bundle(contract)
+        backend = generate_backend_bundle(
+            contract,
+            dba_schema=dba.files["server/schema.core.json"],
+        )
+        self.assertIn("const TABLE = 'resumes'", backend.files["server/index.js"])
+        manifest = json.loads(backend.files["server/api-routes.json"])
+        self.assertEqual(manifest["table"], "resumes")
+        self.assertIn("/api/v1/resumes", backend.files["server/index.js"])
+
+    def test_backend_rejects_divergent_dba_schema(self) -> None:
+        contract = _resume_contract()
+        with self.assertRaises(ValueError):
+            generate_backend_bundle(
+                contract,
+                dba_schema={
+                    "table": "users",
+                    "columnDefs": [["id", "INTEGER"], ["name", "TEXT"]],
+                },
+            )
 
     def test_collection_path_prefers_get_collection_route(self) -> None:
         contract = _contract()
@@ -1103,6 +1225,92 @@ class GraphTests(unittest.TestCase):
                 for event in events
             )
         )
+
+    def test_orm_mismatch_regenerates_dba_before_build(self) -> None:
+        """回归 500 Unknown column：ORM 字段错位必须先重跑 DBACoder。
+
+        模拟“旧模板仍在用 users/name”的事故包：一致性检查报
+        ``orm_schema`` 后，图必须回到 DBACoder 按真实 DDL 重写，
+        重写通过后才允许 install / build / restart。
+        """
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        contract = _resume_contract()
+        buffer = RunEventBuffer("fsk_orm_self_heal")
+        runner = FullstackGraphRunner(sandbox, event_sink=buffer)
+
+        from ai_core.fullstack import graph as graph_module
+        from ai_core.fullstack.consistency import (
+            BackendRoute,
+            ConsistencyIssue,
+            ConsistencyReport,
+        )
+
+        bad_report = ConsistencyReport(
+            calls_checked=1,
+            backend_routes=(BackendRoute("GET", "/api/v1/resumes"),),
+            issues=(
+                ConsistencyIssue(
+                    kind="orm_schema",
+                    component="DBACoder",
+                    method="",
+                    path="server/db.js",
+                    message="ORM 模型引用了 DDL 中不存在的字段：name",
+                    suggestion="由 DBACoder 按 migrations/001_init.sql 重建 db.js",
+                    fix_action="REGENERATE_ORM",
+                ),
+            ),
+        )
+        original = graph_module.verify_consistency
+        calls: list[int] = []
+
+        def fake_verify(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                return bad_report
+            return original(*args, **kwargs)
+
+        graph_module.verify_consistency = fake_verify
+        try:
+            runner.run(
+                {
+                    "run_id": "fsk_orm_self_heal",
+                    "project_id": "proj_resume",
+                    "sandbox_id": sandbox.handle.sandbox_id,
+                    "preview_url": sandbox.handle.preview_url,
+                    "contract": contract,
+                    "files": [],
+                }
+            )
+        finally:
+            graph_module.verify_consistency = original
+
+        self.assertEqual(len(calls), 2)
+        events = buffer.snapshot()
+        dba_starts = [
+            event
+            for event in events
+            if event.type == "fullstack.node.started"
+            and event.payload["node"] == "DBACoder"
+        ]
+        self.assertEqual(len(dba_starts), 2)
+        repairs = [
+            event for event in events if event.type == "fullstack.consistency.repair"
+        ]
+        self.assertEqual(len(repairs), 1)
+        self.assertEqual(repairs[0].payload["node"], "DBACoder")
+        self.assertEqual(repairs[0].payload["reason"], "ORM_SCHEMA_MISMATCH")
+        self.assertEqual(repairs[0].payload["attempt"], 1)
+        # 重写后的持久化层必须绑定真实核心业务表，构建才继续。
+        self.assertIn("const TABLE = 'resumes'", sandbox.files["server/db.js"])
+        self.assertEqual(
+            sandbox.verified,
+            [
+                (sandbox.handle.sandbox_id, "install"),
+                (sandbox.handle.sandbox_id, "build"),
+            ],
+        )
+        self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/api/health")])
 
     def test_consistency_retries_at_most_twice_then_fails(self) -> None:
         """自愈最多 2 次；仍不一致时在一致性格点终止，不进入构建。"""

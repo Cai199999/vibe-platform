@@ -36,7 +36,7 @@ from ai_core.domain.fullstack import (
 from ai_core.fullstack.coders import (
     collection_path,
     contract_database_engine,
-    extract_table_name,
+    core_table_for_contract,
 )
 from ai_core.fullstack.graph import (
     MODE_NODE_ORDERS,
@@ -426,7 +426,7 @@ class FullstackService:
 
     def summary_for_request(self, contract: ArchitectContract) -> dict[str, Any]:
         """契约摘要：供诊断脚本 / 测试核对生成目标。"""
-        table = extract_table_name(contract.database_ddl)
+        table = core_table_for_contract(contract).name
         return {
             "contractId": contract.contract_id,
             "appShape": contract.app_shape,

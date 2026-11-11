@@ -59,6 +59,8 @@ logger = logging.getLogger(__name__)
 GRAPH_NODE_TOTAL = 7
 # 一致性检查失败后，最多把缺失路由回传 BackendCoder 自愈 2 次。
 MAX_CONSISTENCY_REPAIRS = 2
+# ORM 模型与迁移 DDL 字段错位时，最多让 DBACoder 按 DDL 重写 2 次。
+MAX_ORM_REPAIRS = 2
 # 对话前置模式的初始前端骨架只执行三个节点。
 FRONTEND_GRAPH_NODE_TOTAL = 3
 FULLSTACK_NODE_ORDER = [
@@ -140,8 +142,10 @@ class FullstackState(TypedDict, total=False):
     consistency_fix_routes: list[dict[str, str]]
     consistency_applied_routes: list[dict[str, str]]
     consistency_repair_count: int
+    consistency_dba_repair_count: int
     consistency_ok: bool
     needs_backend_repair: bool
+    needs_dba_repair: bool
 
 
 class FullstackGraphRunner:
@@ -246,6 +250,9 @@ class FullstackGraphRunner:
             {
                 "build": "BuildVerifier",
                 "repair": "BackendCoder",
+                # ORM 模型与 DDL 字段错位：回到 DBACoder 重新生成持久化层，
+                # 随后由既有 DBACoder -> BackendCoder 边重新绑定 HTTP 层。
+                "regenerate": "DBACoder",
             },
         )
         builder.add_edge("BuildVerifier", "SandboxRestart")
@@ -259,8 +266,14 @@ class FullstackGraphRunner:
 
     @staticmethod
     def _route_after_consistency_verifier(state: FullstackState) -> str:
-        """一致性通过才允许构建，否则回到 BackendCoder 补齐缺失路由。"""
-        return "build" if state.get("consistency_ok") else "repair"
+        """一致性通过才允许构建。
+
+        - ORM/DDL 字段错位：回到 DBACoder 重写持久化层；
+        - 缺失路由：回到 BackendCoder 补齐端点。
+        """
+        if state.get("consistency_ok"):
+            return "build"
+        return "regenerate" if state.get("needs_dba_repair") else "repair"
 
     # --------------------------------------------------------
     # 节点：DBACoder
@@ -292,6 +305,7 @@ class FullstackGraphRunner:
     # --------------------------------------------------------
     def _backend_coder(self, state: FullstackState) -> dict[str, Any]:
         contract = state["contract"]
+        sandbox_id = state["sandbox_id"]
         started = time.monotonic()
         self._node_started("BackendCoder", state)
         try:
@@ -302,7 +316,19 @@ class FullstackGraphRunner:
             for route in fix_routes:
                 if route not in applied_routes:
                     applied_routes.append(route)
-            bundle = generate_backend_bundle(contract, extra_routes=applied_routes)
+            # 显式读取 DBACoder 刚产出的权威表结构：优先机器可读的
+            # schema.core.json，缺失时退回真实迁移 SQL，最后才由契约推导。
+            # 这保证 BackendCoder 不会与 DBACoder 各自“猜”出不同表。
+            dba_schema = self._read_optional(sandbox_id, "server/schema.core.json")
+            if not dba_schema:
+                dba_schema = self._read_optional(
+                    sandbox_id, "server/migrations/001_init.sql"
+                )
+            bundle = generate_backend_bundle(
+                contract,
+                extra_routes=applied_routes,
+                dba_schema=dba_schema,
+            )
             files = self._write_bundle(state, bundle)
             collection = str(bundle.metadata.get("collectionPath") or "")
             summary = bundle.summary
@@ -413,6 +439,10 @@ class FullstackGraphRunner:
             "src/fullstack-api.jsx",
             "server/api-routes.json",
             "server/index.js",
+            # ORM ↔ 迁移 DDL 一致性校验所需的真实产物。
+            "server/db.js",
+            "server/schema.core.json",
+            "server/migrations/001_init.sql",
         ):
             content = self._read_optional(sandbox_id, path)
             if content is not None:
@@ -471,7 +501,56 @@ class FullstackGraphRunner:
                 [],
                 started,
             )
-            return {"consistency_ok": True, "needs_backend_repair": False}
+            return {
+                "consistency_ok": True,
+                "needs_backend_repair": False,
+                "needs_dba_repair": False,
+            }
+
+        # 优先处理 ORM ↔ DDL 字段错位：这类问题会让所有 CRUD 直接 500，
+        # 必须先由 DBACoder 按 DDL 重写持久化层，再让 BackendCoder 重新绑定。
+        dba_repair_count = int(state.get("consistency_dba_repair_count") or 0)
+        if report.needs_orm_repair and dba_repair_count < MAX_ORM_REPAIRS:
+            next_count = dba_repair_count + 1
+            logger.warning(
+                "ConsistencyVerifier 发现 ORM/DDL 字段错位，转 DBACoder 重写 [%d/%d] run_id=%s",
+                next_count,
+                MAX_ORM_REPAIRS,
+                state.get("run_id"),
+            )
+            self._emit(
+                "fullstack.consistency.repair",
+                {
+                    "runId": state["run_id"],
+                    "attempt": next_count,
+                    "maxAttempts": MAX_ORM_REPAIRS,
+                    "node": "DBACoder",
+                    "reason": "ORM_SCHEMA_MISMATCH",
+                    "issues": [
+                        issue.to_dict()
+                        for issue in report.issues
+                        if issue.fix_action == "REGENERATE_ORM"
+                    ],
+                    "report": report.to_dict(),
+                },
+            )
+            self._node_completed(
+                "ConsistencyVerifier",
+                state,
+                (
+                    "ORM 模型与迁移 DDL 字段不一致，转交 DBACoder 按 DDL 重写"
+                    f"（第 {next_count}/{MAX_ORM_REPAIRS} 次）"
+                ),
+                [],
+                started,
+            )
+            return {
+                "consistency_ok": False,
+                "needs_backend_repair": True,
+                "needs_dba_repair": True,
+                "consistency_dba_repair_count": next_count,
+                "consistency_fix_routes": [],
+            }
 
         repair_count = int(state.get("consistency_repair_count") or 0)
         missing_routes = list(report.missing_routes())
@@ -510,6 +589,7 @@ class FullstackGraphRunner:
             return {
                 "consistency_ok": False,
                 "needs_backend_repair": True,
+                "needs_dba_repair": False,
                 "consistency_fix_routes": missing_routes,
                 "consistency_repair_count": next_count,
             }

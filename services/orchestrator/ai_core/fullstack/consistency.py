@@ -32,9 +32,11 @@ from typing import Iterable, Mapping
 
 from ai_core.domain.architect import ArchitectContract
 from ai_core.fullstack.coders import (
+    check_orm_schema,
     collection_path,
-    extract_column_defs,
+    core_table_for_contract,
     item_path,
+    parse_ddl_tables,
 )
 
 # 后端 Express 模板固定注册的通用路由：健康检查 + 通用数据别名。
@@ -155,8 +157,13 @@ class ConsistencyReport:
 
     @property
     def repairable(self) -> bool:
-        """是否存在可由 BackendCoder 自动补齐的路由差异。"""
-        return bool(self.missing_routes())
+        """是否存在可自动修复的差异（缺失路由或 ORM/DDL 字段错位）。"""
+        return bool(self.missing_routes()) or self.needs_orm_repair
+
+    @property
+    def needs_orm_repair(self) -> bool:
+        """是否需要 DBACoder 按 DDL 重新生成 ORM 与迁移。"""
+        return any(issue.fix_action == "REGENERATE_ORM" for issue in self.issues)
 
     def summary(self) -> str:
         if self.ok:
@@ -211,6 +218,7 @@ class ConsistencyReport:
             "backendRoutes": [route.to_dict() for route in self.backend_routes],
             "missingRoutes": list(self.missing_routes()),
             "repairable": self.repairable,
+            "needsOrmRepair": self.needs_orm_repair,
             "issues": [issue.to_dict() for issue in self.issues],
             "schema": self.schema,
         }
@@ -280,6 +288,12 @@ def verify_consistency(
         payload_issue = _payload_issue(call, writable_columns)
         if payload_issue is not None:
             issues.append(payload_issue)
+
+    # 维度三：ORM 模型 vs 生产迁移 DDL。路由全对但字段错位时，
+    # 服务启动后仍会 500 Unknown column；必须在构建前阻断。
+    orm_issues, orm_checked = _orm_schema_issues(files, contract)
+    issues.extend(orm_issues)
+    checked_files = sorted(set(checked_files) | set(orm_checked))
 
     return ConsistencyReport(
         calls_checked=len(frontend_calls),
@@ -548,10 +562,77 @@ def _payload_issue(
 
 
 def _writable_columns(contract: ArchitectContract) -> list[str]:
-    columns = [name for name, _type in extract_column_defs(contract.database_ddl)]
+    # 可写列必须来自核心业务表，而不是多表 DDL 的第一张 users。
+    columns = core_table_for_contract(contract).column_names
     return [
         column for column in columns if column.casefold() not in _NON_WRITABLE_COLUMNS
     ]
+
+
+def _orm_schema_issues(
+    files: Mapping[str, str],
+    contract: ArchitectContract,
+) -> tuple[list[ConsistencyIssue], list[str]]:
+    """ORM 模型（server/db.js）与生产迁移 DDL 的字段一致性校验。
+
+    这是 ``Unknown column 'name'`` 的构建前门禁：
+
+      - 解析 ``server/db.js`` 的 ``const TABLE`` 与 ``COLUMN_DEFS``；
+      - 解析 ``server/migrations/001_init.sql`` 中核心业务表的真实字段；
+      - 代码引用了 DDL 不存在的字段（如多表 DDL 里把 users 当业务表）
+        立即产出 ``REGENERATE_ORM`` 阻断项，驱动 DBACoder 重写。
+
+    快照里没有 ``server/db.js`` 时返回空列表，保证只做路由校验的
+    单元测试与局部调用保持兼容；完整全栈图一定会带上该文件。
+    """
+    db_js = files.get("server/db.js")
+    if not isinstance(db_js, str) or not db_js.strip():
+        return [], []
+    core = core_table_for_contract(contract)
+    migration = files.get("server/migrations/001_init.sql")
+    migration_text = (
+        migration if isinstance(migration, str) and migration.strip() else ""
+    )
+    migration_tables = {
+        table.name.lower(): table for table in parse_ddl_tables(migration_text)
+    }
+    migration_table = migration_tables.get(core.name.lower())
+    expected = (
+        list(migration_table.column_names)
+        if migration_table is not None
+        else list(core.column_names)
+    )
+    messages = check_orm_schema(
+        files,
+        table=core.name,
+        expected_columns=expected,
+    )
+    if migration_text and migration_table is None:
+        messages.insert(
+            0,
+            f"迁移 001_init.sql 未包含核心业务表 {core.name}，" "部署后 CRUD 必然失败",
+        )
+    issues = [
+        ConsistencyIssue(
+            kind="orm_schema",
+            component="DBACoder",
+            method="",
+            path="server/db.js",
+            message=message,
+            suggestion=(
+                "由 DBACoder 按 databaseDdl 的核心业务表重新生成 "
+                "server/db.js 与 server/migrations/001_init.sql，"
+                "再由 BackendCoder 重新绑定同一张表；"
+                "禁止使用 users / name 作为默认占位符"
+            ),
+            fix_action="REGENERATE_ORM",
+        )
+        for message in messages
+    ]
+    checked = ["server/db.js"]
+    if migration_text:
+        checked.append("server/migrations/001_init.sql")
+    return issues, checked
 
 
 def _express_path(path: str) -> str:

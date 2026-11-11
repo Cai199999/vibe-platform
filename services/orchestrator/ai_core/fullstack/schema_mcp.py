@@ -32,8 +32,7 @@ from ai_core.config import Settings, get_settings
 from ai_core.domain.architect import ArchitectContract
 from ai_core.fullstack.coders import (
     contract_database_engine,
-    extract_column_defs,
-    extract_table_name,
+    core_table_for_contract,
     sqlite_schema_sql,
 )
 from ai_core.mcp.client import McpError, McpServerConfig, McpStdioClient
@@ -116,9 +115,9 @@ def _pick_schema_source(
         content = files.get(path)
         if isinstance(content, str) and content.strip():
             return content, path
-    # 快照缺少 DDL 时按契约字段确定性生成，仍走真实数据库执行。
+    # 快照缺少 DDL 时按契约核心业务表确定性生成，仍走真实数据库执行。
     return (
-        sqlite_schema_sql(table, extract_column_defs(contract.database_ddl)),
+        sqlite_schema_sql(table, list(core_table_for_contract(contract).column_defs)),
         "generated:server/schema.sql",
     )
 
@@ -150,9 +149,10 @@ def verify_schema_with_mcp(
 ) -> SchemaCheck:
     """执行一次真实 DDL → SQLite → 结构查询的 MCP 校验。"""
     settings = settings or get_settings()
-    table = extract_table_name(contract.database_ddl)
+    core = core_table_for_contract(contract)
+    table = core.name
     engine = contract_database_engine(contract)
-    expected = tuple(name for name, _type in extract_column_defs(contract.database_ddl))
+    expected = core.column_names
     sql, source = _pick_schema_source(files, contract, table, engine)
 
     if not settings.schema_mcp_enabled:

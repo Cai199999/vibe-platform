@@ -760,6 +760,50 @@ def _contract_text(contract: dict[str, Any]) -> str:
     return json.dumps(contract, ensure_ascii=False, default=str)
 
 
+SQL_COLUMN_STOPWORDS = {
+    "PRIMARY",
+    "FOREIGN",
+    "UNIQUE",
+    "CONSTRAINT",
+    "KEY",
+    "INDEX",
+    "FULLTEXT",
+    "SPATIAL",
+    "CHECK",
+}
+
+
+def _split_sql_definitions(body: str) -> list[str]:
+    """按顶层逗号切分字段定义；``DECIMAL(10,2)`` 不能被拆开。"""
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote: str | None = None
+    for char in body:
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = None
+            continue
+        if char in "'\"`":
+            quote = char
+            current.append(char)
+        elif char == "(":
+            depth += 1
+            current.append(char)
+        elif char == ")":
+            depth = max(0, depth - 1)
+            current.append(char)
+        elif char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    if current:
+        parts.append("".join(current))
+    return parts
+
+
 def parse_ddl_schema(ddl: str) -> dict[str, list[str]]:
     """解析 CREATE TABLE，返回 ``{表名: [字段名]}``。
 
@@ -787,20 +831,14 @@ def parse_ddl_schema(ddl: str) -> dict[str, list[str]]:
             continue
         body = ddl[match.end() : index - 1]
         columns: list[str] = []
-        for line in body.split(","):
+        for line in _split_sql_definitions(body):
             stripped = line.strip()
             if not stripped:
                 continue
             name = stripped.split()[0].strip("\"'`[]")
-            if name.upper() in {
-                "PRIMARY",
-                "FOREIGN",
-                "UNIQUE",
-                "CONSTRAINT",
-                "KEY",
-                "INDEX",
-                "CHECK",
-            }:
+            if name.upper() in SQL_COLUMN_STOPWORDS:
+                continue
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
                 continue
             columns.append(name)
         schema[table] = columns
@@ -816,6 +854,256 @@ def _ddl_columns(ddl: str) -> list[str]:
     for table_columns in parse_ddl_schema(ddl).values():
         columns.extend(table_columns)
     return columns
+
+
+# ------------------------------------------------------------
+# ORM 模型 vs 迁移 DDL：Unknown column 的静态门禁
+# ------------------------------------------------------------
+SYSTEM_TABLE_NAMES = {
+    "user",
+    "users",
+    "account",
+    "accounts",
+    "session",
+    "sessions",
+    "role",
+    "roles",
+    "permission",
+    "permissions",
+    "user_role",
+    "user_roles",
+    "refresh_token",
+    "refresh_tokens",
+    "audit_log",
+    "audit_logs",
+    "_schema_migrations",
+    "schema_migrations",
+    "migrations",
+}
+SYSTEM_TABLE_PREFIXES = ("auth_", "oauth_", "session_")
+VERSION_SEGMENTS = {"api", "v1", "v2", "v3", "v4"}
+TABLE_CONSTANT_PATTERN = re.compile(r"\bconst\s+TABLE\s*=\s*(['\"])([^'\"]+)\1")
+COLLECTION_CONSTANT_PATTERN = re.compile(
+    r"\bconst\s+COLLECTION_PATH\s*=\s*(['\"])([^'\"]+)\1"
+)
+
+
+def _normalize_word(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def _singular_word(value: str) -> str:
+    word = _normalize_word(value)
+    if word.endswith("ies") and len(word) > 3:
+        return word[:-3] + "y"
+    if word.endswith(("ses", "xes", "zes", "ches", "shes")) and len(word) > 3:
+        return word[:-2]
+    if word.endswith("s") and not word.endswith("ss") and len(word) > 2:
+        return word[:-1]
+    return word
+
+
+def _collection_resource(path: str) -> str:
+    segments = [
+        segment
+        for segment in str(path or "").split("?", 1)[0].split("/")
+        if segment and not segment.startswith(("{", ":"))
+    ]
+    for segment in reversed(segments):
+        normalized = _normalize_word(segment)
+        if normalized and normalized not in VERSION_SEGMENTS:
+            return normalized
+    return ""
+
+
+def _manifest_payload(package_root: Path) -> dict[str, Any]:
+    content = _read_text(package_root / "server" / "api-routes.json")
+    try:
+        payload = json.loads(content) if content else {}
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def package_collection_path(package_root: Path) -> str:
+    manifest = _manifest_payload(package_root)
+    collection = str(manifest.get("collection") or "").strip()
+    if collection:
+        return collection
+    frontend = _read_text(package_root / "src" / "fullstack-api.jsx")
+    match = COLLECTION_CONSTANT_PATTERN.search(frontend)
+    return match.group(2).strip() if match else ""
+
+
+def core_business_table(
+    package_root: Path,
+    contract: dict[str, Any] | None = None,
+) -> str:
+    """确定导出包的核心业务表。
+
+    顺序：集合路由资源名 → 清单 table → schema.core.json → 第一张非系统表。
+    集合路由必须优先：它代表用户真正访问的 CRUD 端点，ORM 指向 users
+    而集合是 /api/v1/resumes 时，健康检查会“假通过”，CRUD 却 500。
+    """
+    migration = _read_text(package_root / "server" / "migrations" / "001_init.sql")
+    ddl = migration
+    if contract is not None:
+        ddl = str(_contract_value(contract, "databaseDdl", "database_ddl") or migration)
+    tables = list(parse_ddl_schema(ddl))
+    resource = _collection_resource(package_collection_path(package_root))
+    if resource:
+        for name in tables:
+            if _normalize_word(name) == resource:
+                return name
+        for name in tables:
+            if _singular_word(name) == _singular_word(resource):
+                return name
+    manifest_table = str(_manifest_payload(package_root).get("table") or "").strip()
+    if manifest_table:
+        return manifest_table
+    core_json = _read_text(package_root / "server" / "schema.core.json")
+    if core_json:
+        try:
+            payload = json.loads(core_json)
+        except json.JSONDecodeError:
+            payload = {}
+        table = (
+            str(payload.get("table") or "").strip() if isinstance(payload, dict) else ""
+        )
+        if table:
+            return table
+    for name in tables:
+        lowered = name.lower()
+        if lowered not in SYSTEM_TABLE_NAMES and not lowered.startswith(
+            SYSTEM_TABLE_PREFIXES
+        ):
+            return name
+    return tables[0] if tables else ""
+
+
+def _js_balanced_literal(content: str, marker: str) -> str:
+    index = content.find(marker)
+    if index < 0:
+        return ""
+    equals = content.find("=", index + len(marker))
+    if equals < 0:
+        return ""
+    starts = [
+        position
+        for position in (content.find("[", equals), content.find("{", equals))
+        if position >= 0
+    ]
+    if not starts:
+        return ""
+    start = min(starts)
+    opening = content[start]
+    closing = "]" if opening == "[" else "}"
+    depth = 1
+    quote: str | None = None
+    position = start + 1
+    while position < len(content) and depth:
+        char = content[position]
+        if quote:
+            if char == "\\":
+                position += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in "'\"`":
+            quote = char
+        elif char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+        position += 1
+    return content[start:position] if depth == 0 else ""
+
+
+def _js_orm_columns(db_code: str) -> list[str]:
+    literal = _js_balanced_literal(db_code, "const COLUMN_DEFS")
+    columns: list[str] = []
+    if literal:
+        try:
+            payload = json.loads(literal)
+        except json.JSONDecodeError:
+            payload = []
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, (list, tuple)) and item:
+                    columns.append(str(item[0]).strip())
+    if not columns:
+        for match in re.finditer(
+            r"\battributes(?:\[\s*['\"]([^'\"]+)['\"]\s*\]|\.([A-Za-z_]\w*))\s*=",
+            db_code,
+        ):
+            name = (match.group(1) or match.group(2) or "").strip()
+            if name:
+                columns.append(name)
+    return [column for column in columns if column]
+
+
+def check_orm_ddl_consistency(
+    package_root: Path,
+    contract: dict[str, Any] | None = None,
+) -> list[str]:
+    """静态确认 ``server/db.js`` 的 ORM 模型没有引用迁移中不存在的字段。
+
+    真实事故：多表 DDL 第一条是 users，ORM 生成
+    ``TABLE='users' / COLUMN_DEFS=[id,name,status]``，生产迁移创建的是
+    resumes(file_name, content, ...)。服务启动、健康检查都正常，
+    但 GET/POST /api/v1/resumes 直接 500 Unknown column 'name'。
+    """
+    issues: list[str] = []
+    db_code = _read_text(package_root / "server" / "db.js")
+    if not db_code:
+        return ["缺少 server/db.js，无法校验 ORM 模型与迁移 DDL 一致性"]
+
+    table = core_business_table(package_root, contract)
+    migration = _read_text(package_root / "server" / "migrations" / "001_init.sql")
+    schema = parse_ddl_schema(migration)
+    if not table:
+        issues.append("无法确定核心业务表，ORM/DDL 一致性校验失败")
+        expected: list[str] = []
+    elif table not in schema:
+        issues.append(
+            f"迁移 001_init.sql 未创建核心业务表 {table}，部署后 CRUD 必然失败"
+        )
+        expected = []
+    else:
+        expected = schema[table]
+
+    orm_match = TABLE_CONSTANT_PATTERN.search(db_code)
+    orm_table = orm_match.group(2).strip() if orm_match else ""
+    if not orm_table:
+        issues.append("server/db.js 未声明 const TABLE")
+    elif table and orm_table.lower() != table.lower():
+        issues.append(
+            f"ORM 目标表与业务路由不一致：db.js TABLE={orm_table}，"
+            f"业务路由对应 {table}（Unknown column 的直接来源）"
+        )
+
+    index_code = _read_text(package_root / "server" / "index.js")
+    index_match = TABLE_CONSTANT_PATTERN.search(index_code)
+    if index_match and table and index_match.group(2).lower() != table.lower():
+        issues.append(
+            f"Express 会话层表名与业务路由不一致：index.js TABLE="
+            f"{index_match.group(2)}，业务路由对应 {table}"
+        )
+
+    orm_columns = _js_orm_columns(db_code)
+    if not orm_columns:
+        issues.append("server/db.js 未解析出 COLUMN_DEFS，ORM 字段不可验证")
+    elif expected:
+        allowed = {column.lower() for column in expected}
+        unknown = [column for column in orm_columns if column.lower() not in allowed]
+        if unknown:
+            issues.append(
+                "ORM 使用了迁移 DDL 中不存在的字段（运行时 500 Unknown column）："
+                + "、".join(unknown)
+                + f"；{table} 真实字段："
+                + "、".join(expected)
+            )
+    return issues
 
 
 def check_business_semantics(
@@ -871,9 +1159,18 @@ def check_business_semantics(
     tables = _ddl_tables(ddl)
     if not tables:
         issues.append("契约 DDL 中未解析出任何 CREATE TABLE")
+    # 生产迁移必须覆盖契约的每一张表；SQLite 预览 schema.sql 只需覆盖
+    # 前端真正 CRUD 的核心业务表（ORM 也只建模这一张）。
+    migration = _read_text(package_root / "server" / "migrations" / "001_init.sql")
     for table in tables:
-        if not re.search(rf"\b{re.escape(table)}\b", schema, re.IGNORECASE):
-            issues.append(f"契约表未写入 schema.sql: {table}")
+        target = migration or schema
+        if not re.search(rf"\b{re.escape(table)}\b", target, re.IGNORECASE):
+            issues.append(f"契约表未写入生产迁移 001_init.sql: {table}")
+    core_table = core_business_table(package_root, contract)
+    if core_table and not re.search(
+        rf"\b{re.escape(core_table)}\b", schema, re.IGNORECASE
+    ):
+        issues.append(f"核心业务表未写入 server/schema.sql: {core_table}")
 
     contract_blob = _contract_text(contract)
     upload_required = (
@@ -1228,15 +1525,50 @@ def verify_health(
     return health
 
 
+SCHEMA_500_PATTERN = re.compile(
+    r"unknown column|doesn't have a default value|cannot be null|"
+    r"no such column|unknown field|field list",
+    re.IGNORECASE,
+)
+
+
+def _describe_schema_500(action: str, collection: str, status: int, body: Any) -> str:
+    detail = json.dumps(body, ensure_ascii=False) if not isinstance(body, str) else body
+    if status == 500 and SCHEMA_500_PATTERN.search(detail):
+        return (
+            f"{action} {collection} 因表结构/字段缺失返回 500 "
+            f"（Unknown column 类致命错误）: {body}"
+        )
+    return f"{action} {collection} -> HTTP {status}: {body}"
+
+
 def verify_crud(
     base_url: str,
     collection: str,
     report: Report,
+    expected_table: str | None = None,
 ) -> dict[str, Any] | None:
-    """GET 列表 + POST 新增 + 再 GET 校验，返回新增记录。"""
+    """GET 列表 + POST 新增 + 再 GET 校验，返回新增记录。
+
+    ``expected_table`` 来自导出包的核心业务表（清单 / 集合路由）。
+    运行期必须确认服务真正读写的是这张表：如果 ORM 漂移到 users，
+    健康检查可能仍 200，但业务 CRUD 会 500 Unknown column。
+    """
     status, listing = http_json(f"{base_url}{collection}")
     if status != 200:
-        report.fail(f"GET {collection} -> HTTP {status}: {listing}")
+        report.fail(_describe_schema_500("GET", collection, status, listing))
+        return None
+    if (
+        expected_table
+        and isinstance(listing, dict)
+        and str(listing.get("table") or "").strip()
+        and str(listing["table"]).lower() != expected_table.lower()
+    ):
+        report.fail(
+            f"GET {collection} 命中了错误的数据表："
+            f"响应 table={listing.get('table')}，核心业务表={expected_table}"
+            "（ORM 与迁移 DDL 已错位）"
+        )
         return None
     name = f"acceptance-{uuid.uuid4().hex[:8]}"
     status, created = http_json(
@@ -1245,7 +1577,7 @@ def verify_crud(
         payload={"name": name, "title": name, "status": "todo"},
     )
     if status not in (200, 201) or not isinstance(created, dict):
-        report.fail(f"POST {collection} -> HTTP {status}: {created}")
+        report.fail(_describe_schema_500("POST", collection, status, created))
         return None
     record_id = created.get("id")
     status, listing = http_json(f"{base_url}{collection}")
@@ -1546,12 +1878,31 @@ def docker_run_and_verify_sqlite(
         )
         if health is None:
             return None
+        expected_table = core_business_table(package_root, contract)
+        if (
+            expected_table
+            and str(health.get("table") or "").strip()
+            and str(health["table"]).lower() != expected_table.lower()
+        ):
+            report.fail(
+                "SQLite 预览命中了错误的数据表："
+                f"health.table={health.get('table')}，核心业务表={expected_table}"
+            )
+            return None
         report.ok(
             "无数据库配置启动成功："
             f"storage={health.get('storage')} runtime={health.get('runtime')} "
             f"db={health.get('dbPath')}"
         )
-        if verify_crud(base_url, collection_path or "/api/data", report) is None:
+        if (
+            verify_crud(
+                base_url,
+                collection_path or "/api/data",
+                report,
+                expected_table=expected_table,
+            )
+            is None
+        ):
             return None
         if contract_requires_upload(contract):
             verify_upload(
@@ -1702,7 +2053,14 @@ def docker_run_and_verify_mysql(
     与旧流程的关键差异：不再通过 ``DB_AUTO_MIGRATE`` 让 ORM 隐式建表。
     验收严格复刻生产发布顺序，未执行迁移时服务必须不可用（503）。
     """
-    del contract  # 契约已由前序静态检查使用；运行时以健康检查返回表名为准。
+    expected_table = core_business_table(package_root, contract)
+    if not expected_table:
+        report.fail("无法从导出包确定核心业务表，MySQL 部署验收无从比对")
+        return None
+    report.ok(
+        f"核心业务表={expected_table}，集合路由="
+        f"{package_collection_path(package_root) or '/api/data'}"
+    )
     database = mysql_provision(report)
     if not database:
         return None
@@ -1751,6 +2109,13 @@ def docker_run_and_verify_mysql(
         if not table:
             report.fail(f"健康检查未返回表名，无法继续验收: {degraded}")
             return None
+        if table.lower() != expected_table.lower():
+            report.fail(
+                "健康检查使用的表与集合路由不一致："
+                f"health.table={table}，集合资源对应 {expected_table}；"
+                "ORM 与迁移 DDL 已错位，CRUD 必然 Unknown column"
+            )
+            return None
 
         # 2) 独立发布步骤执行迁移，失败必须非 0 退出。
         if not run_migration_container(
@@ -1771,8 +2136,21 @@ def docker_run_and_verify_mysql(
         if not columns:
             report.fail(f"迁移后真实表不存在或没有字段: {database}.{table}")
             return None
+        # 运行期二次确认：ORM 建模的每个字段都必须真实存在于 MySQL。
+        # 静态检查可能被手改产物绕过；这里以数据库 INFORMATION_SCHEMA 为准。
+        orm_columns = _js_orm_columns(_read_text(package_root / "server" / "db.js"))
+        allowed = {column.lower() for column in columns}
+        unknown = [column for column in orm_columns if column.lower() not in allowed]
+        if unknown:
+            report.fail(
+                "ORM 字段在真实 MySQL 表中不存在（运行时会 500 Unknown column）："
+                + "、".join(unknown)
+                + f"；{database}.{table} 实际字段："
+                + "、".join(columns)
+            )
+            return None
         report.ok(
-            f"真实 MySQL 建表完成：{database}.{table} "
+            f"真实 MySQL 建表完成且与 ORM 字段一致：{database}.{table} "
             f"columns={','.join(columns[:6])}"
             f"{'...' if len(columns) > 6 else ''}，checksum={checksum[:12]}…"
         )
@@ -1792,9 +2170,15 @@ def docker_run_and_verify_mysql(
             f"status=ok storage=mysql tableReady=true records={health.get('records')}"
         )
 
-        created = verify_crud(base_url, collection_path or "/api/data", report)
+        created = verify_crud(
+            base_url,
+            collection_path or "/api/data",
+            report,
+            expected_table=expected_table,
+        )
         if created is None:
             return None
+        report.ok(f"核心业务表 {expected_table} 的 GET/POST 未因字段缺失返回 500")
         record_id = created.get("id")
         row = mysql_fetch_row(database, table, record_id)
         if row is None:
@@ -1938,6 +2322,17 @@ def main() -> int:
                     report.fail(issue)
             else:
                 report.ok("契约路由 / 数据表 / 上传中间件 / 成功态与生成代码一致")
+
+            orm_issues = check_orm_ddl_consistency(package_root, contract)
+            if orm_issues:
+                for issue in orm_issues:
+                    report.fail(issue)
+            else:
+                core_table = core_business_table(package_root, contract)
+                report.ok(
+                    f"ORM 模型与迁移 DDL 字段一致（核心表 {core_table}），"
+                    "不存在 Unknown column 风险"
+                )
         except Exception as exc:  # noqa: BLE001
             report.fail(f"业务语义检查失败: {exc}")
 
