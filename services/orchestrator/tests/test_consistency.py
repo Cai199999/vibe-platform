@@ -42,6 +42,21 @@ DDL = """CREATE TABLE tasks (
   deleted_at TIMESTAMP NULL
 );"""
 
+MULTI_TABLE_DDL = """CREATE TABLE users (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  iam_sub VARCHAR(128) NOT NULL UNIQUE,
+  display_name VARCHAR(128),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE resumes (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  user_id BIGINT NOT NULL,
+  file_name VARCHAR(255),
+  content MEDIUMTEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"""
+
 
 def _contract(
     *,
@@ -390,20 +405,6 @@ class ConsistencyTest(unittest.TestCase):
         /api/v1/resumes，但 ORM 仍按第一张 users 表生成 name/status。
         正确产物必须通过；被污染产物必须产出 REGENERATE_ORM。
         """
-        multi_ddl = """CREATE TABLE users (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  iam_sub VARCHAR(128) NOT NULL UNIQUE,
-  display_name VARCHAR(128),
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE resumes (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  user_id BIGINT NOT NULL,
-  file_name VARCHAR(255),
-  content MEDIUMTEXT NOT NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"""
         contract = _contract(
             routes=[
                 ArchitectApiRoute(method="GET", path="/api/v1/resumes"),
@@ -411,7 +412,7 @@ CREATE TABLE resumes (
                 ArchitectApiRoute(method="GET", path="/api/v1/resumes/:id"),
             ],
             interactions=[],
-            database_ddl=multi_ddl,
+            database_ddl=MULTI_TABLE_DDL,
         )
         dba = generate_dba_bundle(contract)
         backend = generate_backend_bundle(
@@ -443,6 +444,39 @@ CREATE TABLE resumes (
         self.assertIn("users", messages)
         self.assertIn("name", messages)
         self.assertIn("server/db.js", report.checked_files)
+
+    def test_runtime_column_mutation_blocks_build(self) -> None:
+        """回归正则漏判：声明合法但运行期 push 了 DDL 不存在的字段。
+
+        旧实现只读取 ``const COLUMN_DEFS = [...]`` 的声明文本，
+        ``COLUMN_DEFS.push(['name', 'TEXT'])`` 会被完全忽略；
+        Babel AST 必须把它识别为不可静态验证的字段变更并阻断。
+        """
+        contract = _contract(
+            routes=[
+                ArchitectApiRoute(method="GET", path="/api/v1/resumes"),
+                ArchitectApiRoute(method="POST", path="/api/v1/resumes"),
+                ArchitectApiRoute(method="GET", path="/api/v1/resumes/:id"),
+            ],
+            interactions=[],
+            database_ddl=MULTI_TABLE_DDL,
+        )
+        dba = generate_dba_bundle(contract)
+        backend = generate_backend_bundle(
+            contract, dba_schema=dba.files["server/schema.core.json"]
+        )
+        files = {**dba.files, **backend.files}
+        baseline = verify_consistency(files, contract)
+        self.assertTrue(baseline.ok, baseline.failure_message())
+
+        files["server/db.js"] += "\nCOLUMN_DEFS.push(['name', 'TEXT'])\n"
+        report = verify_consistency(files, contract)
+
+        self.assertFalse(report.ok)
+        self.assertTrue(report.needs_orm_repair)
+        messages = " ".join(issue.message for issue in report.issues)
+        self.assertIn("运行期", messages)
+        self.assertIn("COLUMN_DEFS", messages)
 
 
 if __name__ == "__main__":

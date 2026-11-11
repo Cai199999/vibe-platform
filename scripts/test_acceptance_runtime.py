@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 import threading
@@ -106,6 +107,62 @@ class MultipartTest(unittest.TestCase):
         self.assertIn(b'name="file"; filename="resume.pdf"', body)
         self.assertIn(b"%PDF-1.4", body)
         self.assertIn("张三".encode("utf-8"), body)
+
+
+class OrmAstConsistencyTest(unittest.TestCase):
+    """验收阶段的 ORM 门禁必须走 Babel AST，而不是正则。"""
+
+    def _package(self, db_code: str) -> Path:
+        root = Path(tempfile.mkdtemp(prefix="acceptance-orm-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        server = root / "server"
+        (server / "migrations").mkdir(parents=True)
+        (server / "db.js").write_text(db_code, encoding="utf-8")
+        (server / "index.js").write_text(
+            "const TABLE = 'resumes'\napp.get('/api/v1/resumes', handler)\n",
+            encoding="utf-8",
+        )
+        (server / "api-routes.json").write_text(
+            json.dumps({"table": "resumes", "collection": "/api/v1/resumes"}),
+            encoding="utf-8",
+        )
+        (server / "migrations" / "001_init.sql").write_text(
+            "CREATE TABLE resumes (\n"
+            "  id BIGINT PRIMARY KEY,\n"
+            "  file_name VARCHAR(255),\n"
+            "  content TEXT NOT NULL\n"
+            ");\n",
+            encoding="utf-8",
+        )
+        return root
+
+    def test_static_orm_passes(self) -> None:
+        package = self._package(
+            "const TABLE = 'resumes'\n"
+            "const COLUMN_DEFS = [['id', 'INTEGER'], "
+            "['file_name', 'TEXT'], ['content', 'TEXT']]\n"
+        )
+        self.assertEqual(acceptance.check_orm_ddl_consistency(package), [])
+
+    def test_runtime_mutation_is_blocked(self) -> None:
+        package = self._package(
+            "const TABLE = 'resumes'\n"
+            "const COLUMN_DEFS = [['id', 'INTEGER'], "
+            "['file_name', 'TEXT'], ['content', 'TEXT']]\n"
+            "COLUMN_DEFS.push(['name', 'TEXT'])\n"
+        )
+        issues = acceptance.check_orm_ddl_consistency(package)
+        combined = " ".join(issues)
+        self.assertIn("运行期", combined)
+        self.assertIn("COLUMN_DEFS", combined)
+
+    def test_dynamic_column_defs_are_blocked(self) -> None:
+        package = self._package(
+            "const TABLE = 'resumes'\n"
+            "const COLUMN_DEFS = JSON.parse(process.env.COLUMNS || '[]')\n"
+        )
+        issues = acceptance.check_orm_ddl_consistency(package)
+        self.assertTrue(any("静态" in issue for issue in issues))
 
 
 class ContractUploadIntentTest(unittest.TestCase):

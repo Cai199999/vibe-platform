@@ -882,7 +882,6 @@ SYSTEM_TABLE_NAMES = {
 }
 SYSTEM_TABLE_PREFIXES = ("auth_", "oauth_", "session_")
 VERSION_SEGMENTS = {"api", "v1", "v2", "v3", "v4"}
-TABLE_CONSTANT_PATTERN = re.compile(r"\bconst\s+TABLE\s*=\s*(['\"])([^'\"]+)\1")
 COLLECTION_CONSTANT_PATTERN = re.compile(
     r"\bconst\s+COLLECTION_PATH\s*=\s*(['\"])([^'\"]+)\1"
 )
@@ -981,65 +980,76 @@ def core_business_table(
     return tables[0] if tables else ""
 
 
-def _js_balanced_literal(content: str, marker: str) -> str:
-    index = content.find(marker)
-    if index < 0:
-        return ""
-    equals = content.find("=", index + len(marker))
-    if equals < 0:
-        return ""
-    starts = [
-        position
-        for position in (content.find("[", equals), content.find("{", equals))
-        if position >= 0
-    ]
-    if not starts:
-        return ""
-    start = min(starts)
-    opening = content[start]
-    closing = "]" if opening == "[" else "}"
-    depth = 1
-    quote: str | None = None
-    position = start + 1
-    while position < len(content) and depth:
-        char = content[position]
-        if quote:
-            if char == "\\":
-                position += 2
-                continue
-            if char == quote:
-                quote = None
-        elif char in "'\"`":
-            quote = char
-        elif char == opening:
-            depth += 1
-        elif char == closing:
-            depth -= 1
-        position += 1
-    return content[start:position] if depth == 0 else ""
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCHEMA_AST_SCRIPT = (
+    REPO_ROOT
+    / "services"
+    / "orchestrator"
+    / "ai_core"
+    / "fullstack"
+    / "schema_ast_check.mjs"
+)
+SCHEMA_AST_REQUIRE_ROOT = (
+    REPO_ROOT / "services" / "orchestrator" / "sandbox_template" / "package.json"
+)
 
 
-def _js_orm_columns(db_code: str) -> list[str]:
-    literal = _js_balanced_literal(db_code, "const COLUMN_DEFS")
-    columns: list[str] = []
-    if literal:
-        try:
-            payload = json.loads(literal)
-        except json.JSONDecodeError:
-            payload = []
-        if isinstance(payload, list):
-            for item in payload:
-                if isinstance(item, (list, tuple)) and item:
-                    columns.append(str(item[0]).strip())
-    if not columns:
-        for match in re.finditer(
-            r"\battributes(?:\[\s*['\"]([^'\"]+)['\"]\s*\]|\.([A-Za-z_]\w*))\s*=",
-            db_code,
-        ):
-            name = (match.group(1) or match.group(2) or "").strip()
-            if name:
-                columns.append(name)
-    return [column for column in columns if column]
+def analyze_package_js_ast(package_root: Path) -> dict[str, dict[str, Any]]:
+    """调用 Babel AST 校验器分析导出包的 ``db.js`` / ``index.js``。
+
+    验收阶段不允许回退到正则：如果 node 或 @babel/parser 不可用，
+    直接让验收失败，避免“静态检查看起来通过、运行时 Unknown column”。
+    """
+    files: dict[str, str] = {}
+    for rel_path in ("server/db.js", "server/index.js"):
+        text = _read_text(package_root / rel_path)
+        if text.strip():
+            files[rel_path] = text
+    if not files:
+        raise AcceptanceFailure("导出包缺少 server/db.js 与 server/index.js")
+
+    node = os.environ.get("SCHEMA_AST_NODE") or shutil.which("node")
+    if not node:
+        raise AcceptanceFailure(
+            "Babel AST 校验器不可用：未找到 node；验收禁止回退到正则"
+        )
+    if not SCHEMA_AST_SCRIPT.is_file():
+        raise AcceptanceFailure(f"AST 校验脚本不存在: {SCHEMA_AST_SCRIPT}")
+
+    env = dict(os.environ)
+    require_root = os.environ.get("VIBE_AST_REQUIRE_ROOT") or (
+        str(SCHEMA_AST_REQUIRE_ROOT) if SCHEMA_AST_REQUIRE_ROOT.is_file() else ""
+    )
+    if require_root:
+        env.setdefault("VIBE_AST_REQUIRE_ROOT", require_root)
+
+    try:
+        completed = subprocess.run(
+            [node, str(SCHEMA_AST_SCRIPT)],
+            input=json.dumps({"files": files}, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AcceptanceFailure(f"Babel AST 校验器执行失败: {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise AcceptanceFailure(
+            f"Babel AST 校验器异常退出（{completed.returncode}）: {detail[:800]}"
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise AcceptanceFailure("Babel AST 校验器输出不是 JSON") from exc
+    if not isinstance(payload, dict) or payload.get("engine") != "babel-ast":
+        raise AcceptanceFailure(f"Babel AST 校验器返回未知结果: {payload!r}")
+    analyzed = payload.get("files")
+    if not isinstance(analyzed, dict):
+        raise AcceptanceFailure("Babel AST 校验器响应缺少 files")
+    return analyzed
 
 
 def check_orm_ddl_consistency(
@@ -1072,9 +1082,21 @@ def check_orm_ddl_consistency(
     else:
         expected = schema[table]
 
-    orm_match = TABLE_CONSTANT_PATTERN.search(db_code)
-    orm_table = orm_match.group(2).strip() if orm_match else ""
-    if not orm_table:
+    analyzed = analyze_package_js_ast(package_root)
+    db_schema = analyzed.get("server/db.js") or {}
+    ast_errors = db_schema.get("errors") or []
+    for error in ast_errors:
+        if isinstance(error, dict):
+            issues.append(
+                "server/db.js AST 校验失败："
+                f"第 {error.get('line') or 1} 行第 {error.get('column') or 1} 列："
+                f"{error.get('message') or '未知错误'}"
+            )
+    orm_table = str(db_schema.get("table") or "").strip()
+    orm_columns = [
+        str(column) for column in (db_schema.get("columns") or []) if str(column)
+    ]
+    if not orm_table and not any("TABLE" in str(item) for item in ast_errors):
         issues.append("server/db.js 未声明 const TABLE")
     elif table and orm_table.lower() != table.lower():
         issues.append(
@@ -1082,16 +1104,22 @@ def check_orm_ddl_consistency(
             f"业务路由对应 {table}（Unknown column 的直接来源）"
         )
 
-    index_code = _read_text(package_root / "server" / "index.js")
-    index_match = TABLE_CONSTANT_PATTERN.search(index_code)
-    if index_match and table and index_match.group(2).lower() != table.lower():
+    index_schema = analyzed.get("server/index.js") or {}
+    for error in index_schema.get("errors") or []:
+        if isinstance(error, dict):
+            issues.append(
+                "server/index.js AST 校验失败："
+                f"第 {error.get('line') or 1} 行第 {error.get('column') or 1} 列："
+                f"{error.get('message') or '未知错误'}"
+            )
+    index_table = str(index_schema.get("table") or "").strip()
+    if index_table and table and index_table.lower() != table.lower():
         issues.append(
             f"Express 会话层表名与业务路由不一致：index.js TABLE="
-            f"{index_match.group(2)}，业务路由对应 {table}"
+            f"{index_table}，业务路由对应 {table}"
         )
 
-    orm_columns = _js_orm_columns(db_code)
-    if not orm_columns:
+    if not orm_columns and not any("COLUMN_DEFS" in str(item) for item in ast_errors):
         issues.append("server/db.js 未解析出 COLUMN_DEFS，ORM 字段不可验证")
     elif expected:
         allowed = {column.lower() for column in expected}
@@ -2138,7 +2166,16 @@ def docker_run_and_verify_mysql(
             return None
         # 运行期二次确认：ORM 建模的每个字段都必须真实存在于 MySQL。
         # 静态检查可能被手改产物绕过；这里以数据库 INFORMATION_SCHEMA 为准。
-        orm_columns = _js_orm_columns(_read_text(package_root / "server" / "db.js"))
+        orm_columns = [
+            str(column)
+            for column in (
+                (analyze_package_js_ast(package_root).get("server/db.js") or {}).get(
+                    "columns"
+                )
+                or []
+            )
+            if str(column)
+        ]
         allowed = {column.lower() for column in columns}
         unknown = [column for column in orm_columns if column.lower() not in allowed]
         if unknown:

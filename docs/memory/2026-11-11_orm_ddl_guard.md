@@ -66,8 +66,9 @@
 
 ## 4. 边界
 
-- 静态门禁识别模板化 Sequelize（`COLUMN_DEFS` / `attributes`）；
-  若未来改为自由手写 ORM，需要升级为 AST 解析；
+- ~~静态门禁识别模板化 Sequelize（`COLUMN_DEFS` / `attributes`）；
+  若未来改为自由手写 ORM，需要升级为 AST 解析；~~
+  **已升级**：正则已全部替换为 Babel AST，见 [[2026-11-11_orm_ast_gate]]；
 - 本次 E2E 的 mock 契约是单表 todo；多表 users → resumes 事故由
   上述回归单测覆盖；
 - 仍未验证真实云端部署、Redis / MinIO 与多服务编排。

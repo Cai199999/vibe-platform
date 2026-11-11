@@ -24,6 +24,10 @@ from ai_core.domain.architect import (
     ArchitectContract,
     normalize_database_engine,
 )
+from ai_core.fullstack.schema_ast import (
+    SchemaAstUnavailable,
+    analyze_js_files,
+)
 from ai_core.fullstack.templates import (
     BACKEND_DOCKERFILE_TEMPLATE,
     DEPLOY_GUIDE_TEMPLATE,
@@ -502,85 +506,25 @@ def extract_column_defs(ddl: str) -> list[tuple[str, str]]:
     ]
 
 
-_TABLE_CONSTANT = re.compile(r"\bconst\s+TABLE\s*=\s*(['\"])([^'\"]+)\1")
-_ATTRIBUTE_ASSIGNMENT = re.compile(
-    r"\battributes(?:\[\s*['\"]([^'\"]+)['\"]\s*\]|\.([A-Za-z_]\w*))\s*="
-)
-
-
-def _js_literal_after(content: str, marker: str) -> str:
-    """截取 ``marker = [ ... ]`` / ``{ ... }`` 的平衡字面量。
-
-    生成模板里的 COLUMN_DEFS 是多行 JSON；用正则 ``\\[.*?\\]`` 会在
-    第一个内层 ``]`` 处提前结束，因此必须做括号配对扫描。
-    """
-    index = content.find(marker)
-    if index < 0:
-        return ""
-    equals = content.find("=", index + len(marker))
-    if equals < 0:
-        return ""
-    starts = [
-        pos
-        for pos in (content.find("[", equals), content.find("{", equals))
-        if pos >= 0
-    ]
-    if not starts:
-        return ""
-    start = min(starts)
-    opening = content[start]
-    closing = "]" if opening == "[" else "}"
-    depth = 1
-    quote: str | None = None
-    position = start + 1
-    while position < len(content) and depth:
-        char = content[position]
-        if quote:
-            if char == "\\":
-                position += 2
-                continue
-            if char == quote:
-                quote = None
-        elif char in "'\"`":
-            quote = char
-        elif char == opening:
-            depth += 1
-        elif char == closing:
-            depth -= 1
-        position += 1
-    if depth:
-        return ""
-    return content[start:position]
-
-
 def extract_orm_schema(db_code: str) -> tuple[str, list[str]]:
-    """从 ``server/db.js`` 提取 ORM 表名与字段名。
+    """从 ``server/db.js`` 提取 ORM 表名与字段名（Babel AST）。
 
-    表的唯一事实来源是 Sequelize ``define(..., { tableName: TABLE })``；
-    字段唯一事实来源是模板注入的 ``COLUMN_DEFS``。若模板演化为显式
-    ``attributes`` 对象，也兼容读取键名。
+    表的唯一事实来源是 ``const TABLE`` / Sequelize ``tableName``；
+    字段唯一事实来源是 ``COLUMN_DEFS``，并兼容显式 ``attributes``。
+    所有取值都经过静态求值：动态 JSON.parse、运行期 push、拼接变量
+    会直接报错，而不是被正则误判为合法字段。
     """
-    table_match = _TABLE_CONSTANT.search(db_code or "")
-    table = table_match.group(2).strip() if table_match else ""
-    columns: list[str] = []
-    literal = _js_literal_after(db_code or "", "const COLUMN_DEFS")
-    if literal:
-        try:
-            payload = json.loads(literal)
-        except json.JSONDecodeError:
-            payload = []
-        if isinstance(payload, list):
-            for item in payload:
-                if isinstance(item, (list, tuple)) and item:
-                    name = str(item[0]).strip()
-                    if name:
-                        columns.append(name)
-    if not columns:
-        for bracket_name, dotted_name in _ATTRIBUTE_ASSIGNMENT.findall(db_code or ""):
-            name = (bracket_name or dotted_name).strip()
-            if name and name not in columns:
-                columns.append(name)
-    return table, columns
+    if not (db_code or "").strip():
+        return "", []
+    analyzed = analyze_js_files({"server/db.js": db_code})
+    schema = analyzed.get("server/db.js")
+    if schema is None:
+        return "", []
+    if schema.errors and not schema.table and not schema.columns:
+        raise SchemaAstUnavailable(
+            "server/db.js AST 校验失败：" + "；".join(schema.errors)
+        )
+    return schema.table, list(schema.columns)
 
 
 def check_orm_schema(
@@ -590,12 +534,13 @@ def check_orm_schema(
     expected_columns: Iterable[str],
     require_orm: bool = False,
 ) -> list[str]:
-    """静态校验 ORM / Express 代码是否只引用真实 DDL 字段。
+    """用 Babel AST 校验 ORM / Express 代码是否只引用真实 DDL 字段。
 
     这是 ``Unknown column`` 事故的生成期门禁：
       - ``server/db.js`` 的 ``TABLE`` 必须等于核心业务表；
-      - ``COLUMN_DEFS`` 中每个字段必须存在于迁移 DDL；
-      - ``server/index.js`` 的 ``TABLE`` 必须与 ORM 一致。
+      - ``COLUMN_DEFS`` / ``attributes`` 的每个字段必须存在于迁移 DDL；
+      - ``server/index.js`` 的 ``TABLE`` 必须与 ORM 一致；
+      - 任何运行期修改字段集合、或无法静态求值的写法都直接阻断。
     """
     issues: list[str] = []
     db_code = files.get("server/db.js") or ""
@@ -604,10 +549,19 @@ def check_orm_schema(
             issues.append("缺少 server/db.js，无法校验 ORM 模型与 DDL 一致性")
         return issues
     normalized_expected = {str(column).lower() for column in expected_columns}
-    orm_table, orm_columns = extract_orm_schema(db_code)
-    if not orm_table:
+    analyzed = analyze_js_files(
+        files,
+        paths=("server/db.js", "server/index.js"),
+    )
+    db_schema = analyzed.get("server/db.js")
+    if db_schema is None:
+        return ["缺少 server/db.js，无法校验 ORM 模型与 DDL 一致性"]
+    issues.extend(f"server/db.js AST 校验失败：{msg}" for msg in db_schema.errors)
+    orm_table = db_schema.table
+    orm_columns = list(db_schema.columns)
+    if not orm_table and not any("TABLE" in msg for msg in db_schema.errors):
         issues.append("server/db.js 未声明 const TABLE，无法确认 ORM 目标表")
-    elif orm_table.lower() != str(table).lower():
+    elif orm_table and orm_table.lower() != str(table).lower():
         issues.append(
             f"ORM 目标表与核心业务表不一致：db.js TABLE={orm_table}，"
             f"DDL 核心表={table}"
@@ -621,14 +575,17 @@ def check_orm_schema(
             + "、".join(unknown)
             + f"（DDL 字段：{'、'.join(sorted(normalized_expected)) or '无'}）"
         )
-    if not orm_columns:
+    if not orm_columns and not any("COLUMN_DEFS" in msg for msg in db_schema.errors):
         issues.append("server/db.js 未解析出任何 COLUMN_DEFS 字段，ORM 模型不可验证")
-    index_code = files.get("server/index.js") or ""
-    if index_code:
-        index_match = _TABLE_CONSTANT.search(index_code)
-        if index_match and index_match.group(2).lower() != str(table).lower():
+
+    index_schema = analyzed.get("server/index.js")
+    if index_schema is not None:
+        issues.extend(
+            f"server/index.js AST 校验失败：{msg}" for msg in index_schema.errors
+        )
+        if index_schema.table and index_schema.table.lower() != str(table).lower():
             issues.append(
-                f"Express 会话层表名不一致：index.js TABLE={index_match.group(2)}，"
+                f"Express 会话层表名不一致：index.js TABLE={index_schema.table}，"
                 f"DDL 核心表={table}"
             )
     return issues
@@ -1836,12 +1793,21 @@ def generate_backend_bundle(
     for key, value in replacements.items():
         server_code = server_code.replace(key, value)
     # 生成期门禁：Express 会话层表名必须与 DBACoder 的 ORM / 迁移一致。
-    index_table = _TABLE_CONSTANT.search(server_code)
-    if index_table and index_table.group(2).lower() != table.lower():
-        raise ValueError(
-            "BackendCoder 生成的 server/index.js 表名与 DDL 不一致："
-            f"index={index_table.group(2)}，DDL={table}"
-        )
+    # 使用 Babel AST，而不是正则扫描 const TABLE。
+    index_schema = analyze_js_files({"server/index.js": server_code}).get(
+        "server/index.js"
+    )
+    if index_schema is not None:
+        if index_schema.errors:
+            raise ValueError(
+                "BackendCoder 生成的 server/index.js AST 校验失败："
+                + "；".join(index_schema.errors)
+            )
+        if index_schema.table and index_schema.table.lower() != table.lower():
+            raise ValueError(
+                "BackendCoder 生成的 server/index.js 表名与 DDL 不一致："
+                f"index={index_schema.table}，DDL={table}"
+            )
 
     # 通用 CRUD 已覆盖的路由不再重复注册；其余契约动作逐个生成独立端点。
     # 前端请求路径与 Express 注册路径都经过 _express_path，保证逐字符一致。

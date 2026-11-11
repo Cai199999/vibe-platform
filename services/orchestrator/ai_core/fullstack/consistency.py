@@ -38,6 +38,7 @@ from ai_core.fullstack.coders import (
     item_path,
     parse_ddl_tables,
 )
+from ai_core.fullstack.schema_ast import SchemaAstUnavailable
 
 # 后端 Express 模板固定注册的通用路由：健康检查 + 通用数据别名。
 HEALTH_PATH = "/api/health"
@@ -602,11 +603,30 @@ def _orm_schema_issues(
         if migration_table is not None
         else list(core.column_names)
     )
-    messages = check_orm_schema(
-        files,
-        table=core.name,
-        expected_columns=expected,
-    )
+    try:
+        messages = check_orm_schema(
+            files,
+            table=core.name,
+            expected_columns=expected,
+        )
+    except SchemaAstUnavailable as exc:
+        # 校验器缺失属于环境问题，不能伪装成“代码可自愈”去重跑 DBACoder。
+        # 直接阻断，并给出可执行的修复方向。
+        return [
+            ConsistencyIssue(
+                kind="ast_unavailable",
+                component="ConsistencyVerifier",
+                method="",
+                path="schema_ast",
+                message=f"ORM/DDL AST 校验器不可用：{exc}",
+                suggestion=(
+                    "检查 Python AI 镜像是否安装 nodejs，且 "
+                    "/app/sandbox_template/node_modules/@babel/parser 可读；"
+                    "禁止回退到正则校验后继续构建"
+                ),
+                fix_action="FIX_ENVIRONMENT",
+            )
+        ], ["schema_ast"]
     if migration_text and migration_table is None:
         messages.insert(
             0,

@@ -24,7 +24,8 @@ React + Vite → Java 21 BFF → Python 3.12 FastAPI/LangGraph → Docker 沙盒
 - **实例解耦**：SDK 从 React fiber 提取 `instanceKey` / `instanceProps`（item.id 等），全链路进入 Coder；Applier 新增 `INSTANCE_GUARD_MISSING`，多实例补丁必须在 callSite 或根组件源码写入真实身份比较（或 `index === instance-1`），禁止无条件写进 map 返回体；diff 模式同样校验 `+` 行。
 - **可视化选型（禁止脑补样式）**：澄清回答命中“和登录按钮一样”时不再直接提交文本，画布 / 预览进入 Inspect 取色；SDK 回传 `tailwindClasses` + computed CSS，后端生成 `reference_styles`，Coder 被强约束逐字复用。新增 `design_system` 静态提取 Tailwind 主题色 / CSS 变量，新组件优先 `bg-primary` 等语义类名。
 - **Unknown column 三层门禁**：多表 DDL 按集合路由选核心业务表，禁止 `users`/`name` 兜底；DBA 产出 `schema.core.json`，Backend 强制绑定并在生成期断言；ConsistencyVerifier 新增 ORM↔迁移字段比对，错位自动回退 DBACoder（≤2 次）；验收脚本增加静态 ORM/DDL 对比与运行时“核心表 GET/POST 不因缺字段 500”断言。
-- 验证：fullstack + consistency 50 项全绿；全量 389 项（仅容器缺 `eval_suite` 的历史问题）；E2E 验收 8/8（SQLite + MySQL 迁移/CRUD/直连查行/幂等）。
+- **ORM 门禁 AST 化**：`schema_ast_check.mjs` 用 Babel 解析 `server/db.js` / `server/index.js`，静态求值常量 / 拼接 / `JSON.parse`，并阻断 `COLUMN_DEFS.push` 等运行期变更；`schema_ast.py` 封装为 `SchemaAstUnavailable` 硬失败（禁止回退正则，环境问题不触发模型自愈）；生成期、ConsistencyVerifier、验收脚本共用同一引擎；镜像补 `nodejs`。
+- 验证：schema_ast + fullstack + consistency 59 项全绿；全量 398 项（仅容器缺 `eval_suite` 的历史问题）；E2E 验收 8/8（SQLite + MySQL 迁移/CRUD/直连查行/幂等）。
 
 ## 真假边界
 
