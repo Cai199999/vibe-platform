@@ -39,8 +39,7 @@ from ai_core.fullstack.coders import (
     extract_table_name,
 )
 from ai_core.fullstack.graph import (
-    FRONTEND_NODE_ORDER,
-    FULLSTACK_NODE_ORDER,
+    MODE_NODE_ORDERS,
     FullstackGenerationError,
     FullstackGraphRunner,
     FullstackState,
@@ -200,7 +199,8 @@ class FullstackService:
             _ACTIVE_RUNS[run_id] = active
 
         mode = request.options.mode
-        nodes = FRONTEND_NODE_ORDER if mode == "frontend" else FULLSTACK_NODE_ORDER
+        # 每种模式只广播自己真实执行的节点，前端进度条不会出现“假节点”。
+        nodes = MODE_NODE_ORDERS.get(mode, MODE_NODE_ORDERS["fullstack"])
         active.buffer.emit(
             "fullstack.started",
             {
@@ -351,10 +351,15 @@ class FullstackService:
                 f"当前契约形态为 {contract.app_shape}，只有 full_stack_system "
                 "需要生成后端与数据库代码"
             )
-        if not contract.api_routes:
-            raise FullstackContractInvalidError("全栈契约缺少 apiRoutes")
-        if not (contract.database_ddl or "").strip():
-            raise FullstackContractInvalidError("全栈契约缺少 databaseDdl")
+        # 专属子图按需校验：DBA 只要 DDL，BackendCoder 只要 API 路由，
+        # 完整全栈两者都必须存在。避免纯建表请求被“缺少 apiRoutes”误拦。
+        mode = request.options.mode
+        if mode in {"fullstack", "backend"} and not contract.api_routes:
+            raise FullstackContractInvalidError("契约缺少 apiRoutes，无法生成后端路由")
+        if mode in {"fullstack", "dba"} and not (contract.database_ddl or "").strip():
+            raise FullstackContractInvalidError(
+                "契约缺少 databaseDdl，无法生成数据库层"
+            )
         return contract
 
     def _ensure_sandbox(self, request: FullstackRunRequest) -> tuple[str, str, bool]:

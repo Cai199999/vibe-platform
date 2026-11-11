@@ -224,6 +224,26 @@
         "format": "markdown",
         "priority": 25
       }
+    },
+    {
+      "skill_id": "ui.frontend_ecosystem",
+      "name": "前端工具类生态",
+      "description": "图标统一使用 lucide-react，条件类名统一使用 clsx，并强制响应式 Grid 布局；挂载自 config/skills/frontend_ui_ecosystem.skill.md。",
+      "prompt_ref": "frontend_ui_ecosystem.skill.md",
+      "rag_refs": [],
+      "tools": [
+        "read_file",
+        "apply_code_edit",
+        "create_file",
+        "run_build"
+      ],
+      "metadata": {
+        "stage": "M3",
+        "external": true,
+        "skillFile": "config/skills/frontend_ui_ecosystem.skill.md",
+        "format": "markdown",
+        "priority": 45
+      }
     }
   ],
   "keywords": [

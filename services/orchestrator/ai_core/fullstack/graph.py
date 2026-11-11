@@ -71,6 +71,15 @@ FULLSTACK_NODE_ORDER = [
     "SandboxRestart",
 ]
 FRONTEND_NODE_ORDER = ["FrontendCoder", "BuildVerifier", "SandboxRestart"]
+# Supervisor 激活的专属专家子图：只跑与目标 Agent 相关的节点。
+BACKEND_NODE_ORDER = ["DBACoder", "BackendCoder", "BuildVerifier", "SandboxRestart"]
+DBA_NODE_ORDER = ["DBACoder", "SandboxRestart"]
+MODE_NODE_ORDERS = {
+    "fullstack": FULLSTACK_NODE_ORDER,
+    "frontend": FRONTEND_NODE_ORDER,
+    "backend": BACKEND_NODE_ORDER,
+    "dba": DBA_NODE_ORDER,
+}
 
 NODE_LABELS = {
     "DBACoder": "数据库工程师",
@@ -150,13 +159,13 @@ class FullstackGraphRunner:
         #  - fullstack：契约确认后的完整生成；
         #  - frontend：新建项目契约确认后的前端骨架初始化。
         self._graphs = {
-            "fullstack": self._build("fullstack"),
-            "frontend": self._build("frontend"),
+            mode: self._build(mode)
+            for mode in ("fullstack", "frontend", "backend", "dba")
         }
 
     def run(self, initial_state: FullstackState) -> FullstackState:
         options = initial_state.get("options") or FullstackRunOptions()
-        mode = "frontend" if options.mode == "frontend" else "fullstack"
+        mode = options.mode if options.mode in MODE_NODE_ORDERS else "fullstack"
         logger.info(
             "FullstackGraph 启动 mode=%s run_id=%s project_id=%s sandbox_id=%s",
             mode,
@@ -182,6 +191,26 @@ class FullstackGraphRunner:
         builder.add_node("FrontendCoder", self._frontend_coder)
         builder.add_node("BuildVerifier", self._build_verifier)
         builder.add_node("SandboxRestart", self._sandbox_restart)
+
+        if mode == "dba":
+            # 只生成数据库层：DDL / Sequelize 模型 / 迁移；不碰前端与后端路由。
+            builder.add_node("DBACoder", self._dba_coder)
+            builder.add_edge(START, "DBACoder")
+            builder.add_edge("DBACoder", "SandboxRestart")
+            builder.add_edge("SandboxRestart", END)
+            return builder.compile()
+
+        if mode == "backend":
+            # 后端专家：DBA 提供模型与迁移，BackendCoder 注册业务路由，
+            # 构建校验后重启服务；FrontendCoder / InfraCoder 完全不运行。
+            builder.add_node("DBACoder", self._dba_coder)
+            builder.add_node("BackendCoder", self._backend_coder)
+            builder.add_edge(START, "DBACoder")
+            builder.add_edge("DBACoder", "BackendCoder")
+            builder.add_edge("BackendCoder", "BuildVerifier")
+            builder.add_edge("BuildVerifier", "SandboxRestart")
+            builder.add_edge("SandboxRestart", END)
+            return builder.compile()
 
         if mode == "frontend":
             # 契约确认后的前端初始化：只生成真实页面骨架并完成构建 / 重启。
@@ -563,9 +592,9 @@ class FullstackGraphRunner:
     def _sandbox_restart(self, state: FullstackState) -> dict[str, Any]:
         options = state.get("options") or FullstackRunOptions()
         sandbox_id = state["sandbox_id"]
-        # 前端骨架没有 Node 后端，只能探测 Vite 根路径；完整全栈才探测
-        # /api/health，确认 Vite 代理与后端同时就绪。
-        ready_path = "/" if options.mode == "frontend" else "/api/health"
+        # 前端骨架 / 纯 DBA 子图没有改动 Node 后端，只能探测 Vite 根路径；
+        # 完整全栈与后端子图才探测 /api/health，确认代理与后端同时就绪。
+        ready_path = "/api/health" if options.mode in {"fullstack", "backend"} else "/"
         started = time.monotonic()
         self._node_started("SandboxRestart", state)
         if not options.restart_sandbox:
@@ -602,9 +631,11 @@ class FullstackGraphRunner:
                 "healthPath": ready_path,
             },
         )
-        summary = (
-            "前端开发服务已就绪" if options.mode == "frontend" else "前后端双服务已就绪"
-        )
+        summary = {
+            "frontend": "前端开发服务已就绪",
+            "dba": "数据库层已生成，开发服务已就绪",
+            "backend": "后端服务已就绪",
+        }.get(options.mode, "前后端双服务已就绪")
         self._node_completed("SandboxRestart", state, summary, [], started)
         return {"preview_url": handle.preview_url}
 
@@ -629,9 +660,9 @@ class FullstackGraphRunner:
 
     def _node_started(self, node: str, state: FullstackState) -> None:
         options = state.get("options") or FullstackRunOptions()
-        frontend_only = options.mode == "frontend"
-        order = FRONTEND_NODE_ORDER if frontend_only else FULLSTACK_NODE_ORDER
-        total = FRONTEND_GRAPH_NODE_TOTAL if frontend_only else GRAPH_NODE_TOTAL
+        mode = options.mode if options.mode in MODE_NODE_ORDERS else "fullstack"
+        order = MODE_NODE_ORDERS[mode]
+        total = len(order)
         index = order.index(node) + 1 if node in order else 0
         logger.info(
             "FullstackGraph 节点开始 [%d/%d] %s run_id=%s sandbox_id=%s",

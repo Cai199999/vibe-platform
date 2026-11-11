@@ -855,6 +855,74 @@ class SchemaMcpTests(unittest.TestCase):
 class GraphTests(unittest.TestCase):
     """FullstackGraph 节点顺序、事件契约与终态。"""
 
+    @staticmethod
+    def _node_order(buffer: RunEventBuffer) -> list[str]:
+        return [
+            event.payload["node"]
+            for event in buffer.snapshot()
+            if event.type == "fullstack.node.started"
+        ]
+
+    def test_dba_mode_only_runs_schema_nodes(self) -> None:
+        """Supervisor 派发 dba_agent 时不得触发前端 / 后端 / 构建节点。"""
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        buffer = RunEventBuffer("fsk_dba_mode")
+        runner = FullstackGraphRunner(sandbox, event_sink=buffer)
+
+        outcome = runner.run(
+            {
+                "run_id": "fsk_dba_mode",
+                "project_id": "proj_fullstack",
+                "sandbox_id": sandbox.handle.sandbox_id,
+                "preview_url": sandbox.handle.preview_url,
+                "contract": _contract(),
+                "options": FullstackRunOptions(mode="dba"),
+                "files": [],
+            }
+        )
+
+        self.assertEqual(self._node_order(buffer), ["DBACoder", "SandboxRestart"])
+        self.assertNotIn("server/index.js", outcome["files"])
+        self.assertNotIn("src/App.jsx", outcome["files"])
+        self.assertEqual(sandbox.verified, [])
+        self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/")])
+
+    def test_backend_mode_skips_frontend_and_infra(self) -> None:
+        """backend 子图只生成 DB + API，前端与部署配置保持原样。"""
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        buffer = RunEventBuffer("fsk_backend_mode")
+        runner = FullstackGraphRunner(sandbox, event_sink=buffer)
+
+        outcome = runner.run(
+            {
+                "run_id": "fsk_backend_mode",
+                "project_id": "proj_fullstack",
+                "sandbox_id": sandbox.handle.sandbox_id,
+                "preview_url": sandbox.handle.preview_url,
+                "contract": _contract(),
+                "options": FullstackRunOptions(mode="backend"),
+                "files": [],
+            }
+        )
+
+        self.assertEqual(
+            self._node_order(buffer),
+            ["DBACoder", "BackendCoder", "BuildVerifier", "SandboxRestart"],
+        )
+        self.assertIn("server/index.js", sandbox.files)
+        self.assertNotIn("src/fullstack-api.jsx", outcome["files"])
+        self.assertNotIn("Dockerfile", sandbox.files)
+        self.assertEqual(
+            sandbox.verified,
+            [
+                (sandbox.handle.sandbox_id, "install"),
+                (sandbox.handle.sandbox_id, "build"),
+            ],
+        )
+        self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/api/health")])
+
     def test_graph_generates_files_and_restarts_sandbox(self) -> None:
         sandbox = _MemorySandbox()
         sandbox.files = _base_files()

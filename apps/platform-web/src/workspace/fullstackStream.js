@@ -88,6 +88,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
  * @param {object} options
  * @param {object} options.payload  POST /runs/fullstack 请求体
  * @param {string} [options.runId]  重连时使用
+ * @param {boolean} [options.replay] 直接订阅已有 Run（Supervisor 派发专家时使用）
  * @param {number} [options.afterSeq]
  * @param {string} [options.token]
  * @param {AbortSignal} [options.signal]
@@ -97,6 +98,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 export async function streamFullstack({
   payload,
   runId,
+  replay = false,
   afterSeq = 0,
   token,
   signal,
@@ -104,7 +106,9 @@ export async function streamFullstack({
 }) {
   let lastSeq = Math.max(0, afterSeq)
   let terminal = false
-  let mode = 'start'
+  // Supervisor 已经启动了 Fullstack Run，只需要按 runId 订阅；
+  // 此时不能再次 POST /fullstack，否则会重复生成一套代码。
+  let mode = replay ? 'replay' : 'start'
   let attempts = 0
   const resolvedRunId = runId || payload?.runId
 

@@ -31,6 +31,7 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒；中间�
 - **通用 AI 全栈平台五项升级（2026-11-11）**：`DecisionImpact`（CRITICAL/MAJOR/MINOR，旧值兼容）；Architect 澄清 10 轮 + 用户“一键采用建议”（AI 无权跳过）；`web_best_practices` Skill 强制挂载 BackendCoder 并生成 Bcrypt 安全模块；契约 `includeAiCapability` 驱动 OpenAI 真实调用 + AI 对话/上传 UI + `OPENAI_API_KEY`；导入支持平台全栈 tar.gz，自动双启 Express(3000)/Vite(5173)、补 `/api` 代理、重注入 `data-source`。306 单测全绿；真实导出→导入与 Playwright 圈选标记验证通过。
 - **混合 RAG（2026-11-11）**：本地 `chromadb` PersistentClient + ONNX MiniLM（镜像预热、离线可用）；`HybridRAGProvider` 并行跑 BM25 与向量、RRF(k=60) 融合、单路故障降级；Architect/Planner 默认切到 `hybrid`，Planner 结果写入 `rag_context/rag_citations`。新增《企业内部安全开发规范与 JWT 鉴权指南》；演示两问 Top-3 精准命中 OAuth 2.1 / 15 分钟；316 单测全绿。
 - **M3 收尾（2026-11-11）**：根 README 重写为“双核架构 / 多智能体 / Hybrid RAG / 沙盒自愈 / 全栈交付”并附 Mermaid 全局图；新增 `docs/INTERVIEW_GUIDE.md`（5 个踩坑与自愈案例）；预留 `EMBEDDING_MODEL` 供 BGE-M3 升级。
+- **M3 交互与专家激活（2026-11-11）**：`backend_coder` / `dba_agent` 转 available，路由新增后端 / DBA 动作词并派发 FullstackGraph `backend` / `dba` 子图；前端支持 `handoff_agent` 与按 runId 挂载事件流。画布恢复双态指针：中键平移经 iframe SDK → 父页面遮罩持续追踪，拖拽期间锁定 `dragArmed`，SDK 不再用 `buttons` 误取消。FrontendCoder Prompt 强制响应式 Grid；BackendCoder Prompt 强制完整 AST 节点 / 全文件替换。新增 `frontend_ui_ecosystem` Skill（lucide-react/clsx）与 `knowledge/backend_docs` Hybrid RAG。322 单测 + 前端 build 全绿。
 
 ### Embedding 升级预留（BGE-M3）
 

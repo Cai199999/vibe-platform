@@ -105,6 +105,25 @@
       "rag_refs": ["knowledge/script/cleaning"],
       "tools": ["read_file", "create_file", "run_script_sandbox", "validate_output"],
       "metadata": {"stage": "M4-reserved"}
+    },
+    {
+      "skill_id": "script.python_stdlib",
+      "name": "Python 标准库快速参考",
+      "description": "os / pathlib / requests / pandas 的生产级用法与常见错误；通过 Hybrid RAG 在生成脚本前召回。",
+      "prompt_ref": "knowledge/backend_docs",
+      "rag_refs": [
+        "knowledge/backend_docs",
+        "knowledge/backend_docs/python_os_quickref.md",
+        "knowledge/backend_docs/python_requests_quickref.md",
+        "knowledge/backend_docs/python_pandas_quickref.md"
+      ],
+      "tools": ["read_contract", "read_file", "create_file", "run_script_sandbox"],
+      "metadata": {
+        "stage": "M4",
+        "ragProvider": "hybrid",
+        "ragTopK": 4,
+        "ragCollection": "knowledge_corpus"
+      }
     }
   ],
   "keywords": [
@@ -122,6 +141,12 @@
   "metadata": {
     "manifest_version": 1,
     "owner": "platform",
-    "contract_only": true
+    "contract_only": true,
+    "rag": {
+      "provider": "hybrid",
+      "knowledgeRoot": "knowledge/backend_docs",
+      "collection": "knowledge_corpus",
+      "topK": 4
+    }
   }
 }

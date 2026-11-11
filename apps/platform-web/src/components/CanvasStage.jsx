@@ -1057,6 +1057,16 @@ function CanvasStage({
   const [dragArmed, setDragArmed] = useState(false)
   const dragArmedRef = useRef(dragArmed)
   dragArmedRef.current = dragArmed
+  // SDK 已真正进入拖拽手势（位移超过阈值）。外部 disabled / blocked 状态
+  // 可能在拖拽过程中变化，但不能因此把正在拖动的组件强行还原。
+  const [componentDragActive, setComponentDragActive] = useState(false)
+  const componentDragActiveRef = useRef(false)
+  componentDragActiveRef.current = componentDragActive
+  // 中键平移遮罩：SDK 在 iframe 内收到中键后发 pan-start，父页面立刻
+  // 盖上透明遮罩接管指针；之后所有 pointermove 都由父页面计算，不再
+  // 依赖 iframe 内部是否还能收到事件。
+  const [panShield, setPanShield] = useState(false)
+  const panShieldRef = useRef(false)
   const liveFrameRef = useRef(null)
   // pointerdown 时的命中目标：pointer capture 会把 pointerup 的 target
   // 重定向到 stage，因此“是否点在真实页面上”必须在下笔时记录。
@@ -1155,6 +1165,11 @@ function CanvasStage({
   // 拖拽只在 live 画布的浏览态生效；Inspect / 生成中 / 审批门控时强制退出，
   // 否则用户会在不可提交的状态下产生“看起来移动了但代码没变”的错觉。
   useEffect(() => {
+    // 正在拖拽时禁止外部状态机收回 dragArmed：
+    // 提交状态 / 审批门控可能在手势中途变化，但此时取消会直接把用户
+    // 正在拖动的组件弹回原位，表现为“左键一拖就取消”。
+    // 手势结束后 effect 会因 componentDragActive 变化重新求值。
+    if (componentDragActiveRef.current) return
     if (
       mode !== 'live' ||
       canvasInspect ||
@@ -1164,7 +1179,15 @@ function CanvasStage({
     ) {
       setDragArmed(false)
     }
-  }, [mode, canvasInspect, disabled, dragSyncActive, blocked, interactionMode])
+  }, [
+    mode,
+    canvasInspect,
+    disabled,
+    dragSyncActive,
+    blocked,
+    interactionMode,
+    componentDragActive,
+  ])
 
   // 同步拖拽开关到 iframe SDK；iframe 未就绪时由 ready 消息补发。
   useEffect(() => {
@@ -1331,6 +1354,10 @@ function CanvasStage({
       if (data.type === 'drag-start') {
         // 拖拽开始：画布与预览同步进入“跟手”状态，预览侧由
         // ProjectWorkspace 转发 drag-apply。
+        // 先置位本地手势锁，再通知外部；即使上层在回调里同步触发了
+        // 提交 / 门控状态，也不会把这次拖拽取消。
+        componentDragActiveRef.current = true
+        setComponentDragActive(true)
         onComponentDragStartRef.current?.(data.payload)
         return
       }
@@ -1339,18 +1366,44 @@ function CanvasStage({
         return
       }
       if (data.type === 'drag-end') {
+        // 先交给上层排队同步，再解除手势锁；关闭锁会重新触发 disarm
+        // effect，但那时拖拽已经合法结束，不会误还原。
         onComponentDragEndRef.current?.(data.payload)
+        componentDragActiveRef.current = false
+        setComponentDragActive(false)
         return
       }
       if (data.type === 'drag-cancel') {
         onComponentDragCancelRef.current?.(data.payload)
+        componentDragActiveRef.current = false
+        setComponentDragActive(false)
         return
       }
       if (data.type === 'pan-start') {
-        viewport.beginExternalPan()
+        const payload = data.payload || {}
+        // SDK 的 x / y 是 iframe 内 CSS 坐标；换算成父页面 client 坐标，
+        // 作为遮罩接管后的第一帧基准。
+        const frame = liveFrameRef.current
+        let point = null
+        if (frame) {
+          const box = frame.getBoundingClientRect()
+          const width = frame.clientWidth || designWidth
+          const height = frame.clientHeight || designHeight
+          if (width > 0 && height > 0) {
+            point = {
+              x: box.left + (Number(payload.x) || 0) * (box.width / width),
+              y: box.top + (Number(payload.y) || 0) * (box.height / height),
+            }
+          }
+        }
+        panShieldRef.current = true
+        setPanShield(true)
+        viewport.beginExternalPan(point)
         return
       }
       if (data.type === 'pan-move') {
+        // 遮罩已接管时，SDK 的增量不再重复应用，避免双倍位移。
+        if (panShieldRef.current) return
         const dx = Number(data.payload?.dx) || 0
         const dy = Number(data.payload?.dy) || 0
         // SDK 的位移单位是 iframe 内 CSS 像素；画布按 scale 缩放显示。
@@ -1358,6 +1411,8 @@ function CanvasStage({
         return
       }
       if (data.type === 'pan-end' || data.type === 'pan-cancel') {
+        panShieldRef.current = false
+        setPanShield(false)
         viewport.endExternalPan()
       }
     }
@@ -1370,6 +1425,50 @@ function CanvasStage({
     viewport.endExternalPan,
     viewport.scale,
   ])
+
+  /*
+   * 中键平移遮罩的指针追踪。
+   * ------------------------------------------------------------------
+   * pan-start 来自 iframe SDK，父页面从未收到 pointerdown，因此不能
+   * 依赖遮罩自己的 onPointerMove 完成第一帧；统一在 window 捕获阶段
+   * 监听后续 move / up，兼容指针移出画布、移出窗口和 iframe 重载。
+   */
+  useEffect(() => {
+    if (!panShield) return undefined
+    const finish = () => {
+      panShieldRef.current = false
+      setPanShield(false)
+      viewport.endExternalPan()
+    }
+    const onMove = (event) => {
+      if ((event.buttons & 4) === 0 && event.pointerType === 'mouse') {
+        // 浏览器偶尔丢失 pointerup：中键已松开就直接结束，避免画布
+        // 一直停在“平移中”状态。
+        finish()
+        return
+      }
+      viewport.moveExternalPanTo(event.clientX, event.clientY)
+    }
+    const onUp = (event) => {
+      // pointerup 的 button 对中键是 1；其它键（例如从遮罩上松开的左键）
+      // 不能误结束中键平移。pointercancel 没有可靠 button，单独处理。
+      if (event.button !== undefined && event.button !== 1 && event.pointerType === 'mouse') {
+        return
+      }
+      finish()
+    }
+    const onCancel = () => finish()
+    window.addEventListener('pointermove', onMove, true)
+    window.addEventListener('pointerup', onUp, true)
+    window.addEventListener('pointercancel', onCancel, true)
+    window.addEventListener('blur', finish)
+    return () => {
+      window.removeEventListener('pointermove', onMove, true)
+      window.removeEventListener('pointerup', onUp, true)
+      window.removeEventListener('pointercancel', onCancel, true)
+      window.removeEventListener('blur', finish)
+    }
+  }, [panShield, viewport.moveExternalPanTo, viewport.endExternalPan])
 
   /** 把父页面指针坐标映射为 iframe 内部逻辑坐标（未受父层 transform 缩放）。 */
   const toLiveFramePoint = (event) => {
@@ -1654,7 +1753,7 @@ function CanvasStage({
 
       <div
         ref={stageRef}
-        className={`canvas-stage ${disabled || blocked ? 'is-disabled' : ''} ${drawing ? 'is-drawing' : ''} ${liveInteractive ? 'is-interacting' : ''} ${dragArmed ? 'is-drag-mode' : ''} ${mode === 'live' ? (liveInteractive ? 'is-web-focus' : 'is-canvas-focus') : ''} ${viewport.spaceHeld ? 'is-pan-ready' : ''} ${viewport.panning ? 'is-panning' : ''}`}
+        className={`canvas-stage ${disabled || blocked ? 'is-disabled' : ''} ${drawing ? 'is-drawing' : ''} ${liveInteractive ? 'is-interacting' : ''} ${dragArmed ? 'is-drag-mode' : ''} ${componentDragActive ? 'is-component-dragging' : ''} ${mode === 'live' ? (liveInteractive ? 'is-web-focus' : 'is-canvas-focus') : ''} ${viewport.spaceHeld ? 'is-pan-ready' : ''} ${viewport.panning ? 'is-panning' : ''}`}
         data-canvas-interaction={mode === 'live' ? interactionMode : undefined}
         data-canvas-drag={mode === 'live' ? (dragArmed ? 'on' : 'off') : undefined}
         onPointerDown={handlePointerDown}
@@ -1736,7 +1835,9 @@ function CanvasStage({
                   title="实时画布预览"
                   // 标注态：指针交给覆盖层，圈选 / 平移 / 缩放不被 iframe 吞掉。
                   // 交互态：把指针放行给真实页面，用户可以直接点击按钮。
-                  style={{ pointerEvents: liveInteractive ? 'auto' : 'none' }}
+                  style={{
+                    pointerEvents: liveInteractive && !panShield ? 'auto' : 'none',
+                  }}
                 />
               ) : (
                 <div className="canvas-live-empty">
@@ -1749,6 +1850,18 @@ function CanvasStage({
                     </>
                   )}
                 </div>
+              )}
+              {/*
+                中键平移遮罩：只在 SDK 已确认中键按下后出现。
+                它盖住 iframe，确保后续 pointermove / pointerup 全部由
+                父页面接收；左键交互不受影响，因为遮罩仅在平移期间存在。
+              */}
+              {panShield && (
+                <div
+                  className="canvas-pan-shield"
+                  data-canvas-pan-shield
+                  onContextMenu={(event) => event.preventDefault()}
+                />
               )}
             </div>
           )}

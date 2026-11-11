@@ -45,10 +45,13 @@ class FullstackRunOptions(CamelModel):
     ``mode``：
       - ``fullstack``：DBA → Backend → Frontend → Infra → Build → Restart；
       - ``frontend``：契约确认后的前端骨架初始化，只执行
-        FrontendCoder → BuildVerifier → SandboxRestart。
+        FrontendCoder → BuildVerifier → SandboxRestart；
+      - ``backend``：Supervisor 激活的 BackendCoder 专属子图，
+        DBA → Backend → Build → Restart，不改前端；
+      - ``dba``：Supervisor 激活的 DBA 专属子图，只生成数据库层并重启。
     """
 
-    mode: Literal["fullstack", "frontend"] = "fullstack"
+    mode: Literal["fullstack", "frontend", "backend", "dba"] = "fullstack"
     verify_build: bool = True
     restart_sandbox: bool = True
     max_output_chars: int = Field(default=4000, ge=500, le=20_000)

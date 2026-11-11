@@ -357,8 +357,19 @@
     document.documentElement.appendChild(style)
   }
 
+  // 父页面在拖拽过程中可能因为提交 / 门控状态变化补发 drag-mode=false。
+  // 此时手势还没结束，不能立刻 cancelActiveDrag() 把组件弹回原位；
+  // 先记下“待退出”，等 pointerup 完成本次拖拽后再真正解除。
+  var pendingDragDisarm = false
+
   function setDragArmed(value) {
-    dragArmed = Boolean(value)
+    var next = Boolean(value)
+    if (!next && dragArmed && dragState && dragState.dragging) {
+      pendingDragDisarm = true
+      return
+    }
+    pendingDragDisarm = false
+    dragArmed = next
     ensureDragStyle()
     document.documentElement.classList.toggle(
       'vibe-drag-enabled',
@@ -1041,10 +1052,9 @@
     function (event) {
       var state = dragState
       if (!state || state.pointerId !== event.pointerId) return
-      if ((event.buttons & 1) === 0) {
-        cancelActiveDrag()
-        return
-      }
+      // 不再用 event.buttons 判断是否取消：部分浏览器 / 触控笔在拖动中
+      // 会把 buttons 报成 0，导致“刚按下就被取消”。手势结束统一由
+      // pointerup / pointercancel 收口。
       var dx = event.clientX - state.startX
       var dy = event.clientY - state.startY
       if (!state.dragging) {
@@ -1116,6 +1126,16 @@
     true,
   )
 
+  function settlePendingDragDisarm() {
+    if (!pendingDragDisarm) return
+    pendingDragDisarm = false
+    dragArmed = false
+    document.documentElement.classList.remove(
+      'vibe-drag-enabled',
+      'vibe-drag-active',
+    )
+  }
+
   function finishDrag(event) {
     var state = dragState
     if (!state || state.pointerId !== event.pointerId) return
@@ -1141,6 +1161,7 @@
         selector: state.selector,
         source: state.source,
       })
+      settlePendingDragDisarm()
       return
     }
     applyInlineTranslate(node, state.baseX + state.dx, state.baseY + state.dy)
@@ -1168,6 +1189,7 @@
       startTranslate: state.startTranslate,
       rect: rectOf(node),
     })
+    settlePendingDragDisarm()
   }
 
   document.addEventListener('pointerup', finishDrag, true)
@@ -1178,6 +1200,7 @@
       if (!state || state.pointerId !== event.pointerId) return
       cancelActiveDrag()
       document.documentElement.classList.remove('vibe-drag-active')
+      settlePendingDragDisarm()
     },
     true,
   )

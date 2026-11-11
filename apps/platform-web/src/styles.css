@@ -935,6 +935,25 @@ body.is-viewport-panning * {
   background: #fff;
 }
 
+/* 中键平移：由 iframe 内 SDK 上报 pan-start 后立刻盖住 iframe。
+   遮罩只存在于平移手势期间，因此不会影响左键点击 / 输入 / 网页滚动；
+   它保证 pointermove 不再依赖 iframe 内部文档，iframe 重载也能继续拖。 */
+.canvas-pan-shield {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  cursor: grabbing;
+  touch-action: none;
+  background: transparent;
+  pointer-events: auto;
+}
+
+/* 拖拽组件期间保持抓手光标，避免 pointermove 时闪回箭头。 */
+.canvas-stage.is-component-dragging,
+.canvas-stage.is-component-dragging .canvas-live-frame {
+  cursor: grabbing !important;
+}
+
 .canvas-live-empty {
   display: flex;
   height: 100%;

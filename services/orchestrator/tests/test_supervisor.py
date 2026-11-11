@@ -178,9 +178,32 @@ class RuleRoutingTest(unittest.TestCase):
         self.assertEqual(prediction.target, "none")
         self.assertFalse(prediction.dispatchable)
 
-    def test_reserved_agent_cannot_be_routed(self) -> None:
-        with self.assertRaises(AgentNotAvailableError):
-            self.classify(_request(options={"targetAgent": "backend_coder"}))
+    def test_backend_action_routes_to_backend_coder(self) -> None:
+        """“只改后端”必须有明确范围限定，不能被 Architect 抢走。"""
+        prediction = self.classify(_request(message="只改后端，补一个订单查询接口"))
+        self.assertEqual(prediction.target, "backend_coder")
+        self.assertEqual(prediction.task_type, "backend_generation")
+        self.assertEqual(prediction.strategy, "backend_keyword")
+        self.assertTrue(prediction.dispatchable)
+        self.assertTrue(any(item.startswith("backend:") for item in prediction.signals))
+
+    def test_dba_action_routes_to_dba_agent(self) -> None:
+        prediction = self.classify(
+            _request(message="给订单表加个索引，再建个表存审计日志")
+        )
+        self.assertEqual(prediction.target, "dba_agent")
+        self.assertEqual(prediction.task_type, "database_schema_design")
+        self.assertEqual(prediction.strategy, "dba_keyword")
+        self.assertTrue(prediction.dispatchable)
+        self.assertIn("scope:dba", prediction.signals)
+
+    def test_architecture_sentence_is_not_hijacked_by_experts(self) -> None:
+        """只说技术栈、不要求具体动作时，仍应交给 Architect 产出契约。"""
+        prediction = self.classify(
+            _request(message="设计全栈系统，后端用 Spring Boot，数据库用 MySQL")
+        )
+        self.assertEqual(prediction.target, "architect_graph")
+        self.assertEqual(prediction.strategy, "rule")
 
     def test_custom_agent_keyword_routes_to_manifest_agent(self) -> None:
         custom_dir = Path(__file__).resolve().parents[1] / "config/custom_agents"
@@ -234,10 +257,13 @@ class RegistryTest(unittest.TestCase):
             "available",
         )
         self.assertEqual(registry.require("supervisor").status, "available")
+        # 已激活专家：可以路由并派发到 FullstackGraph 专属子图。
+        for agent_id in ("backend_coder", "dba_agent"):
+            self.assertEqual(registry.require(agent_id).status, "available")
+            self.assertTrue(registry.require(agent_id).routable)
+        # 尚未接入运行时的专家继续保持 reserved。
         for agent_id in (
-            "backend_coder",
             "script_agent",
-            "dba_agent",
             "integration_verifier",
             "devops_agent",
         ):
@@ -261,9 +287,7 @@ class RegistryTest(unittest.TestCase):
     def test_reserved_team_agents_are_declared_but_not_routable(self) -> None:
         registry = AgentRegistry()
         for agent_id in (
-            "backend_coder",
             "script_agent",
-            "dba_agent",
             "integration_verifier",
             "devops_agent",
         ):
@@ -461,6 +485,8 @@ class DispatchTest(unittest.TestCase):
         self.registry = AgentRegistry()
         self.architect = _FakeDispatcher("architect_graph")
         self.ui = _FakeDispatcher("ui_graph")
+        self.backend = _FakeDispatcher("backend_coder")
+        self.dba = _FakeDispatcher("dba_agent")
         self.architect_runs: dict[str, _FakeArchitectRun] = {
             "fake_architect_graph": _FakeArchitectRun()
         }
@@ -470,6 +496,8 @@ class DispatchTest(unittest.TestCase):
             dispatchers={
                 "architect_graph": self.architect,
                 "ui_graph": self.ui,
+                "backend_coder": self.backend,
+                "dba_agent": self.dba,
             },
             gate_registry=self.gates,
             architect_run_getter=self.architect_runs.get,
@@ -482,6 +510,29 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(response.dispatches[0].run_id, "fake_architect_graph")
         self.assertEqual(len(self.architect.calls), 1)
         self.assertEqual(self.ui.calls, [])
+
+    def test_dispatch_backend_expert(self) -> None:
+        response = self.service.dispatch(_request(message="只改后端，补接口"))
+        self.assertEqual(response.decision.handoff, "handoff_agent")
+        self.assertEqual(response.decision.target, "backend_coder")
+        self.assertEqual(
+            [item.agent_id for item in response.dispatches],
+            ["backend_coder"],
+        )
+        self.assertEqual(len(self.backend.calls), 1)
+        self.assertEqual(self.dba.calls, [])
+        self.assertEqual(self.architect.calls, [])
+
+    def test_dispatch_dba_expert(self) -> None:
+        response = self.service.dispatch(_request(message="给用户表建个索引"))
+        self.assertEqual(response.decision.handoff, "handoff_agent")
+        self.assertEqual(response.decision.target, "dba_agent")
+        self.assertEqual(
+            [item.agent_id for item in response.dispatches],
+            ["dba_agent"],
+        )
+        self.assertEqual(len(self.dba.calls), 1)
+        self.assertEqual(self.backend.calls, [])
 
     def test_dispatch_both_starts_only_architect_and_creates_gate(self) -> None:
         response = self.service.dispatch(

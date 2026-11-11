@@ -112,7 +112,7 @@ const EMPTY_RUN = {
   // patch.proposed 的截断 diff，用于详情抽屉；完整结果仍以终态为准。
   patchPreview: '',
   // Supervisor 最近一次意图：handoff_ui / handoff_architect / handoff_both /
-  // handoff_custom / rejected。
+  // handoff_agent / handoff_custom / rejected。
   supervisorHandoff: null,
   // 可视化“AI 思考”的轻量状态：analyzing → decided → dispatching →
   // both_waiting / ui_running / custom / rejected / error。
@@ -2241,6 +2241,37 @@ export default function WorkspacePage() {
         }
         releaseInflight()
         return { ok: false, reason: handoff, decision: decisionView }
+      }
+
+      // handoff_agent：backend_coder / dba_agent 已激活，后端启动
+      // FullstackGraph 的 backend / dba 子图；前端挂载同一 Run 的事件流，
+      // 展示真实生成进度，而不是只显示“已路由”。
+      if (handoff === 'handoff_agent') {
+        const expertDispatch = (result.dispatches ?? [])[0]
+        if (!expertDispatch) {
+          throw new Error('Supervisor 未返回专家子图 Run')
+        }
+        const expertMode =
+          expertDispatch.agentId === 'dba_agent' ? 'dba' : 'backend'
+        architect.attachFullstack(projectId, {
+          runId: expertDispatch.runId,
+          mode: expertMode,
+        })
+        patchRun(projectId, {
+          submitting: false,
+          pendingAnnotationId: null,
+          pendingAction: null,
+          error: null,
+          supervisorHandoff: handoff,
+          supervisorPhase: 'agent_running',
+          supervisorDecision: decisionView,
+        })
+        releaseInflight()
+        showToast(
+          'info',
+          `已派发给${decisionView.agentDisplayName ?? decision.target}，正在生成代码`,
+        )
+        return { ok: true, reason: handoff, decision: decisionView }
       }
 
       throw new Error(`暂不支持的 Handoff: ${handoff}`)

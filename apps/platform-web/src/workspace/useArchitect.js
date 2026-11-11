@@ -62,6 +62,19 @@ const FULLSTACK_NODES = [
   'SandboxRestart',
 ]
 
+// 与 Python MODE_NODE_ORDERS 保持一致：Supervisor 派发专属专家时，
+// 面板只展示该子图真实执行的节点。
+const MODE_FULLSTACK_NODES = {
+  fullstack: FULLSTACK_NODES,
+  frontend: ['FrontendCoder', 'BuildVerifier', 'SandboxRestart'],
+  backend: ['DBACoder', 'BackendCoder', 'BuildVerifier', 'SandboxRestart'],
+  dba: ['DBACoder', 'SandboxRestart'],
+}
+
+function nodesForMode(mode) {
+  return MODE_FULLSTACK_NODES[mode] ?? FULLSTACK_NODES
+}
+
 const FULLSTACK_NODE_LABELS = {
   DBACoder: '数据库工程师',
   BackendCoder: '后端工程师',
@@ -771,7 +784,7 @@ export function useArchitect({ token } = {}) {
    * 重新打开后可通过同一个 runId 重放。
    */
   const connectFullstack = useCallback(
-    async (projectId, { payload, runId } = {}) => {
+    async (projectId, { payload, runId, replay = false } = {}) => {
       const controller = new AbortController()
       fullstackControllersRef.current.get(projectId)?.abort()
       fullstackControllersRef.current.set(projectId, controller)
@@ -779,6 +792,7 @@ export function useArchitect({ token } = {}) {
         await streamFullstack({
           payload,
           runId,
+          replay,
           afterSeq: 0,
           token,
           signal: controller.signal,
@@ -912,6 +926,34 @@ export function useArchitect({ token } = {}) {
         },
       }
       void connectFullstack(projectId, { payload, runId })
+      return true
+    },
+    [connectFullstack, patch],
+  )
+
+  /**
+   * 挂载 Supervisor 已启动的全栈/专家 Run。
+   *
+   * 与 generateFullstack 的区别：不 POST 启动接口，只按 runId 订阅已有
+   * 事件流，避免“Supervisor 派发一次 + 前端再启动一次”重复生成。
+   */
+  const attachFullstack = useCallback(
+    (projectId, { runId, mode = 'backend' } = {}) => {
+      if (!runId) return false
+      fullstackStartingRef.current.add(projectId)
+      patch(projectId, (previous) => ({
+        ...previous,
+        fullstack: {
+          ...EMPTY_FULLSTACK,
+          runId,
+          status: 'RUNNING',
+          mode,
+          starting: true,
+          steps: createFullstackSteps(nodesForMode(mode)),
+          updatedAt: new Date().toISOString(),
+        },
+      }))
+      void connectFullstack(projectId, { runId, replay: true })
       return true
     },
     [connectFullstack, patch],
@@ -1240,6 +1282,7 @@ export function useArchitect({ token } = {}) {
     askHelper,
     cancel,
     generateFullstack,
+    attachFullstack,
     abort,
     reset,
     remove,

@@ -164,6 +164,26 @@ def find_architect_contract(contract_id: str) -> ArchitectContract | None:
     return None
 
 
+def find_confirmed_contract_for_project(project_id: str) -> ArchitectContract | None:
+    """查找项目最近一次已确认的契约。
+
+    Supervisor 派发 backend_coder / dba_agent 时，前端只传项目与消息，
+    不重复回传契约；服务端按 ``updated_at`` 取最新快照，确保连续澄清后
+    使用最后确认的权威版本。未确认契约绝不返回。
+    """
+    latest: tuple[datetime, ArchitectContract] | None = None
+    with _ACTIVE_LOCK:
+        for active in _ACTIVE_RUNS.values():
+            if active.request.project_id != project_id:
+                continue
+            contract = active.contract
+            if contract is None or contract.status != "CONFIRMED":
+                continue
+            if latest is None or active.updated_at > latest[0]:
+                latest = (active.updated_at, contract.model_copy(deep=True))
+    return latest[1] if latest else None
+
+
 class ArchitectService:
     """Architect 执行入口。"""
 

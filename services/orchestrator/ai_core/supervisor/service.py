@@ -199,6 +199,92 @@ class UiSubGraphDispatcher:
         )
 
 
+class FullstackExpertDispatcher:
+    """把 Supervisor 请求映射为 FullstackGraph 的专属模式。
+
+    backend_coder / dba_agent 共用 FullstackGraph 的节点实现，只是拓扑
+    不同；契约由服务端按 projectId 找回最近一次确认版本，前端不需要
+    重复回传，避免路由层承担契约快照职责。
+    """
+
+    agent_id = "backend_coder"
+    mode = "backend"
+
+    def __init__(
+        self,
+        service_factory: Callable[[], Any] | None = None,
+        contract_getter: Callable[[str], Any] | None = None,
+        *,
+        mode: str | None = None,
+    ) -> None:
+        self._service_factory = service_factory
+        self._contract_getter = contract_getter
+        if mode is not None:
+            self.mode = mode
+
+    def _new_service(self) -> Any:  # noqa: ANN401 - 延迟导入避免启动耦合
+        if self._service_factory is not None:
+            return self._service_factory()
+        from ai_core.fullstack.service import FullstackService
+
+        return FullstackService()
+
+    def _find_contract(self, project_id: str) -> Any:  # noqa: ANN401
+        if self._contract_getter is not None:
+            return self._contract_getter(project_id)
+        from ai_core.architect.service import find_confirmed_contract_for_project
+
+        return find_confirmed_contract_for_project(project_id)
+
+    def start(
+        self,
+        request: SupervisorRequest,
+        descriptor: AgentDescriptor,
+    ) -> SubGraphHandle:
+        from ai_core.domain.fullstack import (
+            FullstackRunOptions,
+            FullstackRunRequest,
+            FullstackSource,
+        )
+
+        contract = self._find_contract(request.project_id)
+        if contract is None:
+            raise SupervisorContractNotConfirmedError(
+                f"项目 {request.project_id} 还没有已确认的实施契约；"
+                "请先在架构面板完成契约确认"
+            )
+        sandbox_id = request.sandbox_id or request.source.sandbox_id
+        fullstack_request = FullstackRunRequest(
+            project_id=request.project_id,
+            contract_id=contract.contract_id,
+            sandbox_id=sandbox_id,
+            contract=contract,
+            source=FullstackSource(
+                sandbox_id=sandbox_id,
+                files=dict(request.files or request.source.files),
+            ),
+            options=FullstackRunOptions(mode=self.mode),
+        )
+        active = self._new_service().start_stream(fullstack_request)
+        return SubGraphHandle(
+            agent_id=descriptor.agent_id,
+            run_id=active.run_id,
+            stream_path=(
+                f"/api/v1/internal/fullstack/runs/{active.run_id}/events/stream"
+            ),
+        )
+
+
+class BackendSubGraphDispatcher(FullstackExpertDispatcher):
+    agent_id = "backend_coder"
+    mode = "backend"
+
+
+class DbaSubGraphDispatcher(FullstackExpertDispatcher):
+    agent_id = "dba_agent"
+    mode = "dba"
+
+
 def _architect_only_history(
     history: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -224,6 +310,8 @@ def build_default_dispatchers() -> dict[str, SubGraphDispatcher]:
     return {
         "architect_graph": ArchitectSubGraphDispatcher(),
         "ui_graph": UiSubGraphDispatcher(),
+        "backend_coder": BackendSubGraphDispatcher(),
+        "dba_agent": DbaSubGraphDispatcher(),
     }
 
 

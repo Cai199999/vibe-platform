@@ -235,6 +235,10 @@ class SupervisorGraphRunner:
             return "handoff_both"
         if target == "none":
             return "rejected"
+        if target in {"backend_coder", "dba_agent"}:
+            # 已激活的内置专家：与 CustomAgent 明确区分，前端可以展示
+            # “已派发给后端 / 数据库专家”而不是“仅完成路由”。
+            return "handoff_agent"
         return "handoff_custom"
 
     @classmethod

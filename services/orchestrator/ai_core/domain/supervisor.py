@@ -25,6 +25,9 @@ HandoffKind = Literal[
     "handoff_ui",
     "handoff_architect",
     "handoff_both",
+    # 已激活的内置专家（backend_coder / dba_agent 等）：可路由、可派发，
+    # 但不等同于企业 CustomAgent（后者运行时尚未接入）。
+    "handoff_agent",
     "handoff_custom",
     "rejected",
 ]

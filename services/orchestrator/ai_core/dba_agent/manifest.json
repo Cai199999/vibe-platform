@@ -1,9 +1,9 @@
 {
   "agent_id": "dba_agent",
-  "name": "数据库工程师（预留）",
-  "description": "未来根据实施契约生成 MySQL DDL、索引设计、Flyway 迁移与回滚脚本，并在沙盒中做结构与约束校验。",
-  "version": "0.0.0",
-  "status": "reserved",
+  "name": "数据库工程师",
+  "description": "根据实施契约生成 Sequelize 模型、迁移与 SQLite 预览 DDL，并通过 FullstackGraph 的 dba 子图执行与重启。",
+  "version": "1.0.0",
+  "status": "available",
   "graph": "DbaAgentGraph",
   "capabilities": [
     {
@@ -127,7 +127,9 @@
   "metadata": {
     "manifest_version": 1,
     "owner": "platform",
-    "contract_only": true,
-    "activation": "M4"
+    "contract_only": false,
+    "activation": "M4-active",
+    "dispatch_mode": "dba",
+    "dispatch_graph": "fullstack"
   }
 }

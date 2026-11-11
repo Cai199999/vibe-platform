@@ -27,6 +27,11 @@ const HANDOFF_META = {
     label: '全栈构建（架构 + 前端）',
     detail: '先确认契约，再放行前端修改，严格串行执行',
   },
+  handoff_agent: {
+    icon: '🧠',
+    label: '专属专家执行',
+    detail: '已派发到后端 / 数据库专家子图，正在生成并构建代码',
+  },
   handoff_custom: {
     icon: '✨',
     label: '我的专属 Agent',
@@ -139,6 +144,7 @@ export default function SupervisorTrace({ run, architectState, gate }) {
   const analyzing = phase === 'analyzing'
   const rejected = decision?.handoff === 'rejected' || phase === 'rejected'
   const custom = decision?.handoff === 'handoff_custom'
+  const expert = decision?.handoff === 'handoff_agent'
   const agentName =
     decision?.agentDisplayName ??
     (custom ? '企业专属 Agent' : meta.label)
@@ -147,7 +153,7 @@ export default function SupervisorTrace({ run, architectState, gate }) {
     <section
       className={`supervisor-trace ${isBoth ? 'is-both' : ''} ${
         rejected ? 'is-rejected' : ''
-      } ${custom ? 'is-custom' : ''}`}
+      } ${custom ? 'is-custom' : ''} ${expert ? 'is-expert' : ''}`}
       data-supervisor-trace
       data-supervisor-phase={phase ?? 'idle'}
       data-supervisor-handoff={decision?.handoff ?? ''}
@@ -201,6 +207,25 @@ export default function SupervisorTrace({ run, architectState, gate }) {
             </li>
           ))}
         </ol>
+      )}
+
+      {expert && !analyzing && (
+        <div className="supervisor-custom-card" data-expert-route-card>
+          <div>
+            <span className="supervisor-custom-eyebrow">BUILTIN · EXPERT AGENT</span>
+            <strong>{agentName}</strong>
+            <span>
+              任务类型 <code>{decision.taskType}</code>
+              {decision.signals?.length
+                ? ` · 命中 ${decision.signals[0].split(':').pop()}`
+                : ''}
+            </span>
+          </div>
+          <p>
+            已启动专属子图并接入实时事件流。生成 / 构建 / 沙盒重启的进度会同步到
+            全栈面板，完成后可直接查看预览。
+          </p>
+        </div>
       )}
 
       {custom && !analyzing && (

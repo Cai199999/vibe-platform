@@ -61,6 +61,59 @@ COMBINED_KEYWORDS: tuple[str, ...] = (
 # 只要用户对已圈选目标说出方向 / 位移意图，Supervisor 就标记为
 # ``ui_move`` 并携带工具信号，UI Graph 会调用 move_component 生成
 # 只改 transform 的确定性 CSS。
+# 后端 / 数据库专属意图：必须与“全局架构设计”区分开。
+# 只有用户明确把范围限定在“后端代码 / 接口实现”或“建表 / 迁移 / 索引”
+# 时才命中；单纯说“后端用 Spring Boot，数据库用 MySQL”仍属于架构设计，
+# 交给 Architect 产出契约。
+BACKEND_ACTION_KEYWORDS: tuple[str, ...] = (
+    "只改后端",
+    "只做后端",
+    "只动后端",
+    "改后端",
+    "后端代码",
+    "后端实现",
+    "补后端",
+    "补接口",
+    "新增接口",
+    "加接口",
+    "写接口",
+    "实现接口",
+    "后端路由",
+    "controller",
+    "repository",
+    "service 层",
+    "service层",
+)
+DBA_ACTION_KEYWORDS: tuple[str, ...] = (
+    "建个表",
+    "建一个表",
+    "建张表",
+    "建表",
+    "创建表",
+    "新建表",
+    "加字段",
+    "加个字段",
+    "新增字段",
+    "修改字段",
+    "加索引",
+    "加个索引",
+    "建索引",
+    "建个索引",
+    "添加索引",
+    "新增索引",
+    "创建索引",
+    "写迁移",
+    "生成迁移",
+    "迁移脚本",
+    "改表结构",
+    "表结构改",
+    "数据库表",
+    "慢查询",
+    "执行计划",
+    "种子数据",
+    "ddl",
+)
+
 MOVE_KEYWORDS: tuple[str, ...] = (
     "挪",
     "移动",
@@ -307,6 +360,56 @@ class RuleBasedIntentClassifier:
                 missing_inputs=missing,
                 strategy="move_skill",
             )
+
+        # ----------------------------------------------------
+        # 2.6 数据库 / 后端专属动作：先于 Architect 的宽泛关键词。
+        #
+        # “建个表”“只改后端”是明确的范围限定，不能因为同时命中
+        # “数据库 / 接口 / 表结构”等架构词就被 Architect 抢走。
+        # 纯设计语句（“设计全栈系统，后端用 Spring Boot，数据库用
+        # MySQL”）不含这些动作词，仍会落到 Architect。
+        # ----------------------------------------------------
+        dba_hits = _match_terms(
+            raw_message.casefold(),
+            DBA_ACTION_KEYWORDS,
+            prefix="dba",
+        )
+        if dba_hits:
+            descriptor = registry.get("dba_agent")
+            if descriptor is not None and descriptor.routable:
+                return IntentPrediction(
+                    task_type=(
+                        descriptor.task_types[0]
+                        if descriptor.task_types
+                        else "database_schema_design"
+                    ),
+                    target=descriptor.agent_id,
+                    confidence=0.93,
+                    reason="识别到数据库建表 / 迁移 / 索引动作，路由到 DBA Agent",
+                    signals=[*dba_hits, "scope:dba"],
+                    strategy="dba_keyword",
+                )
+
+        backend_hits = _match_terms(
+            raw_message.casefold(),
+            BACKEND_ACTION_KEYWORDS,
+            prefix="backend",
+        )
+        if backend_hits:
+            descriptor = registry.get("backend_coder")
+            if descriptor is not None and descriptor.routable:
+                return IntentPrediction(
+                    task_type=(
+                        descriptor.task_types[0]
+                        if descriptor.task_types
+                        else "backend_generation"
+                    ),
+                    target=descriptor.agent_id,
+                    confidence=0.93,
+                    reason="识别到后端代码 / 接口实现动作，路由到 BackendCoder",
+                    signals=[*backend_hits, "scope:backend"],
+                    strategy="backend_keyword",
+                )
 
         # ----------------------------------------------------
         # 3. 关键词规则

@@ -3346,6 +3346,12 @@ def generate_frontend_bundle(
     scripts = package.setdefault("scripts", {})
     scripts["dev"] = "node scripts/dev.mjs"
     scripts["dev:vite"] = "vite"
+    # 前端工具类生态 Skill 要求优先使用 lucide-react（图标）与 clsx（类名
+    # 合并）。导入项目可能没有这两个依赖，必须在写 package.json 时补齐，
+    # 否则 Coder 一旦按 Skill 生成 import，构建会因模块不存在而失败。
+    dependencies = package.setdefault("dependencies", {})
+    dependencies.setdefault("lucide-react", "^0.460.0")
+    dependencies.setdefault("clsx", "^2.1.1")
     files["package.json"] = json.dumps(package, ensure_ascii=False, indent=2) + "\n"
 
     return GeneratedBundle(
