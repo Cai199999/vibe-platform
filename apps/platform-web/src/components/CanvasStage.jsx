@@ -6,6 +6,10 @@ import {
   MODIFY_EXISTING,
   normalizeAction,
 } from '../workspace/annotationActions.js'
+import {
+  collectReferenceText,
+  isVisualReferenceText,
+} from '../workspace/visualReference.js'
 
 const clamp01 = (value) => Math.min(1, Math.max(0, value))
 
@@ -358,6 +362,12 @@ function AnnotationPopover({
   onClarificationAnswer,
   clarification,
   clarificationPending,
+  // 可视化选型：本轮澄清命中“和…一样”后，等待用户在画布上点参考组件。
+  referencePick,
+  // 用户取消取色后的同一段文本：允许按普通回答提交一次。
+  referenceBypass,
+  onReferenceRequest,
+  onReferenceCancel,
   onRollback,
   onActivate,
   onDeactivate,
@@ -390,6 +400,8 @@ function AnnotationPopover({
   const sending = Boolean(submitting && pending)
   // 关闭确认按项目级 submitting 判定：单圈 / 批量提交都要保护。
   const executing = Boolean(submitting)
+  // 本标注正在等待用户点选参考组件：禁止再次提交，浮层显示取色提示。
+  const pickingReference = referencePick?.annotationId === annotation.id
   const onUnmountRef = useRef(onUnmount)
 
   useEffect(() => {
@@ -543,7 +555,7 @@ function AnnotationPopover({
    * 若仍有缺失，则只填入该答案，保留逐项补充的交互。
    */
   const applyQuickOption = (option) => {
-    if (!clarification || submitting) return
+    if (!clarification || submitting || pickingReference) return
     const questionId =
       option.questionId || clarification.questions?.[0]?.questionId
     if (!questionId) return
@@ -603,13 +615,37 @@ function AnnotationPopover({
         return { questionId: question.questionId, value }
       })
       .filter(Boolean)
+    const finalComment = injected ? '' : replyValue
+    // 指代式回答（“和登录按钮一样”）交给模型只会脑补样式：先冻结
+    // 本轮答案，切换到画布取色模式，等 SDK 抓到真实类名后再提交。
+    const referenceText = collectReferenceText(replyValue, payload)
+    const bypassed =
+      referenceBypass?.annotationId === annotation.id &&
+      referenceBypass?.text === referenceText
+    if (
+      !pickingReference &&
+      !bypassed &&
+      isVisualReferenceText(referenceText)
+    ) {
+      const accepted = onReferenceRequest?.(annotation.id, {
+        clarificationId: clarification.clarificationId,
+        clarification,
+        answers: payload,
+        comment: finalComment,
+        referenceText,
+      })
+      if (accepted) {
+        setReply('')
+        return
+      }
+    }
     // 已经作为问题答案提交的文本不再重复塞进 comment，避免 Planner /
     // Coder 同时读到两份相同内容。
     onClarificationAnswer?.(
       annotation.id,
       clarification,
       payload,
-      injected ? '' : replyValue,
+      finalComment,
     )
     // 回答已进入 chatHistory，清空输入框准备下一轮追问。
     setReply('')
@@ -801,6 +837,29 @@ function AnnotationPopover({
             </p>
           )}
 
+          {/* 可视化选型：不把“和 X 一样”直接交给模型，改为点选真实组件。 */}
+          {pickingReference && (
+            <div
+              className="clarification-reference-pick"
+              role="status"
+              data-reference-pick
+            >
+              <strong>请点击页面上您想参考的组件</strong>
+              <span>
+                {referencePick?.referenceText || referencePick?.comment
+                  ? `已收到「${referencePick.referenceText || referencePick.comment}」，点中目标后提取它的真实类名与样式。`
+                  : '点中目标后，我会提取它的 Tailwind 类名与 computed 样式。'}
+              </span>
+              <button
+                type="button"
+                className="clarification-reference-cancel"
+                onClick={() => onReferenceCancel?.()}
+              >
+                取消取色
+              </button>
+            </div>
+          )}
+
           {/* 结构化一键决策：只用于 CORE_BUSINESS，实现细节不会走到这里。 */}
           {clarification.status !== 'EXPIRED' &&
             clarification.clarificationOptions?.length > 0 && (
@@ -816,7 +875,7 @@ function AnnotationPopover({
                       className={`clarification-quick-option ${option.recommended ? 'is-recommended' : ''}`}
                       data-clarification-quick-option={option.optionId}
                       data-recommended={option.recommended ? 'true' : 'false'}
-                      disabled={submitting}
+                      disabled={submitting || pickingReference}
                       onClick={() => applyQuickOption(option)}
                     >
                       <span className="clarification-quick-label">
@@ -875,7 +934,7 @@ function AnnotationPopover({
                             type="button"
                             className={`clarification-option ${selected ? 'is-selected' : ''}`}
                             aria-pressed={selected}
-                            disabled={submitting}
+                            disabled={submitting || pickingReference}
                             onClick={() => {
                               // 点击预设选项只更新答案，不关闭主输入栏；
                               // 用户仍可继续写补充说明。
@@ -904,7 +963,7 @@ function AnnotationPopover({
                         type="button"
                         className={`clarification-option is-custom ${custom ? 'is-selected' : ''}`}
                         aria-pressed={custom}
-                        disabled={submitting}
+                        disabled={submitting || pickingReference}
                         onClick={() => toggleCustom(question.questionId)}
                       >
                         自定义
@@ -929,7 +988,7 @@ function AnnotationPopover({
                           ? '输入你的回答，支持多行…'
                           : '补充自定义说明，支持多行…'
                       }
-                      disabled={submitting}
+                      disabled={submitting || pickingReference}
                       onChange={(event) => {
                         if (freeText) {
                           setAnswer(question.questionId, event.target.value)
@@ -948,7 +1007,10 @@ function AnnotationPopover({
               className="clarification-submit"
               type="button"
               disabled={
-                submitting || !clarificationComplete || !clarificationHasInput
+                submitting ||
+                pickingReference ||
+                !clarificationComplete ||
+                !clarificationHasInput
               }
               onClick={() => submitClarification(reply)}
             >
@@ -977,7 +1039,7 @@ function AnnotationPopover({
                   : '其他标注有待确认的问题…'
                 : '描述修改意图...'
           }
-          disabled={blocked || submitting}
+          disabled={blocked || submitting || pickingReference}
           onChange={(event) => {
             if (clarificationPending && clarification) {
               setReply(event.target.value)
@@ -992,6 +1054,7 @@ function AnnotationPopover({
           disabled={
             blocked ||
             submitting ||
+            pickingReference ||
             (clarificationPending
               ? !clarification ||
                 !clarificationComplete ||
@@ -1068,6 +1131,11 @@ function CanvasStage({
   onAnnotationMove,
   onClarificationAnswer,
   clarification,
+  // 可视化选型：等用户点选参考组件时，画布保持 inspect 模式并显示提示。
+  referencePick = null,
+  referenceBypass = null,
+  onReferenceRequest,
+  onReferenceCancel,
   onAnnotationRollback,
   pendingAnnotationId,
   pendingAction,
@@ -2252,6 +2320,10 @@ function CanvasStage({
                   onSend={onAnnotationSend}
                   onClarificationAnswer={onClarificationAnswer}
                   clarificationPending={Boolean(clarification)}
+                  referencePick={referencePick}
+                  referenceBypass={referenceBypass}
+                  onReferenceRequest={onReferenceRequest}
+                  onReferenceCancel={onReferenceCancel}
                   clarification={
                     clarification &&
                     (clarification.annotationId === annotation.id ||

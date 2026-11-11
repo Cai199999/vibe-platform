@@ -15,6 +15,10 @@ import {
   MODIFY_EXISTING,
   isCreateAction,
 } from '../workspace/annotationActions.js'
+import {
+  buildVisualReference,
+  formatReferenceComment,
+} from '../workspace/visualReference.js'
 
 /**
  * 单个项目窗口：支持「对比模式」与「展示模式」两种布局。
@@ -108,6 +112,12 @@ function ProjectWorkspaceInner({
   // 精准点击选择（Inspect）模式与命中组件后的标注草稿。
   const [inspectMode, setInspectMode] = useState(false)
   const [inspectDraft, setInspectDraft] = useState(null)
+  // 可视化选型：用户回答“和登录按钮一样”后，暂存本次澄清提交，等用户
+  // 在画布上点中参考组件再一起发给后端。null 表示当前没有取色任务。
+  const [referencePick, setReferencePick] = useState(null)
+  // 用户取消取色后，同一段指代文本允许按普通回答提交一次；否则再次
+  // 点击发送会立刻重新进入取色模式，形成无法退出的循环。
+  const [referenceBypass, setReferenceBypass] = useState(null)
   // 顶部工具栏的「更多」折叠菜单：清空标注 / 保存快照 / 导出 / Agent 目录。
   const [moreOpen, setMoreOpen] = useState(false)
   const moreRef = useRef(null)
@@ -355,6 +365,22 @@ function ProjectWorkspaceInner({
           ? 'success'
           : 'idle'
   const inspectBlocked = submitting || approvalPending || gateActive
+  const activeClarificationId = run.clarification?.clarificationId || null
+
+  // 澄清问题已被替换（重试 / 新一轮 Run）时，上一轮的取色任务必须作废，
+  // 否则用户点中的参考组件会被提交到已经不存在的 clarification 上。
+  useEffect(() => {
+    if (!referencePick) return
+    const pickClarificationId =
+      referencePick.clarificationId ||
+      referencePick.clarification?.clarificationId ||
+      null
+    if (!activeClarificationId || pickClarificationId !== activeClarificationId) {
+      setReferencePick(null)
+      setReferenceBypass(null)
+      setInspectMode(false)
+    }
+  }, [activeClarificationId, referencePick])
 
   /**
    * 精准选择在画布与预览两种模式下都可使用。
@@ -367,14 +393,76 @@ function ProjectWorkspaceInner({
     const next = !inspectMode
     setInspectMode(next)
     setInspectDraft(null)
+    // 手动退出选择模式时，取消尚未完成的参考组件取色，避免状态悬挂；
+    // 同时放行这段文本，下一次发送不会再被强行拉回取色模式。
+    if (!next) {
+      if (referencePick) {
+        setReferenceBypass({
+          annotationId: referencePick.annotationId,
+          text: referencePick.referenceText || '',
+        })
+      }
+      setReferencePick(null)
+    }
     if (next && mode === 'canvas' && canvasMode !== 'live') {
       setMode('preview')
     }
   }
 
+  /**
+   * 澄清回答命中“和…一样”时，不提交文本，而是进入取色模式。
+   *
+   * CanvasStage 已把本轮答案打包好；这里只负责切换画布状态，等 SDK
+   * picked 回调带回真实类名 / computed CSS 后再一次性提交。
+   */
+  const handleReferenceRequest = (annotationId, request) => {
+    if (!previewReady || inspectBlocked) return false
+    setReferenceBypass(null)
+    setReferencePick({ annotationId, ...request })
+    setInspectDraft(null)
+    setInspectMode(true)
+    // 画布不是 live 时没有真实 DOM 可点，切到预览侧复用同一套 SDK。
+    if (viewMode === 'compare') {
+      setMode(canvasMode === 'live' ? 'canvas' : 'preview')
+    }
+    return true
+  }
+
+  const cancelReferencePick = () => {
+    if (referencePick) {
+      setReferenceBypass({
+        annotationId: referencePick.annotationId,
+        text: referencePick.referenceText || '',
+      })
+    }
+    setReferencePick(null)
+    setInspectMode(false)
+  }
+
   /** SDK 回传的命中结果转换为本地标注草稿。 */
   const handleInspectPick = (payload) => {
     if (!payload?.source?.file) return
+    // 取色任务优先：用户点中的组件不是新标注，而是本轮澄清回答的
+    // 视觉参考。抓取真实类名/computed CSS 后立即提交，不再生成草稿。
+    if (referencePick) {
+      const reference = buildVisualReference(payload)
+      if (!reference) return
+      const { annotationId, clarification, answers, comment } = referencePick
+      setReferencePick(null)
+      setInspectMode(false)
+      const note = formatReferenceComment(reference)
+      const mergedComment = [comment?.trim(), note]
+        .filter(Boolean)
+        .join('；')
+      onClarificationAnswer?.(
+        annotationId,
+        clarification,
+        answers,
+        mergedComment,
+        reference,
+      )
+      return
+    }
     const rect = payload.rect ?? { x: 0, y: 0, width: 0, height: 0 }
     // SDK 的 rect 相对当前 iframe 逻辑视口；视口会随画布尺寸扩展，
     // 因此必须使用 payload 里的真实 innerWidth / innerHeight 归一化。
@@ -406,6 +494,9 @@ function ProjectWorkspaceInner({
         instanceCount: Number(source.instanceCount) || undefined,
         instanceId: source.instanceId || undefined,
         callSite: source.callSite || null,
+        // 绝对视觉签名：Inspect 草稿同样携带真实 computed 样式，
+        // 后续转成标注时可作为 current_styles 供 Coder 复用。
+        styleSignature: payload.styles || source.styleSignature || undefined,
       },
       container: payload.container
         ? {
@@ -472,6 +563,7 @@ function ProjectWorkspaceInner({
       instanceCount: Number(sourceItem.instanceCount) || undefined,
       instanceId: sourceItem.instanceId || undefined,
       callSite: sourceItem.callSite || null,
+      styleSignature: sourceItem.styleSignature || fallback.styleSignature || undefined,
     })
     onAnnotationAdd?.({
       rect: inspectDraft.worldRect,
@@ -506,6 +598,7 @@ function ProjectWorkspaceInner({
         instanceCount: Number(effective.instanceCount) || undefined,
         instanceId: effective.instanceId || undefined,
         callSite: effective.callSite || null,
+        styleSignature: effective.styleSignature || undefined,
       },
     })
     setInspectDraft(null)
@@ -858,6 +951,10 @@ function ProjectWorkspaceInner({
               onClarificationAnswer={onClarificationAnswer}
               inspectMode={inspectMode && canvasVisible && !inspectBlocked}
               onInspectPick={handleInspectPick}
+              referencePick={referencePick}
+              referenceBypass={referenceBypass}
+              onReferenceRequest={handleReferenceRequest}
+              onReferenceCancel={cancelReferencePick}
               onFrameScroll={handleFrameScroll}
               onFrameRouteChange={handleFrameRouteChange}
               onFrameReady={handleFrameReady}
@@ -944,6 +1041,8 @@ function ProjectWorkspaceInner({
               onCancelRun={onCancelRun}
               inspectMode={inspectMode && previewVisible && !inspectBlocked}
               onInspectPick={handleInspectPick}
+              referencePick={referencePick}
+              onReferenceCancel={cancelReferencePick}
               onFrameRouteChange={handleFrameRouteChange}
               inspectDraft={inspectDraft}
               onInspectDraftChange={handleInspectDraftChange}

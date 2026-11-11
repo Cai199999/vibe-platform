@@ -52,6 +52,9 @@ class AnnotationSource(CamelModel):
     instance_id: str | None = None
     # React dev 模式下由运行时 fiber 读取的父级调用点。
     call_site: AnnotationCallSite | None = None
+    # SDK snapshot 提取的绝对视觉指纹：className 集合 + computed CSS。
+    # 它是“事实”，优先级高于模型对自然语言“和某组件一样”的猜测。
+    style_signature: dict[str, Any] | None = None
 
 
 class AnnotationSnippet(CamelModel):
@@ -370,10 +373,42 @@ class Clarification(CamelModel):
     answered_at: datetime | None = None
 
 
+class VisualReferenceSource(CamelModel):
+    """被参考组件的源码定位；只用于审计与实例隔离，不驱动生成。"""
+
+    file: str | None = None
+    line: int | None = None
+    column: int | None = None
+    component: str | None = None
+    instance: int | None = None
+    instance_count: int | None = None
+    instance_id: str | None = None
+
+
+class VisualReference(CamelModel):
+    """用户在画布上点选的参考组件。
+
+    大模型不能跨域读取真实 DOM，只有把这组“绝对视觉事实”随澄清答案
+    传给 Coder，才能避免它把“和登录按钮一样”脑补成另一种蓝色。
+    """
+
+    kind: str = "visual_reference"
+    label: str | None = None
+    tag: str | None = None
+    # 真实 className / Tailwind 类名集合；Coder 必须逐字复用。
+    classes: list[str] = Field(default_factory=list)
+    # computed CSS 视觉指纹：backgroundColor / borderRadius / padding 等。
+    styles: dict[str, Any] = Field(default_factory=dict)
+    source: VisualReferenceSource | None = None
+    captured_at: str | None = None
+
+
 class ClarificationAnswer(CamelModel):
     question_id: str
     value: Any = None
     text: str | None = Field(default=None, max_length=1000)
+    # 可视化选型：用户回答“和登录按钮一样”后点选的真实组件。
+    reference: VisualReference | None = None
 
 
 class ClarificationAnswersRequest(CamelModel):

@@ -1371,6 +1371,7 @@ class AgentGraphRunner:
                 "target_files": target_files,
                 "verify_result": _repair_payload(verify_result),
                 "retry_count": retry_count,
+                "design_system": state.get("design_system") or {},
             }
             self._emit(
                 "node.progress",
@@ -1654,6 +1655,7 @@ class AgentGraphRunner:
             # 完整 stdout/stderr 仅保留在状态里供 UI 与审计使用。
             "verify_result": _repair_payload(verify_result),
             "retry_count": retry_count,
+            "design_system": state.get("design_system") or {},
         }
         fallback_used = False
         try:
@@ -2600,6 +2602,71 @@ def _latest_answers(answers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [latest[key] for key in order]
 
 
+_REFERENCE_SUMMARY_STYLE_KEYS = (
+    "backgroundColor",
+    "color",
+    "borderColor",
+    "borderRadius",
+    "fontSize",
+    "fontWeight",
+    "padding",
+    "boxShadow",
+    "tailwindClasses",
+)
+
+
+def _latest_reference(answers: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """取最近一次可视化选型结果。
+
+    参考组件是用户主动点选的绝对事实，一旦捕获就应持续生效；这里不做
+    questionId 去重，避免后续补充文字回答把 reference 覆盖掉。
+    """
+    for item in reversed(answers or []):
+        if not isinstance(item, dict):
+            continue
+        reference = item.get("reference")
+        if isinstance(reference, dict) and reference:
+            return reference
+    return None
+
+
+def _reference_summary(reference: dict[str, Any]) -> str:
+    """把 reference 压缩成人类可读摘要，供 finalIntent / 聊天记录展示。"""
+    source = (
+        reference.get("source") if isinstance(reference.get("source"), dict) else {}
+    )
+    label = (
+        reference.get("label")
+        or reference.get("component")
+        or source.get("component")
+        or reference.get("tag")
+        or "参考组件"
+    )
+    classes = [
+        str(value).strip()
+        for value in (reference.get("classes") or [])
+        if str(value).strip()
+    ][:16]
+    styles = (
+        reference.get("styles") if isinstance(reference.get("styles"), dict) else {}
+    )
+    facts: list[str] = []
+    if classes:
+        facts.append("类名 " + " ".join(classes))
+    for key in _REFERENCE_SUMMARY_STYLE_KEYS:
+        if key == "tailwindClasses":
+            continue
+        value = styles.get(key)
+        if value:
+            facts.append(f"{key}={value}")
+    detail = "，".join(facts)
+    return (
+        f"参考「{label}」的真实样式：{detail}"
+        if detail
+        else f"参考「{label}」的真实样式（见 reference_styles）"
+    )
+
+
 def _set_final_intent(
     annotation: dict[str, Any],
     item: dict[str, Any] | None,
@@ -2653,8 +2720,14 @@ def _augment_style_answers(
     style_text = "；".join(
         filter(None, (_answer_text(item) for item in _latest_answers(answers)))
     )
-    if not style_text or not target_ids:
+    reference = _latest_reference(answers)
+    if (not style_text and reference is None) or not target_ids:
         return context
+    # 可视化选型优先于自然语言描述：先写参考组件的事实摘要，Coder 再
+    # 通过 reference_styles 拿到逐字可复制的类名 / CSS。
+    if reference is not None:
+        reference_text = _reference_summary(reference)
+        style_text = f"{style_text}；{reference_text}" if style_text else reference_text
 
     updated = copy.deepcopy(context)
     for item in updated.get("annotations") or []:
@@ -2674,6 +2747,8 @@ def _augment_style_answers(
                 if annotation_id not in target_ids:
                     continue
                 merged = _merge_style_text(_annotation_style_text(nested), style_text)
+                if reference is not None:
+                    nested.setdefault("payload", {})["reference"] = reference
                 _set_final_intent(nested, None, merged)
                 addition["intent"] = merged
             continue
@@ -2690,6 +2765,8 @@ def _augment_style_answers(
             _annotation_style_text(annotation) or str(item.get("instruction") or ""),
             style_text,
         )
+        if reference is not None:
+            annotation.setdefault("payload", {})["reference"] = reference
         _set_final_intent(annotation, item, merged)
     return updated
 
@@ -2818,13 +2895,17 @@ def _normalize_answers(raw: Any) -> list[dict[str, Any]]:
         question_id = item.get("questionId") or item.get("question_id")
         if not question_id:
             continue
-        answers.append(
-            {
-                "questionId": str(question_id),
-                "value": item.get("value", item.get("answer")),
-                "text": item.get("text"),
-            }
-        )
+        answer: dict[str, Any] = {
+            "questionId": str(question_id),
+            "value": item.get("value", item.get("answer")),
+            "text": item.get("text"),
+        }
+        # 可视化选型：reference 是 SDK 提取的绝对视觉事实，必须透传，
+        # 否则重新 normalize 后 Coder 又只能靠自然语言猜样式。
+        reference = item.get("reference")
+        if isinstance(reference, dict) and reference:
+            answer["reference"] = reference
+        answers.append(answer)
     return answers
 
 
@@ -2844,7 +2925,10 @@ def _augment_context_with_answers(
         for item in latest
         if _answer_text(item)
     )
-    if not answer_text:
+    # 可视化选型不受 questionId 去重影响：用户点选的参考组件必须持续
+    # 生效，直到下一次重新选型覆盖它。
+    reference = _latest_reference(answers)
+    if not answer_text and reference is None:
         return context
 
     updated = copy.deepcopy(context)
@@ -2858,7 +2942,17 @@ def _augment_context_with_answers(
         # 历史意图”，必须一并移除；否则 Coder 会看到红蓝两个方案。
         if any(_STYLE_COLOR_TOKEN_RE.search(_answer_text(row)) for row in latest):
             base = _STYLE_COLOR_TOKEN_RE.sub("", base).strip(" ，,；;")
-        merged = f"{base}（澄清回答：{answer_text}）" if base else answer_text
+        if reference is not None:
+            # 参考样式是唯一视觉事实：写入 payload 供 compact_annotations
+            # 生成结构化 reference_styles，同时写进 finalIntent 供审计。
+            payload["reference"] = reference
+            reference_text = _reference_summary(reference)
+            suffix = (
+                f"{answer_text}；{reference_text}" if answer_text else reference_text
+            )
+            merged = f"{base}（澄清回答：{suffix}）" if base else suffix
+        else:
+            merged = f"{base}（澄清回答：{answer_text}）" if base else answer_text
         _set_final_intent(annotation, item, merged)
         # M2 一次澄清默认只作用于当前单标注；批量标注的逐条答案可在 M3
         # 通过 answer.annotationId 扩展。

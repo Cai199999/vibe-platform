@@ -22,6 +22,7 @@ from pathlib import PurePosixPath
 from typing import Any, Callable, TypeVar
 
 from ai_core.adapters.model.deepseek import DeepSeekClient
+from ai_core.agent.design_system import render_design_system
 from ai_core.agent.memory import fallback_summary
 from ai_core.agent.ui_context import (
     UI_CONTEXT_TOKEN_BUDGET,
@@ -150,11 +151,13 @@ class AgentLLM:
         *,
         compact: bool = False,
         prefer_fast: bool = False,
+        design_system: dict[str, Any] | None = None,
     ) -> CodeResult:
         """生成代码修改。
 
         ``compact``：超时后的降级重试，进一步压缩上下文并强制局部 Diff；
-        ``prefer_fast``：切换到低延迟模型，优先尽快返回可构建结果。
+        ``prefer_fast``：切换到低延迟模型，优先尽快返回可构建结果；
+        ``design_system``：沙盒项目提取的主题色 / 语义类名，用于约束新组件。
         """
         raise NotImplementedError
 
@@ -305,7 +308,11 @@ class MockAgentLLM(AgentLLM):
         *,
         compact: bool = False,
         prefer_fast: bool = False,
+        design_system: dict[str, Any] | None = None,
     ) -> CodeResult:
+        # Mock 不消费设计系统；保留参数以匹配 AgentLLM 契约，避免
+        # Runner 传入 design_system 时触发 TypeError。
+        del design_system
         primary_file = (
             target_files[0]
             if target_files
@@ -539,6 +546,9 @@ class DeepSeekAgentLLM(AgentLLM):
             "组件的实例。计划必须写“修改 callSite 所在父组件的 JSX 调用”，"
             "**禁止**规划修改基础组件（Button.jsx / Card.jsx 等）或全局 CSS，"
             "否则会污染同页面的所有实例。\n"
+            "- **参考样式铁律**：标注出现 reference_styles 时，计划只能写"
+            "“逐字复用参考组件的 tailwindClasses 与 computed 样式”，"
+            "禁止自行规划新的颜色 / 圆角 / 字号，也禁止用近似值。\n"
             "- **职责边界铁律**：你只规划前端视觉与 DOM（组件结构、样式、"
             "布局、文案、可访问性）。接口路径、数据库、鉴权、业务分支由 "
             "Architect / BackendCoder 负责；即使需求涉及业务逻辑，本轮 UI "
@@ -649,12 +659,16 @@ class DeepSeekAgentLLM(AgentLLM):
         *,
         compact: bool = False,
         prefer_fast: bool = False,
+        design_system: dict[str, Any] | None = None,
     ) -> CodeResult:
         """只生成 React UI 与样式修改。
 
         职责解耦：UI Coder 不设计业务接口、数据库或路由。上下文只包含
         目标组件附近的 JSX 窗口；当窗口被裁剪或超出 Token 预算时，强制
         输出局部 unified diff，避免大模型整文件重写造成超时。
+
+        ``design_system`` 由 Service 从沙盒 tailwind.config / 全局 CSS
+        提取；有主色定义时强制优先使用 bg-primary 等语义类名。
         """
         budget = 2600 if compact else UI_CONTEXT_TOKEN_BUDGET
         full_file_limit = 900 if compact else UI_FULL_FILE_TOKEN_LIMIT
@@ -680,6 +694,7 @@ class DeepSeekAgentLLM(AgentLLM):
             ensure_ascii=False,
             default=str,
         )
+        design_text = render_design_system(design_system)
 
         system = (
             "你是 FrontendCoder（视觉与 DOM 修改器）。你的唯一职责是"
@@ -731,6 +746,15 @@ class DeepSeekAgentLLM(AgentLLM):
             "- **最终意图铁律**：只实现系统给出的最终确认意图（finalIntent）。"
             "历史聊天记录里的旧颜色 / 旧方案 / 被否定过的指令一律视为不存在，"
             "不得同时保留，也不得回退。\n"
+            "- **参考样式铁律（禁止脑补）**：标注中出现 reference_styles 时，"
+            "它是用户点选组件的绝对视觉事实，也是唯一允许复制的样式来源。"
+            "必须逐字复用其中的 tailwindClasses；backgroundColor / color / "
+            "borderColor / borderRadius / fontSize / fontWeight / padding / "
+            "boxShadow 必须与之一致。禁止用“相近的蓝色”“大概是 8px 圆角”"
+            "之类的近似值，禁止自行换算或发明色值。\n"
+            "- **当前样式铁律**：source.styleSignature / current_styles 是目标"
+            "元素此刻的真实样式。用户说“更大 / 更圆 / 换颜色”时，必须基于"
+            "这些真实值做增量修改，不得重置为无关的默认值。\n"
             "- 兼容旧客户端：relativeX / relativeY 等像素字段只能用于判断 "
             "flex/grid 插入顺序或 margin 粗调，不得写死绝对坐标；旧版 "
             "payload.position 仅作为历史审计信息，不再驱动 left/top 定位。\n"
@@ -753,6 +777,16 @@ class DeepSeekAgentLLM(AgentLLM):
             f"{self._memory_block()}"
             f"{self._preference_block()}"
         )
+        if design_text:
+            # 设计系统是“兜底约束”：新增组件先找语义类名，再谈具体色值。
+            system += (
+                "\n- **设计系统铁律**：项目已配置 Tailwind 主题 / CSS 变量。"
+                "新增或修改组件必须优先使用下方语义类名（bg-primary、"
+                "text-secondary、border-border 等），禁止写死 #hex / rgb 色值；"
+                "仅当语义令牌无法表达时，才允许使用 reference_styles 中的"
+                "精确值。\n"
+                f"- 可用设计系统：{design_text}"
+            )
         if force_diff:
             system += (
                 "\n\n【本轮强制局部 Diff】上下文已精简 / 目标文件较大，"
@@ -763,6 +797,8 @@ class DeepSeekAgentLLM(AgentLLM):
         human = (
             f"目标文件列表: {json.dumps(target_files, ensure_ascii=False, default=str)}\n\n"
             f"{ui_context.render()}\n\n"
+            f"项目设计系统（有值时新增组件必须优先复用语义类名）:\n"
+            f"{design_text or '未检测到 tailwind.config / CSS 变量'}\n\n"
             f"视觉修改计划:\n{plan_text or '按标注直接做最小视觉修改'}\n\n"
             f"上一轮验证结果:\n{verify_text}\n\n"
             f"当前重试次数: {retry_count}"

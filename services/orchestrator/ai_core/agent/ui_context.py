@@ -125,6 +125,49 @@ class _JsxPair:
     close_end: int
 
 
+# SDK 视觉签名 / 参考组件允许进入 Prompt 的字段。只保留真正决定视觉
+# 结果的属性，避免把整份 computedStyle 倒进上下文。
+_STYLE_SIGNATURE_KEYS = (
+    "backgroundColor",
+    "color",
+    "borderColor",
+    "borderWidth",
+    "borderRadius",
+    "fontSize",
+    "fontWeight",
+    "lineHeight",
+    "letterSpacing",
+    "padding",
+    "margin",
+    "gap",
+    "boxShadow",
+    "fontFamily",
+    "textTransform",
+    "display",
+    "alignItems",
+    "justifyContent",
+)
+
+
+def _compact_style_signature(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in _STYLE_SIGNATURE_KEYS:
+        value = raw.get(key)
+        if value in (None, "", "none", "normal", "auto", "0px"):
+            continue
+        compact[key] = str(value)[:120]
+    classes = [
+        str(token).strip()
+        for token in (raw.get("tailwindClasses") or raw.get("classes") or [])
+        if str(token).strip()
+    ]
+    if classes:
+        compact["tailwindClasses"] = classes[:40]
+    return compact
+
+
 def compact_annotations(
     annotations: list[dict[str, Any]],
     *,
@@ -207,9 +250,15 @@ def compact_annotations(
                 "instanceCount",
                 "instanceId",
                 "callSite",
+                "styleSignature",
             )
             if source.get(key) not in (None, "", 0)
         }
+        style_signature = _compact_style_signature(source.get("styleSignature"))
+        if style_signature:
+            # 目标节点当前的绝对样式：模型做“更大 / 更圆 / 换个色”时
+            # 必须基于这些真实值计算，而不是凭空猜。
+            item["current_styles"] = style_signature
         if source_view:
             item["source"] = source_view
         for key in ("instanceId", "relativeTarget", "relative_target", "position"):
@@ -231,6 +280,42 @@ def compact_annotations(
                 continue
             if isinstance(value, (str, int, float, bool)) and key.endswith("Id"):
                 item[key] = value
+
+        # 可视化选型：reference_styles 是 Coder 唯一允许复制的视觉来源。
+        reference = (
+            payload.get("reference")
+            if isinstance(payload.get("reference"), dict)
+            else None
+        )
+        if reference:
+            reference_styles = _compact_style_signature(reference.get("styles"))
+            reference_classes = [
+                str(token).strip()
+                for token in (reference.get("classes") or [])
+                if str(token).strip()
+            ]
+            if reference_classes:
+                reference_styles["tailwindClasses"] = reference_classes[:40]
+            if reference_styles:
+                item["reference_styles"] = reference_styles
+            reference_view: dict[str, Any] = {}
+            label = reference.get("label") or reference.get("tag")
+            if label:
+                reference_view["label"] = str(label)[:80]
+            reference_source = (
+                reference.get("source")
+                if isinstance(reference.get("source"), dict)
+                else {}
+            )
+            location = {
+                key: reference_source.get(key)
+                for key in ("file", "line", "component", "instance")
+                if reference_source.get(key) not in (None, "", 0)
+            }
+            if location:
+                reference_view["source"] = location
+            if reference_view:
+                item["reference"] = reference_view
 
         thread = (
             annotation.get("threadContext")

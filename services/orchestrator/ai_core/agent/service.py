@@ -29,6 +29,11 @@ from ai_core.agent.context_doc import (
     VIBE_CONTEXT_FILENAME,
     render_vibe_context,
 )
+from ai_core.agent.design_system import (
+    DESIGN_CONFIG_CANDIDATES,
+    DESIGN_CSS_CANDIDATES,
+    extract_design_system,
+)
 from ai_core.agent.events import RunEventBuffer, get_event_buffer
 from ai_core.agent.graph import (
     AgentGraphRunner,
@@ -861,6 +866,9 @@ class RunExecutionService:
             annotation_context = self._build_annotation_context(
                 request, target_files, thread_contexts, current_files
             )
+            # 设计系统兜底：Coder 新增组件必须优先使用项目既有主色 /
+            # 语义类名，不能写死色值。读取失败只降级为空约束。
+            design_system = self._load_design_system(handle.sandbox_id)
             primary_file = target_files[0]
             initial_state: dict[str, Any] = {
                 "run_id": run_id,
@@ -870,6 +878,7 @@ class RunExecutionService:
                 "preview_url": handle.preview_url,
                 "target_file": primary_file,
                 "target_files": target_files,
+                "design_system": design_system,
                 "annotation_context": annotation_context,
                 "messages": [],
                 "current_code": current_files[primary_file],
@@ -1656,13 +1665,20 @@ class RunExecutionService:
             value = item.value if item.value is not None else item.text
             if value is None or value == "":
                 continue
-            answers.append(
-                {
-                    "questionId": item.question_id,
-                    "value": value,
-                    "text": item.text,
-                }
-            )
+            answer: dict[str, Any] = {
+                "questionId": item.question_id,
+                "value": value,
+                "text": item.text,
+            }
+            # 可视化选型：参考组件的类名 / computed CSS 必须跟随答案进入
+            # 状态机，后续 Planner / Coder 直接复制，不再猜样式。
+            if item.reference is not None:
+                reference = item.reference.model_dump(
+                    mode="json", by_alias=True, exclude_none=True
+                )
+                if reference:
+                    answer["reference"] = reference
+            answers.append(answer)
             answered_ids.add(item.question_id)
 
         if request.use_defaults:
@@ -1822,6 +1838,38 @@ class RunExecutionService:
                 f"读取目标文件失败 {list(target_files)}: {exc}"
             ) from exc
         return handle, False, current_files
+
+    def _load_design_system(self, sandbox_id: str) -> dict[str, Any]:
+        """读取沙盒里的 Tailwind 配置 / 全局 CSS 变量。
+
+        只读取固定候选文件，不递归扫描 node_modules；任何读取或解析失败
+        都返回空 dict，保证设计系统只是增强项，不会让 Run 失败。
+        """
+        files: dict[str, str] = {}
+        for path in (*DESIGN_CONFIG_CANDIDATES, *DESIGN_CSS_CANDIDATES):
+            try:
+                files[path] = self._sandbox.read_file(sandbox_id, path)
+            except Exception:  # noqa: BLE001 - 文件不存在是常态
+                continue
+        if not files:
+            return {}
+        try:
+            design = extract_design_system(files)
+        except Exception:  # noqa: BLE001 - 静态解析失败不能阻断生成
+            logger.warning(
+                "extract design system failed sandbox_id=%s",
+                sandbox_id,
+                exc_info=True,
+            )
+            return {}
+        if design:
+            logger.info(
+                "design system loaded sandbox_id=%s colors=%s css_vars=%s",
+                sandbox_id,
+                len(design.get("colors") or {}),
+                len(design.get("cssVariables") or {}),
+            )
+        return design
 
     @staticmethod
     def _assistant_message(

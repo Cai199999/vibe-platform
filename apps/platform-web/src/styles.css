@@ -5094,6 +5094,69 @@ body.is-viewport-panning * {
   pointer-events: none;
 }
 
+/* 可视化选型：等待用户点选参考组件。横幅允许点击“取消”，
+   但自身之外的区域保持穿透，不能让 iframe 失去可选性。 */
+.runtime-reference-banner {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  z-index: 14;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: max-content;
+  max-width: calc(100% - 32px);
+  padding: 10px 12px 10px 14px;
+  border: 1px solid rgba(129, 140, 248, 0.55);
+  border-radius: 12px;
+  background: rgba(2, 6, 23, 0.94);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(14px);
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+
+.runtime-reference-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #818cf8;
+  box-shadow: 0 0 12px rgba(129, 140, 248, 0.9);
+  animation: runtime-background-pulse 1.2s ease-in-out infinite;
+}
+
+.runtime-reference-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  color: #c7d2fe;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.runtime-reference-copy strong {
+  color: #eef2ff;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.runtime-reference-cancel {
+  flex: none;
+  padding: 5px 10px;
+  border: 1px solid rgba(129, 140, 248, 0.4);
+  border-radius: 8px;
+  background: rgba(79, 70, 229, 0.18);
+  color: #e0e7ff;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.runtime-reference-cancel:hover {
+  background: rgba(79, 70, 229, 0.3);
+}
+
 .runtime-background-dot {
   flex: none;
   width: 8px;
@@ -10606,6 +10669,43 @@ body.is-viewport-panning * {
   color: #fde68a;
   font-size: 9px;
   font-weight: 700;
+}
+
+/* 澄清回答命中“和…一样”后的取色提示：浮层内可见，明确下一步动作。 */
+.clarification-reference-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 9px;
+  padding: 8px 9px;
+  border: 1px solid rgba(129, 140, 248, 0.5);
+  border-radius: 9px;
+  background: rgba(49, 46, 129, 0.28);
+  color: #c7d2fe;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.clarification-reference-pick strong {
+  color: #eef2ff;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.clarification-reference-cancel {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 3px 9px;
+  border: 1px solid rgba(129, 140, 248, 0.4);
+  border-radius: 7px;
+  background: rgba(79, 70, 229, 0.18);
+  color: #e0e7ff;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.clarification-reference-cancel:hover {
+  background: rgba(79, 70, 229, 0.32);
 }
 
 .clarification-quick {

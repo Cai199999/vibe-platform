@@ -323,6 +323,123 @@
     return result
   }
 
+  // ------------------------------------------------------------
+  // 视觉签名（reference_styles）
+  // ------------------------------------------------------------
+  // 大模型无法跨域读取真实 DOM，只靠“和登录按钮一样”会凭空猜颜色与圆角。
+  // 这里在 SDK 内提取**绝对视觉事实**：真实 className 集合 + computed CSS。
+  // 父页面把签名原样交给 Coder，模型只允许抄，不允许自由发挥。
+  var STYLE_FINGERPRINT_KEYS = [
+    'backgroundColor',
+    'color',
+    'borderColor',
+    'borderWidth',
+    'borderStyle',
+    'borderRadius',
+    'fontSize',
+    'fontWeight',
+    'lineHeight',
+    'letterSpacing',
+    'boxShadow',
+    'textTransform',
+    'display',
+    'alignItems',
+    'justifyContent',
+    'gap',
+  ]
+
+  function classNamesOf(node) {
+    var tokens = []
+    var seen = {}
+    function addFrom(element) {
+      if (!element || typeof element.getAttribute !== 'function') return
+      var raw = element.getAttribute('class') || ''
+      var parts = String(raw).split(/\s+/)
+      for (var i = 0; i < parts.length; i += 1) {
+        var token = parts[i]
+        if (!token || token.length > 80 || seen[token]) continue
+        // 构建期注入的定位类不属于设计系统，不能回传给模型。
+        if (token.indexOf('vibe-') === 0) continue
+        seen[token] = true
+        tokens.push(token)
+      }
+    }
+    addFrom(node)
+    var descendants = node.querySelectorAll ? node.querySelectorAll('*') : []
+    var limit = Math.min(descendants.length, 24)
+    for (var index = 0; index < limit; index += 1) {
+      addFrom(descendants[index])
+    }
+    return tokens.slice(0, 60)
+  }
+
+  function sideShorthand(computed, prefix) {
+    var top = String(computed[prefix + 'Top'] || '')
+    var right = String(computed[prefix + 'Right'] || '')
+    var bottom = String(computed[prefix + 'Bottom'] || '')
+    var left = String(computed[prefix + 'Left'] || '')
+    if (!top && !right && !bottom && !left) return ''
+    var values = [top, right, bottom, left]
+    var zero = values.every(function (value) {
+      return value === '0px' || value === '0'
+    })
+    if (zero) return ''
+    if (top === right && right === bottom && bottom === left) return top
+    if (top === bottom && right === left) return top + ' ' + right
+    return values.join(' ')
+  }
+
+  /**
+   * 提取组件的视觉指纹。
+   *
+   * 返回扁平结构，键名与 reference_styles 契约一致；空值 / 默认值会被
+   * 剔除，避免把整份 computedStyle 塞进 Prompt。
+   */
+  function styleSignature(node) {
+    if (!node || typeof window.getComputedStyle !== 'function') return null
+    var computed = window.getComputedStyle(node)
+    if (!computed) return null
+    var signature = {
+      tailwindClasses: classNamesOf(node),
+      tag: String(node.tagName || '').toLowerCase(),
+    }
+    for (var i = 0; i < STYLE_FINGERPRINT_KEYS.length; i += 1) {
+      var key = STYLE_FINGERPRINT_KEYS[i]
+      var value = String(computed[key] || '').trim()
+      if (!value) continue
+      if (
+        value === 'none' ||
+        value === 'normal' ||
+        value === 'auto' ||
+        value === '0px'
+      ) {
+        continue
+      }
+      if (value.length > 160) value = value.slice(0, 160)
+      signature[key] = value
+    }
+    var padding = sideShorthand(computed, 'padding')
+    if (padding) signature.padding = padding
+    var margin = sideShorthand(computed, 'margin')
+    if (margin) signature.margin = margin
+    var fontFamily = String(computed.fontFamily || '')
+      .split(',')[0]
+      .replace(/["']/g, '')
+      .trim()
+    if (fontFamily) signature.fontFamily = fontFamily
+    // 透明背景、零边框、无阴影都属于“默认值”，回传只会增加噪声。
+    if (signature.backgroundColor === 'rgba(0, 0, 0, 0)') {
+      delete signature.backgroundColor
+    }
+    if (signature.borderWidth === '0px') {
+      delete signature.borderWidth
+      delete signature.borderColor
+      delete signature.borderStyle
+    }
+    if (signature.boxShadow === 'none') delete signature.boxShadow
+    return signature
+  }
+
   /**
    * 读取节点的源码出处。
    *
@@ -330,8 +447,11 @@
    *  1. data-source-file / data-source-line / data-source-column（插件注入）
    *  2. data-source 中形如 "src/App.jsx:12:5" 的生成标记
    *  3. 仅有业务 marker 时保留 marker，但 file/line 为空
+   *
+   * withStyles 只允许 pick / 圈选分析开启：hover 每帧都会调用它，读取
+   * computedStyle + 扫描子树代价太高。
    */
-  function readSource(node) {
+  function readSource(node, withStyles) {
     if (!node || typeof node.getAttribute !== 'function') return null
     var file = node.getAttribute('data-source-file') || ''
     var line = Number(node.getAttribute('data-source-line') || 0)
@@ -371,6 +491,8 @@
       instanceCount: instanceInfo.instanceCount,
       instanceId: instanceInfo.instanceId,
       callSite: instanceInfo.callSite,
+      // 绝对视觉事实：参考组件 / 目标节点当前真实使用的类名与样式。
+      styleSignature: withStyles ? styleSignature(node) : null,
     }
   }
 
@@ -435,9 +557,9 @@
    * 与父页面 CanvasStage.targetForNode 保持同一字段集合；区别是这里运行
    * 在 iframe 内部，能拿到构建期注入的 file / line / column。
    */
-  function targetDescriptor(node) {
+  function targetDescriptor(node, withStyles) {
     if (!node) return null
-    var source = readSource(node)
+    var source = readSource(node, withStyles)
     if (!source) return null
     var label =
       source.component && source.component !== 'Component'
@@ -461,6 +583,7 @@
       instanceCount: source.instanceCount,
       instanceId: source.instanceId,
       callSite: source.callSite,
+      styleSignature: source.styleSignature,
     }
   }
 
@@ -595,7 +718,7 @@
     return {
       ok: true,
       action: action,
-      target: coversEnough ? targetDescriptor(best.node) : null,
+      target: coversEnough ? targetDescriptor(best.node, true) : null,
       addTarget: targetDescriptor(parentNode) || pageTarget(),
       relativeRect: relative,
       documentRect: toDocumentRect(rect),
@@ -606,7 +729,11 @@
         hitCoverage: best ? Number(best.coverage.toFixed(3)) : 0,
         candidateCount: leaves.length,
       },
-      source: best ? readSource(best.node) : parentNode ? readSource(parentNode) : null,
+      source: best
+        ? readSource(best.node, true)
+        : parentNode
+          ? readSource(parentNode)
+          : null,
       addSource: parentNode ? readSource(parentNode) : null,
       viewport: {
         width: window.innerWidth,
@@ -907,7 +1034,7 @@
     return chain
   }
 
-  function inspectAt(x, y) {
+  function inspectAt(x, y, withStyles) {
     var element = document.elementFromPoint(x, y)
     if (!element) {
       clearOverlay()
@@ -929,7 +1056,7 @@
       }
     }
 
-    var source = readSource(target)
+    var source = readSource(target, withStyles)
     var rect = rectOf(target)
     var containerNode = findContainer(target)
     var containerSource = containerNode ? readSource(containerNode) : null
@@ -958,6 +1085,8 @@
             : source.tag),
       tag: source.tag,
       outerHtml: String(target.outerHTML || '').slice(0, 600),
+      // 参考组件取色：pick 时返回真实视觉签名，hover 时为 null 以节省开销。
+      styles: withStyles ? styleSignature(target) : null,
       container: containerSource
         ? {
             source: containerSource,
@@ -1073,7 +1202,8 @@
     }
     if (data.type === 'pick') {
       if (!enabled) return
-      var payload = inspectAt(Number(data.x), Number(data.y))
+      // pick = 用户最终选中，必须带上真实视觉签名（reference_styles）。
+      var payload = inspectAt(Number(data.x), Number(data.y), true)
       reply(event.source, event.origin, 'picked', payload)
     }
     if (data.type === 'measure') {

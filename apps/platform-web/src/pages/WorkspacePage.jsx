@@ -610,6 +610,12 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
             instanceId:
               precise?.instanceId ?? target?.instanceId ?? undefined,
             callSite: precise?.callSite ?? target?.callSite ?? undefined,
+            // 绝对视觉指纹：SDK 从真实 DOM 提取的类名 + computed CSS。
+            // Coder 修改 / 参考组件时必须基于这些事实，而不是猜样式。
+            styleSignature:
+              precise?.styleSignature ??
+              target?.styleSignature ??
+              undefined,
           },
           selector: target.selector,
           snippet: {
@@ -638,6 +644,9 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
       from: null,
       to: null,
       strokes: [],
+      // 可视化选型：用户点选的参考组件及其真实类名 / computed CSS。
+      // 即使后续重新提交（并非走澄清 checkpoint），也必须保留事实来源。
+      ...(entry.reference ? { reference: entry.reference } : {}),
       // 直接拖拽：dx / dy 是相对组件原始位置的累计偏移（不是本次手势
       // 增量）。后端 _try_move_tool 直接读取它调用 move_component，
       // 不再让模型从自然语言里猜方向与距离。
@@ -787,6 +796,28 @@ function _formatAnswerValue(value) {
       .join('；')
   }
   return String(value ?? '').trim()
+}
+
+/**
+ * 把可视化选型结果挂到标注上。
+ *
+ * 澄清恢复依赖 LangGraph checkpoint；但若恢复后的 Run 失败、用户再次发送，
+ * 前端必须仍能带上同一份 reference，否则 Coder 又只能猜样式。
+ */
+function attachAnnotationReference(run, annotationId, reference) {
+  if (!reference || !annotationId) return run
+  let changed = false
+  const annotations = (run.annotations ?? []).map((annotation) => {
+    if (
+      annotation.id !== annotationId &&
+      annotation.threadId !== annotationId
+    ) {
+      return annotation
+    }
+    changed = true
+    return { ...annotation, reference }
+  })
+  return changed ? { ...run, annotations } : run
 }
 
 function appendClarificationReply(
@@ -3421,6 +3452,7 @@ export default function WorkspacePage() {
     clarification,
     answers,
     comment = '',
+    reference = null,
   ) => {
     const run = runStates[projectId] ?? EMPTY_RUN
     if (
@@ -3432,33 +3464,65 @@ export default function WorkspacePage() {
       return
     }
     inflightRef.current.add(projectId)
-    patchRun(projectId, (previous) => ({
-      // 用户回答先进入聊天记录，再发请求；即使网络失败，回答也不会消失。
-      ...appendClarificationReply(
+    patchRun(projectId, (previous) => {
+      // 先挂 reference，再 append 用户回复；两份状态都不会因网络失败丢失。
+      const withReference = attachAnnotationReference(
         previous,
         annotationId,
-        clarification,
-        answers,
-        comment,
-      ),
-      submitting: true,
-      pendingAnnotationId: annotationId,
-      pendingAction: 'run',
-      clarification: null,
-      error: null,
-    }))
+        reference,
+      )
+      return {
+        ...appendClarificationReply(
+          withReference,
+          annotationId,
+          clarification,
+          answers,
+          comment,
+        ),
+        submitting: true,
+        pendingAnnotationId: annotationId,
+        pendingAction: 'run',
+        clarification: null,
+        error: null,
+      }
+    })
     // 多轮澄清期间幽灵预览必须原地更新：同一个 annotationId 只刷新
-    // 意图文案，不新增视觉占位符。
+    // 意图文案，不新增视觉占位符。参考组件的真实类名也写进幽灵提示，
+    // 让用户在 Coder 执行前就能确认“抄的是不是这个”。
     updatePendingAdditionClarification(
       projectId,
       annotationId,
       [
         ...(answers ?? []).map((item) => _formatAnswerValue(item?.value)),
         comment,
+        reference
+          ? `参考「${reference.label || reference.tag || '组件'}」${
+              reference.classes?.length
+                ? `：${reference.classes.slice(0, 12).join(' ')}`
+                : ''
+            }`
+          : '',
       ]
         .filter(Boolean)
         .join('；'),
+      reference,
     )
+
+    // reference 随第一条答案提交；即使问题答案已存在，也要让后端拿到
+    // 结构化视觉事实。answers 为空时补一条伪答案承载 reference。
+    const payloadAnswers = reference
+      ? answers?.length
+        ? answers.map((item, index) =>
+            index === 0 ? { ...item, reference } : item,
+          )
+        : [
+            {
+              questionId: '__visual_reference__',
+              value: reference.label || 'visual-reference',
+              reference,
+            },
+          ]
+      : answers
 
     try {
       const response = await fetch(
@@ -3470,7 +3534,7 @@ export default function WorkspacePage() {
             Authorization: `Bearer ${session?.token ?? ''}`,
           },
           body: JSON.stringify({
-            answers,
+            answers: payloadAnswers,
             // 主输入栏 / 自定义文本域里的补充说明随澄清一起提交；服务端
             // 把它作为开发者注释并入标注上下文，不会丢失。
             comment: String(comment || '').trim() || null,
@@ -3887,13 +3951,15 @@ export default function WorkspacePage() {
     projectId,
     annotationId,
     answerText,
+    reference = null,
   ) => {
     const map = pendingAdditionsRef.current.get(projectId)
     const item = map?.get(annotationId)
     const text = String(answerText || '').trim()
-    if (!item || !text) return
+    if (!item || (!text && !reference)) return
     map.set(annotationId, {
       ...item,
+      ...(reference ? { reference } : {}),
       clarificationText: text,
       // 最终意图 = 原始指令 + 最新澄清答案；历史轮次不累积。
       finalIntent: [item.intent, text].filter(Boolean).join('；'),
@@ -4040,6 +4106,7 @@ export default function WorkspacePage() {
         instanceCount: Number(firstSource.instanceCount) || undefined,
         instanceId: firstSource.instanceId || undefined,
         callSite: firstSource.callSite || null,
+        styleSignature: firstSource.styleSignature || null,
       },
       inspectSource: {
         file,
@@ -4052,6 +4119,7 @@ export default function WorkspacePage() {
         instanceCount: Number(firstSource.instanceCount) || undefined,
         instanceId: firstSource.instanceId || undefined,
         callSite: firstSource.callSite || null,
+        styleSignature: firstSource.styleSignature || null,
       },
       // buildAnnotation 会原样转成 payload.moves；不要塞进 payload.move，
       // 那是单组件 MOVE 的旧协议。
@@ -4083,7 +4151,13 @@ export default function WorkspacePage() {
           item.finalIntent || item.intent || raw.intent || '',
         ).trim()
         const envelope = buildAnnotation(
-          { ...raw, intent: intentText },
+          {
+            ...raw,
+            intent: intentText,
+            // 视觉选型结果可能存储在幽灵草稿上（澄清期间未能写回
+            // run.annotations）；重新提交时必须随信封一起带走。
+            reference: item.reference || raw.reference || null,
+          },
           sourceCode,
           targetFile,
           files,
@@ -4130,6 +4204,7 @@ export default function WorkspacePage() {
           instanceCount: firstAddition.target.source.instanceCount,
           instanceId: firstAddition.target.source.instanceId,
           callSite: firstAddition.target.source.callSite,
+          styleSignature: firstAddition.target.source.styleSignature,
         }
       : moveEntry?.inspectSource ?? null
 

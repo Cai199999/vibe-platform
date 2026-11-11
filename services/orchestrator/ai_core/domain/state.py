@@ -98,6 +98,9 @@ class AgentState(TypedDict, total=False):
     current_code: str
     # 所有目标文件的最新完整内容：{path: source}
     current_files: dict[str, str]
+    # 项目设计系统（Tailwind 主题色 / CSS 变量 / 语义类名）。只读约束，
+    # 用于强制 Coder 复用 bg-primary 等既有令牌，禁止写死色值。
+    design_system: dict[str, Any]
     # 本轮 Run 开始前的文件快照；审批 Diff / 拒绝回滚都以它为基线。
     # 节点不会更新该字段，始终保持“写沙盒之前”的内容。
     initial_files: dict[str, str]

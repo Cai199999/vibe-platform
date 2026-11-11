@@ -636,6 +636,9 @@ export default function RuntimePanel({
   onInspectDraftChange,
   onInspectDraftCancel,
   onInspectDraftSubmit,
+  // 可视化选型：等待用户在预览里点选参考组件时，暂停浮层让出 iframe。
+  referencePick = null,
+  onReferenceCancel,
   placement = null,
   onPlacementConfirm,
   onPlacementDismiss,
@@ -818,7 +821,9 @@ export default function RuntimePanel({
           </div>
         )}
 
-        {!submitting && !approval && clarification && (
+        {/* 取色期间隐藏 PausedState，否则遮罩会挡住 iframe，用户点不到
+            目标组件；改用顶部窄横幅提示操作，画布保持可点击。 */}
+        {!submitting && !approval && clarification && !referencePick && (
           <div className="runtime-overlay">
             <PausedState
               timeline={timeline}
@@ -827,6 +832,31 @@ export default function RuntimePanel({
               cancelRequested={cancelRequested}
               onCancel={onCancelRun}
             />
+          </div>
+        )}
+
+        {referencePick && !submitting && !approval && (
+          <div
+            className="runtime-reference-banner"
+            role="status"
+            aria-live="polite"
+          >
+            <span className="runtime-reference-dot" aria-hidden="true" />
+            <div className="runtime-reference-copy">
+              <strong>请点击页面上您想参考的组件</strong>
+              <span>
+                {referencePick.referenceText || referencePick.comment
+                  ? `已收到「${referencePick.referenceText || referencePick.comment}」，点中后提取真实类名与样式。`
+                  : '点中后提取真实 Tailwind 类名与 computed 样式。'}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="runtime-reference-cancel"
+              onClick={() => onReferenceCancel?.()}
+            >
+              取消
+            </button>
           </div>
         )}
 
