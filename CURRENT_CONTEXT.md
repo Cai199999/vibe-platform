@@ -30,6 +30,13 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒；中间�
 
 - **通用 AI 全栈平台五项升级（2026-11-11）**：`DecisionImpact`（CRITICAL/MAJOR/MINOR，旧值兼容）；Architect 澄清 10 轮 + 用户“一键采用建议”（AI 无权跳过）；`web_best_practices` Skill 强制挂载 BackendCoder 并生成 Bcrypt 安全模块；契约 `includeAiCapability` 驱动 OpenAI 真实调用 + AI 对话/上传 UI + `OPENAI_API_KEY`；导入支持平台全栈 tar.gz，自动双启 Express(3000)/Vite(5173)、补 `/api` 代理、重注入 `data-source`。306 单测全绿；真实导出→导入与 Playwright 圈选标记验证通过。
 - **混合 RAG（2026-11-11）**：本地 `chromadb` PersistentClient + ONNX MiniLM（镜像预热、离线可用）；`HybridRAGProvider` 并行跑 BM25 与向量、RRF(k=60) 融合、单路故障降级；Architect/Planner 默认切到 `hybrid`，Planner 结果写入 `rag_context/rag_citations`。新增《企业内部安全开发规范与 JWT 鉴权指南》；演示两问 Top-3 精准命中 OAuth 2.1 / 15 分钟；316 单测全绿。
+- **M3 收尾（2026-11-11）**：根 README 重写为“双核架构 / 多智能体 / Hybrid RAG / 沙盒自愈 / 全栈交付”并附 Mermaid 全局图；新增 `docs/INTERVIEW_GUIDE.md`（5 个踩坑与自愈案例）；预留 `EMBEDDING_MODEL` 供 BGE-M3 升级。
+
+### Embedding 升级预留（BGE-M3）
+
+- `.env` 已预留 `EMBEDDING_MODEL`（空 = Chroma 内置 ONNX MiniLM，当前运行路径）。
+- 切换 BGE-M3：设 `EMBEDDING_MODEL=BAAI/bge-m3`，在 `ChromaRAGProvider` 注入对应 EmbeddingFunction（sentence-transformers / FlagEmbedding），并把 `CHROMA_HYBRID_COLLECTION_NAME` 改为新名（如 `knowledge_corpus_bge_m3`）或清空 `data/chroma` 重建。
+- 维度不同，禁止复用旧 collection；BGE-M3 约 2GB 级内存，适合中文长文档，需重新评估索引耗时与镜像体积。
 
 ## 真假边界
 
