@@ -1136,9 +1136,12 @@ class AgentGraphRunner:
             target_ids,
         )
         style_text = "；".join(
-            filter(None, (_answer_text(item) for item in normalized_answers))
+            filter(
+                None,
+                (_answer_text(item) for item in _latest_answers(normalized_answers)),
+            )
         )
-        plan = str(state.get("plan") or "")
+        plan = _STYLE_PLAN_RE.sub("", str(state.get("plan") or "")).rstrip()
         if style_text:
             plan = f"{plan}\n\n视觉样式约束（必须严格复用现有组件类名）：{style_text}"
         return {
@@ -1769,6 +1772,16 @@ class AgentGraphRunner:
         sandbox_id = state["sandbox_id"]
         files = state.get("generated_files") or {}
         patch = state.get("generated_patch") or None
+
+        # 实例作用域守卫：先校验，再写沙盒。污染一旦写进去，HMR 已经
+        # 渲染到用户眼前，回滚成本远高于在 Applier 直接打回 Coder。
+        violation = _instance_scope_violation(state, files, patch)
+        if violation:
+            logger.warning(
+                "instance scope violation rejected: %s",
+                violation["error_code"],
+            )
+            return violation
 
         try:
             # 全量文件与 unified diff 只能二选一：
@@ -2551,12 +2564,78 @@ def _style_targets(context: dict[str, Any]) -> list[dict[str, Any]]:
     return targets
 
 
+_CLARIFICATION_CLAUSE_RE = re.compile(r"[；;]?\s*（澄清回答：.*?）")
+_STYLE_CLAUSE_RE = re.compile(r"[；;]?\s*（样式要求：.*?）")
+_STYLE_COLOR_TOKEN_RE = re.compile(
+    r"(红色|蓝色|绿色|黄色|橙色|紫色|黑色|白色|灰色|"
+    r"red|blue|green|yellow|orange|purple|black|white|gray|grey)",
+    re.IGNORECASE,
+)
+
+
+_STYLE_PLAN_RE = re.compile(
+    r"\n\n视觉样式约束（必须严格复用现有组件类名）：.*$",
+    re.DOTALL,
+)
+
+
+def _latest_answers(answers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """同一 questionId 只保留最后一次回答。
+
+    多轮澄清中用户可能先选“红色”又改成“蓝色”；状态里累加了全部
+    回答，但最终意图只能由最后一轮决定。保留列表顺序，避免把不同
+    问题的答案打乱。
+    """
+    latest: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in answers:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("questionId") or item.get("question_id") or "")
+        if not key:
+            key = f"__anonymous_{len(order)}"
+        if key not in latest:
+            order.append(key)
+        latest[key] = item
+    return [latest[key] for key in order]
+
+
+def _set_final_intent(
+    annotation: dict[str, Any],
+    item: dict[str, Any] | None,
+    text: str,
+) -> None:
+    """把最终意图写入标注信封，覆盖而不是追加历史指令。
+
+    ``finalIntent`` 是唯一权威字段；payload.text / intent.ui.summary
+    同步覆盖，避免不同消费者各读一份旧值。
+    """
+    payload = annotation.setdefault("payload", {})
+    payload["text"] = text
+    payload["finalIntent"] = text
+    intent = annotation.setdefault("intent", {})
+    ui = intent.setdefault("ui", {})
+    ui["summary"] = text
+    if item is not None:
+        item["instruction"] = text
+        item["ui_summary"] = text
+
+
 def _merge_style_text(value: Any, style_text: str) -> str:
-    original = str(value or "").strip()
+    """用最新样式回答覆盖旧样式约束，而不是无限追加。
+
+    用户先说“主色”，后改“和登录按钮一样”时，旧约束必须失效；
+    否则 Coder 会看到两个冲突方案。
+    """
+    original = _STYLE_CLAUSE_RE.sub("", str(value or "")).strip(" ；;")
     if not style_text:
         return original
-    if style_text in original:
-        return original
+    if _STYLE_COLOR_TOKEN_RE.search(style_text):
+        original = _STYLE_COLOR_TOKEN_RE.sub("", original).strip(" ，,；;")
+    if "次要色" in style_text:
+        original = original.replace("主色", "").strip(" ，,；;")
+    elif "主色" in style_text:
+        original = original.replace("次要色", "").strip(" ，,；;")
     return f"{original}（样式要求：{style_text}）" if original else style_text
 
 
@@ -2571,7 +2650,9 @@ def _augment_style_answers(
     的修改指令；BATCH_LAYOUT 需要同时更新嵌套信封与 entry.intent，
     因为 `_explicit_layout_batch` 优先读取后者作为展示与合成指令。
     """
-    style_text = "；".join(filter(None, (_answer_text(item) for item in answers)))
+    style_text = "；".join(
+        filter(None, (_answer_text(item) for item in _latest_answers(answers)))
+    )
     if not style_text or not target_ids:
         return context
 
@@ -2593,16 +2674,7 @@ def _augment_style_answers(
                 if annotation_id not in target_ids:
                     continue
                 merged = _merge_style_text(_annotation_style_text(nested), style_text)
-                nested.setdefault("payload", {})["text"] = merged
-                intent = nested.get("intent")
-                if not isinstance(intent, dict):
-                    intent = {}
-                    nested["intent"] = intent
-                ui = intent.get("ui")
-                if not isinstance(ui, dict):
-                    ui = {}
-                    intent["ui"] = ui
-                ui["summary"] = merged
+                _set_final_intent(nested, None, merged)
                 addition["intent"] = merged
             continue
 
@@ -2618,18 +2690,7 @@ def _augment_style_answers(
             _annotation_style_text(annotation) or str(item.get("instruction") or ""),
             style_text,
         )
-        annotation.setdefault("payload", {})["text"] = merged
-        intent = annotation.get("intent")
-        if not isinstance(intent, dict):
-            intent = {}
-            annotation["intent"] = intent
-        ui = intent.get("ui")
-        if not isinstance(ui, dict):
-            ui = {}
-            intent["ui"] = ui
-        ui["summary"] = merged
-        item["instruction"] = merged
-        item["ui_summary"] = merged
+        _set_final_intent(annotation, item, merged)
     return updated
 
 
@@ -2776,9 +2837,11 @@ def _augment_context_with_answers(
     LangGraph 恢复时不会重新执行 Service 的初始状态构造，因此必须在
     Planner 内把答案写回 annotation_context，Coder 才能看到“改成红色”。
     """
+    # 同一问题只取最后一轮答案；历史回答仅用于审计，不再进入最终意图。
+    latest = _latest_answers(answers)
     answer_text = "；".join(
         f"{item.get('questionId')}: {_answer_text(item)}"
-        for item in answers
+        for item in latest
         if _answer_text(item)
     )
     if not answer_text:
@@ -2788,14 +2851,15 @@ def _augment_context_with_answers(
     for item in updated.get("annotations", []):
         annotation = item.get("annotation") or {}
         payload = annotation.setdefault("payload", {})
-        original = str(payload.get("text") or "").strip()
-        merged = f"{original}（澄清回答：{answer_text}）" if original else answer_text
-        payload["text"] = merged
-        intent = annotation.setdefault("intent", {})
-        ui = intent.setdefault("ui", {})
-        ui["summary"] = merged
-        item["instruction"] = merged
-        item["ui_summary"] = merged
+        original = str(payload.get("finalIntent") or payload.get("text") or "").strip()
+        # 覆盖旧的澄清结论，避免“红色→蓝色”两轮答案同时残留。
+        base = _CLARIFICATION_CLAUSE_RE.sub("", original).strip(" ；;")
+        # 新一轮回答出现明确颜色时，旧指令里的颜色也属于“被否定过的
+        # 历史意图”，必须一并移除；否则 Coder 会看到红蓝两个方案。
+        if any(_STYLE_COLOR_TOKEN_RE.search(_answer_text(row)) for row in latest):
+            base = _STYLE_COLOR_TOKEN_RE.sub("", base).strip(" ，,；;")
+        merged = f"{base}（澄清回答：{answer_text}）" if base else answer_text
+        _set_final_intent(annotation, item, merged)
         # M2 一次澄清默认只作用于当前单标注；批量标注的逐条答案可在 M3
         # 通过 answer.annotationId 扩展。
         break
@@ -3005,6 +3069,178 @@ def _failure(error_logs: str) -> dict[str, Any]:
         "exit_code": -1,
         "duration_ms": 0,
     }
+
+
+# ------------------------------------------------------------
+# 实例作用域守卫
+# ------------------------------------------------------------
+# 前端 SDK 会回传目标元素在页面中的实例信息：
+#   source.file / line        -> 组件内部真实 JSX 出处（基础组件）
+#   source.instance/count     -> 本页面第几个实例 / 实例总数
+#   source.callSite.file/line -> 父级组件里使用该组件的 JSX 调用位置
+#
+# Coder 一旦修改基础组件文件，所有实例都会被污染。Applier 在写盘前做
+# 确定性校验：目标存在 callSite 且补丁改到了基础组件源码时直接打回，
+# 让 evaluator 重新调度 Coder，而不是把污染写进沙盒。
+_SCOPE_ACTIONS = {"CREATE_NEW", "MODIFY_EXISTING", "ADD", "MODIFY"}
+
+
+def _scope_path(path: Any) -> str:
+    """统一路径格式，避免 ./src/App.jsx 与 src/App.jsx 匹配失败。"""
+    value = str(path or "").replace("\\", "/")
+    while value.startswith("./"):
+        value = value[2:]
+    return value
+
+
+def _iter_scope_annotations(annotation: dict[str, Any]) -> list[dict[str, Any]]:
+    """展开 BATCH_LAYOUT 里嵌套的新增组件标注。"""
+    result = [annotation]
+    payload = annotation.get("payload")
+    if isinstance(payload, dict):
+        for addition in payload.get("additions") or []:
+            if not isinstance(addition, dict):
+                continue
+            nested = addition.get("annotation")
+            if isinstance(nested, dict):
+                result.append(nested)
+    return result
+
+
+def _changed_lines_for_scope(
+    state: AgentState,
+    files: dict[str, str],
+    patch: str | None,
+) -> dict[str, set[int] | None]:
+    """计算每个变更文件的新行号集合；None 表示无法精确判断（整文件）。"""
+    current = state.get("current_files") or {}
+    changed: dict[str, set[int] | None] = {}
+    for path, content in (files or {}).items():
+        key = _scope_path(path)
+        before = current.get(path)
+        if before is None:
+            # current_files 的 key 可能带 ./ 前缀，按规范化路径再匹配一次。
+            for old_path, old_content in current.items():
+                if _scope_path(old_path) == key:
+                    before = old_content
+                    break
+        if before is None:
+            # 新建文件：所有行都是新增内容。
+            changed[key] = None
+            continue
+        before_lines = str(before).splitlines()
+        after_lines = str(content).splitlines()
+        lines: set[int] = set()
+        matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines)
+        for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+            if tag == "equal":
+                continue
+            if j2 > j1:
+                lines.update(range(j1 + 1, j2 + 1))
+            else:
+                # 纯删除没有新行号，用删除位置附近的一行标记结构变化。
+                lines.add(max(1, min(len(after_lines) or 1, j1)))
+        changed[key] = lines
+    for path in _diff_paths(patch or ""):
+        key = _scope_path(path)
+        if key not in changed:
+            changed[key] = None
+    return changed
+
+
+def _scope_violation_payload(
+    *,
+    action: str,
+    file: str,
+    source_line: int,
+    instance_count: int,
+    call_site_file: str,
+    call_site_line: int,
+) -> dict[str, Any]:
+    message = (
+        f"检测到实例作用域越界：{action} 目标 {file}:{source_line}"
+        f"（页面共 {instance_count} 个实例，父级调用点 "
+        f"{call_site_file or '未知'}:{call_site_line or 0}），"
+        "但补丁修改了基础组件源码。请改为修改 callSite 指向的父级 JSX "
+        "调用，只影响目标实例，禁止污染同类组件。"
+    )
+    return {
+        "apply_failed": True,
+        "verify_result": _failure(message),
+        "error_code": "INSTANCE_SCOPE_VIOLATION",
+        "status": "APPLYING",
+        "messages": [_message("applier", message, error=True)],
+    }
+
+
+def _instance_scope_violation(
+    state: AgentState,
+    files: dict[str, str],
+    patch: str | None,
+) -> dict[str, Any] | None:
+    """Applier 写盘前的硬校验：禁止为了单个实例去改基础组件。"""
+    changed = _changed_lines_for_scope(state, files, patch)
+    if not changed:
+        return None
+    context = state.get("annotation_context") or {}
+    for item in context.get("annotations") or []:
+        if not isinstance(item, dict):
+            continue
+        annotation = item.get("annotation")
+        if not isinstance(annotation, dict):
+            continue
+        for scoped in _iter_scope_annotations(annotation):
+            action = str(scoped.get("action") or "").upper()
+            if action not in _SCOPE_ACTIONS:
+                continue
+            target = scoped.get("target")
+            source = target.get("source") if isinstance(target, dict) else None
+            if not isinstance(source, dict):
+                continue
+            file = _scope_path(source.get("file"))
+            if not file or file not in changed:
+                continue
+            source_line = int(source.get("line") or 0)
+            instance_count = int(
+                source.get("instanceCount") or source.get("instance_count") or 1
+            )
+            call_site = source.get("callSite") or source.get("call_site")
+            call_site = call_site if isinstance(call_site, dict) else {}
+            call_site_file = _scope_path(call_site.get("file"))
+            call_site_line = int(call_site.get("line") or 0)
+
+            # 情况一：基础组件与父级调用点分属不同文件。Prompt 铁律要求
+            # 局部变更必须通过父级 JSX 调用完成；只要补丁改了基础组件
+            # 文件，就直接打回，避免“当前页面恰好只有一个实例”时侥幸
+            # 放行、后续其他页面复用后再次被污染。
+            if call_site_file and call_site_file != file:
+                return _scope_violation_payload(
+                    action=action,
+                    file=file,
+                    source_line=source_line,
+                    instance_count=instance_count,
+                    call_site_file=call_site_file,
+                    call_site_line=call_site_line,
+                )
+
+            # 情况二：组件与父级在同一文件。允许在 callSite 周围做局部
+            # 变体（条件渲染 / 传 props）；但只要改到组件主体源码行，
+            # 就会同时改变所有实例的渲染结果，必须打回。
+            if instance_count > 1 and call_site_file == file and call_site_line:
+                lines = changed.get(file)
+                body_touched = lines is None or any(
+                    abs(line - source_line) <= 2 for line in lines
+                )
+                if body_touched:
+                    return _scope_violation_payload(
+                        action=action,
+                        file=file,
+                        source_line=source_line,
+                        instance_count=instance_count,
+                        call_site_file=call_site_file,
+                        call_site_line=call_site_line,
+                    )
+    return None
 
 
 def _select_error_source(logs: str, state: AgentState) -> str:

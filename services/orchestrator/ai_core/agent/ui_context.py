@@ -129,6 +129,7 @@ def compact_annotations(
     annotations: list[dict[str, Any]],
     *,
     max_history: int = 4,
+    include_history: bool = True,
 ) -> list[dict[str, Any]]:
     """把 AnnotationEnvelope 压缩成纯视觉指令。
 
@@ -164,8 +165,12 @@ def compact_annotations(
             if isinstance(annotation.get("payload"), dict)
             else {}
         )
+        # finalIntent 是后端归一化后的“唯一有效意图”。多轮对话中用户
+        # 纠正过颜色 / 方案时，旧指令只保留在聊天记录中供审计，绝不能
+        # 再次进入 Coder Prompt，否则模型会把“红色 + 蓝色”同时实现。
         instruction = str(
-            payload.get("text")
+            payload.get("finalIntent")
+            or payload.get("text")
             or ui.get("summary")
             or annotation.get("instruction")
             or ""
@@ -188,8 +193,26 @@ def compact_annotations(
                 str(value).strip() for value in acceptance if str(value).strip()
             ][:6],
         }
-        # 相对坐标只用于判断插入父容器 / 顺序，保留原字段名以兼容既有 Prompt。
-        for key in ("relativeTarget", "relative_target", "position"):
+        # 实例级定位：同一个源文件行可能在页面中渲染多次；把序号、
+        # 总数与父级调用点一并交给模型，禁止它改基础组件来“批量生效”。
+        source_view = {
+            key: source.get(key)
+            for key in (
+                "file",
+                "line",
+                "column",
+                "component",
+                "sourceKind",
+                "instance",
+                "instanceCount",
+                "instanceId",
+                "callSite",
+            )
+            if source.get(key) not in (None, "", 0)
+        }
+        if source_view:
+            item["source"] = source_view
+        for key in ("instanceId", "relativeTarget", "relative_target", "position"):
             value = annotation.get(key)
             if value is not None:
                 item[key] = value
@@ -214,26 +237,30 @@ def compact_annotations(
             if isinstance(annotation.get("threadContext"), dict)
             else {}
         )
-        history = thread.get("chatHistory") or []
-        if history:
-            item["chatHistory"] = [
-                {
-                    "role": message.get("role"),
-                    "content": str(message.get("content") or "")[:240],
-                }
-                for message in history[-max_history:]
-                if isinstance(message, dict)
-            ]
-        previous = thread.get("previousRuns") or []
-        if previous:
-            item["previousRuns"] = [
-                {
-                    "summary": str(run.get("summary") or "")[:200],
-                    "status": run.get("status"),
-                }
-                for run in previous[-2:]
-                if isinstance(run, dict)
-            ]
+        # Coder 只允许看到最终意图：历史用户消息包含被用户否定过的
+        # “红色 / 大一点 / 用方案 A”，一旦进入 Prompt 就会被模型重新执行。
+        # Planner 仍可看历史用于理解指代，Coder 则完全剥离。
+        if include_history:
+            history = thread.get("chatHistory") or []
+            if history:
+                item["chatHistory"] = [
+                    {
+                        "role": message.get("role"),
+                        "content": str(message.get("content") or "")[:240],
+                    }
+                    for message in history[-max_history:]
+                    if isinstance(message, dict)
+                ]
+            previous = thread.get("previousRuns") or []
+            if previous:
+                item["previousRuns"] = [
+                    {
+                        "summary": str(run.get("summary") or "")[:200],
+                        "status": run.get("status"),
+                    }
+                    for run in previous[-2:]
+                    if isinstance(run, dict)
+                ]
         compacted.append(
             {key: value for key, value in item.items() if value not in (None, "", [])}
         )
@@ -501,13 +528,21 @@ def build_ui_coder_context(
     full_file_token_limit: int = UI_FULL_FILE_TOKEN_LIMIT,
     diff_token_threshold: int = UI_DIFF_TOKEN_THRESHOLD,
     include_annotations: bool = True,
+    include_history: bool = True,
 ) -> UiCoderContext:
     """组装 UI Coder 的极简上下文。
 
     多文件时优先保障第一个目标文件；其余文件如果让总预算超限，会被
     明确标记为“未加载，禁止修改”，并要求模型只输出已加载文件的局部 diff。
+
+    ``include_history=False`` 用于 FrontendCoder：只保留最终意图，剥离
+    被用户否定过的历史指令，避免旧样式被重新写回代码。
     """
-    compacted = compact_annotations(annotations) if include_annotations else []
+    compacted = (
+        compact_annotations(annotations, include_history=include_history)
+        if include_annotations
+        else []
+    )
     annotations_text = json.dumps(
         compacted,
         ensure_ascii=False,

@@ -1084,6 +1084,9 @@ function CanvasStage({
   onFrameInteraction,
   // iframe 内部路由切换 / 整页重载：父级必须清空当前标注，避免圈画在空气上。
   onFrameRouteChange,
+  // iframe document ready（首次加载 / Vite HMR 重载）。父级据此丢弃已经
+  // 被真实 DOM 取代的视觉暂存幽灵节点，避免出现“真实按钮 + 假按钮”。
+  onFrameReady,
   // 直接拖拽：SDK 在 iframe 内完成手势与临时位移，松手后把目标与
   // 累计位移回传父页面，由 WorkspacePage 静默提交给 UI Agent。
   onComponentDragStart,
@@ -1108,6 +1111,7 @@ function CanvasStage({
   const onFrameScrollRef = useRef(onFrameScroll)
   const onFrameInteractionRef = useRef(onFrameInteraction)
   const onFrameRouteChangeRef = useRef(onFrameRouteChange)
+  const onFrameReadyRef = useRef(onFrameReady)
   // iframe 内部滚动位置：标注圈用文档坐标存储，显示时减去 scrollY 重绘。
   // 这份状态只用于渲染，不同步给预览（预览有自己的 scrollStateRef）。
   const [frameScroll, setFrameScroll] = useState({
@@ -1128,6 +1132,7 @@ function CanvasStage({
   onFrameScrollRef.current = onFrameScroll
   onFrameInteractionRef.current = onFrameInteraction
   onFrameRouteChangeRef.current = onFrameRouteChange
+  onFrameReadyRef.current = onFrameReady
   onComponentDragStartRef.current = onComponentDragStart
   onComponentDragMoveRef.current = onComponentDragMove
   onComponentDragEndRef.current = onComponentDragEnd
@@ -1427,6 +1432,9 @@ function CanvasStage({
             height: Number(readyScroll.height) || current.height,
           }))
         }
+        // 通知父级：真实 DOM 已重建（首次加载或 HMR）。父级必须立刻
+        // 丢弃视觉暂存幽灵节点，否则会和沙盒渲染出的真实组件重复。
+        onFrameReadyRef.current?.(data.payload)
         return
       }
       if (data.type === 'scroll') {
@@ -2181,7 +2189,9 @@ function CanvasStage({
                       {item.componentLabel || '新增组件'}
                     </span>
                     <span className="pending-addition-ghost-intent">
-                      {item.intent}
+                      {/* 多轮澄清时同一条记录原地刷新最终意图，绝不新建
+                          第二个幽灵节点。 */}
+                      {item.finalIntent || item.intent}
                     </span>
                   </div>
                 </div>

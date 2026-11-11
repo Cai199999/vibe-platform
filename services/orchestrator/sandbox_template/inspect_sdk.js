@@ -163,6 +163,166 @@
     return 'jsx'
   }
 
+  // ------------------------------------------------------------
+  // 实例定位（instance / callSite）
+  // ------------------------------------------------------------
+  // 可复用组件在页面中会渲染出多个 DOM 节点，它们共享同一份源码出处
+  // （file:line:column）。仅凭源码行号无法区分“第几个实例”，模型就会
+  // 去改基础组件，污染同一页面的所有同类组件。这里在运行时补充：
+  //   - instance：当前 DOM 节点在相同源码出处中的序号（1 起）；
+  //   - instanceCount：该源码出处在本页面的实例总数；
+  //   - callSite：父级组件里真正写 <Button /> 的那个 JSX 调用位置。
+  var instanceCache = null
+  var instanceCacheAt = 0
+
+  function normalizeSourceFile(file) {
+    var value = String(file || '')
+      .replace(/\\/g, '/')
+      .split('?')[0]
+    var srcIndex = value.lastIndexOf('/src/')
+    if (srcIndex >= 0) return value.slice(srcIndex + 1)
+    if (value.indexOf('/app/') === 0) return value.slice(5)
+    return value
+  }
+
+  function sourceKeyOf(file, line, column) {
+    return [file || '', Number(line) || 0, Number(column) || 0].join(':')
+  }
+
+  function buildInstanceIndex() {
+    var map = new Map()
+    var nodes = document.querySelectorAll('[data-source-file]')
+    for (var i = 0; i < nodes.length; i += 1) {
+      var node = nodes[i]
+      var key = sourceKeyOf(
+        node.getAttribute('data-source-file'),
+        node.getAttribute('data-source-line'),
+        node.getAttribute('data-source-column'),
+      )
+      var list = map.get(key)
+      if (!list) {
+        list = []
+        map.set(key, list)
+      }
+      list.push(node)
+    }
+    instanceCache = map
+    instanceCacheAt = Date.now()
+    return map
+  }
+
+  function sourceInstanceIndex(file, line, column) {
+    // 250ms 缓存足够覆盖 hover / pick / drag 的连续读取，又能在 HMR 后
+    // 快速失效；避免每次 readSource 都全量扫描 DOM。
+    if (!instanceCache || Date.now() - instanceCacheAt > 250) {
+      buildInstanceIndex()
+    }
+    return instanceCache.get(sourceKeyOf(file, line, column)) || []
+  }
+
+  function fiberFromNode(node) {
+    if (!node) return null
+    var keys = Object.keys(node)
+    for (var i = 0; i < keys.length; i += 1) {
+      var key = keys[i]
+      if (
+        key.indexOf('__reactFiber$') === 0 ||
+        key.indexOf('__reactInternalInstance$') === 0
+      ) {
+        return node[key]
+      }
+    }
+    return null
+  }
+
+  function componentNameOfFiber(fiber) {
+    if (!fiber) return ''
+    var type = fiber.type
+    if (typeof type === 'function') {
+      return type.displayName || type.name || ''
+    }
+    if (type && typeof type === 'object') {
+      return (
+        type.displayName ||
+        type.name ||
+        (type.render &&
+          (type.render.displayName || type.render.name)) ||
+        ''
+      )
+    }
+    return ''
+  }
+
+  function debugLocationOfFiber(fiber) {
+    var source = fiber && fiber._debugSource
+    if (!source) return null
+    var file = normalizeSourceFile(source.fileName || '')
+    var line = Number(source.lineNumber) || 0
+    var column = Number(source.columnNumber) || 0
+    if (!file || !line) return null
+    return { file: file, line: line, column: column }
+  }
+
+  /** owner 之上是否还存在组件父级；没有则 owner 就是根组件（App）。 */
+  function hasComponentAncestor(fiber) {
+    var current = fiber && fiber.return
+    while (current) {
+      if (current.tag === 3) return false
+      if (componentNameOfFiber(current)) return true
+      current = current.return
+    }
+    return false
+  }
+
+  function callSiteFor(node) {
+    var fiber = fiberFromNode(node)
+    var current = fiber
+    while (current) {
+      var name = componentNameOfFiber(current)
+      if (name) {
+        // 根组件直接挂在 HostRoot 下，它的 _debugSource 指向 main.jsx，
+        // 不是业务 JSX 调用点，绝不能回传成 callSite。
+        if (!hasComponentAncestor(current)) return null
+        var location = debugLocationOfFiber(current)
+        if (!location) return null
+        return {
+          file: location.file,
+          line: location.line,
+          column: location.column,
+          component: name,
+        }
+      }
+      current = current.return
+    }
+    return null
+  }
+
+  /**
+   * 计算节点在页面中的实例信息。
+   *
+   * 注意：instance 依赖当前 DOM 顺序，只在本次渲染内有效；跨 HMR 后
+   * 必须重新计算，因此 instanceId 由“源码 key + 序号”组成，不含随机数。
+   */
+  function instanceInfoFor(node, file, line, column) {
+    var result = {
+      instance: 1,
+      instanceCount: 1,
+      instanceId: '',
+      callSite: null,
+    }
+    if (!file || !line) return result
+    var matches = sourceInstanceIndex(file, line, column)
+    if (matches.length > 0) {
+      result.instanceCount = matches.length
+      var index = matches.indexOf(node)
+      result.instance = index >= 0 ? index + 1 : 1
+    }
+    result.instanceId =
+      sourceKeyOf(file, line, column) + '#' + result.instance
+    result.callSite = callSiteFor(node)
+    return result
+  }
+
   /**
    * 读取节点的源码出处。
    *
@@ -194,6 +354,9 @@
       (CONTAINER_TAGS[String(node.tagName || '').toLowerCase()]
         ? 'container'
         : 'element')
+    // 实例定位：同一份源码可能渲染多个 DOM 节点，必须把“第几个”与
+    // 父级 JSX 调用位置一并回传，否则 Coder 只能改基础组件造成全局污染。
+    var instanceInfo = instanceInfoFor(node, file, line, column)
     return {
       file: file,
       line: line,
@@ -204,6 +367,10 @@
       kind: kind,
       tag: String(node.tagName || '').toLowerCase(),
       selector: marker ? '[data-source="' + marker + '"]' : '',
+      instance: instanceInfo.instance,
+      instanceCount: instanceInfo.instanceCount,
+      instanceId: instanceInfo.instanceId,
+      callSite: instanceInfo.callSite,
     }
   }
 
@@ -290,6 +457,10 @@
       line: source.line,
       column: source.column,
       sourceKind: source.sourceKind,
+      instance: source.instance,
+      instanceCount: source.instanceCount,
+      instanceId: source.instanceId,
+      callSite: source.callSite,
     }
   }
 

@@ -64,6 +64,8 @@ function ProjectWorkspaceInner({
   onClearAnnotations,
   // iframe 内部路由切换 / 重载：清空画布标注与当前 Inspect 草稿。
   onFrameRouteChange,
+  // iframe 文档重建（首次加载 / HMR）：父级清空视觉暂存幽灵节点。
+  onFrameReady,
   onApprovalDecision,
   onCancelRun,
   onSubmit,
@@ -398,6 +400,12 @@ function ProjectWorkspaceInner({
         marker: source.marker || '',
         selector: source.selector || '',
         kind: source.kind || 'element',
+        // 实例作用域：同一源码可能对应多个 DOM 实例，必须原样带给
+        // AnnotationEnvelope，Coder 才能只改 callSite 而不是基础组件。
+        instance: Number(source.instance) || undefined,
+        instanceCount: Number(source.instanceCount) || undefined,
+        instanceId: source.instanceId || undefined,
+        callSite: source.callSite || null,
       },
       container: payload.container
         ? {
@@ -460,6 +468,10 @@ function ProjectWorkspaceInner({
         fallback.tag ||
         (isCreateAction(action) ? 'div' : 'button'),
       kind: sourceItem.kind || 'element',
+      instance: Number(sourceItem.instance) || undefined,
+      instanceCount: Number(sourceItem.instanceCount) || undefined,
+      instanceId: sourceItem.instanceId || undefined,
+      callSite: sourceItem.callSite || null,
     })
     onAnnotationAdd?.({
       rect: inspectDraft.worldRect,
@@ -490,6 +502,10 @@ function ProjectWorkspaceInner({
         component: effective.component || 'Component',
         sourceKind: effective.sourceKind || 'jsx',
         kind: effective.kind || 'element',
+        instance: Number(effective.instance) || undefined,
+        instanceCount: Number(effective.instanceCount) || undefined,
+        instanceId: effective.instanceId || undefined,
+        callSite: effective.callSite || null,
       },
     })
     setInspectDraft(null)
@@ -503,6 +519,11 @@ function ProjectWorkspaceInner({
   const handleFrameRouteChange = (payload) => {
     setInspectDraft(null)
     onFrameRouteChange?.(payload)
+  }
+
+  /** HMR / 首次加载：真实 DOM 已重建，交给 WorkspacePage 清理幽灵草稿。 */
+  const handleFrameReady = (payload) => {
+    onFrameReady?.(payload)
   }
 
   return (
@@ -839,6 +860,7 @@ function ProjectWorkspaceInner({
               onInspectPick={handleInspectPick}
               onFrameScroll={handleFrameScroll}
               onFrameRouteChange={handleFrameRouteChange}
+              onFrameReady={handleFrameReady}
               onFrameInteraction={handleFrameInteraction}
               onComponentDragStart={handleComponentDragStart}
               onComponentDragMove={handleComponentDragMove}

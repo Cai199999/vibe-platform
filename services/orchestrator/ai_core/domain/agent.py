@@ -21,6 +21,21 @@ from ai_core.domain.common import CamelModel, iso_datetime
 # ------------------------------------------------------------
 # AnnotationEnvelope（M1 只使用 source 模式）
 # ------------------------------------------------------------
+class AnnotationCallSite(CamelModel):
+    """可复用组件在父级 JSX 中的调用位置。
+
+    ``AnnotationSource`` 指向 DOM 节点真正落地的源码（例如
+    ``Button.jsx``），而 callSite 指向上层页面里 ``<Button />`` 的调用点。
+    修改“某一个实例”时必须在 callSite 所在的父组件中做局部处理，
+    绝不能改基础组件本身，否则页面上所有同组件实例都会被污染。
+    """
+
+    file: str | None = None
+    line: int | None = None
+    column: int | None = None
+    component: str | None = None
+
+
 class AnnotationSource(CamelModel):
     file: str | None = None
     line: int | None = None
@@ -29,6 +44,14 @@ class AnnotationSource(CamelModel):
     end_column: int | None = None
     component: str | None = None
     source_kind: str | None = None
+    # 实例定位：同一个 JSX 调用可能被 map / 多次渲染，DOM 中会出现多个
+    # 相同 file:line 的实例。instance 为 1-based 序号，instanceCount 为
+    # 当前页面中的总实例数，instanceId 是稳定的 file:line:col#index。
+    instance: int | None = Field(default=None, ge=1)
+    instance_count: int | None = Field(default=None, ge=1)
+    instance_id: str | None = None
+    # React dev 模式下由运行时 fiber 读取的父级调用点。
+    call_site: AnnotationCallSite | None = None
 
 
 class AnnotationSnippet(CamelModel):

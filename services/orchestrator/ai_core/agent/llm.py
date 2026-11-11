@@ -534,6 +534,11 @@ class DeepSeekAgentLLM(AgentLLM):
             "时，计划只能写“给目标元素追加 transform: translate3d(dx,dy,0)”，"
             "禁止规划 width / height / left / top / position / margin 变更；"
             "拖拽浮层是画布交互，不是最终代码的一部分。\n"
+            "- **实例作用域铁律**：source.instanceCount > 1 或 "
+            "source.callSite.file 与 source.file 不同时，目标只是某个可复用"
+            "组件的实例。计划必须写“修改 callSite 所在父组件的 JSX 调用”，"
+            "**禁止**规划修改基础组件（Button.jsx / Card.jsx 等）或全局 CSS，"
+            "否则会污染同页面的所有实例。\n"
             "- **职责边界铁律**：你只规划前端视觉与 DOM（组件结构、样式、"
             "布局、文案、可访问性）。接口路径、数据库、鉴权、业务分支由 "
             "Architect / BackendCoder 负责；即使需求涉及业务逻辑，本轮 UI "
@@ -661,6 +666,9 @@ class DeepSeekAgentLLM(AgentLLM):
             budget_tokens=budget,
             full_file_token_limit=full_file_limit,
             diff_token_threshold=diff_threshold,
+            # Coder 只吃最终意图：历史里的“先改成红色，不，蓝色”会把
+            # 两个冲突方案同时写进代码。
+            include_history=False,
         )
         force_diff = ui_context.force_diff or compact or prefer_fast
         # CREATE_NEW 必须真正新增 JSX 节点。仅改 import / 样式的“假补丁”
@@ -711,6 +719,18 @@ class DeepSeekAgentLLM(AgentLLM):
             "等叶子元素内部；target 为空时插到 main / 根 section 末尾。\n"
             "- 标注 action=MODIFY_EXISTING（旧别名 MODIFY）：只改目标元素的"
             "视觉属性，不删除无关节点。\n"
+            "- **实例作用域铁律（最高优先级）**：每个标注的 "
+            "source 携带 file / line / column / instance / instanceCount / "
+            "callSite。若 source.instanceCount > 1，或 source.callSite.file "
+            "与 source.file 不同，说明目标是可复用组件的某一个实例；"
+            "**绝对禁止**修改基础组件文件（如 Button.jsx / Card.jsx）的"
+            "默认样式，也禁止改全局 CSS。必须到 callSite 指向的父级组件中，"
+            "通过修改对应的 JSX 调用来实现局部变更：条件渲染、传入不同的 "
+            "className / 内联样式 props，或增加 data-* 定位属性。"
+            "只允许影响第 instance 个实例，其余实例必须保持原样。\n"
+            "- **最终意图铁律**：只实现系统给出的最终确认意图（finalIntent）。"
+            "历史聊天记录里的旧颜色 / 旧方案 / 被否定过的指令一律视为不存在，"
+            "不得同时保留，也不得回退。\n"
             "- 兼容旧客户端：relativeX / relativeY 等像素字段只能用于判断 "
             "flex/grid 插入顺序或 margin 粗调，不得写死绝对坐标；旧版 "
             "payload.position 仅作为历史审计信息，不再驱动 left/top 定位。\n"

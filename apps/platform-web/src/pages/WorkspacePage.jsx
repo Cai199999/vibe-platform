@@ -600,6 +600,16 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
                 : resolvedFile.endsWith('.html')
                   ? 'html'
                   : 'jsx'),
+            // 实例作用域：file:line 只能定位到组件源码，无法区分同一
+            // 组件的第几个实例；instance / callSite 必须随 Envelope 进入
+            // 后端 Prompt，否则 Coder 会改基础组件造成全局污染。
+            instance: Number(precise?.instance ?? target?.instance) || undefined,
+            instanceCount:
+              Number(precise?.instanceCount ?? target?.instanceCount) ||
+              undefined,
+            instanceId:
+              precise?.instanceId ?? target?.instanceId ?? undefined,
+            callSite: precise?.callSite ?? target?.callSite ?? undefined,
           },
           selector: target.selector,
           snippet: {
@@ -3309,6 +3319,15 @@ export default function WorkspacePage() {
         if (event.type === 'clarification.required') {
           clarificationEvent = event
         }
+        // 代码已经写入沙盒：视觉暂存必须在这一帧立刻退场。SSE 终态可能
+        // 早于 handleSaveLayout / handleClarificationAnswer 的 await 返回，
+        // 如果等调用方收尾，就会出现“真实按钮 + 幽灵按钮”并存的重复帧。
+        if (event.type === 'run.succeeded') {
+          clearPendingAdditionsForRun(projectId, {
+            annotationId,
+            runId: event.runId ?? event.payload?.runId ?? null,
+          })
+        }
         if (closedProjectsRef.current.has(projectId)) {
           if (
             event.type === 'run.succeeded' ||
@@ -3428,6 +3447,18 @@ export default function WorkspacePage() {
       clarification: null,
       error: null,
     }))
+    // 多轮澄清期间幽灵预览必须原地更新：同一个 annotationId 只刷新
+    // 意图文案，不新增视觉占位符。
+    updatePendingAdditionClarification(
+      projectId,
+      annotationId,
+      [
+        ...(answers ?? []).map((item) => _formatAnswerValue(item?.value)),
+        comment,
+      ]
+        .filter(Boolean)
+        .join('；'),
+    )
 
     try {
       const response = await fetch(
@@ -3813,6 +3844,82 @@ export default function WorkspacePage() {
     publishPendingAdditions(projectId)
   }
 
+  /**
+   * run.succeeded 到达时立即撤掉视觉幽灵节点。
+   *
+   * 这里只处理“看得见的假节点”，不删除 layoutFlushRef 快照：成功后的
+   * 标注清理、位移基线更新与 Toast 仍由 handleSaveLayout /
+   * handleClarificationAnswer 统一收尾，避免重复提交或丢失提示。
+   */
+  const clearPendingAdditionsForRun = (
+    projectId,
+    { annotationId = null, runId = null } = {},
+  ) => {
+    const snapshot = layoutFlushRef.current.get(projectId)
+    if (snapshot) {
+      const belongsToRun =
+        snapshot.runId === null ||
+        runId === null ||
+        snapshot.runId === runId
+      if (belongsToRun) {
+        const map = pendingAdditionsRef.current.get(projectId)
+        if (map?.size) {
+          snapshot.additionIds.forEach((id) => map.delete(id))
+          if (map.size === 0) pendingAdditionsRef.current.delete(projectId)
+          publishPendingAdditions(projectId)
+        }
+        snapshot.additionsCleared = true
+        return true
+      }
+    }
+    // 非布局提交（单标注对话）没有 snapshot：只清理该标注的占位符。
+    if (annotationId) removePendingAddition(projectId, annotationId)
+    return false
+  }
+
+  /**
+   * 澄清回答期间原地更新同一条视觉暂存记录。
+   *
+   * Map 的 key 始终是 annotationId，绝不新建占位符；这里只刷新最终意图
+   * 文案，避免多轮问答后出现第二个幽灵按钮。
+   */
+  const updatePendingAdditionClarification = (
+    projectId,
+    annotationId,
+    answerText,
+  ) => {
+    const map = pendingAdditionsRef.current.get(projectId)
+    const item = map?.get(annotationId)
+    const text = String(answerText || '').trim()
+    if (!item || !text) return
+    map.set(annotationId, {
+      ...item,
+      clarificationText: text,
+      // 最终意图 = 原始指令 + 最新澄清答案；历史轮次不累积。
+      finalIntent: [item.intent, text].filter(Boolean).join('；'),
+    })
+    publishPendingAdditions(projectId)
+  }
+
+  /**
+   * iframe 文档重建（首次加载 / Vite HMR）。
+   *
+   * HMR 说明沙盒源码已变、真实 DOM 已重新渲染；此时仍挂着的幽灵节点
+   * 一定是过期草稿。只在“确实有一次布局提交”时清理，避免误删用户
+   * 尚未提交的新增组件。
+   */
+  const handleFrameReady = (projectId) => {
+    const run = runStatesRef.current[projectId] ?? EMPTY_RUN
+    const hasLayoutSnapshot = layoutFlushRef.current.has(projectId)
+    if (!hasLayoutSnapshot && !run.submitting) return
+    const snapshot = layoutFlushRef.current.get(projectId)
+    if (snapshot) snapshot.additionsCleared = true
+    if (pendingAdditionsRef.current.get(projectId)?.size) {
+      pendingAdditionsRef.current.delete(projectId)
+      publishPendingAdditions(projectId)
+    }
+  }
+
   /** 悬浮条文案：把“新增组件”和“位置调整”合并成一句人类可读摘要。 */
   const describePendingChanges = (projectId, overrides = {}) => {
     // 优先读 ref：点击瞬间 state 可能还落后一帧，不能漏掉刚画的组件。
@@ -3929,6 +4036,10 @@ export default function WorkspacePage() {
         role: firstSource.tag || 'element',
         component: firstSource.component || 'App',
         tag: firstSource.tag || 'div',
+        instance: Number(firstSource.instance) || undefined,
+        instanceCount: Number(firstSource.instanceCount) || undefined,
+        instanceId: firstSource.instanceId || undefined,
+        callSite: firstSource.callSite || null,
       },
       inspectSource: {
         file,
@@ -3937,6 +4048,10 @@ export default function WorkspacePage() {
         component: firstSource.component || 'App',
         sourceKind: firstSource.sourceKind || 'jsx',
         marker: firstSource.marker || '',
+        instance: Number(firstSource.instance) || undefined,
+        instanceCount: Number(firstSource.instanceCount) || undefined,
+        instanceId: firstSource.instanceId || undefined,
+        callSite: firstSource.callSite || null,
       },
       // buildAnnotation 会原样转成 payload.moves；不要塞进 payload.move，
       // 那是单组件 MOVE 的旧协议。
@@ -3962,15 +4077,23 @@ export default function WorkspacePage() {
     const additionBatch = additions
       .map((item) => {
         const raw = findAnnotation(item.annotationId) || item
-        const envelope = buildAnnotation(raw, sourceCode, targetFile, files)
-        if (!envelope?.annotationId) return null
-        const component = inferPendingComponentType(
-          item.intent || raw.intent || '',
+        // 澄清后的重试必须只用最终意图：finalIntent 已覆盖被否定过的
+        // 旧颜色 / 旧方案，不能再回退到 raw.intent。
+        const intentText = String(
+          item.finalIntent || item.intent || raw.intent || '',
+        ).trim()
+        const envelope = buildAnnotation(
+          { ...raw, intent: intentText },
+          sourceCode,
+          targetFile,
+          files,
         )
+        if (!envelope?.annotationId) return null
+        const component = inferPendingComponentType(intentText)
         const { chatHistory, screenshot, ...compact } = envelope
         return {
           annotationId: envelope.annotationId,
-          intent: String(item.intent || raw.intent || '').trim(),
+          intent: intentText,
           componentType: component.key,
           componentLabel: component.label,
           annotation: compact,
@@ -4003,6 +4126,10 @@ export default function WorkspacePage() {
           component: firstAddition.target.source.component || 'App',
           sourceKind: firstAddition.target.source.sourceKind || 'jsx',
           marker: firstAddition.target.source.marker || '',
+          instance: firstAddition.target.source.instance,
+          instanceCount: firstAddition.target.source.instanceCount,
+          instanceId: firstAddition.target.source.instanceId,
+          callSite: firstAddition.target.source.callSite,
         }
       : moveEntry?.inspectSource ?? null
 
@@ -5120,6 +5247,7 @@ export default function WorkspacePage() {
       handleClarificationAnswer,
       handleAnnotationRollback,
       handleClearAnnotations,
+      handleFrameReady,
       handleApprovalDecision,
       handleCancelRun,
       handleSubmit,
@@ -5190,6 +5318,7 @@ export default function WorkspacePage() {
         onClearAnnotations: () => call('handleClearAnnotations'),
         onFrameRouteChange: (payload) =>
           call('handleFrameRouteChange', payload),
+        onFrameReady: (payload) => call('handleFrameReady', payload),
         onApprovalDecision: (decision, comment) =>
           call('handleApprovalDecision', decision, comment),
         onCancelRun: () => call('handleCancelRun'),

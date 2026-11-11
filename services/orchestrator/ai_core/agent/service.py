@@ -1970,6 +1970,11 @@ class RunExecutionService:
                 if target and target.source and target.source.file
                 else DEFAULT_TARGET_FILE
             )
+            # 可复用组件的 DOM 节点落在组件文件里，但局部修改必须在
+            # callSite 所在的父级组件完成；两个文件都要加载，Coder 才能
+            # 改调用点而不去污染基础组件。
+            if target and target.source and target.source.call_site:
+                add(target.source.call_site.file)
             if str(annotation.action).upper() != "BATCH_LAYOUT":
                 continue
             payload = annotation.payload or {}
@@ -1983,6 +1988,9 @@ class RunExecutionService:
                 nested_source = nested_target.get("source")
                 nested_source = nested_source if isinstance(nested_source, dict) else {}
                 add(nested_source.get("file"))
+                call_site = nested_source.get("callSite")
+                if isinstance(call_site, dict):
+                    add(call_site.get("file"))
             for move in payload.get("moves") or []:
                 if isinstance(move, dict):
                     add(move.get("file"))
