@@ -384,6 +384,26 @@ function inferAnnotationAction(target, intent, geometryAction) {
 }
 
 /**
+ * 从自然语言粗判新增组件类型，仅用于前端“幽灵预览”的视觉占位。
+ * 后端仍然以完整 AnnotationEnvelope 为准，不依赖这个标签。
+ */
+function inferPendingComponentType(intent) {
+  const text = String(intent || '')
+  const rules = [
+    [/输入框|输入|表单|搜索框|textarea/i, 'input', '输入框'],
+    [/卡片|card|区块/i, 'card', '卡片'],
+    [/图片|图标|头像|banner|image|logo/i, 'image', '图片'],
+    [/标题|文字|文本|段落|说明/i, 'text', '文本'],
+    [/导航|菜单|tab|标签页/i, 'nav', '导航'],
+    [/按钮|button|btn|提交|登录|注册/i, 'button', '按钮'],
+  ]
+  for (const [pattern, key, label] of rules) {
+    if (pattern.test(text)) return { key, label }
+  }
+  return { key: 'component', label: '组件' }
+}
+
+/**
  * 将画布上的一个归一化选区组装为 AnnotationEnvelope。
  * worldTarget 保留归一化坐标；target 记录圈选命中的元素，帮助模型把
  * “改成蓝色 / 文字改为提交 / 放大一倍”绑定到正确的组件。
@@ -395,29 +415,66 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
   // 不需要 LLM 解析自然语言。其余动作仍走旧别名归一化。
   const rawAction = String(entry.action || '').toUpperCase()
   const isBatchMove = rawAction === 'BATCH_MOVE'
+  const isLayoutBatch = rawAction === 'BATCH_LAYOUT'
   const isMove = rawAction === 'MOVE'
   // 旧 localStorage 里的标注没有 action：按指令与几何判定即时推断。
   // 有 action 时统一归一化，旧 ADD / MODIFY 也在这里升级。
   const action = isBatchMove
     ? 'BATCH_MOVE'
-    : isMove
-      ? 'MOVE'
-      : entry.action
-        ? normalizeAction(entry.action)
-        : inferAnnotationAction(entry.target, instruction, entry.geometryAction)
+    : isLayoutBatch
+      ? 'BATCH_LAYOUT'
+      : isMove
+        ? 'MOVE'
+        : entry.action
+          ? normalizeAction(entry.action)
+          : inferAnnotationAction(entry.target, instruction, entry.geometryAction)
   // 批量布局：一个 Envelope 携带 N 条选择器 + 累计偏移，Coder 一次合并。
-  const moveBatch = isBatchMove
-    ? (entry.moveBatch ?? [])
-        .map((move) => ({
-          source: move.source || move.selector || '',
-          file: move.file || targetFile,
-          selector: move.selector || '',
-          label: move.label || '组件',
-          dx: Math.round(Number(move.dx) || 0),
-          dy: Math.round(Number(move.dy) || 0),
-          token: move.token ?? null,
-        }))
-        .filter((move) => move.selector)
+  const moveBatch =
+    isBatchMove || isLayoutBatch
+      ? (entry.moveBatch ?? [])
+          .map((move) => ({
+            source: move.source || move.selector || '',
+            file: move.file || targetFile,
+            selector: move.selector || '',
+            label: move.label || '组件',
+            dx: Math.round(Number(move.dx) || 0),
+            dy: Math.round(Number(move.dy) || 0),
+            token: move.token ?? null,
+          }))
+          .filter((move) => move.selector)
+      : []
+  // 统一提交的新增组件：每一项都携带完整 CREATE_NEW 信封，后端直接复用
+  // 现有 UI 上下文裁剪与 data-vibe-created 校验，避免再做一套协议。
+  const additionBatch = isLayoutBatch
+    ? (entry.additionBatch ?? [])
+        .map((addition) => {
+          const nested = addition.annotation
+          if (!nested) return null
+          const annotationId =
+            addition.annotationId || nested.annotationId || ''
+          if (!annotationId) return null
+          const intentText =
+            addition.intent ||
+            nested.intent?.ui?.summary ||
+            nested.payload?.text ||
+            ''
+          if (!String(intentText).trim()) return null
+          // 聊天历史 / 截图与生成无关，剥离以缩小 Prompt。
+          const { chatHistory, screenshot, ...compact } = nested
+          return {
+            annotationId,
+            intent: String(intentText).trim(),
+            componentType: addition.componentType || 'component',
+            componentLabel: addition.componentLabel || '组件',
+            annotation: {
+              ...compact,
+              annotationId,
+              action: CREATE_NEW,
+              type: compact.type || 'visual-draw',
+            },
+          }
+        })
+        .filter(Boolean)
     : []
   // CREATE_NEW 的目标必须是“最近 data-source 父容器”，由 CanvasStage 在
   // 圈选时计算；只命中叶子时不能把新增 JSX 塞进 button / p / h1。
@@ -450,14 +507,26 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
     ? sourceLines.slice(startLine - 1, endLine).join('\n')
     : sourceText
   const moveOffset = isMove ? entry.moveOffset ?? null : null
-  const acceptance = isBatchMove
+  const acceptance = isLayoutBatch
     ? [
-        `按 payload.moves 一次调整 ${moveBatch.length} 个组件的累计偏移`,
-        '每个组件只允许追加 transform: translate3d(dx,dy,0)，禁止修改 width / height / left / top',
-        '必须合并为同一份全量文件补丁，禁止分多次写文件',
+        `统一提交 ${additionBatch.length} 个新增组件与 ${moveBatch.length} 个位置调整`,
+        '新增组件必须在 target.selector 指向的父容器内插入完整 JSX，并带 data-vibe-created 标记',
+        ...(moveBatch.length
+          ? [
+              '位移只允许追加 transform: translate3d(dx,dy,0)，禁止修改 width / height / left / top',
+            ]
+          : []),
+        '所有变更必须合并为同一份写盘操作，禁止分多次写文件或触发多次 HMR',
         '其余布局、文案与交互保持不变',
       ]
-    : isMove
+    : isBatchMove
+      ? [
+          `按 payload.moves 一次调整 ${moveBatch.length} 个组件的累计偏移`,
+          '每个组件只允许追加 transform: translate3d(dx,dy,0)，禁止修改 width / height / left / top',
+          '必须合并为同一份全量文件补丁，禁止分多次写文件',
+          '其余布局、文案与交互保持不变',
+        ]
+      : isMove
     ? [
         `把${target?.label || '目标组件'}移动到累计偏移 (${Math.round(Number(moveOffset?.dx) || 0)}, ${Math.round(Number(moveOffset?.dy) || 0)}) px`,
         '只允许追加 transform: translate3d(dx,dy,0)，禁止修改 width / height / left / top',
@@ -482,7 +551,10 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
     annotationId: entry.id,
     // visual-draw = 精准点击选择；drag = 圈选 / 直接拖拽。后端都按 UI
     // 标注处理，保留 type 便于审计与后续差异化策略。
-    type: !isMove && !isBatchMove && precise ? 'visual-draw' : 'drag',
+    type:
+      !isMove && !isBatchMove && !isLayoutBatch && precise
+        ? 'visual-draw'
+        : 'drag',
     action,
     worldTarget: {
       x: Number(rect.x.toFixed(6)),
@@ -559,7 +631,13 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
       // 直接拖拽：dx / dy 是相对组件原始位置的累计偏移（不是本次手势
       // 增量）。后端 _try_move_tool 直接读取它调用 move_component，
       // 不再让模型从自然语言里猜方向与距离。
-      ...(isBatchMove && moveBatch.length
+      ...(isLayoutBatch && (moveBatch.length || additionBatch.length)
+        ? {
+            // 视觉暂存统一提交：位移走确定性 Tool，新增组件走一次 Coder。
+            ...(moveBatch.length ? { moves: moveBatch } : {}),
+            additions: additionBatch,
+          }
+        : isBatchMove && moveBatch.length
         ? {
             // 任务三协议：多个组件一次性提交；Coder 只生成一份合并补丁。
             // 每项都带 selector（Tool 入参）与 source（审计标识）。
@@ -1127,6 +1205,10 @@ export default function WorkspacePage() {
   const pendingLayoutChangesRef = useRef(new Map())
   // 渲染层快照：projectId -> 草稿数组，悬浮操作条据此显示数量。
   const [pendingLayoutChanges, setPendingLayoutChanges] = useState({})
+  // 视觉暂存的新增组件：projectId -> Map<annotationId, annotation>。
+  // 前端只画半透明预览，不写代码；用户点【保存布局】后才与位移一起提交。
+  const pendingAdditionsRef = useRef(new Map())
+  const [pendingAdditions, setPendingAdditions] = useState({})
   // 防止【保存布局】在 React 下一次渲染前被双击触发两次 Run。
   const layoutSaveInflightRef = useRef(new Set())
   // 已成功写入代码的累计位移；保存成功前绝不更新，失败才能保留草稿。
@@ -1190,8 +1272,9 @@ export default function WorkspacePage() {
       annotationAbortRef.current.clear()
       snapshotDiffAbortRef.current.forEach((controller) => controller.abort())
       snapshotDiffAbortRef.current.clear()
-      // 组件卸载后丢弃所有未保存的布局草稿。
+      // 组件卸载后丢弃所有未保存的布局 / 新增组件草稿。
       pendingLayoutChangesRef.current.clear()
+      pendingAdditionsRef.current.clear()
     }
   }, [])
 
@@ -1600,55 +1683,70 @@ export default function WorkspacePage() {
       astPath = `${entryFile}:${findTargetLine(sourceCode, anchored.marker)}:1`
     }
 
+    const autoAction = geometryAction
+      ? normalizeAction(geometryAction)
+      : inferAnnotationAction(target, presetIntent, geometryAction)
+    const annotationId = newId('ann')
+    const annotation = {
+      id: annotationId,
+      rect,
+      // live 画布专用的文档坐标（不受 iframe 滚动影响）。
+      documentRect,
+      frameScroll,
+      // 圈实际覆盖到的叶子节点（MODIFY 目标）。
+      target,
+      // 最近 data-source 容器（ADD 的插入父级）。
+      addTarget,
+      // 圈相对父容器的归一化坐标，直接进入 AnnotationEnvelope.relativeTarget。
+      relativeRect,
+      geometryAction: autoAction,
+      measured,
+      // 空白区域 / 圈远大于节点 → ADD；命中元素 → MODIFY，
+      // 输入“添加”后自动切换，用户也可在浮层内手动覆盖。
+      action: autoAction,
+      actionSource: inspectSource ? 'inspect' : 'auto',
+      // CREATE_NEW 是视觉暂存：不立刻调 Agent，等用户点【保存布局】
+      // 或进入架构流程时，和位移一起统一提交。
+      staged: isCreateAction(autoAction),
+      // Inspect 模式会直接带上用户填写的意图与真实源码出处；
+      // 圈选模式仍从空输入框开始。
+      intent: presetIntent,
+      inspectSource,
+      astPath,
+      createdAt: new Date().toISOString(),
+      // 每个标注 = 一个独立 Agent thread，后续对话复用同一个 id。
+      threadId: newId('thread'),
+      chatHistory: [],
+      // M1.5 全局撤销基线：记录“圈出该标注时”的代码 commit。
+      // 删除该圈时直接 reset 到这里；之后 A/C 的改动会丢失，M2 用
+      // Event Sourcing 重放未删除标注的意图。
+      baseCommitHash: runStatesRef.current[projectId]?.result?.commitHash ?? null,
+      lastCommitHash: null,
+      lastTurnCount: 0,
+    }
+    const count =
+      runStatesRef.current[projectId]?.annotations.length ?? 0
     patchRun(projectId, (previous) => {
       if (previous.annotations.length >= MAX_ANNOTATIONS) return previous
-      const autoAction = geometryAction
-        ? normalizeAction(geometryAction)
-        : inferAnnotationAction(target, '')
       return {
         ...previous,
-        annotations: [
-          ...previous.annotations,
-          {
-            id: newId('ann'),
-            rect,
-            // live 画布专用的文档坐标（不受 iframe 滚动影响）。
-            documentRect,
-            frameScroll,
-            // 圈实际覆盖到的叶子节点（MODIFY 目标）。
-            target,
-            // 最近 data-source 容器（ADD 的插入父级）。
-            addTarget,
-            // 圈相对父容器的归一化坐标，直接进入 AnnotationEnvelope.relativeTarget。
-            relativeRect,
-            geometryAction: autoAction,
-            measured,
-            // 空白区域 / 圈远大于节点 → ADD；命中元素 → MODIFY，
-            // 输入“添加”后自动切换，用户也可在浮层内手动覆盖。
-            action: autoAction,
-            actionSource: inspectSource ? 'inspect' : 'auto',
-            // Inspect 模式会直接带上用户填写的意图与真实源码出处；
-            // 圈选模式仍从空输入框开始。
-            intent: presetIntent,
-            inspectSource,
-            astPath,
-            createdAt: new Date().toISOString(),
-            // 每个标注 = 一个独立 Agent thread，后续对话复用同一个 id。
-            threadId: newId('thread'),
-            chatHistory: [],
-            // M1.5 全局撤销基线：记录“圈出该标注时”的代码 commit。
-            // 删除该圈时直接 reset 到这里；之后 A/C 的改动会丢失，M2 用
-            // Event Sourcing 重放未删除标注的意图。
-            baseCommitHash: previous.result?.commitHash ?? null,
-            lastCommitHash: null,
-            lastTurnCount: 0,
-          },
-        ],
+        annotations: [...previous.annotations, annotation],
       }
     })
+    if (count < MAX_ANNOTATIONS && annotation.staged) {
+      upsertPendingAddition(projectId, annotation)
+    }
   }
 
   const handleAnnotationIntentChange = (projectId, annotationId, intent) => {
+    const current = (runStatesRef.current[projectId] ?? EMPTY_RUN).annotations.find(
+      (annotation) => annotation.id === annotationId,
+    )
+    const nextAction = current
+      ? current.actionSource === 'manual'
+        ? current.action
+        : inferAnnotationAction(current.target, intent, current.geometryAction)
+      : null
     patchRun(projectId, (previous) => ({
       ...previous,
       annotations: previous.annotations.map((annotation) =>
@@ -1657,33 +1755,49 @@ export default function WorkspacePage() {
               ...annotation,
               intent,
               // 自动模式随文案实时切换；手动选择过类型后尊重用户选择。
-              action:
-                annotation.actionSource === 'manual'
-                  ? annotation.action
-                  : inferAnnotationAction(
-                      annotation.target,
-                      intent,
-                      annotation.geometryAction,
-                    ),
+              action: nextAction ?? annotation.action,
+              // 只有 CREATE_NEW 才是视觉暂存；改成 MODIFY 后恢复普通提交。
+              staged: isCreateAction(nextAction ?? annotation.action),
             }
           : annotation,
       ),
     }))
+    if (current) {
+      upsertPendingAddition(projectId, {
+        ...current,
+        intent,
+        action: nextAction ?? current.action,
+        staged: isCreateAction(nextAction ?? current.action),
+      })
+    }
   }
 
   const handleAnnotationActionChange = (projectId, annotationId, action) => {
+    const nextAction = normalizeAction(action)
+    const current = (runStatesRef.current[projectId] ?? EMPTY_RUN).annotations.find(
+      (annotation) => annotation.id === annotationId,
+    )
     patchRun(projectId, (previous) => ({
       ...previous,
       annotations: previous.annotations.map((annotation) =>
         annotation.id === annotationId
           ? {
               ...annotation,
-              action: normalizeAction(action),
+              action: nextAction,
               actionSource: 'manual',
+              staged: isCreateAction(nextAction),
             }
           : annotation,
       ),
     }))
+    if (current) {
+      upsertPendingAddition(projectId, {
+        ...current,
+        action: nextAction,
+        actionSource: 'manual',
+        staged: isCreateAction(nextAction),
+      })
+    }
   }
 
   /**
@@ -1805,6 +1919,8 @@ export default function WorkspacePage() {
     const run = runStates[projectId] ?? EMPTY_RUN
     const annotation = run.annotations.find((item) => item.id === annotationId)
     if (!annotation) return
+    // 视觉暂存还没有写进代码，删除时只清本地草稿，绝不能触发 Git 回滚。
+    removePendingAddition(projectId, annotationId)
 
     // 执行中强行关闭：浮层已向用户确认过。先中止该标注的 route / dispatch /
     // SSE，再立刻从 UI 移除；后端 Run 用 cancel 尽力收尾，但所有迟到结果
@@ -1900,6 +2016,8 @@ export default function WorkspacePage() {
       delete next[projectId]
       return next
     })
+    // 页面已经切换，暂存的新增组件也失去了落点；只清前端草稿，不回滚代码。
+    clearPendingAdditions(projectId)
     patchRun(projectId, (previous) => {
       if (
         previous.annotations.length === 0 &&
@@ -1937,6 +2055,7 @@ export default function WorkspacePage() {
       : null
     const sandboxId = run.result?.sandboxId || anchor?.lastSandboxId
     if (!anchor || !baseCommitHash || !sandboxId) {
+      clearPendingAdditions(projectId)
       patchRun(projectId, (previous) => ({ ...previous, annotations: [] }))
       return
     }
@@ -1955,6 +2074,7 @@ export default function WorkspacePage() {
         sandboxId,
       )
       if (closedProjectsRef.current.has(projectId)) return
+      clearPendingAdditions(projectId)
       patchRun(projectId, (previous) => ({
         ...previous,
         error: null,
@@ -2675,7 +2795,7 @@ export default function WorkspacePage() {
    * 工具栏主 CTA：已有 Run 时恢复同一面板；否则也走 Supervisor，
    * 由后端决定是纯 Architect 还是 UI + Architect 的 both。
    */
-  const handleStartArchitect = (projectId, goal = '') => {
+  const handleStartArchitect = async (projectId, goal = '') => {
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
     // 保存门控：未保存的生成 / 拖拽 / 样式修改绝不能进入全栈澄清。
@@ -2683,6 +2803,21 @@ export default function WorkspacePage() {
       showToast('info', '请先保存当前修改')
       return
     }
+
+    // 【统一提交】进入架构澄清前，先把画布上所有视觉暂存一次性写进代码。
+    // 保存失败则停留在当前页面，草稿不会丢，避免 Architect 基于旧界面推演。
+    const pendingSummary = describePendingChanges(projectId)
+    if (pendingSummary) {
+      const saved = await handleSaveLayout(projectId)
+      if (!saved) {
+        showToast('info', '画布变更尚未保存成功，已暂停进入架构澄清')
+        return
+      }
+    }
+    // 用 system 角色注入，只作为 Architect 的上下文事实，不污染用户目标。
+    const pendingContext = pendingSummary
+      ? [{ role: 'system', content: pendingSummary }]
+      : []
 
     // 新建项目：纯自然语言驱动，不再要求先有画布标注。
     // 直接把用户目标作为首条 user 消息交给 ArchitectGraph。
@@ -2708,7 +2843,11 @@ export default function WorkspacePage() {
         source: run.result?.sandboxId
           ? { sandboxId: run.result.sandboxId, files: {} }
           : { files: {} },
-        uiHistory: [...history, { role: 'user', content: text }],
+        uiHistory: [
+          ...history,
+          ...pendingContext,
+          { role: 'user', content: text },
+        ],
         options: { llmProvider: modelProvider },
       })
       return
@@ -2719,6 +2858,7 @@ export default function WorkspacePage() {
     const message = [
       '下一步：构建全栈方案',
       ...annotations.map((item) => item.intent.trim()),
+      ...(pendingSummary ? [pendingSummary] : []),
     ].join('。')
     void submitViaSupervisor(projectId, {
       message,
@@ -2779,6 +2919,15 @@ export default function WorkspacePage() {
    */
   const handleFullstackGenerate = async (projectId) => {
     if (blockGenerateUntilAnswered(projectId)) return
+    // 全栈生成会以当前前端为基准推演后端；先统一提交画布暂存，
+    // 否则用户刚加的组件不会出现在生成结果里。
+    if (describePendingChanges(projectId)) {
+      const saved = await handleSaveLayout(projectId)
+      if (!saved) {
+        showToast('info', '画布变更尚未保存成功，已暂停全栈生成')
+        return
+      }
+    }
     const project = projects.find((item) => item.id === projectId)
     const architectState = architectStates[projectId]
     const contract = architectState?.contract
@@ -3321,6 +3470,16 @@ export default function WorkspacePage() {
       return
     }
 
+    // 视觉暂存：新增组件不立刻写代码，等【保存布局】统一提交。
+    if (annotation.staged && isCreateAction(annotation.action)) {
+      upsertPendingAddition(projectId, { ...annotation, intent: instruction })
+      showToast(
+        'info',
+        '已加入未保存变更，点击右下角【保存布局】一次性生成，不会触发白屏',
+      )
+      return
+    }
+
     const userMessage = newMessage('user', instruction)
     // 单标注也带自己的 threadId；commit 在 Supervisor 成功派发后才执行，
     // 被 rejected / 调度失败时用户输入不会丢失。
@@ -3428,6 +3587,96 @@ export default function WorkspacePage() {
     })
   }
 
+  /** 把新增组件草稿同步到 React state（幽灵预览与悬浮列表都读它）。 */
+  const publishPendingAdditions = (projectId) => {
+    if (!workspaceMountedRef.current) return
+    const pending = pendingAdditionsRef.current.get(projectId)
+    setPendingAdditions((previous) => {
+      const next = { ...previous }
+      if (pending?.size) {
+        next[projectId] = [...pending.values()]
+      } else {
+        delete next[projectId]
+      }
+      return next
+    })
+  }
+
+  /**
+   * 新增 / 更新一条视觉暂存。
+   *
+   * 只有 CREATE_NEW 且用户已经写下非空意图时才算“待保存变更”；
+   * 空圈只是选区位，不应出现在未保存列表里。
+   */
+  const upsertPendingAddition = (projectId, annotation) => {
+    if (!annotation?.id) return
+    const intent = annotation.intent?.trim()
+    const staged = Boolean(annotation.staged) && isCreateAction(annotation.action)
+    const map = pendingAdditionsRef.current.get(projectId) || new Map()
+    if (!staged || !intent) {
+      map.delete(annotation.id)
+    } else {
+      const component = inferPendingComponentType(intent)
+      map.set(annotation.id, {
+        ...annotation,
+        annotationId: annotation.id,
+        intent,
+        componentType: component.key,
+        componentLabel: component.label,
+      })
+    }
+    if (map.size) {
+      pendingAdditionsRef.current.set(projectId, map)
+    } else {
+      pendingAdditionsRef.current.delete(projectId)
+    }
+    publishPendingAdditions(projectId)
+  }
+
+  const removePendingAddition = (projectId, annotationId) => {
+    const map = pendingAdditionsRef.current.get(projectId)
+    if (!map?.delete(annotationId)) return
+    if (map.size === 0) pendingAdditionsRef.current.delete(projectId)
+    publishPendingAdditions(projectId)
+  }
+
+  const clearPendingAdditions = (projectId) => {
+    if (!pendingAdditionsRef.current.delete(projectId)) return
+    publishPendingAdditions(projectId)
+  }
+
+  /** 悬浮条文案：把“新增组件”和“位置调整”合并成一句人类可读摘要。 */
+  const describePendingChanges = (projectId, overrides = {}) => {
+    // 优先读 ref：点击瞬间 state 可能还落后一帧，不能漏掉刚画的组件。
+    const moveMap = pendingLayoutChangesRef.current.get(projectId)
+    const additionMap = pendingAdditionsRef.current.get(projectId)
+    const moves =
+      overrides.moves ??
+      (moveMap?.size
+        ? [...moveMap.values()]
+        : pendingLayoutChanges[projectId] ?? [])
+    const additions =
+      overrides.additions ??
+      (additionMap?.size
+        ? [...additionMap.values()]
+        : pendingAdditions[projectId] ?? [])
+    if (moves.length === 0 && additions.length === 0) return ''
+    const parts = []
+    if (additions.length) {
+      const names = additions
+        .slice(0, 5)
+        .map((item) => `「${item.intent || item.componentLabel}」`)
+        .join('、')
+      parts.push(
+        `新增 ${additions.length} 个组件${names ? `：${names}` : ''}`,
+      )
+    }
+    if (moves.length) {
+      parts.push(`调整 ${moves.length} 个组件位置`)
+    }
+    return `【画布中尚未保存的变更】${parts.join('；')}。请在后续生成中一并实现，不要遗漏。`
+  }
+
   const moveOffsetText = (dx, dy) => {
     const parts = []
     if (dx) parts.push(`${dx > 0 ? '向右' : '向左'} ${Math.abs(dx)}px`)
@@ -3529,6 +3778,95 @@ export default function WorkspacePage() {
   }
 
   /**
+   * 把“位移 + 新增组件”打包成一个 BATCH_LAYOUT 标注。
+   *
+   * 新增组件必须携带完整 AnnotationEnvelope：后端 Coder 会直接复用
+   * 现有 UI 上下文裁剪 / CREATE_NEW 标记校验，不再维护第二套协议。
+   */
+  const buildBatchLayoutEntry = (project, items, additions) => {
+    const run = runStatesRef.current[project.id] ?? EMPTY_RUN
+    const targetFile = projectEntryFile(project)
+    const sourceCode = projectSource(project)
+    const files = { ...(project.files ?? {}), [targetFile]: sourceCode }
+    const findAnnotation = (annotationId) =>
+      run.annotations.find((annotation) => annotation.id === annotationId)
+
+    const additionBatch = additions
+      .map((item) => {
+        const raw = findAnnotation(item.annotationId) || item
+        const envelope = buildAnnotation(raw, sourceCode, targetFile, files)
+        if (!envelope?.annotationId) return null
+        const component = inferPendingComponentType(
+          item.intent || raw.intent || '',
+        )
+        const { chatHistory, screenshot, ...compact } = envelope
+        return {
+          annotationId: envelope.annotationId,
+          intent: String(item.intent || raw.intent || '').trim(),
+          componentType: component.key,
+          componentLabel: component.label,
+          annotation: compact,
+        }
+      })
+      .filter((item) => item?.intent)
+
+    const moveEntry = items.length ? buildBatchMoveEntry(project, items) : null
+    const firstAddition = additionBatch[0]?.annotation
+    const firstAdditionRaw = additions[0]
+      ? findAnnotation(additions[0].annotationId) || additions[0]
+      : null
+    const rect =
+      firstAdditionRaw?.rect ??
+      moveEntry?.rect ?? { x: 0, y: 0, width: 0.1, height: 0.1 }
+    const target = firstAddition?.target ??
+      moveEntry?.target ?? {
+        marker: '',
+        selector: '',
+        label: '画布',
+        role: 'container',
+        component: 'App',
+        tag: 'div',
+      }
+    const inspectSource = firstAddition?.target?.source
+      ? {
+          file: firstAddition.target.source.file,
+          line: firstAddition.target.source.line || 1,
+          column: firstAddition.target.source.column || 1,
+          component: firstAddition.target.source.component || 'App',
+          sourceKind: firstAddition.target.source.sourceKind || 'jsx',
+          marker: firstAddition.target.source.marker || '',
+        }
+      : moveEntry?.inspectSource ?? null
+
+    const parts = []
+    if (additionBatch.length) {
+      parts.push(
+        `新增 ${additionBatch.length} 个组件：${additionBatch
+          .map((item) => `「${item.intent}」`)
+          .join('、')}`,
+      )
+    }
+    if (moveEntry?.moveBatch?.length) {
+      parts.push(`调整 ${moveEntry.moveBatch.length} 个组件位置`)
+    }
+    dragSeqRef.current += 1
+    return {
+      id: `layout_${Date.now().toString(36)}_${dragSeqRef.current}`,
+      action: 'BATCH_LAYOUT',
+      type: 'drag',
+      // 人类可读摘要：Run 时间轴 / 助手气泡直接展示。
+      intent: `统一提交画布变更：${parts.join('；')}（新增组件必须带 data-vibe-created，位移只改 transform）`,
+      rect,
+      target,
+      inspectSource,
+      // 两个批次都由 buildAnnotation 归一化后进入 payload。
+      moveBatch: moveEntry?.moveBatch ?? [],
+      additionBatch,
+      createdAt: new Date().toISOString(),
+    }
+  }
+
+  /**
    * 等 runStates 真正落回 submitting=false 后再解除“静默同步”标记。
    *
    * 由 runStates effect 事件驱动；此处只登记 pending，不再 setInterval
@@ -3556,41 +3894,68 @@ export default function WorkspacePage() {
     })
   }
 
-  /** 【撤销】清空草稿，并把所有组件的 DOM 内联位移恢复原位。 */
+  /** 【撤销】清空位移与新增组件草稿，并恢复 DOM 内联位移。 */
   const handleUndoLayout = (projectId) => {
     const pending = pendingLayoutChangesRef.current.get(projectId)
-    if (!pending?.size) return
+    const additions = pendingAdditionsRef.current.get(projectId)
+    if (!pending?.size && !additions?.size) return
     if (dragSyncStates[projectId]) return
-    const items = [...pending.values()].map((item) => ({
-      token: item.token,
-      selector: item.selector,
-    }))
-    pendingLayoutChangesRef.current.delete(projectId)
-    publishPendingLayoutChanges(projectId)
-    triggerDragRollback(
-      projectId,
-      items,
-      `已撤销 ${items.length} 个组件的位置调整`,
-      'info',
-    )
+    const items = pending?.size
+      ? [...pending.values()].map((item) => ({
+          token: item.token,
+          selector: item.selector,
+        }))
+      : []
+    if (pending?.size) {
+      pendingLayoutChangesRef.current.delete(projectId)
+      publishPendingLayoutChanges(projectId)
+    }
+    const addedIds = new Set(additions ? additions.keys() : [])
+    if (addedIds.size) {
+      // 暂存新增组件从未写进代码，撤销只需删除本地标注与草稿。
+      pendingAdditionsRef.current.delete(projectId)
+      publishPendingAdditions(projectId)
+      patchRun(projectId, (previous) => ({
+        ...previous,
+        annotations: previous.annotations.filter(
+          (annotation) => !addedIds.has(annotation.id),
+        ),
+      }))
+    }
+    if (items.length) {
+      triggerDragRollback(
+        projectId,
+        items,
+        `已撤销 ${items.length} 个组件的位置调整`,
+        'info',
+      )
+    }
+    if (addedIds.size) {
+      showToast('info', `已撤销 ${addedIds.size} 个暂存的新增组件`)
+    }
   }
 
   /**
-   * 【保存布局】一次 Run 提交所有草稿。
+   * 【保存布局】一次 Run 提交所有暂存变更（位移 + 新增组件）。
    *
    * 只有后端成功（补丁已应用且构建通过）才清空 pending；超时 / 失败
    * 一律保留草稿和内联视觉位置，用户可以直接重试。
+   *
+   * 返回值用于“进入架构澄清 / 重新生成”前的自动统一提交。
    */
   const handleSaveLayout = async (projectId) => {
     const pending = pendingLayoutChangesRef.current.get(projectId)
-    if (!pending?.size) return
-    if (layoutSaveInflightRef.current.has(projectId)) return
+    const additionMap = pendingAdditionsRef.current.get(projectId)
+    const batch = pending?.size ? [...pending.values()] : []
+    const additions = additionMap?.size ? [...additionMap.values()] : []
+    if (batch.length === 0 && additions.length === 0) return true
+    if (layoutSaveInflightRef.current.has(projectId)) return false
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
-    if (!project) return
+    if (!project) return false
     if (!run.result?.sandboxId) {
-      showToast('error', '当前页面尚未生成代码，布局草稿已保留')
-      return
+      showToast('error', '当前页面尚未生成代码，画布变更已保留')
+      return false
     }
     if (
       run.submitting ||
@@ -3599,12 +3964,14 @@ export default function WorkspacePage() {
       inflightRef.current.has(projectId) ||
       gateIsActive(projectId)
     ) {
-      showToast('info', '当前有任务执行中，布局草稿已保留，请稍后重试')
-      return
+      showToast('info', '当前有任务执行中，画布变更已保留，请稍后重试')
+      return false
     }
 
-    const batch = [...pending.values()]
-    const entry = buildBatchMoveEntry(project, batch)
+    const entry = additions.length
+      ? buildBatchLayoutEntry(project, batch, additions)
+      : buildBatchMoveEntry(project, batch)
+    const addedIds = additions.map((item) => item.annotationId)
     layoutSaveInflightRef.current.add(projectId)
     setDragSyncStates((previous) => ({
       ...previous,
@@ -3615,9 +3982,9 @@ export default function WorkspacePage() {
         message: entry.intent,
         annotations: [entry],
         scopeHint: 'ui',
-        // 拖拽是确定性的几何事实，直接交给 UI Agent，不再经过意图猜测。
+        // 画布变更都是确定性事实，直接交给 UI Agent，不再经过意图猜测。
         targetAgent: 'ui_graph',
-        // 批量布局同步不能让人工审批打断；失败由前端保留草稿。
+        // 统一提交不能让人工审批打断；失败由前端保留草稿。
         requireManualApproval: false,
         // 不抢焦点：用户仍在画布上调整布局。
         switchToPreview: false,
@@ -3634,8 +4001,8 @@ export default function WorkspacePage() {
         const runId = runStatesRef.current?.[projectId]?.runId
         if (runId) cancelRunSilently(runId)
         clearDragSync(projectId)
-        showToast('error', '布局同步超时，草稿已保留，可稍后重试')
-        return
+        showToast('error', '画布变更同步超时，草稿已保留，可稍后重试')
+        return false
       }
 
       if (outcome?.ok) {
@@ -3660,25 +4027,53 @@ export default function WorkspacePage() {
           }
         }
         publishPendingLayoutChanges(projectId)
-        setDragCommits((previous) => ({
-          ...previous,
-          [projectId]: {
-            nonce: (previous[projectId]?.nonce ?? 0) + 1,
-            // 同一 selector 多次拖动只保留最新 token；SDK 的 rollback /
-            // commit 记录本身也会按 selector 合并到最早基线。
-            items: batch.map((item) => ({
-              token: item.token,
-              selector: item.selector,
-            })),
-          },
-        }))
-        showToast('success', '布局已同步')
-        return
+        // 新增组件已真实落盘，才删除暂存标注；失败时保留供重试。
+        if (addedIds.length) {
+          const addedSet = new Set(addedIds)
+          const addedMap = pendingAdditionsRef.current.get(projectId)
+          if (addedMap) {
+            addedIds.forEach((annotationId) => addedMap.delete(annotationId))
+            if (addedMap.size === 0) {
+              pendingAdditionsRef.current.delete(projectId)
+            }
+          }
+          publishPendingAdditions(projectId)
+          patchRun(projectId, (previous) => ({
+            ...previous,
+            annotations: previous.annotations.filter(
+              (annotation) => !addedSet.has(annotation.id),
+            ),
+          }))
+        }
+        if (batch.length) {
+          setDragCommits((previous) => ({
+            ...previous,
+            [projectId]: {
+              nonce: (previous[projectId]?.nonce ?? 0) + 1,
+              // 同一 selector 多次拖动只保留最新 token；SDK 的 rollback /
+              // commit 记录本身也会按 selector 合并到最早基线。
+              items: batch.map((item) => ({
+                token: item.token,
+                selector: item.selector,
+              })),
+            },
+          }))
+        }
+        showToast(
+          'success',
+          additions.length
+            ? `已同步 ${additions.length} 个新增组件${
+                batch.length ? `与 ${batch.length} 处位置调整` : ''
+              }`
+            : '布局已同步',
+        )
+        return true
       }
 
-      // 失败：不 rollback、不清空 pending，保留用户的全部拖拽草稿。
+      // 失败：不 rollback、不清空 pending，保留用户的全部画布草稿。
       clearDragSync(projectId)
-      showToast('error', '布局同步失败，草稿已保留，可稍后重试')
+      showToast('error', '画布变更同步失败，草稿已保留，可稍后重试')
+      return false
     } finally {
       layoutSaveInflightRef.current.delete(projectId)
     }
@@ -3768,17 +4163,25 @@ export default function WorkspacePage() {
   const handleSubmit = async (projectId) => {
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
-    const annotations = run.annotations
+    // CREATE_NEW 视觉暂存不进入普通 Run：它们必须与位移一起统一提交，
+    // 否则“边画边写”会重新引入白屏与多线程写文件问题。
+    const annotations = run.annotations.filter(
+      (annotation) => !(annotation.staged && isCreateAction(annotation.action)),
+    )
     const instructions = annotations.map((annotation) => annotation.intent.trim())
     if (
       !project ||
-      annotations.length === 0 ||
       instructions.some((text) => !text) ||
       run.submitting ||
       run.clarification ||
       run.approval ||
       inflightRef.current.has(projectId)
     ) {
+      return
+    }
+    if (annotations.length === 0) {
+      // 只有暂存变更时，提交动作等价于【保存布局】。
+      await handleSaveLayout(projectId)
       return
     }
 
@@ -4573,6 +4976,9 @@ export default function WorkspacePage() {
           call('handleComponentDragEnd', payload),
         onComponentDragCancel: (payload) =>
           call('handleComponentDragCancel', payload),
+        // 移除暂存组件同时删除前端标注与草稿，不触碰沙盒代码。
+        onRemovePendingAddition: (annotationId) =>
+          call('handleAnnotationRemove', annotationId),
         onSaveLayout: () => call('handleSaveLayout'),
         onUndoLayout: () => call('handleUndoLayout'),
         onClarificationAnswer: (
@@ -4805,6 +5211,7 @@ export default function WorkspacePage() {
                 layoutDraftCount={
                   pendingLayoutChanges[project.id]?.length ?? 0
                 }
+                pendingAdditions={pendingAdditions[project.id] ?? []}
                 layoutSaving={
                   Boolean(dragSyncStates[project.id]) || run.submitting
                 }

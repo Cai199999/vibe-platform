@@ -1139,6 +1139,85 @@ body.is-viewport-panning * {
   pointer-events: none;
 }
 
+/* 视觉暂存幽灵层：半透明预览新增组件，纯粹是前端 Overlay。
+   不写代码、不触发 HMR，因此无论用户怎么画都不会让沙盒白屏。 */
+.pending-addition-ghost {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  pointer-events: none;
+  animation: pending-addition-in 0.18s ease-out;
+}
+
+.pending-addition-ghost-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 10px 14px;
+  border: 1px dashed rgba(125, 211, 252, 0.8);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.55);
+  box-shadow:
+    0 10px 28px rgba(2, 6, 23, 0.35),
+    0 0 0 1px rgba(56, 189, 248, 0.18) inset;
+  opacity: 0.86;
+  backdrop-filter: blur(2px);
+}
+
+.pending-addition-ghost-badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.18);
+  color: #7dd3fc;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+/* 模拟“即将生成的按钮”，让用户对结果有直观预期。 */
+.pending-addition-ghost-preview {
+  overflow: hidden;
+  max-width: 100%;
+  padding: 7px 16px;
+  border: 1px solid rgba(56, 189, 248, 0.65);
+  border-radius: 9px;
+  background: linear-gradient(
+    135deg,
+    rgba(14, 165, 233, 0.85),
+    rgba(37, 99, 235, 0.85)
+  );
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-addition-ghost-intent {
+  overflow: hidden;
+  max-width: 200px;
+  color: #cbd5e1;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes pending-addition-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 .annotation-ellipse {
   position: absolute;
   z-index: 20;
@@ -3649,6 +3728,90 @@ body.is-viewport-panning * {
   border-color: rgba(56, 189, 248, 0.6);
 }
 
+/* 含新增组件时变成右下角浮窗：标题 + 明细列表 + 操作按钮纵向排列。 */
+.layout-draft-bar.has-additions {
+  right: 20px;
+  left: auto;
+  bottom: 20px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  width: min(380px, calc(100% - 32px));
+  transform: none;
+}
+
+.layout-draft-bar.has-additions .layout-draft-text strong {
+  white-space: normal;
+}
+
+.layout-draft-bar.has-additions .layout-draft-actions {
+  justify-content: flex-end;
+}
+
+.layout-draft-additions {
+  display: flex;
+  flex: 1 1 220px;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  max-height: 96px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.layout-draft-additions li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 6px 4px 8px;
+  border: 1px dashed rgba(56, 189, 248, 0.4);
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.08);
+  color: #cbd5e1;
+  font-size: 11px;
+}
+
+.layout-draft-addition-label {
+  flex: 0 0 auto;
+  color: #7dd3fc;
+  font-weight: 600;
+}
+
+.layout-draft-addition-intent {
+  overflow: hidden;
+  max-width: 180px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layout-draft-addition-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.18);
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.layout-draft-addition-remove:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.35);
+}
+
+.layout-draft-addition-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .layout-draft-copy {
   display: flex;
   align-items: center;
@@ -3760,6 +3923,10 @@ body.is-viewport-panning * {
     align-items: stretch;
     gap: 10px;
     transform: none;
+  }
+
+  .layout-draft-bar.has-additions {
+    width: auto;
   }
 
   .layout-draft-actions {

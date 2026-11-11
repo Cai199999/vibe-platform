@@ -17,6 +17,12 @@ RUN apk add --no-cache git unzip \
 # 纯 HTML 导入项目的静态服务器（无 npm 依赖）。
 COPY static_server.mjs /opt/vibe-static-server.mjs
 
+# 写盘前 AST 门禁：解析语法 + 检查未绑定的 JSX 组件（漏 import 会白屏）。
+# Babel 依赖独立安装在 /opt，避免导入项目改写 /app/package.json 后检查器失效。
+COPY ast_check.mjs /opt/vibe-ast-check.mjs
+RUN npm install --prefix /opt/vibe-ast --no-audit --no-fund --no-save \
+    @babel/parser@7.29.13 @babel/traverse@7.29.13
+
 WORKDIR /app
 
 # 依赖层：package.json / lock 不变时命中 Docker 缓存。

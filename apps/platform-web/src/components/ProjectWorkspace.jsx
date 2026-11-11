@@ -51,6 +51,9 @@ function ProjectWorkspaceInner({
   dragSyncActive = false,
   // 批量拖拽草稿：数量 > 0 时显示悬浮操作条；保存中禁用全部按钮。
   layoutDraftCount = 0,
+  // 视觉暂存的新增组件：只存在于前端，保存布局时才一次性写入代码。
+  pendingAdditions = [],
+  onRemovePendingAddition,
   layoutSaving = false,
   onSaveLayout,
   onUndoLayout,
@@ -844,6 +847,8 @@ function ProjectWorkspaceInner({
               dragRollback={dragRollback}
               dragCommit={dragCommit}
               dragSyncActive={dragSyncActive}
+              pendingAdditions={pendingAdditions}
+              onRemovePendingAddition={onRemovePendingAddition}
               clarification={run.clarification}
               onAnnotationRollback={onAnnotationRollback}
               pendingAnnotationId={run.pendingAnnotationId}
@@ -934,10 +939,13 @@ function ProjectWorkspaceInner({
           </ErrorBoundary>
         </div>
 
-        {/* 批量拖拽草稿条：松手只记草稿，保存时才触发一次 BATCH_MOVE。 */}
-        {layoutDraftCount > 0 && (
+        {/* 画布草稿条：位移与新增组件都只暂存在前端，
+            点击【保存布局】时才合并成一次 BATCH_LAYOUT 写入代码。 */}
+        {(layoutDraftCount > 0 || pendingAdditions.length > 0) && (
           <div
-            className={`layout-draft-bar ${layoutSaving ? 'is-saving' : ''}`}
+            className={`layout-draft-bar has-additions ${
+              layoutSaving ? 'is-saving' : ''
+            }`}
             role="status"
             aria-live="polite"
             data-layout-draft-bar
@@ -951,16 +959,42 @@ function ProjectWorkspaceInner({
               <span className="layout-draft-text">
                 <strong>
                   {layoutSaving
-                    ? '正在同步布局...'
-                    : `已修改 ${layoutDraftCount} 个组件位置`}
+                    ? '正在同步画布变更...'
+                    : `📝 当前有 ${
+                        layoutDraftCount + pendingAdditions.length
+                      } 个未保存的组件变更`}
                 </strong>
                 <span>
                   {layoutSaving
                     ? 'Agent 正在生成合并补丁，请稍候'
-                    : '保存后一次性写入代码，可继续拖动其他组件'}
+                    : '保存后一次性写入代码，可继续在画布上调整'}
                 </span>
               </span>
             </div>
+            {pendingAdditions.length > 0 && (
+              <ul className="layout-draft-additions">
+                {pendingAdditions.map((item) => (
+                  <li key={item.annotationId}>
+                    <span className="layout-draft-addition-label">
+                      {item.componentLabel || '新增组件'}
+                    </span>
+                    <span className="layout-draft-addition-intent">
+                      {item.intent}
+                    </span>
+                    <button
+                      type="button"
+                      className="layout-draft-addition-remove"
+                      title="移除这个暂存组件"
+                      aria-label={`移除暂存组件：${item.intent}`}
+                      onClick={() => onRemovePendingAddition?.(item.annotationId)}
+                      disabled={layoutSaving}
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
             <div className="layout-draft-actions">
               <button
                 type="button"
@@ -982,12 +1016,14 @@ function ProjectWorkspaceInner({
           </div>
         )}
 
-        {dragSyncActive && layoutDraftCount === 0 && (
-          <div className="canvas-sync-hint" role="status" aria-live="polite">
-            <span className="mini-spinner" aria-hidden="true" />
-            代码同步中...
-          </div>
-        )}
+        {dragSyncActive &&
+          layoutDraftCount === 0 &&
+          pendingAdditions.length === 0 && (
+            <div className="canvas-sync-hint" role="status" aria-live="polite">
+              <span className="mini-spinner" aria-hidden="true" />
+              代码同步中...
+            </div>
+          )}
       </div>
 
       {architectState?.open && (

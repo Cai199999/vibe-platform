@@ -15,11 +15,11 @@ React + Vite → Java 21 BFF → Python 3.12 FastAPI/LangGraph → Docker 沙盒
 
 ## 最新里程碑（2026-11-11）
 
-- **修复添加按钮假成功**：空 selector 走 `app-main` 结构锚点；SDK 精确行号优先；Coder 强制新增节点携带 `data-vibe-created`；Verifier 构建通过后再校验标记，缺失即失败。
-- **修复 Applier 落盘失败**：模型 hunk 行数常写错，`git apply --recount` 容忍计数错误与行号偏移；真实回归已成功把按钮写入 `src/App.jsx` 并构建通过。
-- **标注坐标系下放**：SDK 基于真实 DOM 覆盖判定 MODIFY/CREATE，回传 `documentRect`、相对坐标与滚动快照；父页面用文档坐标 + 实时 `frameScroll` 重投影，滚出视口隐藏。
-- **页面切换清空**：SDK 监听 `pushState/replaceState/popstate/hashchange/reload`，`route-change` 通知父页面清除标注与草稿，不回滚代码。
-- 验证：Chromium CDP 实测滚动不变性 + 路由事件 PASS；前端 build 通过；orchestrator 346 tests 中 345 通过，唯一失败为既有挂载目录权限问题。
+- **白屏事故止血 + AST 门禁**：沙盒已回滚基线；`ast_check.mjs` 用 Babel 检查语法与未绑定 JSX 组件，`_preflight_code_check` 在 `/tmp` 副本上预检，失败直接拦截、不触碰 `/app`、不触发 HMR。
+- **画布视觉暂存**：CREATE_NEW 不再边画边写代码；前端 `pendingAdditions` + 半透明幽灵预览 + 右下角「未保存变更」浮窗，怎么画都不会白屏。
+- **BATCH_LAYOUT 统一提交**：保存布局 / 进入架构澄清 / 全栈生成时，位移与新增组件打包一次提交；Coder 一次生成新增 JSX，Python 合并 diff 后追加确定性 transform，只产出一份补丁与一次 HMR；Verifier 穿透校验每个 `data-vibe-created`。
+- **Architect 上下文**：进入澄清前自动 flush 画布草稿，并以 `system` 消息注入未保存变更摘要。
+- 验证：`test_layout_batch` 等 53 项测试全绿；前端 build 通过；真实沙盒 AST 探针（`<Plus />` 拦截 / 正常文件放行）通过。
 
 ## 真假边界
 

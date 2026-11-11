@@ -13,6 +13,7 @@ python-ai 容器通过挂载的 /var/run/docker.sock 调用宿主机 Docker：
 from __future__ import annotations
 
 import io
+import logging
 import re
 import shlex
 import socket
@@ -78,6 +79,17 @@ GIT_EXCLUDE_CONTENT = (
     "*.db\n"
 )
 FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+logger = logging.getLogger(__name__)
+
+# 写盘前静态门禁：语法错误 / 未绑定的 JSX 组件一律拦截，绝不让坏代码
+# 触发 Vite HMR。真实事故：`<Plus />` 漏 import，esbuild 构建通过，
+# 浏览器运行时报 ReferenceError，整个 React 树被卸载成白屏。
+AST_CHECK_SCRIPT = "/opt/vibe-ast-check.mjs"
+AST_STAGE_DIR = "/tmp/vibe-ast-stage"
+AST_STAGE_PATCH = "/tmp/vibe-ast-stage.patch"
+SCRIPT_SUFFIXES = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx")
+# unified diff 的 ``+++`` 目标行：兼容 ``b/path``、带引号路径与 /dev/null。
+PATCH_TARGET_RE = re.compile(r"^\+\+\+\s+(?P<path>.+?)\s*$", re.MULTILINE)
 
 
 class LocalDockerSandbox(SandboxProvider):
@@ -678,6 +690,11 @@ class LocalDockerSandbox(SandboxProvider):
         changed: list[str] = []
 
         normalized = self._validate_files(files or {})
+        # 关键顺序：先在临时副本里预演全部变更并跑 AST 门禁，通过后才
+        # 触碰 /app。这样非法代码不会触发 HMR，沙盒始终停留在上一个
+        # 可运行的 commit，不需要额外 reset。
+        if normalized or patch:
+            self._preflight_code_check(container, normalized, patch)
         if normalized:
             self._put_files(container, normalized)
             changed.extend(sorted(normalized))
@@ -979,6 +996,162 @@ class LocalDockerSandbox(SandboxProvider):
 
         if code != 0:
             raise SandboxPatchError(f"应用补丁失败: {self._decode(output)}")
+
+    # --------------------------------------------------------
+    # 写盘前 AST 门禁
+    # --------------------------------------------------------
+    def _preflight_code_check(
+        self,
+        container: Any,
+        files: dict[str, str] | None,
+        patch: str | None,
+    ) -> None:
+        """在临时副本中预演变更并执行 AST 检查。
+
+        关键约束：本方法只能读 /app，绝不能写 /app。Vite 监听的是真实
+        工作目录，只要坏代码没有落到那里，HMR 就不会被触发，页面也不会
+        白屏；失败时沙盒自然停留在上一个可运行的 commit。
+        """
+        if not files and not patch:
+            return
+        if not self._ensure_ast_checker(container):
+            # 检查器缺失属于环境异常（例如极老的导入镜像）。此时放行并
+            # 记录告警，避免整个平台因为缺少检查器而无法写代码。
+            logger.warning("AST checker missing, skip preflight scan")
+            return
+
+        stage = AST_STAGE_DIR
+        workdir = self.settings.sandbox_workdir
+        try:
+            # 1. 准备临时工作目录。
+            if patch:
+                # 补丁上下文来自线上工作树，不能 checkout HEAD 预演：
+                # 失败重试时线上可能存在尚未 commit 的代码。这里复制
+                # 源码快照（排除依赖 / 构建产物），保证预演结果与真实
+                # 应用完全一致。
+                code, output = self._exec(
+                    container,
+                    [
+                        "sh",
+                        "-lc",
+                        f"rm -rf {stage} && mkdir -p {stage} && "
+                        f"tar -C {shlex.quote(workdir)} "
+                        "--exclude=./node_modules --exclude=./dist "
+                        "--exclude=./.git --exclude=./.vite -cf - . "
+                        f"| tar -C {stage} -xf -",
+                    ],
+                )
+                if code != 0:
+                    raise SandboxPatchError(f"代码预检快照失败: {self._decode(output)}")
+            else:
+                code, output = self._exec(
+                    container, ["sh", "-lc", f"rm -rf {stage} && mkdir -p {stage}"]
+                )
+                if code != 0:
+                    raise SandboxPatchError(
+                        f"代码预检目录创建失败: {self._decode(output)}"
+                    )
+
+            # 2. files 模式：把待写内容放进副本；patch 模式：先落 files
+            #    再打补丁，和真实 apply_patch 的顺序保持一致。
+            if files:
+                container.put_archive(stage, self._build_tar(files))
+            if patch:
+                container.put_archive(
+                    "/tmp", self._build_tar({"vibe-ast-stage.patch": patch})
+                )
+                code, output = self._exec(
+                    container,
+                    [
+                        "sh",
+                        "-lc",
+                        f"git apply --recount --whitespace=nowarn {AST_STAGE_PATCH}",
+                    ],
+                    workdir=stage,
+                )
+                if code != 0:
+                    # 补丁本身无法应用也在这里拦截：绝不把半份补丁写进
+                    # 线上工作树。
+                    raise SandboxPatchError(
+                        "补丁预检失败（沙盒未写盘，仍停留在上一 commit）: "
+                        f"{self._decode(output)}"
+                    )
+
+            # 3. 只检查本次真正变更的脚本文件，避免历史文件里的既有
+            #    问题阻塞一次无关的写盘。
+            script_paths: list[str] = []
+            for rel_path in sorted(files or {}):
+                if rel_path.lower().endswith(SCRIPT_SUFFIXES):
+                    script_paths.append(f"{stage}/{rel_path}")
+            for rel_path in self._patch_target_paths(patch or ""):
+                if rel_path.lower().endswith(SCRIPT_SUFFIXES):
+                    script_paths.append(f"{stage}/{rel_path}")
+            script_paths = list(dict.fromkeys(script_paths))
+            if not script_paths:
+                return
+
+            code, output = self._exec(
+                container, ["node", AST_CHECK_SCRIPT, *script_paths]
+            )
+            logs = self._decode(output).strip()
+            if code == 2:
+                # 退出码 2 = 检查器自身无法加载 Babel，属于环境问题；
+                # 与“代码不合法”（退出码 1）严格区分。
+                logger.warning("AST checker unavailable: %s", logs[:500])
+                return
+            if code != 0:
+                raise SandboxPatchError(
+                    "代码静态检查未通过，已拦截写入（未触发 HMR，"
+                    "沙盒保持在上一 commit）:\n" + logs
+                )
+        finally:
+            # 清理由容器内 rm 完成，失败也不影响调用方。
+            try:
+                self._exec(
+                    container, ["sh", "-lc", f"rm -rf {stage} {AST_STAGE_PATCH}"]
+                )
+            except DockerException:  # pragma: no cover - 容器已经消失
+                pass
+
+    def _ensure_ast_checker(self, container: Any) -> bool:
+        """把仓库里的检查器推送到容器 /opt，兼容升级前创建的旧沙盒。"""
+        candidates = [
+            Path(self.settings.sandbox_template_dir) / "ast_check.mjs",
+            Path(__file__).resolve().parents[3] / "sandbox_template" / "ast_check.mjs",
+        ]
+        source = next((path for path in candidates if path.is_file()), None)
+        if source is None:
+            return False
+        try:
+            container.put_archive(
+                "/opt",
+                self._build_tar(
+                    {"vibe-ast-check.mjs": source.read_text(encoding="utf-8")}
+                ),
+            )
+        except DockerException:
+            logger.warning("failed to inject AST checker", exc_info=True)
+            return False
+        return True
+
+    @staticmethod
+    def _patch_target_paths(patch: str) -> list[str]:
+        """从 unified diff 提取受影响的目标文件（删除文件跳过）。"""
+        paths: list[str] = []
+        for raw in PATCH_TARGET_RE.findall(patch):
+            value = raw.split("\t", 1)[0].strip()
+            if value.startswith('"') and value.endswith('"'):
+                value = value[1:-1]
+            if not value or value == "/dev/null":
+                continue
+            if value.startswith("b/"):
+                value = value[2:]
+            pure = PurePosixPath(value)
+            # 防御路径穿越：预检副本的路径必须收敛在 stage 内。
+            if pure.is_absolute() or ".." in pure.parts:
+                continue
+            paths.append(str(pure))
+        return paths
 
     def _build_tar(self, files: dict[str, str]) -> bytes:
         """把相对路径文本文件打成 Docker put_archive 需要的 tar。"""

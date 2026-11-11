@@ -98,6 +98,9 @@ class AnnotationEnvelope(CamelModel):
     #   - BATCH_MOVE：用户连续拖拽多个组件后统一提交。payload.moves 是
     #     [{source, file, selector, dx, dy}] 数组，Coder 一次生成合并补丁，
     #     避免多个 Run 并发写同一文件。
+    #   - BATCH_LAYOUT：前端视觉暂存的统一提交。payload.moves 为可选位移，
+    #     payload.additions 为 [{annotationId, intent, annotation}] 新增组件；
+    #     Coder 一次生成全部代码，避免画布上“边画边写”导致白屏。
     # 旧客户端仍发送 MODIFY / ADD，领域层通过 actions.normalize_action()
     # 统一语义，避免历史数据失效。
     action: Literal[
@@ -107,6 +110,7 @@ class AnnotationEnvelope(CamelModel):
         "MODIFY_EXISTING",
         "MOVE",
         "BATCH_MOVE",
+        "BATCH_LAYOUT",
     ] = "MODIFY"
     world_target: dict[str, Any] = Field(default_factory=dict)
     # ADD 专用：圈选区域相对“最近 data-source 父容器”的位置。

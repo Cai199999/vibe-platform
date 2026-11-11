@@ -170,21 +170,12 @@ def _explicit_move_offset(annotation: dict[str, Any]) -> tuple[float, float] | N
     return dx, dy
 
 
-def _explicit_batch_moves(
-    annotation: dict[str, Any],
-) -> list[dict[str, Any]] | None:
-    """解析 BATCH_MOVE 的 payload.moves。
+def _parse_move_records(raw_moves: Any) -> list[dict[str, Any]] | None:
+    """校验并归一化 payload.moves。
 
-    前端把用户连续拖拽的多个组件合并成一个 Envelope；每条记录都必须
-    带选择器与有限、有界的累计偏移。任何一条非法都整体返回 None，
-    回退到原有 LLM 流程，绝不静默丢弃用户的布局草稿。
+    每条记录都必须带选择器与有限、有界的累计偏移。任何一条非法都整体
+    返回 None，回退到原有流程，绝不静默丢弃用户的布局草稿。
     """
-    if str(annotation.get("action") or "").upper() != "BATCH_MOVE":
-        return None
-    payload = annotation.get("payload") or {}
-    if not isinstance(payload, dict):
-        return None
-    raw_moves = payload.get("moves")
     if not isinstance(raw_moves, list) or not raw_moves:
         return None
     # 上限既保护 Prompt / 补丁体积，也避免异常客户端造成长循环。
@@ -218,6 +209,99 @@ def _explicit_batch_moves(
             }
         )
     return moves
+
+
+def _explicit_batch_moves(
+    annotation: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    """解析 BATCH_MOVE 的 payload.moves。"""
+    if str(annotation.get("action") or "").upper() != "BATCH_MOVE":
+        return None
+    payload = annotation.get("payload") or {}
+    if not isinstance(payload, dict):
+        return None
+    return _parse_move_records(payload.get("moves"))
+
+
+def _explicit_layout_batch(
+    annotation: dict[str, Any],
+) -> dict[str, Any] | None:
+    """解析 BATCH_LAYOUT：视觉暂存的位移 + 新增组件统一提交。
+
+    返回：
+      - moves：[{selector, dx, dy, ...}]，可为空；
+      - additions：每项包含完整 CREATE_NEW annotate 信封，供 Coder 直接
+        复用现有 UI 上下文裁剪与 data-vibe-created 标记校验。
+    任一新增项不合法都返回 None，回退到普通流程而不是悄悄丢掉用户草稿。
+    """
+    if str(annotation.get("action") or "").upper() != "BATCH_LAYOUT":
+        return None
+    payload = annotation.get("payload") or {}
+    if not isinstance(payload, dict):
+        return None
+
+    raw_moves = payload.get("moves")
+    moves: list[dict[str, Any]] = []
+    if raw_moves:
+        parsed_moves = _parse_move_records(raw_moves)
+        if parsed_moves is None:
+            return None
+        moves = parsed_moves
+
+    raw_additions = payload.get("additions")
+    additions: list[dict[str, Any]] = []
+    if raw_additions:
+        if not isinstance(raw_additions, list) or len(raw_additions) > 20:
+            return None
+        for raw in raw_additions:
+            if not isinstance(raw, dict):
+                return None
+            nested = raw.get("annotation")
+            if not isinstance(nested, dict):
+                return None
+            annotation_id = str(
+                nested.get("annotationId") or nested.get("annotation_id") or ""
+            ).strip()
+            intent = nested.get("intent")
+            intent = intent if isinstance(intent, dict) else {}
+            ui = intent.get("ui")
+            ui = ui if isinstance(ui, dict) else {}
+            nested_payload = nested.get("payload")
+            nested_payload = nested_payload if isinstance(nested_payload, dict) else {}
+            text = str(
+                raw.get("intent")
+                or ui.get("summary")
+                or nested_payload.get("text")
+                or ""
+            ).strip()
+            if not annotation_id or not text:
+                return None
+            # 强制嵌套信封走 CREATE_NEW：前端暂存的一定是“新增组件”。
+            normalized = dict(nested)
+            normalized["annotationId"] = annotation_id
+            normalized["action"] = "CREATE_NEW"
+            normalized.setdefault("type", "visual-draw")
+            if not isinstance(normalized.get("intent"), dict):
+                normalized["intent"] = {
+                    "kind": "UI_ONLY",
+                    "ui": {"summary": text, "acceptance": [], "elementRole": "element"},
+                }
+            additions.append(
+                {
+                    "annotationId": annotation_id,
+                    "intent": text,
+                    "annotation": normalized,
+                }
+            )
+
+    if not moves and not additions:
+        return None
+    return {"moves": moves, "additions": additions}
+
+
+def _is_explicit_layout_batch(annotations: list[dict[str, Any]]) -> bool:
+    """单个 BATCH_LAYOUT 是确定性布局批次，跳过 RAG / Planner LLM。"""
+    return len(annotations) == 1 and _explicit_layout_batch(annotations[0]) is not None
 
 
 def _is_explicit_move_batch(annotations: list[dict[str, Any]]) -> bool:
@@ -811,11 +895,27 @@ class AgentGraphRunner:
         rag_query = ""
         knowledge_context = ""
         rag_citations: list[dict[str, Any]] = []
-        if not _is_explicit_move_batch(annotations):
+        deterministic_layout = _is_explicit_move_batch(annotations) or (
+            _is_explicit_layout_batch(annotations)
+        )
+        if not deterministic_layout:
             rag_query, knowledge_context, rag_citations = (
                 self._retrieve_planner_knowledge(state, annotations)
             )
-        if _is_explicit_move_batch(annotations):
+        if _is_explicit_layout_batch(annotations):
+            # 视觉暂存统一提交：位移是几何事实，新增组件是用户明确意图，
+            # 不需要规划模型，也不能被澄清中断打断。
+            plan = PlanResult(
+                plan=(
+                    "一次提交画布暂存变更：先用 move_component 的规则写入全部 "
+                    "transform 位移，再为每个 additions 中的 CREATE_NEW 生成 "
+                    "完整 JSX（带 data-vibe-created），合并为一份补丁。"
+                ),
+                confidence_score=0.99,
+                decision_impact=MINOR,
+                needs_clarification=False,
+            )
+        elif _is_explicit_move_batch(annotations):
             # 直接拖拽是确定性几何输入：不调用规划模型，避免把“拖了 12px”
             # 重新解释成自然语言需求，也避免任何澄清中断打断静默同步。
             plan = PlanResult(
@@ -1133,6 +1233,220 @@ class AgentGraphRunner:
             ],
         }
 
+    def _coder_layout_batch(
+        self,
+        state: AgentState,
+        layout: dict[str, Any],
+        current_files: dict[str, str],
+        verify_result: dict[str, Any],
+        retry_count: int,
+    ) -> dict[str, Any]:
+        """BATCH_LAYOUT 的统一编码：位移确定性写入 + 新增组件一次生成。
+
+        顺序很重要：先让模型基于**原始文件**生成新增组件的 diff，再用
+        Python 侧的最小补丁应用器合并到工作副本，最后追加位移 CSS。
+        这样模型补丁的上下文始终与当前沙盒一致，不会因为提前插入 CSS
+        规则而 hunk 匹配失败。
+        """
+        target_files = list(state.get("target_files") or [])
+        if not target_files:
+            return self._coder_failure_result(
+                code="CODER_INTERNAL_ERROR",
+                message="布局批次缺少目标文件",
+            )
+        additions = layout.get("additions") or []
+        moves = layout.get("moves") or []
+        updated = dict(current_files)
+        changed: set[str] = set()
+        summaries: list[str] = []
+
+        if additions:
+            synthetic = [item["annotation"] for item in additions]
+            timeout_seconds = float(
+                state.get("coder_timeout_seconds")
+                or getattr(self._settings, "agent_coder_timeout_seconds", 30.0)
+            )
+            generate_kwargs = {
+                "annotations": synthetic,
+                "plan": state.get("plan", ""),
+                "current_files": current_files,
+                "target_files": target_files,
+                "verify_result": _repair_payload(verify_result),
+                "retry_count": retry_count,
+            }
+            self._emit(
+                "node.progress",
+                {
+                    "node": "coder",
+                    "message": f"批量生成 {len(additions)} 个新增组件的 JSX",
+                },
+                dedupe_key=f"node.progress:coder:layout-add:{retry_count}",
+            )
+            try:
+                result = self._generate_with_coder_timeout(
+                    **generate_kwargs,
+                    compact=False,
+                    prefer_fast=False,
+                    timeout_seconds=timeout_seconds,
+                )
+            except CoderTimeoutError:
+                try:
+                    result = self._generate_with_coder_timeout(
+                        **generate_kwargs,
+                        compact=True,
+                        prefer_fast=True,
+                        timeout_seconds=float(
+                            getattr(
+                                self._settings,
+                                "agent_coder_retry_timeout_seconds",
+                                20.0,
+                            )
+                        ),
+                    )
+                except (CoderTimeoutError, AgentLLMError) as exc:
+                    logger.warning("layout coder fallback failed: %s", exc)
+                    return self._coder_failure_result(
+                        code="CODER_TIMEOUT_RECOVERABLE",
+                        message=CODER_BACKGROUND_AVAILABLE_MESSAGE,
+                        background_available=True,
+                    )
+            except AgentLLMError as exc:
+                detail = str(exc).strip()
+                return self._coder_failure_result(
+                    code="CODER_GENERATION_FAILED",
+                    message=(
+                        f"{CODER_GENERATION_FAILED_MESSAGE}（{detail[:200]}）"
+                        if detail
+                        else CODER_GENERATION_FAILED_MESSAGE
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("layout coder crashed")
+                return self._coder_failure_result(
+                    code="CODER_INTERNAL_ERROR",
+                    message=f"Coder 生成新增组件失败: {exc}",
+                )
+
+            generated = _materialize_generated_files(current_files, result.files)
+            if not generated and result.patch:
+                applied = _apply_unified_patch(current_files, result.patch)
+                if applied is None:
+                    return self._coder_failure_result(
+                        code="CODER_PATCH_UNPARSEABLE",
+                        message="新增组件补丁无法合并，已保留画布草稿，请重试",
+                    )
+                generated = {
+                    path: content
+                    for path, content in applied.items()
+                    if content != current_files.get(path)
+                }
+            if not generated:
+                return self._coder_failure_result(
+                    code="CODER_GENERATION_FAILED",
+                    message="模型没有生成任何新增组件代码，画布草稿已保留",
+                )
+            updated.update(generated)
+            changed.update(generated)
+            summaries.append(result.summary or f"新增 {len(additions)} 个组件")
+
+        if moves:
+            tool = self._toolbox.get("move_component")
+            if tool is None:
+                return self._coder_failure_result(
+                    code="CODER_INTERNAL_ERROR",
+                    message="move_component Tool 不可用，布局草稿已保留",
+                )
+            for move_index, move in enumerate(moves):
+                selector = move["selector"]
+                offset = (move["dx"], move["dy"])
+                fallback_path = annotation_target_file(
+                    state["annotation_context"]["annotations"][0]["annotation"],
+                    current_files,
+                    target_files[0],
+                )
+                candidate = move.get("file") or ""
+                path = (
+                    candidate if candidate and candidate in updated else fallback_path
+                )
+                if path not in updated:
+                    return self._coder_failure_result(
+                        code="CODER_INTERNAL_ERROR",
+                        message=f"位移目标文件不存在: {path}，布局草稿已保留",
+                    )
+                try:
+                    raw = tool.invoke(
+                        {
+                            "element_id": selector,
+                            "x": offset[0],
+                            "y": offset[1],
+                        }
+                    )
+                    payload = json.loads(raw) if isinstance(raw, str) else raw
+                    rule = str(payload.get("rule") or "")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("layout move tool failed: %s", exc)
+                    return self._coder_failure_result(
+                        code="CODER_INTERNAL_ERROR",
+                        message=f"位移规则生成失败: {exc}，布局草稿已保留",
+                    )
+                if not rule:
+                    return self._coder_failure_result(
+                        code="CODER_INTERNAL_ERROR",
+                        message=f"位移规则为空: {selector}，布局草稿已保留",
+                    )
+                updated[path] = append_css_rule(updated[path], rule, path)
+                changed.add(path)
+                self._emit(
+                    "node.progress",
+                    {
+                        "node": "coder",
+                        "message": (
+                            f"批量布局位移 [{move_index + 1}/{len(moves)}] "
+                            f"move_component({selector}, {offset[0]:g}, {offset[1]:g})"
+                        ),
+                    },
+                    dedupe_key=(
+                        f"node.progress:coder:layout-move:{move_index}:{retry_count}"
+                    ),
+                )
+            summaries.append(f"调整 {len(moves)} 个组件位置")
+
+        generated_files = {
+            path: updated[path]
+            for path in sorted(changed)
+            if path in updated and updated[path] != current_files.get(path)
+        }
+        if not generated_files:
+            return self._coder_failure_result(
+                code="CODER_GENERATION_FAILED",
+                message="画布变更没有产生任何代码差异，草稿已保留",
+            )
+        patch = _combined_diff(current_files, generated_files)
+        round_no = int(state.get("clarification_round", 0))
+        patch_id = f"pat_{state.get('run_id')}_{round_no}_{retry_count}"
+        insertions, deletions = _diff_stat(patch)
+        summary = "；".join(summaries) or "统一提交画布变更"
+        self._emit(
+            "patch.proposed",
+            {
+                "patchId": patch_id,
+                "files": sorted(generated_files),
+                "insertions": insertions,
+                "deletions": deletions,
+                "summary": summary,
+                "diffPreview": _tail(patch, 2000) if patch else "",
+            },
+            dedupe_key=f"patch.proposed:{patch_id}",
+        )
+        return {
+            "generated_patch": patch,
+            "generated_files": generated_files,
+            "patch_id": patch_id,
+            "apply_failed": False,
+            "status": "CODING",
+            "messages": [_message("coder", summary)],
+        }
+
     def _generate_with_coder_timeout(
         self,
         *args: Any,
@@ -1210,6 +1524,14 @@ class AgentGraphRunner:
             },
             dedupe_key=f"node.progress:coder:{retry_count}",
         )
+        # 视觉暂存统一提交：位移 + 新增组件必须一次落盘，避免用户每画
+        # 一个组件就触发一次 Coder / HMR。
+        if len(annotations) == 1:
+            layout = _explicit_layout_batch(annotations[0])
+            if layout is not None:
+                return self._coder_layout_batch(
+                    state, layout, current_files, verify_result, retry_count
+                )
         # 纯移动请求走标准 Tool，而不是让模型自由写 CSS：
         # 1) 位移规则由 move_component 统一生成（只允许 transform）；
         # 2) 杜绝模型改 width / height / left / top 造成“按钮瞬间变长”；
@@ -1520,12 +1842,24 @@ class AgentGraphRunner:
         context = state.get("annotation_context") or {}
         target_files = [str(path) for path in (state.get("target_files") or [])]
         missing: list[dict[str, str]] = []
+        pending: list[dict[str, Any]] = []
         for item in context.get("annotations") or []:
             if not isinstance(item, dict):
                 continue
             annotation = item.get("annotation")
             if not isinstance(annotation, dict):
                 continue
+            layout = _explicit_layout_batch(annotation)
+            if layout is not None:
+                # BATCH_LAYOUT 的新增组件藏在 payload.additions 里，必须
+                # 逐个校验真实标记，否则构建通过仍可能“假成功”。
+                pending.extend(
+                    entry["annotation"] for entry in layout.get("additions") or []
+                )
+                continue
+            pending.append(annotation)
+
+        for annotation in pending:
             action = (
                 annotation.get("action")
                 or annotation.get("intentAction")
@@ -2364,6 +2698,134 @@ def _repair_payload(verify_result: dict[str, Any]) -> dict[str, Any]:
         "exit_code": verify_result.get("exit_code", -1),
         "error_context": _repair_feedback(verify_result) or "",
     }
+
+
+_HUNK_HEADER_RE = re.compile(
+    r"^@@ -(?P<old>\d+)(?:,(?P<old_count>\d+))? "
+    r"\+(?P<new>\d+)(?:,(?P<new_count>\d+))? @@"
+)
+_DIFF_FILE_RE = re.compile(r"^(?P<marker>---|\+\+\+)\s+(?P<path>.+?)\s*$")
+
+
+def _normalize_patch_path(raw: str) -> str:
+    value = raw.split("\t", 1)[0].strip()
+    if value.startswith('"') and value.endswith('"'):
+        value = value[1:-1]
+    if value.startswith("b/") or value.startswith("a/"):
+        value = value[2:]
+    return value
+
+
+def _apply_unified_patch(
+    current_files: dict[str, str],
+    patch: str,
+) -> dict[str, str] | None:
+    """把模型输出的 unified diff 合并回内存文件表。
+
+    BATCH_LAYOUT 需要先拿到“新增组件后的完整内容”，再追加确定性 CSS
+    位移规则；沙盒写盘仍由 Applier 用 ``git apply`` 完成。这里只处理
+    标准 ``---/+++`` + ``@@`` 格式，容忍行号偏移（与 ``--recount`` 的
+    行为一致）；遇到无法定位的上下文就返回 None，绝不猜测写错位置。
+    """
+    if not patch.strip():
+        return None
+    lines = patch.splitlines()
+    result = dict(current_files)
+    index = 0
+    total = len(lines)
+    while index < total:
+        line = lines[index]
+        if not line.startswith("--- "):
+            index += 1
+            continue
+        if index + 1 >= total or not lines[index + 1].startswith("+++ "):
+            return None
+        old_path = _normalize_patch_path(line[4:])
+        new_path = _normalize_patch_path(lines[index + 1][4:])
+        path = new_path if new_path != "/dev/null" else old_path
+        if not path or path == "/dev/null":
+            return None
+        content = result.get(path, "")
+        file_lines = content.splitlines()
+        trailing_newline = content.endswith("\n")
+        index += 2
+        line_offset = 0  # 同一文件内多个 hunk 的累计行号位移
+        applied_any = False
+        while index < total and lines[index].startswith("@@"):
+            header = _HUNK_HEADER_RE.match(lines[index])
+            if not header:
+                return None
+            old_start = int(header.group("old"))
+            index += 1
+            old_block: list[str] = []
+            new_block: list[str] = []
+            while index < total:
+                body = lines[index]
+                if body.startswith("@@"):
+                    break
+                if (
+                    body.startswith("--- ")
+                    and index + 1 < total
+                    and lines[index + 1].startswith("+++ ")
+                ):
+                    break
+                if body.startswith("\\"):  # \ No newline at end of file
+                    index += 1
+                    continue
+                if not body:
+                    # 空行在 diff 中表示一个空的上下文行。
+                    old_block.append("")
+                    new_block.append("")
+                elif body[0] == " ":
+                    old_block.append(body[1:])
+                    new_block.append(body[1:])
+                elif body[0] == "-":
+                    old_block.append(body[1:])
+                elif body[0] == "+":
+                    new_block.append(body[1:])
+                else:
+                    # 非标准行：视为补丁结束，交给下一个文件头处理。
+                    break
+                index += 1
+
+            expected = max(0, old_start - 1 + line_offset)
+            position = _locate_block(file_lines, old_block, expected)
+            if position is None:
+                return None
+            file_lines[position : position + len(old_block)] = new_block
+            line_offset += len(new_block) - len(old_block)
+            applied_any = True
+
+        if not applied_any:
+            return None
+        updated = "\n".join(file_lines)
+        if trailing_newline:
+            updated += "\n"
+        result[path] = updated
+    return result
+
+
+def _locate_block(
+    file_lines: list[str],
+    block: list[str],
+    expected: int,
+) -> int | None:
+    """在期望位置附近搜索 hunk 的旧内容，容忍行号偏移。"""
+    if not block:
+        return min(max(0, expected), len(file_lines))
+    last_start = len(file_lines) - len(block)
+    if last_start < 0:
+        return None
+    # 补丁行号可能远大于实际文件（模型计数错误 / 上下文过短），先把期望
+    # 位置夹到合法区间，再向外扩散；否则从越界位置出发永远扫不到。
+    start = min(max(0, expected), last_start)
+    for distance in range(0, len(file_lines) + 1):
+        for candidate in (start - distance, start + distance):
+            if candidate < 0 or candidate > last_start:
+                continue
+            if file_lines[candidate : candidate + len(block)] == block:
+                return candidate
+    return None
 
 
 def _unified_diff(old: str, new: str, target_file: str) -> str:

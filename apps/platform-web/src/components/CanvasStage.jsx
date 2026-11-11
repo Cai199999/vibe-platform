@@ -1055,6 +1055,10 @@ function CanvasStage({
   dragCommit = null,
   // 静默同步进行中：submitting=true 属于后台写代码，不应强制退出拖拽模式。
   dragSyncActive = false,
+  // 视觉暂存：这些新增组件只存在于前端，画在这里的是半透明幽灵预览。
+  // 真正写代码发生在【保存布局】的一次 BATCH_LAYOUT 请求里。
+  pendingAdditions = [],
+  onRemovePendingAddition,
 }) {
   const stageRef = useRef(null)
   // 固定 1440×900 的视口节点：所有屏幕 → 世界坐标换算都以它的
@@ -2106,6 +2110,42 @@ function CanvasStage({
                 <span className="annotation-tag">新标注</span>
               </div>
             )}
+
+            {/* 视觉暂存幽灵层：绝对定位铺在 iframe 上方，只表达“这里将会
+                出现什么”，完全不改 sandbox 代码，因此不可能触发白屏。 */}
+            {pendingAdditions.map((item) => {
+              const ghostRect =
+                mode === 'live'
+                  ? resolveAnnotationRect(item, frameScroll)
+                  : item.rect
+              if (!ghostRect || ghostRect.visible === false) return null
+              return (
+                <div
+                  key={`pending-addition-${item.annotationId}`}
+                  className="pending-addition-ghost"
+                  data-pending-addition-id={item.annotationId}
+                  style={{
+                    left: `${ghostRect.x * 100}%`,
+                    top: `${ghostRect.y * 100}%`,
+                    width: `${ghostRect.width * 100}%`,
+                    height: `${ghostRect.height * 100}%`,
+                    zIndex: 60,
+                  }}
+                >
+                  <div className="pending-addition-ghost-card">
+                    <span className="pending-addition-ghost-badge">
+                      暂存 · 未写入
+                    </span>
+                    <span className="pending-addition-ghost-preview">
+                      {item.componentLabel || '新增组件'}
+                    </span>
+                    <span className="pending-addition-ghost-intent">
+                      {item.intent}
+                    </span>
+                  </div>
+                </div>
+              )
+            })}
 
             {movingAnnotation && movingDisplayRect && (
               <div

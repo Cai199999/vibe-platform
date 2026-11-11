@@ -1950,16 +1950,42 @@ class RunExecutionService:
 
     @staticmethod
     def _resolve_target_files(request: ExecuteRunRequest) -> list[str]:
-        """按标注顺序去重目标文件；没有源码定位时回退到默认入口。"""
+        """按标注顺序去重目标文件；没有源码定位时回退到默认入口。
+
+        BATCH_LAYOUT 把多个新增组件 / 位移藏在 payload 里，顶层 target
+        只代表第一个落点；必须把每个嵌套目标文件都加载进来，否则 Coder
+        在跨文件批次里读不到真实源码。
+        """
         files: list[str] = []
-        for annotation in request.effective_annotations:
-            file = None
-            target = annotation.target
-            if target and target.source and target.source.file:
-                file = target.source.file
-            file = file or DEFAULT_TARGET_FILE
-            if file not in files:
+
+        def add(raw_file: Any) -> None:
+            file = str(raw_file or "").strip()
+            if file and file not in files:
                 files.append(file)
+
+        for annotation in request.effective_annotations:
+            target = annotation.target
+            add(
+                target.source.file
+                if target and target.source and target.source.file
+                else DEFAULT_TARGET_FILE
+            )
+            if str(annotation.action).upper() != "BATCH_LAYOUT":
+                continue
+            payload = annotation.payload or {}
+            for addition in payload.get("additions") or []:
+                if not isinstance(addition, dict):
+                    continue
+                nested = addition.get("annotation")
+                nested = nested if isinstance(nested, dict) else {}
+                nested_target = nested.get("target")
+                nested_target = nested_target if isinstance(nested_target, dict) else {}
+                nested_source = nested_target.get("source")
+                nested_source = nested_source if isinstance(nested_source, dict) else {}
+                add(nested_source.get("file"))
+            for move in payload.get("moves") or []:
+                if isinstance(move, dict):
+                    add(move.get("file"))
         return files or [DEFAULT_TARGET_FILE]
 
     @staticmethod
