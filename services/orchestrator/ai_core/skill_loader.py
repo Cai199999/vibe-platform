@@ -23,11 +23,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ai_core.domain.skills import SkillDescriptor
 
@@ -54,7 +55,10 @@ class SkillFile(BaseModel):
 
     skill_id: str = Field(alias="skillId", min_length=1, max_length=96)
     name: str = Field(min_length=1, max_length=128)
-    agent_id: str = Field(alias="agentId", min_length=1, max_length=64)
+    # 单 Agent 用 agentId；需要把同一份规范同时挂到多个 Agent 时使用
+    # agentIds（例如 BackendCoder + InfraCoder 共用生产规范）。
+    agent_id: str = Field(default="", alias="agentId", max_length=64)
+    agent_ids: list[str] = Field(default_factory=list, alias="agentIds", max_length=20)
     description: str = Field(default="", max_length=2000)
     version: str = Field(default="1.0.0", max_length=32)
     enabled: bool = True
@@ -69,7 +73,7 @@ class SkillFile(BaseModel):
     )
     rag_refs: list[str] = Field(default_factory=list, alias="ragRefs", max_length=20)
 
-    @field_validator("tools", "keywords", "rag_refs")
+    @field_validator("tools", "keywords", "rag_refs", "agent_ids")
     @classmethod
     def _clean_list(cls, values: list[str]) -> list[str]:
         result: list[str] = []
@@ -80,6 +84,15 @@ class SkillFile(BaseModel):
                 seen.add(value)
                 result.append(value)
         return result
+
+    @model_validator(mode="after")
+    def _require_agent(self) -> "SkillFile":
+        if not self.agent_id.strip() and not self.agent_ids:
+            raise ValueError("Skill 必须声明 agentId 或 agentIds")
+        if self.agent_id:
+            # agentId 是主挂载；agentIds 只用于追加其它 Agent，避免重复。
+            self.agent_ids = [item for item in self.agent_ids if item != self.agent_id]
+        return self
 
 
 def _read_prompt(base: Path, payload: SkillFile) -> str:
@@ -138,10 +151,15 @@ def _descriptor_from_payload(
     if not payload.enabled:
         raise SkillFileError(f"Skill 已禁用: {payload.skill_id}")
 
+    primary_agent = payload.agent_id or payload.agent_ids[0]
+    extra_agents = [
+        item for item in payload.agent_ids if item and item != primary_agent
+    ]
+
     return SkillDescriptor(
         skill_id=payload.skill_id,
         name=payload.name,
-        agent_id=payload.agent_id,
+        agent_id=primary_agent,
         description=payload.description,
         prompt_ref=path.name,
         system_prompt=_read_prompt(path.parent, payload) or None,
@@ -153,6 +171,7 @@ def _descriptor_from_payload(
             "keywords": payload.keywords,
             "source": source,
             "stage": "M3",
+            "additionalAgentIds": extra_agents,
         },
     )
 
@@ -193,9 +212,22 @@ def load_skill_directory(directory: Path | str) -> list[SkillDescriptor]:
     paths = sorted(base.glob("*.skill.json")) + sorted(base.glob("*.skill.md"))
     for path in paths:
         try:
-            skills.append(read_skill_file(path))
+            descriptor = read_skill_file(path)
         except SkillFileError as exc:
             logger.warning("skip invalid skill file %s: %s", path, exc)
+            continue
+        skills.append(descriptor)
+        # agentIds 允许一份领域规范同时挂载到多个 Agent。SkillRegistry 以
+        # skill_id 为唯一键，因此追加 Agent 使用 `<id>.<agentId>`，既避免
+        # 冲突，又能让每个 Agent 的 Prompt 注入独立生效。
+        for agent_id in descriptor.metadata.get("additionalAgentIds") or []:
+            skills.append(
+                replace(
+                    descriptor,
+                    skill_id=f"{descriptor.skill_id}.{agent_id}",
+                    agent_id=agent_id,
+                )
+            )
     return skills
 
 

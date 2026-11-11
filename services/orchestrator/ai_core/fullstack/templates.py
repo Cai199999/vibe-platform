@@ -124,20 +124,32 @@ function sequelizeType(name, sqliteType, DataTypes) {
   return DataTypes.TEXT
 }
 
-async function connectOrm() {
+export async function createSequelize() {
   // 动态 import：沙盒未配置 DATABASE_URL 时不会加载 sequelize，
   // 因而无需在预览镜像里预装生产依赖。
-  const { Sequelize, DataTypes } = await import('sequelize')
+  const { Sequelize } = await import('sequelize')
   const dialect = STORAGE === 'postgresql' ? 'postgres' : 'mysql'
-  const instance = new Sequelize(DATABASE_URL, {
+  return new Sequelize(DATABASE_URL, {
     dialect,
     logging: false,
+    // 云数据库（阿里云 RDS / Neon / Supabase）通常强制 TLS；
+    // 是否启用必须由部署平台的环境变量决定，不能写死在代码里。
     dialectOptions:
       process.env.DB_SSL === 'true'
         ? { ssl: { require: true, rejectUnauthorized: false } }
         : {},
+    pool: {
+      max: Number(process.env.DB_POOL_MAX || 10),
+      min: 0,
+      acquire: 30000,
+      idle: 10000,
+    },
   })
+}
 
+async function connectOrm() {
+  const { DataTypes } = await import('sequelize')
+  const instance = await createSequelize()
   const attributes = {}
   for (const [name, sqliteType] of COLUMN_DEFS) {
     const isId = name === 'id'
@@ -155,10 +167,9 @@ async function connectOrm() {
   })
 
   await instance.authenticate()
-  // 首次部署可通过 DB_AUTO_MIGRATE=true 自动建表；成熟项目应改用迁移脚本。
-  if (process.env.DB_AUTO_MIGRATE === 'true') {
-    await model.sync()
-  }
+  // 生产环境绝不调用 model.sync() 自动建表：表结构唯一来源是
+  // server/migrations/*.sql，由 `npm run db:migrate` 显式执行。
+  // 未迁移时健康检查返回 503，让部署平台在发布阶段就暴露问题。
   if (process.env.DB_SEED === 'true') {
     await seedOrm(model)
   }
@@ -339,17 +350,30 @@ export async function deleteRecord(id) {
 export async function health() {
   if (ORM_ENABLED) {
     const { instance, model } = await getOrm()
+    // authenticate 验证连接与账号权限；失败时直接抛出，由 /api/health
+    // 转为 HTTP 503，让负载均衡 / 部署平台停止摘流。
     await instance.authenticate()
-    const records = await model.count()
+    let tableReady = true
+    let records = 0
+    let reason = ''
+    try {
+      records = Number(await model.count())
+    } catch (error) {
+      // 连接正常但表不存在：通常是迁移未执行，返回 degraded 而不是 ok。
+      tableReady = false
+      reason = String(error?.message || error)
+    }
     return {
-      status: 'ok',
+      status: tableReady ? 'ok' : 'degraded',
       runtime: RUNTIME,
       storage: STORAGE,
       orm: 'sequelize',
       databaseUrlConfigured: true,
       table: TABLE,
       entity: ENTITY,
-      records: Number(records),
+      tableReady,
+      records,
+      ...(reason ? { reason } : {}),
     }
   }
   const total = sqliteGet(
@@ -364,29 +388,21 @@ export async function health() {
     databaseUrlConfigured: false,
     table: TABLE,
     entity: ENTITY,
+    tableReady: true,
     records: Number(total?.total ?? 0),
     dbPath: DB_PATH,
   }
 }
 
-/**
- * 显式迁移入口：生产环境可执行 `npm run db:migrate`。
- * SQLite 预览库在模块加载时已经自动建表。
- */
-export async function migrate() {
-  if (!ORM_ENABLED) {
-    return {
-      storage: 'sqlite',
-      migrated: false,
-      reason: 'DATABASE_URL 未配置，SQLite 预览库已自动建表',
-    }
-  }
-  const { model } = await getOrm()
-  await model.sync()
-  return { storage: STORAGE, migrated: true, table: TABLE }
+export {
+  DATABASE_URL,
+  DB_ENGINE,
+  DB_PATH,
+  ORM_ENABLED,
+  RUNTIME,
+  SCHEMA_SQL,
+  STORAGE,
 }
-
-export { DB_PATH, ORM_ENABLED, RUNTIME, SCHEMA_SQL, STORAGE }
 """
 
 # ------------------------------------------------------------
@@ -398,6 +414,8 @@ EXPRESS_SERVER_TEMPLATE = r"""// 由 BackendCoder 根据《全栈实施契约》
 import express from 'express'
 __UPLOAD_IMPORTS__
 import {
+  ORM_ENABLED,
+  RUNTIME,
   STORAGE,
   createRecord,
   deleteRecord,
@@ -414,23 +432,49 @@ const TABLE = '__TABLE__'
 const ENTITY = '__ENTITY__'
 const COLLECTION_PATH = '__COLLECTION_PATH__'
 const ITEM_PATH = '__ITEM_PATH__'
-const CORS_ORIGIN = process.env.CORS_ORIGIN || '*'
+const IS_PRODUCTION = process.env.NODE_ENV === 'production'
+// CORS 白名单只从环境变量读取：支持逗号分隔的多个前端域名。
+// 生产环境未配置时默认拒绝跨域（同源部署不受影响），绝不隐式放开 *。
+const CORS_ORIGINS = String(
+  process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || '',
+)
+  .split(',')
+  .map((item) => item.trim())
+  .filter(Boolean)
+const ALLOW_ANY_ORIGIN =
+  CORS_ORIGINS.includes('*') || (!IS_PRODUCTION && CORS_ORIGINS.length === 0)
 
 const app = express()
 app.disable('x-powered-by')
+// Render / 阿里云 SLB 会终止 TLS 并在 X-Forwarded-* 头里传真实协议与 IP。
+app.set('trust proxy', 1)
 app.use(express.json({ limit: '1mb' }))
 app.use((request, response, next) => {
-  response.setHeader('Access-Control-Allow-Origin', CORS_ORIGIN)
-  if (CORS_ORIGIN !== '*') response.setHeader('Vary', 'Origin')
-  response.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, Idempotency-Key',
-  )
-  response.setHeader(
-    'Access-Control-Allow-Methods',
-    'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-  )
-  if (request.method === 'OPTIONS') return response.status(204).end()
+  const origin = String(request.headers.origin || '')
+  const allowedOrigin = ALLOW_ANY_ORIGIN
+    ? '*'
+    : CORS_ORIGINS.includes(origin)
+      ? origin
+      : ''
+  if (allowedOrigin) {
+    response.setHeader('Access-Control-Allow-Origin', allowedOrigin)
+    if (allowedOrigin !== '*') response.setHeader('Vary', 'Origin')
+    response.setHeader(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization, Idempotency-Key',
+    )
+    response.setHeader(
+      'Access-Control-Allow-Methods',
+      'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+    )
+  }
+  if (request.method === 'OPTIONS') {
+    // 未命中白名单的预检请求不返回 Allow-*，浏览器会按 CORS 规则拒绝。
+    return response.status(allowedOrigin ? 204 : 403).end()
+  }
+  if (!IS_PRODUCTION && !allowedOrigin && origin) {
+    console.warn(`[fullstack-api] CORS 拒绝来源: ${origin}`)
+  }
   next()
 })
 
@@ -459,9 +503,23 @@ __UPLOAD_RESPONSE_FIELDS__    success: true,
   })
 })
 
-app.get('/api/health', asyncHandler(async (_request, response) => {
-  response.json(await health())
-}))
+// 健康检查必须真实探测数据库：连接失败或迁移未执行时返回 503。
+// 负载均衡 / Render healthCheckPath 依据状态码决定是否接流。
+app.get('/api/health', async (_request, response) => {
+  try {
+    const result = await health()
+    response.status(result.status === 'ok' ? 200 : 503).json(result)
+  } catch (error) {
+    response.status(503).json({
+      status: 'error',
+      runtime: RUNTIME,
+      storage: STORAGE,
+      orm: ORM_ENABLED ? 'sequelize' : 'sqlite-fallback',
+      databaseUrlConfigured: ORM_ENABLED,
+      message: String(error?.message || error),
+    })
+  }
+})
 
 app.get(COLLECTION_PATH, listHandler)
 app.post(COLLECTION_PATH, __COLLECTION_POST_MIDDLEWARE__createHandler)
@@ -534,16 +592,198 @@ process.on('SIGINT', () => shutdown('SIGINT'))
 """
 
 # ------------------------------------------------------------
+# server/migrations.mjs：SQL 迁移执行器
+# ------------------------------------------------------------
+MIGRATION_RUNNER_TEMPLATE = r"""// 由 DBACoder 生成：按文件名顺序执行 server/migrations/*.sql。
+// 生产环境禁止使用 Sequelize sync() 隐式建表；所有结构变更必须落成
+// 可审计、可回放的 SQL 迁移，并记录在 _schema_migrations 表中。
+import { createHash } from 'node:crypto'
+import { readdir, readFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import { ORM_ENABLED, STORAGE, createSequelize } from './db.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const MIGRATIONS_DIR = process.env.MIGRATIONS_DIR || join(__dirname, 'migrations')
+const MIGRATION_TABLE = '_schema_migrations'
+
+const TRACKING_DDL =
+  STORAGE === 'postgresql'
+    ? `CREATE TABLE IF NOT EXISTS ${MIGRATION_TABLE} (
+        id BIGSERIAL PRIMARY KEY,
+        filename VARCHAR(255) NOT NULL UNIQUE,
+        checksum VARCHAR(64) NOT NULL,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`
+    : `CREATE TABLE IF NOT EXISTS ${MIGRATION_TABLE} (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        filename VARCHAR(255) NOT NULL UNIQUE,
+        checksum VARCHAR(64) NOT NULL,
+        applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+
+// 逐字符切分 SQL，避免把字符串 / 注释里的分号误当语句结束。
+function splitSqlStatements(sql) {
+  const statements = []
+  let current = ''
+  let quote = ''
+  let lineComment = false
+  let blockComment = false
+  for (let index = 0; index < sql.length; index += 1) {
+    const char = sql[index]
+    const next = sql[index + 1]
+    if (lineComment) {
+      if (char === '\n') lineComment = false
+      current += char
+      continue
+    }
+    if (blockComment) {
+      current += char
+      if (char === '*' && next === '/') {
+        current += next
+        index += 1
+        blockComment = false
+      }
+      continue
+    }
+    if (!quote && char === '-' && next === '-') {
+      lineComment = true
+      current += char + next
+      index += 1
+      continue
+    }
+    if (!quote && char === '/' && next === '*') {
+      blockComment = true
+      current += char + next
+      index += 1
+      continue
+    }
+    if (quote) {
+      current += char
+      if (char === quote) {
+        if (sql[index + 1] === quote) {
+          current += sql[index + 1]
+          index += 1
+        } else {
+          quote = ''
+        }
+      } else if (char === '\\') {
+        current += next || ''
+        index += 1
+      }
+      continue
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char
+      current += char
+      continue
+    }
+    if (char === ';') {
+      if (current.trim()) statements.push(current.trim())
+      current = ''
+      continue
+    }
+    current += char
+  }
+  if (current.trim()) statements.push(current.trim())
+  return statements
+}
+
+function checksumOf(sql) {
+  return createHash('sha256').update(sql, 'utf8').digest('hex')
+}
+
+export async function runMigrations() {
+  if (!ORM_ENABLED) {
+    return {
+      storage: 'sqlite',
+      skipped: true,
+      applied: [],
+      reason: 'DATABASE_URL 未配置，生产迁移中止；SQLite 预览库不参与迁移',
+    }
+  }
+  const sequelize = await createSequelize()
+  const appliedNow = []
+  const skipped = []
+  try {
+    await sequelize.authenticate()
+    await sequelize.query(TRACKING_DDL)
+    const files = (await readdir(MIGRATIONS_DIR))
+      .filter((name) => name.endsWith('.sql'))
+      .sort()
+    if (files.length === 0) {
+      throw new Error(`未找到迁移文件: ${MIGRATIONS_DIR}`)
+    }
+    const [rows] = await sequelize.query(
+      `SELECT filename, checksum FROM ${MIGRATION_TABLE}`,
+    )
+    const applied = new Map(
+      (rows || []).map((row) => [String(row.filename), String(row.checksum)]),
+    )
+    for (const filename of files) {
+      const sql = await readFile(join(MIGRATIONS_DIR, filename), 'utf8')
+      const checksum = checksumOf(sql)
+      if (applied.has(filename)) {
+        if (applied.get(filename) !== checksum) {
+          throw new Error(
+            `迁移 ${filename} 已执行但内容被修改；` +
+              '生产环境禁止改写历史迁移，请新增下一版迁移文件',
+          )
+        }
+        skipped.push(filename)
+        continue
+      }
+      const statements = splitSqlStatements(sql)
+      if (statements.length === 0) {
+        throw new Error(`迁移文件为空或无法解析: ${filename}`)
+      }
+      await sequelize.transaction(async (transaction) => {
+        for (const statement of statements) {
+          await sequelize.query(statement, { transaction })
+        }
+        await sequelize.query(
+          `INSERT INTO ${MIGRATION_TABLE} (filename, checksum) VALUES (?, ?)`,
+          { transaction, replacements: [filename, checksum] },
+        )
+      })
+      appliedNow.push(filename)
+      console.log(`[fullstack-db] applied ${filename}`)
+    }
+    return {
+      storage: STORAGE,
+      skipped: false,
+      applied: appliedNow,
+      alreadyApplied: skipped,
+    }
+  } finally {
+    await sequelize.close()
+  }
+}
+
+export { splitSqlStatements }
+"""
+
+# ------------------------------------------------------------
 # server/migrate.mjs：生产数据库迁移入口
 # ------------------------------------------------------------
 MIGRATE_SCRIPT_TEMPLATE = r"""// 由 DBACoder 生成：显式执行数据库迁移。
-// 生产：npm run db:migrate（需要 DATABASE_URL）。
-// 沙盒：DATABASE_URL 缺失时仅提示 SQLite 预览库已自动建表。
-import { migrate } from './db.js'
+// 生产：node server/migrate.mjs（需要 DATABASE_URL）。
+// 迁移失败立刻以非 0 退出码终止发布，绝不让服务带着旧表结构上线。
+import { runMigrations } from './migrations.mjs'
 
-const result = await migrate()
-console.log('[fullstack-db] migrate', result)
-process.exit(0)
+try {
+  const result = await runMigrations()
+  if (result.skipped) {
+    console.error('[fullstack-db] 迁移中止：', result.reason)
+    process.exit(1)
+  }
+  console.log('[fullstack-db] migrate', result)
+  process.exit(0)
+} catch (error) {
+  console.error('[fullstack-db] 迁移失败：', error)
+  process.exit(1)
+}
 """
 
 # ------------------------------------------------------------
@@ -599,21 +839,27 @@ start('vite', 'npm', ['run', 'dev:vite'])
 # Infrastructure as Code：Dockerfile / Render Blueprint / env
 # ------------------------------------------------------------
 BACKEND_DOCKERFILE_TEMPLATE = r"""# syntax=docker/dockerfile:1
-# 由 InfraCoder 生成：后端 API 生产镜像。
+# 由 InfraCoder 生成：后端 API 生产镜像（多阶段构建）。
 # 构建上下文为项目根目录：docker build -t __SERVICE_NAME__-api .
-FROM node:22-alpine
+#
+# 阶段 1 只负责安装生产依赖；阶段 2 仅复制 node_modules 与源码，
+# 不携带 npm 缓存、构建工具和 devDependencies，镜像体积更小、攻击面更低。
 
+FROM node:22-alpine AS deps
 WORKDIR /app
-ENV NODE_ENV=production
-
 # 先复制依赖清单，命中 Docker 层缓存；生产依赖包含 Sequelize 与驱动。
-# 保留 server/ 目录层级：db.js 默认把 SQLite 放在 /app/data，
-# 与沙盒目录结构一致，未配置 DATABASE_URL 时也能直接写库。
 COPY server/package.json ./server/package.json
 RUN cd server && npm install --omit=dev --no-audit --no-fund
 
-COPY server/ ./server
-# 第二次 COPY 以 root 写入，必须在切换用户前再次移交属主；
+FROM node:22-alpine AS runtime
+WORKDIR /app
+ENV NODE_ENV=production \
+    PORT=3000
+# 保留 server/ 目录层级：db.js 默认把 SQLite 放在 /app/data，
+# 与沙盒目录结构一致，未配置 DATABASE_URL 时也能直接写库。
+COPY --from=deps --chown=node:node /app/server/node_modules ./server/node_modules
+COPY --chown=node:node server/ ./server
+# COPY 以 root 写入时必须显式 --chown 或在切换用户前再次移交属主；
 # 否则 node 用户无法创建 server/uploads（multer 落盘）与 data/（SQLite），
 # 上传会直接 500 EACCES。
 RUN mkdir -p /app/server/uploads /app/data \
@@ -621,6 +867,7 @@ RUN mkdir -p /app/server/uploads /app/data \
 USER node
 
 EXPOSE 3000
+# 生产发布流程：先 node server/migrate.mjs，再启动本镜像。
 CMD ["node", "server/index.js"]
 """
 
@@ -649,15 +896,18 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     healthCheckPath: /api/health
+    # 发布前显式执行 SQL 迁移；迁移失败会阻断本次部署。
+    preDeployCommand: node server/migrate.mjs
     envVars:
+      - key: NODE_ENV
+        value: production
       - key: DATABASE_URL
         sync: false
       - key: DB_ENGINE
         value: __DB_ENGINE__
-      # 首次部署自动建表；稳定后建议改为 false 并使用 npm run db:migrate。
-      - key: DB_AUTO_MIGRATE
-        value: "true"
-      - key: CORS_ORIGIN
+      - key: DB_SSL
+        sync: false
+      - key: CORS_ORIGINS
         sync: false
   - type: web
     name: __SERVICE_NAME__-web
@@ -672,25 +922,35 @@ services:
 ENV_EXAMPLE_TEMPLATE = r"""# ============================================================
 # __PROJECT_NAME__ · 生产部署环境变量
 # 复制为 .env 后按需填写；真实 .env 不得提交到 Git。
+# 所有连接串 / 端口 / CORS 白名单都只从这里读取，代码中不得硬编码。
 # ============================================================
+
+# ---- 运行环境 ----
+NODE_ENV=production
 
 # ---- 数据库（生产必填）----
 # MySQL:      mysql://user:password@db-host:3306/database?charset=utf8mb4
-# PostgreSQL: postgresql://user:password@db-host:5432/database
+# PostgreSQL: postgresql://user:password@db-host:5432/database?sslmode=require
 # 留空时后端回退到本地 SQLite，仅用于沙盒预览 / 本地测试。
 DATABASE_URL=
 DB_ENGINE=__DB_ENGINE__
-# 首次部署设为 true 自动建表；稳定后建议关闭并使用 npm run db:migrate。
-DB_AUTO_MIGRATE=false
+# 云数据库通常要求 TLS；本地 Docker MySQL 保持 false。
 DB_SSL=false
+DB_POOL_MAX=10
 DB_SEED=false
+# 迁移目录默认 server/migrations；一般无需修改。
+MIGRATIONS_DIR=
+# 迁移必须显式执行：node server/migrate.mjs
+# 生产不会通过 Sequelize sync() 自动建表。
 
 # ---- 后端 API ----
 PORT=3000
 FULLSTACK_API_PORT=3000
 FULLSTACK_DATA_DIR=./data
-# 生产环境填写前端公网地址；* 仅用于本地联调。
-CORS_ORIGIN=*
+# CORS 白名单：逗号分隔的完整 Origin，例如
+# CORS_ORIGINS=https://app.example.com,https://admin.example.com
+# 生产留空表示只允许同源访问；* 仅用于本地联调。
+CORS_ORIGINS=
 
 # ---- 前端构建（Vite）----
 # 生产环境填写后端公网地址；留空则使用同源 /api 代理（沙盒默认）。
@@ -729,42 +989,55 @@ DEPLOY_GUIDE_TEMPLATE = r"""# __PROJECT_NAME__ · 部署指引
 2. Render → **New → Blueprint**，选择仓库与 `render.yaml`；
 3. 填写：
    - `DATABASE_URL`：第 2 步的数据库连接串；
-   - `CORS_ORIGIN`：前端公网地址（首次可先填 `*`）；
+   - `CORS_ORIGINS`：前端公网地址，逗号分隔多个域名（生产禁止 `*`）；
+   - `DB_SSL`：云数据库通常填 `true`；
    - `VITE_API_BASE_URL`：后端 API 公网地址，例如
      `https://__SERVICE_NAME__-api.onrender.com`；
-4. 应用 Blueprint：后端使用 Docker 镜像启动，前端构建为静态站；
-5. 打开 `https://<后端域名>/api/health`，确认 `status=ok` 且
-   `storage=__DB_ENGINE__`。
+4. 应用 Blueprint：Render 会先执行 `node server/migrate.mjs`，
+   迁移成功后才启动 Docker 镜像，最后构建前端静态站；
+5. 打开 `https://<后端域名>/api/health`，确认 HTTP 200、`status=ok`、
+   `tableReady=true` 且 `storage=__DB_ENGINE__`。
 
 ## 4. Vercel 部署前端（可选）
 
 1. Vercel → **Add New → Project**，导入同一仓库；
 2. Framework 选择 Vite，Build Command `npm run build`，Output `dist`；
 3. 环境变量 `VITE_API_BASE_URL` 填写后端公网地址；
-4. 部署完成后，把 Vercel 域名加入后端的 `CORS_ORIGIN`。
+4. 部署完成后，把 Vercel 域名加入后端的 `CORS_ORIGINS`。
 
-## 5. Railway / 其它 Docker 平台
+## 5. Railway / 阿里云 / 其它 Docker 平台
 
 ```bash
+# 1) 构建生产镜像（多阶段构建，不包含 devDependencies）
 docker build -t __SERVICE_NAME__-api .
-docker run --rm -p 3000:3000 \
-  -e DATABASE_URL='<你的连接串>' \
-  -e DB_ENGINE='__DB_ENGINE__' \
-  -e DB_AUTO_MIGRATE=true \
-  -e CORS_ORIGIN='*' \
+
+# 2) 先执行 SQL 迁移；失败会以非 0 退出，禁止继续发布
+docker run --rm --env-file .env \
+  __SERVICE_NAME__-api node server/migrate.mjs
+
+# 3) 迁移成功后再启动服务
+docker run --rm -p 3000:3000 --env-file .env \
   __SERVICE_NAME__-api
 ```
 
 平台会自动读取根目录 `Dockerfile`；也可以把镜像推送到任意容器 Registry。
+生产环境必须把迁移作为独立发布步骤，不能依赖应用启动时自动建表。
 
-## 6. 数据库迁移与验收
+## 6. 数据库迁移与验收（生产必读）
 
-- 首次部署：`DB_AUTO_MIGRATE=true` 会调用 Sequelize `sync()` 建表；
-- 稳定后：改为 `false`，在发布流程执行 `npm run db:migrate`；
-- 验收：`GET /api/health`、`GET __COLLECTION_PATH__`、`POST __COLLECTION_PATH__`；
+- 迁移文件：`server/migrations/001_init.sql`（随契约 DDL 生成）；
+- 执行入口：`node server/migrate.mjs` / `npm run db:migrate`；
+- 执行顺序：按文件名升序；已执行文件记录在 `_schema_migrations`，
+  重复执行不会重复建表；改动历史文件会因 checksum 不一致直接报错；
+- 禁止在生产调用 Sequelize `sync()`：应用启动只连接数据库，不建表；
+- 新增结构变更：新增 `002_xxx.sql`，不要修改 `001_init.sql`；
+- 验收：
+  1. `GET /api/health` 返回 HTTP 200、`status=ok`、`tableReady=true`；
+  2. `GET __COLLECTION_PATH__` 能读取列表；
+  3. `POST __COLLECTION_PATH__` 能写入并再次查询到记录；
 - 本地沙盒：未配置 `DATABASE_URL` 时自动使用 SQLite，便于先联调再上云。
 
-> 安全提示：`DATABASE_URL`、账号密码与 `CORS_ORIGIN` 必须通过部署平台的
+> 安全提示：`DATABASE_URL`、账号密码与 `CORS_ORIGINS` 必须通过部署平台的
 > 环境变量注入；不要把真实密钥写入仓库、镜像或前端构建产物。
 """
 
@@ -776,6 +1049,7 @@ __all__ = [
     "ENV_EXAMPLE_TEMPLATE",
     "EXPRESS_SERVER_TEMPLATE",
     "MIGRATE_SCRIPT_TEMPLATE",
+    "MIGRATION_RUNNER_TEMPLATE",
     "RENDER_YAML_TEMPLATE",
     "SEQUELIZE_DB_TEMPLATE",
 ]

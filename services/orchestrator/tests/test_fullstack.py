@@ -11,12 +11,15 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 import unittest
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from ai_core.agent.events import TERMINAL_EVENT_TYPES, RunEventBuffer
+from ai_core.config import Settings
 from ai_core.domain.architect import (
     ArchitectApiRoute,
     ArchitectComponentInteraction,
@@ -37,7 +40,9 @@ from ai_core.fullstack.coders import (
     item_path,
 )
 from ai_core.fullstack.graph import FullstackConsistencyError, FullstackGraphRunner
+from ai_core.fullstack.schema_mcp import verify_schema_with_mcp
 from ai_core.fullstack.service import FullstackService
+from ai_core.mcp.client import McpServerConfig, McpStdioClient
 from ai_core.ports.sandbox import SandboxHandle, SandboxProvider, VerifyResult
 
 DDL = """CREATE TABLE todos (
@@ -359,6 +364,17 @@ class CoderTests(unittest.TestCase):
         self.assertIn("import('sequelize')", db_code)
         self.assertIn("findAndCountAll", db_code)
         self.assertIn("server/migrate.mjs", bundle.files)
+        # 生产迁移：SQL 文件 + 显式执行器，禁止 sync() 自动建表。
+        migration = bundle.files["server/migrations/001_init.sql"]
+        self.assertIn("CREATE TABLE IF NOT EXISTS todos", migration)
+        self.assertIn("AUTO_INCREMENT", migration)
+        self.assertNotIn("AUTOINCREMENT", migration)
+        runner = bundle.files["server/migrations.mjs"]
+        self.assertIn("_schema_migrations", runner)
+        self.assertIn("checksum", runner)
+        self.assertNotIn("await model.sync()", db_code)
+        self.assertNotIn("DB_AUTO_MIGRATE", db_code)
+        self.assertIn("tableReady", db_code)
 
         postgres = generate_dba_bundle(
             _contract(techStack={"backend": "node_express", "database": "postgresql"})
@@ -380,7 +396,15 @@ class CoderTests(unittest.TestCase):
         self.assertIn("/api/v1/todos", code)
         self.assertIn("Access-Control-Allow-Origin", code)
         self.assertIn("process.env.PORT", code)
+        self.assertIn("process.env.CORS_ORIGINS", code)
         self.assertIn("process.env.CORS_ORIGIN", code)
+        # 生产 CORS 白名单不是硬编码 *：未命中白名单的预检直接 403。
+        self.assertIn("CORS_ORIGINS.includes(origin)", code)
+        self.assertIn("status(allowedOrigin ? 204 : 403)", code)
+        # 健康检查必须真实探测数据库，失败返回 503。
+        self.assertIn("response.status(503)", code)
+        db_code = generate_dba_bundle(_contract()).files["server/db.js"]
+        self.assertIn("tableReady", db_code)
         self.assertEqual(bundle.metadata["collectionPath"], "/api/v1/todos")
         self.assertEqual(bundle.metadata["runtime"], "express-sequelize")
         self.assertEqual(bundle.metadata["databaseEngine"], "mysql")
@@ -515,15 +539,19 @@ class CoderTests(unittest.TestCase):
         )
 
         self.assertIn("src/fullstack-api.jsx", bundle.files)
+        self.assertIn("src/api-client.jsx", bundle.files)
         self.assertIn("scripts/dev.mjs", bundle.files)
         patched_main = bundle.files["src/main.jsx"]
         self.assertIn("FullstackDataPanel", patched_main)
+        self.assertIn("ApiErrorBanner", patched_main)
         self.assertIn("<App /><FullstackDataPanel />", patched_main)
         panel = bundle.files["src/fullstack-api.jsx"]
         self.assertIn("data-fullstack-success", panel)
         self.assertIn("提交成功", panel)
-        # 生产前后端分域部署：面板必须支持 VITE_API_BASE_URL。
-        self.assertIn("VITE_API_BASE_URL", panel)
+        # 生产前后端分域部署：API_BASE / VITE_API_BASE_URL 与全局错误
+        # 拦截器统一收敛在 src/api-client.jsx。
+        self.assertIn("import { apiFetch, apiUrl } from './api-client.jsx'", panel)
+        self.assertIn("VITE_API_BASE_URL", bundle.files["src/api-client.jsx"])
         self.assertIn("apiUrl(COLLECTION_PATH)", panel)
         patched_vite = bundle.files["vite.config.js"]
         self.assertIn("'/api'", patched_vite)
@@ -545,8 +573,12 @@ class CoderTests(unittest.TestCase):
     def test_frontend_skeleton_renders_contract_routes_and_components(self) -> None:
         """对话前置：契约中的路由 / 布局 / 组件必须落到真实 App.jsx。"""
         bundle = generate_frontend_skeleton_bundle(_frontend_contract())
-        self.assertEqual(set(bundle.files), {"src/App.jsx"})
+        self.assertEqual(set(bundle.files), {"src/App.jsx", "src/api-client.jsx"})
         app = bundle.files["src/App.jsx"]
+        # 全局 fetch 拦截器 / 错误横幅必须随骨架一起生成。
+        self.assertIn("ApiErrorBanner", app)
+        self.assertIn("installFetchInterceptor", bundle.files["src/api-client.jsx"])
+        self.assertIn("VITE_API_BASE_URL", bundle.files["src/api-client.jsx"])
         self.assertIn("任务总览", app)
         self.assertIn("/board", app)
         self.assertIn("TaskBoard", app)
@@ -706,15 +738,21 @@ class CoderTests(unittest.TestCase):
             },
         )
         dockerfile = bundle.files["Dockerfile"]
-        self.assertIn("FROM node:22-alpine", dockerfile)
+        # 多阶段构建：deps 只装生产依赖，runtime 只复制 node_modules 与源码。
+        self.assertIn("FROM node:22-alpine AS deps", dockerfile)
+        self.assertIn("FROM node:22-alpine AS runtime", dockerfile)
         self.assertIn("COPY server/package.json ./server/package.json", dockerfile)
+        self.assertIn(
+            "COPY --from=deps --chown=node:node /app/server/node_modules",
+            dockerfile,
+        )
         # 保留 server/ 层级，SQLite 默认写入 /app/data（../data）。
-        self.assertIn("COPY server/ ./server", dockerfile)
+        self.assertIn("COPY --chown=node:node server/ ./server", dockerfile)
         # 第二次 COPY 以 root 写入，必须在 USER node 之前重新 chown；
         # 否则 multer 上传目录与 SQLite data 目录都会 EACCES。
         self.assertIn("mkdir -p /app/server/uploads /app/data", dockerfile)
         self.assertLess(
-            dockerfile.index("COPY server/ ./server"),
+            dockerfile.index("COPY --chown=node:node server/ ./server"),
             dockerfile.index("chown -R node:node /app"),
         )
         self.assertLess(
@@ -727,16 +765,91 @@ class CoderTests(unittest.TestCase):
         self.assertIn("runtime: static", render)
         self.assertIn("DATABASE_URL", render)
         self.assertIn("/api/health", render)
+        self.assertIn("preDeployCommand: node server/migrate.mjs", render)
+        self.assertNotIn("DB_AUTO_MIGRATE", render)
         env = bundle.files[".env.example"]
         self.assertIn("DATABASE_URL=", env)
         self.assertIn("DB_ENGINE=mysql", env)
+        self.assertIn("NODE_ENV=production", env)
         self.assertIn("PORT=3000", env)
+        self.assertIn("CORS_ORIGINS=", env)
         self.assertIn("VITE_API_BASE_URL=", env)
+        self.assertNotIn("DB_AUTO_MIGRATE", env)
         deploy = bundle.files["DEPLOY.md"]
         self.assertIn("Vercel", deploy)
         self.assertIn("Railway", deploy)
         self.assertIn("MySQL 8", deploy)
+        self.assertIn("server/migrate.mjs", deploy)
+        self.assertNotIn("DB_AUTO_MIGRATE", deploy)
+        self.assertNotIn("sync() 建表", deploy)
         self.assertEqual(bundle.metadata["databaseEngine"], "mysql")
+
+
+class SchemaMcpTests(unittest.TestCase):
+    """MCP 真实数据库结构验收：DDL 必须执行，表与字段必须可查询。"""
+
+    SCRIPT = (
+        Path(__file__).resolve().parents[1]
+        / "ai_core"
+        / "mcp_servers"
+        / "sqlite_mcp.py"
+    )
+
+    def _settings(self) -> Settings:
+        return Settings(
+            schema_mcp_enabled=True,
+            schema_mcp_python=sys.executable,
+            schema_mcp_script=str(self.SCRIPT),
+            schema_mcp_timeout_seconds=15,
+        )
+
+    def test_mcp_executes_generated_ddl_and_finds_table(self) -> None:
+        dba = generate_dba_bundle(_contract())
+        files = {"server/schema.sql": dba.files["server/schema.sql"]}
+        check = verify_schema_with_mcp(files, _contract(), settings=self._settings())
+        self.assertTrue(check.enabled)
+        self.assertTrue(check.ok, check.error)
+        self.assertEqual(check.table, "todos")
+        self.assertIn("id", check.actual_columns)
+        self.assertIn("payload", check.actual_columns)
+        self.assertGreaterEqual(check.statements, 1)
+        self.assertEqual(check.missing_columns, ())
+        self.assertEqual(check.source, "server/schema.sql")
+
+    def test_mcp_reports_missing_columns_instead_of_text_pass(self) -> None:
+        files = {
+            "server/schema.sql": (
+                'CREATE TABLE IF NOT EXISTS "todos" (\n'
+                '  "id" INTEGER PRIMARY KEY AUTOINCREMENT,\n'
+                '  "name" TEXT\n'
+                ");\n"
+            )
+        }
+        check = verify_schema_with_mcp(files, _contract(), settings=self._settings())
+        self.assertFalse(check.ok)
+        self.assertIn("tenant_id", check.missing_columns)
+        self.assertIn("payload", check.missing_columns)
+
+    def test_mcp_rejects_destructive_sql(self) -> None:
+        client = McpStdioClient(
+            McpServerConfig(
+                name="sqlite_schema_test",
+                command=sys.executable,
+                args=(str(self.SCRIPT),),
+                timeout_seconds=15,
+                allowed_tools=("validate_schema",),
+            )
+        )
+        try:
+            client.start()
+            result = client.call_tool(
+                "validate_schema",
+                {"ddl": "DROP TABLE todos;", "table": "todos"},
+            )
+        finally:
+            client.close()
+        self.assertTrue(result.get("isError"))
+        self.assertIn("拒绝", str(result.get("text")))
 
 
 class GraphTests(unittest.TestCase):
@@ -818,6 +931,16 @@ class GraphTests(unittest.TestCase):
         self.assertTrue(
             any(event.payload["path"] == "server/schema.sql" for event in outputs)
         )
+        # 一致性报告必须包含 MCP 真实数据库结构验收结果。
+        reports = [
+            event for event in events if event.type == "fullstack.consistency.report"
+        ]
+        self.assertTrue(reports)
+        self.assertTrue(reports[-1].payload["ok"])
+        schema = reports[-1].payload["schema"]
+        self.assertTrue(schema["ok"], schema)
+        self.assertEqual(schema["table"], "todos")
+        self.assertIn("id", schema["actualColumns"])
         # 本次 graph 不发送终态事件，终态由 Service 统一 emit。
         self.assertNotIn("fullstack.completed", [event.type for event in events])
 

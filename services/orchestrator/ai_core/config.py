@@ -204,6 +204,17 @@ class Settings(BaseSettings):
     mcp_call_timeout_seconds: float = 10.0
     mcp_servers: list[dict[str, Any]] = []
 
+    # ConsistencyVerifier 的真实数据库结构验收：启动内置 SQLite MCP，
+    # 把生成 DDL 执行到临时库并查询 sqlite_master / PRAGMA table_info。
+    schema_mcp_enabled: bool = True
+    # MCP 进程的 Python 解释器；留空使用当前 AI Core 的解释器。
+    schema_mcp_python: str = ""
+    # MCP Server 脚本；留空使用 ai_core/mcp_servers/sqlite_mcp.py。
+    schema_mcp_script: str = ""
+    schema_mcp_timeout_seconds: float = 15.0
+    # 默认严格：MCP 不可用 / DDL 不可执行都阻断构建。排障环境可设 false。
+    schema_mcp_strict: bool = True
+
     # ------------------------------------------------------------
     # Architect（M2.5 全栈架构澄清与 Path 生成）
     # ------------------------------------------------------------

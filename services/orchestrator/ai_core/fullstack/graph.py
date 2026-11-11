@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
 from ai_core.agent.events import EventSink, NullEventSink
+from ai_core.config import get_settings
 from ai_core.domain.architect import ArchitectContract
 from ai_core.domain.fullstack import FullstackRunOptions
 from ai_core.fullstack.coders import (
@@ -44,9 +46,11 @@ from ai_core.fullstack.coders import (
 )
 from ai_core.fullstack.consistency import (
     ConsistencyError,
+    ConsistencyIssue,
     ConsistencyReport,
     verify_consistency,
 )
+from ai_core.fullstack.schema_mcp import verify_schema_with_mcp
 from ai_core.ports.sandbox import SandboxProvider
 
 logger = logging.getLogger(__name__)
@@ -387,13 +391,45 @@ class FullstackGraphRunner:
 
         try:
             report = verify_consistency(snapshot, contract)
+            # 维度二：静态路由比对之外，再通过内置 SQLite MCP 把生成的
+            # DDL 真正执行到临时数据库，查询 table / columns 是否存在。
+            # 这一步能抓住“路由齐全但表根本建不起来”的产物。
+            schema_check = verify_schema_with_mcp(snapshot, contract)
+            checked_files = set(report.checked_files)
+            if not schema_check.source.startswith("generated:"):
+                checked_files.add(schema_check.source)
+            report = replace(
+                report,
+                schema=schema_check.to_dict(),
+                checked_files=tuple(sorted(checked_files)),
+            )
+            if not schema_check.ok and get_settings().schema_mcp_strict:
+                report = replace(
+                    report,
+                    issues=report.issues
+                    + (
+                        ConsistencyIssue(
+                            kind="schema",
+                            component="DBACoder",
+                            method="",
+                            path="",
+                            message=schema_check.summary(),
+                            suggestion=(
+                                "修正契约 DDL 或 DBACoder 生成的迁移文件，"
+                                "确保目标表与全部字段可真实创建；"
+                                "禁止绕过迁移直接上线"
+                            ),
+                            fix_action="FIX_SCHEMA",
+                        ),
+                    ),
+                )
         except Exception as exc:
             self._node_failed("ConsistencyVerifier", state, exc)
             raise FullstackGenerationError(
                 f"接口一致性检查失败: {exc}", node="ConsistencyVerifier"
             ) from exc
 
-        # 差异报告单独推送一次，前端可以直接渲染 issue 列表。
+        # 差异报告单独推送一次，前端可以直接渲染 issue 列表与 MCP 结构结果。
         self._emit(
             "fullstack.consistency.report",
             {"runId": state["run_id"], **report.to_dict()},

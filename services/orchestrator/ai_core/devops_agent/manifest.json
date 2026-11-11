@@ -117,6 +117,15 @@
       "rag_refs": ["knowledge/devops/observability"],
       "tools": ["read_file", "create_file", "validate_pipeline"],
       "metadata": {"stage": "M4-reserved"}
+    },
+    {
+      "skill_id": "production.ready.devops_agent",
+      "name": "生产级部署基线",
+      "description": "强制多阶段镜像、非 root 运行、环境变量注入、发布前迁移与健康检查；挂载自 config/skills/production_ready.skill.md。",
+      "prompt_ref": "production_ready.skill.md",
+      "rag_refs": [],
+      "tools": ["read_file", "create_file", "run_docker_build", "validate_pipeline"],
+      "metadata": {"stage": "production", "priority": 10, "mandatory": true}
     }
   ],
   "keywords": [

@@ -111,6 +111,15 @@
       "rag_refs": ["knowledge/backend/testing"],
       "tools": ["read_contract", "create_file", "run_maven_test", "run_pytest"],
       "metadata": {"stage": "M3-preview"}
+    },
+    {
+      "skill_id": "production.ready",
+      "name": "生产级后端基线",
+      "description": "强制环境变量隔离、SQL 迁移、参数化查询、严格 CORS、真实健康检查与多阶段镜像；挂载自 config/skills/production_ready.skill.md。",
+      "prompt_ref": "production_ready.skill.md",
+      "rag_refs": [],
+      "tools": ["read_file", "create_file", "apply_code_edit"],
+      "metadata": {"stage": "production", "priority": 10, "mandatory": true}
     }
   ],
   "keywords": [

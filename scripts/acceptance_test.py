@@ -18,13 +18,16 @@
      验证 SQLite 回退可自动建表、健康检查与 CRUD 均正常；
      若契约要求上传，再发送真实 ``multipart/form-data`` 请求，
      校验文件落盘、静态 URL 可回读且内容逐字节一致；
-  8. 注入宿主机 MySQL（复用 ``~/Workspace/infra``，自动创建临时库），
-     验证 Sequelize 真实建表 / CRUD，并用宿主机连接直接查库，
-     证明数据确实写入 MySQL 而非仅回显。
+  8. 模拟真实云端部署：把带 MySQL 连接串的 ``.env`` 注入镜像，
+     启动容器 → 验证未迁移时 ``/api/health`` 返回 503 →
+     以独立发布步骤执行 ``node server/migrate.mjs`` →
+     验证 ``_schema_migrations`` 与真实表结构 → 健康检查恢复 200 →
+     CRUD 后用宿主机连接直接查库，证明数据确实写入 MySQL；
+     最后重复执行迁移，验证幂等。
 
 全程通过打印::
 
-    🎉 全栈产物验收通过，已具备上云条件
+    🎉 生产级产物验收通过，可直接交付云端部署
 
 任何一步失败都会列出缺失文件、路由不匹配或编译/运行报错，并以 1 退出。
 
@@ -83,7 +86,25 @@ MYSQL_CONTAINER_HOST = os.environ.get(
 MYSQL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
-REQUIRED_FILES = ("DEPLOY.md", "Dockerfile", "render.yaml")
+REQUIRED_FILES = (
+    "DEPLOY.md",
+    "Dockerfile",
+    "render.yaml",
+    ".env.example",
+    "server/migrations.mjs",
+    "server/migrations/001_init.sql",
+)
+REQUIRED_ENV_KEYS = (
+    "NODE_ENV",
+    "DATABASE_URL",
+    "DB_ENGINE",
+    "DB_SSL",
+    "PORT",
+    "CORS_ORIGINS",
+)
+HARD_CODED_DATABASE_URL = re.compile(
+    r"[\"'](?:mysql|postgres(?:ql)?)://[^\"'\s]+[\"']", re.IGNORECASE
+)
 FRONTEND_SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
 FORBIDDEN_DB_ENV = re.compile(
     r"^(DATABASE_URL|DB_HOST|DB_PORT|DB_USER|DB_PASSWORD|DB_NAME|"
@@ -112,7 +133,7 @@ class Report:
 
     def finish(self) -> int:
         if not self.failures:
-            print("\n🎉 全栈产物验收通过，已具备上云条件")
+            print("\n🎉 生产级产物验收通过，可直接交付云端部署")
             return 0
         print(f"\n❌ 全栈产物验收失败（{len(self.failures)} 项）")
         for index, failure in enumerate(self.failures, start=1):
@@ -265,6 +286,86 @@ def resolve_package_root(extracted_dir: Path) -> Path:
 def check_required_files(package_root: Path) -> list[str]:
     missing = [name for name in REQUIRED_FILES if not (package_root / name).is_file()]
     return missing
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+
+
+def check_production_contract(package_root: Path) -> list[str]:
+    """静态验证导出包是否具备生产部署契约。
+
+    验收不能只看“容器能跑”：必须在代码层面确认连接串来自环境变量、
+    迁移文件存在、CORS 不是隐式通配、健康检查会真实返回 503、
+    Dockerfile 采用多阶段构建且以非 root 用户运行。
+    """
+    issues: list[str] = []
+
+    env_example = package_root / ".env.example"
+    if not env_example.is_file():
+        issues.append("缺少 .env.example，云端无法按模板注入生产配置")
+    else:
+        env_text = _read_text(env_example)
+        for key in REQUIRED_ENV_KEYS:
+            if not re.search(rf"^\s*{re.escape(key)}=", env_text, re.MULTILINE):
+                issues.append(f".env.example 缺少 {key} 配置项")
+        if "DB_AUTO_MIGRATE" in env_text:
+            issues.append(".env.example 仍包含已废弃的 DB_AUTO_MIGRATE")
+
+    server_dir = package_root / "server"
+    if not server_dir.is_dir():
+        return issues + ["缺少 server/ 目录，无法验证生产后端契约"]
+
+    server_code = "\n".join(
+        _read_text(path)
+        for path in sorted(server_dir.rglob("*"))
+        if path.is_file() and path.suffix in {".js", ".mjs", ".cjs"}
+    )
+    if "DB_AUTO_MIGRATE" in server_code:
+        issues.append("后端代码仍引用 DB_AUTO_MIGRATE，生产建表必须走迁移")
+    if re.search(r"await\s+\w+\.sync\s*\(", server_code):
+        issues.append("后端代码仍在启动时调用 model.sync() 自动建表")
+    if "process.env.DATABASE_URL" not in server_code:
+        issues.append("后端未通过 process.env.DATABASE_URL 读取数据库连接串")
+    if HARD_CODED_DATABASE_URL.search(server_code):
+        issues.append("后端代码硬编码了数据库连接串，违反环境变量隔离")
+    if "process.env.CORS_ORIGINS" not in server_code:
+        issues.append("后端未从 process.env.CORS_ORIGINS 读取跨域白名单")
+    if re.search(r"cors\(\s*\{[^}]*origin\s*:\s*['\"]\*['\"]", server_code, re.DOTALL):
+        issues.append("后端 CORS 使用通配符 origin: '*'，生产环境禁止")
+    if "tableReady" not in server_code or "status(503)" not in server_code:
+        issues.append("健康检查未真实探测表结构（缺少 tableReady / HTTP 503）")
+    if not (server_dir / "migrations.mjs").is_file():
+        issues.append("缺少 server/migrations.mjs，生产无法执行迁移")
+    elif "_schema_migrations" not in _read_text(server_dir / "migrations.mjs"):
+        issues.append("迁移执行器未记录 _schema_migrations，无法保证幂等")
+    migration_sql = server_dir / "migrations" / "001_init.sql"
+    if not migration_sql.is_file():
+        issues.append("缺少 server/migrations/001_init.sql")
+    elif not re.search(r"CREATE\s+TABLE", _read_text(migration_sql), re.IGNORECASE):
+        issues.append("001_init.sql 未包含 CREATE TABLE")
+
+    dockerfile = _read_text(package_root / "Dockerfile")
+    if dockerfile:
+        if not re.search(r"FROM\s+\S+\s+AS\s+deps", dockerfile, re.IGNORECASE):
+            issues.append("Dockerfile 不是多阶段构建（缺少 deps 阶段）")
+        if re.search(r"^\s*USER\s+root\s*$", dockerfile, re.IGNORECASE | re.MULTILINE):
+            issues.append("Dockerfile 以 root 用户运行")
+        if "npm install" not in dockerfile:
+            issues.append("Dockerfile 未在 deps 阶段安装依赖")
+
+    render = _read_text(package_root / "render.yaml")
+    if render:
+        if "preDeployCommand" not in render:
+            issues.append("render.yaml 未配置 preDeployCommand 执行迁移")
+        if "migrate.mjs" not in render:
+            issues.append("render.yaml 未在发布阶段调用 node server/migrate.mjs")
+
+    deploy_doc = _read_text(package_root / "DEPLOY.md")
+    if deploy_doc and "migrate.mjs" not in deploy_doc:
+        issues.append("DEPLOY.md 未写明生产迁移执行步骤")
+
+    return issues
 
 
 def normalize_route(path: str) -> str:
@@ -1017,11 +1118,38 @@ def wait_health(base_url: str, container: str, timeout: float = 90) -> dict[str,
     )
 
 
+def wait_health_status(
+    base_url: str,
+    container: str,
+    *,
+    expect_status: int,
+    timeout: float = 90,
+) -> dict[str, Any]:
+    """等待健康检查返回指定状态码；用于验证“未迁移 = 503”这一契约。"""
+    deadline = time.monotonic() + timeout
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            status, payload = http_json(f"{base_url}/api/health")
+            if status == expect_status and isinstance(payload, dict):
+                return payload
+            last_error = f"HTTP {status}: {payload}"
+        except Exception as exc:  # noqa: BLE001 - 启动阶段连接拒绝属于正常现象
+            last_error = str(exc)
+        time.sleep(1)
+    logs = run_command(["docker", "logs", "--tail", "50", container], timeout=20)
+    raise AcceptanceFailure(
+        f"/api/health 在 {timeout:.0f}s 内未返回 HTTP {expect_status}: "
+        f"{last_error}\n容器日志:\n{tail(logs.stdout + logs.stderr)}"
+    )
+
+
 def start_container(
     tag: str,
     report: Report,
     *,
     env: dict[str, str] | None = None,
+    env_file: Path | None = None,
     extra_args: list[str] | None = None,
 ) -> tuple[str, str] | None:
     """启动验收容器并等待端口映射，返回 ``(container, base_url)``。"""
@@ -1038,6 +1166,9 @@ def start_container(
         "127.0.0.1::3000",
     ]
     command.extend(extra_args or [])
+    if env_file is not None:
+        # 模拟云端平台注入 Secret：连接串不出现在 docker run 参数中。
+        command.extend(["--env-file", str(env_file)])
     for key, value in (env or {}).items():
         command.extend(["-e", f"{key}={value}"])
     command.append(tag)
@@ -1439,15 +1570,144 @@ def docker_run_and_verify_sqlite(
             run_command(["docker", "rm", "-f", container], timeout=30)
 
 
+def write_production_env(database_url: str) -> tuple[Path, Path]:
+    """写一份模拟云端 Secret 注入的 .env，返回 ``(env_file, temp_dir)``。"""
+    directory = Path(tempfile.mkdtemp(prefix="vibe-prod-env-"))
+    env_file = directory / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "NODE_ENV=production",
+                "PORT=3000",
+                f"DATABASE_URL={database_url}",
+                "DB_ENGINE=mysql",
+                "DB_SSL=false",
+                "DB_POOL_MAX=5",
+                "CORS_ORIGINS=https://console.example.com",
+                "FULLSTACK_DATA_DIR=/app/data",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return env_file, directory
+
+
+def run_migration_container(
+    tag: str,
+    env_file: Path,
+    report: Report,
+    *,
+    label: str,
+    expect_applied: bool,
+) -> bool:
+    """以独立发布步骤执行 ``node server/migrate.mjs``。
+
+    与业务容器分离，模拟 Render preDeployCommand / 阿里云 Job 的真实发布顺序。
+    """
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--label",
+        "vibe.acceptance=1",
+        "--add-host",
+        f"{MYSQL_CONTAINER_HOST}:host-gateway",
+        "--env-file",
+        str(env_file),
+        tag,
+        "node",
+        "server/migrate.mjs",
+    ]
+    proc = run_command(command, timeout=180)
+    if VERBOSE:
+        print(tail(proc.stdout + "\n" + proc.stderr, 20))
+    if proc.returncode != 0:
+        report.fail(format_command_failure(f"{label} ", proc))
+        return False
+    output = proc.stdout + proc.stderr
+    if expect_applied:
+        if not re.search(r"applied\s+001_init\.sql", output):
+            report.fail(f"{label} 未应用 001_init.sql，输出:\n{tail(output)}")
+            return False
+    else:
+        if "alreadyApplied" not in output or "001_init.sql" not in output:
+            report.fail(f"{label} 未确认迁移幂等，输出:\n{tail(output)}")
+            return False
+    report.ok(f"{label}成功（exit=0）")
+    return True
+
+
+def mysql_migration_rows(database: str) -> list[dict[str, Any]]:
+    """读取迁移记录表；不存在时返回空列表。"""
+    pymysql = _pymysql()
+    connection = pymysql.connect(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=database,
+        connect_timeout=5,
+        cursorclass=pymysql.cursors.DictCursor,
+    )
+    try:
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute(
+                    "SELECT filename, checksum, applied_at "
+                    "FROM `_schema_migrations` ORDER BY filename"
+                )
+            except pymysql.err.ProgrammingError:
+                return []
+            return list(cursor.fetchall())
+    finally:
+        connection.close()
+
+
+def mysql_table_columns(database: str, table: str) -> list[str]:
+    """直接查询 information_schema，确认真实表与字段已由迁移创建。"""
+    if not MYSQL_IDENTIFIER.match(table):
+        raise AcceptanceFailure(f"非法表名，拒绝查询: {table}")
+    pymysql = _pymysql()
+    connection = pymysql.connect(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=database,
+        connect_timeout=5,
+    )
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s "
+                "ORDER BY ordinal_position",
+                (database, table),
+            )
+            return [str(row[0]) for row in cursor.fetchall()]
+    finally:
+        connection.close()
+
+
 def docker_run_and_verify_mysql(
     tag: str,
     collection_path: str | None,
+    package_root: Path,
+    contract: dict[str, Any],
     report: Report,
 ) -> str | None:
-    """注入宿主机 MySQL，验证 Sequelize 建表 / CRUD / 直连查库。"""
+    """模拟真实云端部署：env 注入 → 未迁移 503 → 显式迁移 → 200 + CRUD。
+
+    与旧流程的关键差异：不再通过 ``DB_AUTO_MIGRATE`` 让 ORM 隐式建表。
+    验收严格复刻生产发布顺序，未执行迁移时服务必须不可用（503）。
+    """
+    del contract  # 契约已由前序静态检查使用；运行时以健康检查返回表名为准。
     database = mysql_provision(report)
     if not database:
         return None
+    env_file: Path | None = None
+    env_dir: Path | None = None
     container = ""
     keep_container = False
     try:
@@ -1459,15 +1719,13 @@ def docker_run_and_verify_mysql(
             f"mysql://{credentials}@{MYSQL_CONTAINER_HOST}:{MYSQL_PORT}/"
             f"{database}?charset=utf8mb4"
         )
+        env_file, env_dir = write_production_env(database_url)
+        report.ok("已生成生产 .env 并通过 --env-file 注入镜像（连接串不落命令行）")
+
         started = start_container(
             tag,
             report,
-            env={
-                "DATABASE_URL": database_url,
-                "DB_ENGINE": "mysql",
-                # 验收库是空库，允许 ORM 自动建表；生产仍由 migrate 脚本负责。
-                "DB_AUTO_MIGRATE": "true",
-            },
+            env_file=env_file,
             extra_args=[
                 "--add-host",
                 f"{MYSQL_CONTAINER_HOST}:host-gateway",
@@ -1476,30 +1734,89 @@ def docker_run_and_verify_mysql(
         if not started:
             return None
         container, base_url = started
-        health = verify_health(
-            base_url,
-            container,
-            report,
-            storage="mysql",
-            runtime="express-sequelize-mysql",
-        )
-        if health is None:
+
+        # 1) 空库 + 未迁移：健康检查必须失败，绝不能被 ORM 悄悄建表。
+        degraded = wait_health_status(base_url, container, expect_status=503)
+        if (
+            degraded.get("storage") != "mysql"
+            or degraded.get("tableReady") is not False
+        ):
+            report.fail(f"未迁移时健康检查语义异常: {degraded}")
             return None
         report.ok(
-            f"MySQL ORM 启动成功：table={health.get('table')} "
-            f"records={health.get('records')}"
+            "未迁移数据库健康检查正确返回 503："
+            f"status={degraded.get('status')} tableReady=false"
+        )
+        table = str(degraded.get("table") or "")
+        if not table:
+            report.fail(f"健康检查未返回表名，无法继续验收: {degraded}")
+            return None
+
+        # 2) 独立发布步骤执行迁移，失败必须非 0 退出。
+        if not run_migration_container(
+            tag, env_file, report, label="生产迁移首次执行", expect_applied=True
+        ):
+            return None
+
+        rows = mysql_migration_rows(database)
+        matched = [row for row in rows if row.get("filename") == "001_init.sql"]
+        if not matched:
+            report.fail(f"_schema_migrations 未记录 001_init.sql: {rows}")
+            return None
+        checksum = str(matched[0].get("checksum") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+            report.fail(f"迁移 checksum 异常: {checksum!r}")
+            return None
+        columns = mysql_table_columns(database, table)
+        if not columns:
+            report.fail(f"迁移后真实表不存在或没有字段: {database}.{table}")
+            return None
+        report.ok(
+            f"真实 MySQL 建表完成：{database}.{table} "
+            f"columns={','.join(columns[:6])}"
+            f"{'...' if len(columns) > 6 else ''}，checksum={checksum[:12]}…"
+        )
+
+        # 3) 迁移后应用无需重启即可恢复 200；数据面也恢复可用。
+        health = wait_health_status(base_url, container, expect_status=200)
+        if (
+            health.get("status") != "ok"
+            or health.get("storage") != "mysql"
+            or health.get("runtime") != "express-sequelize-mysql"
+            or health.get("tableReady") is not True
+        ):
+            report.fail(f"迁移后健康检查语义异常: {health}")
+            return None
+        report.ok(
+            "迁移后健康检查恢复 200："
+            f"status=ok storage=mysql tableReady=true records={health.get('records')}"
         )
 
         created = verify_crud(base_url, collection_path or "/api/data", report)
         if created is None:
             return None
         record_id = created.get("id")
-        table = str(health.get("table") or "")
         row = mysql_fetch_row(database, table, record_id)
         if row is None:
             report.fail(f"MySQL 直连查询未找到记录：table={table} id={record_id}")
             return None
         report.ok(f"MySQL 真实持久化：直连 {database}.{table} 查到 id={record_id}")
+
+        # 4) 重复发布：迁移必须幂等，历史文件不得重复执行或改写 checksum。
+        if not run_migration_container(
+            tag, env_file, report, label="生产迁移重复执行", expect_applied=False
+        ):
+            return None
+        rows_after = mysql_migration_rows(database)
+        same_file = [row for row in rows_after if row.get("filename") == "001_init.sql"]
+        if len(same_file) != 1:
+            report.fail(f"迁移幂等失败：001_init.sql 记录数={len(same_file)}")
+            return None
+        if str(same_file[0].get("checksum") or "") != checksum:
+            report.fail("重复迁移改写了 checksum，违反不可变迁移原则")
+            return None
+        report.ok("迁移幂等验证通过：重复发布未重复建表、checksum 未变化")
+
         keep_container = True
         return container
     except AcceptanceFailure as exc:
@@ -1508,6 +1825,8 @@ def docker_run_and_verify_mysql(
     finally:
         if not keep_container and container:
             run_command(["docker", "rm", "-f", container], timeout=30)
+        if env_dir is not None:
+            shutil.rmtree(env_dir, ignore_errors=True)
         # 验收库始终清理，避免污染宿主机 MySQL。
         mysql_drop(database)
 
@@ -1570,7 +1889,7 @@ def main() -> int:
             report.fail(f"导出包下载失败: {exc}")
             return report.finish()
 
-        stage("3/8 解压与必需文件")
+        stage("3/8 解压与生产部署契约")
         try:
             extract_archive(archive_path, package_dir)
             package_root = resolve_package_root(package_dir)
@@ -1583,7 +1902,22 @@ def main() -> int:
         if missing:
             report.fail("缺少必需部署文件: " + ", ".join(missing))
         else:
-            report.ok("DEPLOY.md / Dockerfile / render.yaml 均存在")
+            report.ok(
+                "DEPLOY.md / Dockerfile / render.yaml / .env.example / "
+                "migrations 均存在"
+            )
+        try:
+            contract_issues = check_production_contract(package_root)
+            if contract_issues:
+                for issue in contract_issues:
+                    report.fail(issue)
+            else:
+                report.ok(
+                    "环境变量隔离 / 显式迁移 / 严格 CORS / 503 健康检查 / "
+                    "多阶段非 root 镜像 全部满足"
+                )
+        except Exception as exc:  # noqa: BLE001
+            report.fail(f"生产部署契约检查失败: {exc}")
 
         stage("4/8 前后端路由一致性")
         try:
@@ -1630,13 +1964,15 @@ def main() -> int:
                 if sqlite_container:
                     containers.append(sqlite_container)
 
-                stage("8/8 真实 MySQL 持久化")
+                stage("8/8 模拟云端部署：MySQL + Migration")
                 if not MYSQL_ENABLED:
                     print("   - ACCEPTANCE_MYSQL=0，跳过真实 MySQL 验收")
                 else:
                     mysql_container = docker_run_and_verify_mysql(
                         image_tag,
                         payload.get("collectionPath"),
+                        package_root,
+                        contract,
                         report,
                     )
                     if mysql_container:

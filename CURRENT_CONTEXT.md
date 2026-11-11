@@ -26,11 +26,12 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒；中间�
 - **全栈产物验收**：新增 `scripts/acceptance_test.py`，生成→导出→安全解压→校验三件套→前后端路由比对→纯净容器 npm build→无 DB env 跑通 SQLite CRUD；生成 Dockerfile 已改为保留 `server/` 层级，修复 `/data` EACCES。
 - **业务 Eval**：`business_cases.yaml` 4 例（纯前端/CRUD/上传），真实 DeepSeek 契约 + 产物语义断言 4/4；上传契约自动注入 multer，构建前安装 `server/` 依赖。
 - **P0 真实业务验收（2026-11-11）**：验收脚本新增真实 `multipart/form-data` 上传→静态回读→字节比对，以及宿主机 MySQL 临时库建表/CRUD/直连查行；业务 Eval `semantic.runtime` 复用同一链路，`biz_003` 100% 通过（101.9s / ¥0.0289）。实测修复：Dockerfile 二次 COPY 后 uploads/data `EACCES`、`resume_file_*` 字段漏映射、上传响应缺标准 `upload` 元数据、常量路由解析、表名语义匹配。
+- **生产级武装（2026-11-11）**：产物强制 env 隔离（DATABASE_URL/CORS/PORT）、显式 SQL 迁移（`server/migrations/001_init.sql` + `_schema_migrations` + `migrate.mjs`，移除 `sync()`/`DB_AUTO_MIGRATE`）、真实 DB 健康检查（未迁移 503/`tableReady`）、前端全局 fetch 拦截器与错误 Banner、多阶段非 root Dockerfile；新增 `production_ready` Skill 挂载 Backend/Infra Agent，SQLite MCP 在 ConsistencyVerifier 真实执行 DDL 验表。验收第 8 步改为云端发布模拟：`.env` 注入→未迁移 503→独立 migrate→直连校验表/checksum→200+CRUD→重复迁移幂等。69 单测 + 9 脚本单测 + 端到端全绿，出口 `🎉 生产级产物验收通过，可直接交付云端部署`。
 
 ## 真假边界
 
-DeepSeek=真实调用+Eval；鉴权=Mock Token；持久化=BFF 无 DB；中间件仅配置；沙盒无 gVisor；部署按钮仅指引；外网不可达。
+DeepSeek=真实调用+Eval；鉴权=Mock Token；持久化=BFF 无 DB；中间件仅配置；沙盒无 gVisor；部署按钮仅指引；外网不可达。产物已按生产契约生成并本地模拟云端发布，但尚未实际部署 Render/阿里云，也没有回滚（down）迁移与云端密钥托管。
 
 ## 下一步
 
-P0 剩余：生成产物多服务编排（web/api/db），multipart + MySQL 同请求落库；P1 业务 Eval 扩至 15–20 例、圈选精度、Redis checkpoint；P2 部署按钮；P3 M3.2 知识中台。
+P0 剩余：生成产物多服务编排（web/api/db），multipart + MySQL 同请求落库，迁移回滚脚本；P1 业务 Eval 扩至 15–20 例、圈选精度、Redis checkpoint；P2 真实云端部署按钮；P3 M3.2 知识中台。

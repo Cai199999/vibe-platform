@@ -122,6 +122,8 @@ class ConsistencyReport:
     backend_routes: tuple[BackendRoute, ...]
     issues: tuple[ConsistencyIssue, ...]
     checked_files: tuple[str, ...] = ()
+    # MCP 真实数据库结构验收结果（见 schema_mcp.SchemaCheck.to_dict）。
+    schema: dict[str, object] | None = None
 
     @property
     def ok(self) -> bool:
@@ -191,6 +193,13 @@ class ConsistencyReport:
             "后端已注册路由："
             + "；".join(f"{route.method} {route.path}" for route in self.backend_routes)
         )
+        if self.schema:
+            lines.append(
+                "数据库结构 MCP 校验："
+                f"ok={self.schema.get('ok')} "
+                f"table={self.schema.get('table')} "
+                f"missing={self.schema.get('missingColumns')}"
+            )
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
@@ -203,6 +212,7 @@ class ConsistencyReport:
             "missingRoutes": list(self.missing_routes()),
             "repairable": self.repairable,
             "issues": [issue.to_dict() for issue in self.issues],
+            "schema": self.schema,
         }
 
 

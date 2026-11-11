@@ -32,6 +32,7 @@ from ai_core.fullstack.templates import (
     ENV_EXAMPLE_TEMPLATE,
     EXPRESS_SERVER_TEMPLATE,
     MIGRATE_SCRIPT_TEMPLATE,
+    MIGRATION_RUNNER_TEMPLATE,
     RENDER_YAML_TEMPLATE,
     SEQUELIZE_DB_TEMPLATE,
 )
@@ -273,6 +274,133 @@ def sqlite_schema_sql(table: str, column_defs: list[tuple[str, str]]) -> str:
     return f'CREATE TABLE IF NOT EXISTS "{table}" (\n{body}\n);\n'
 
 
+def _engine_column_type(sqlite_type: str, engine: str, *, is_id: bool) -> str:
+    """把字段亲和性映射为目标数据库类型；只用于契约缺少原始 DDL 时兜底。"""
+    if is_id:
+        if engine == "mysql":
+            return "BIGINT PRIMARY KEY AUTO_INCREMENT"
+        if engine == "postgresql":
+            return "BIGSERIAL PRIMARY KEY"
+        return "INTEGER PRIMARY KEY AUTOINCREMENT"
+    if engine == "mysql":
+        return {
+            "INTEGER": "INT",
+            "REAL": "DOUBLE",
+            "BLOB": "BLOB",
+        }.get(sqlite_type, "TEXT")
+    if engine == "postgresql":
+        return {
+            "INTEGER": "INTEGER",
+            "REAL": "DOUBLE PRECISION",
+            "BLOB": "BYTEA",
+        }.get(sqlite_type, "TEXT")
+    return sqlite_type
+
+
+def schema_for_engine(
+    table: str,
+    column_defs: list[tuple[str, str]],
+    engine: str,
+) -> str:
+    """生成目标数据库的 ``CREATE TABLE IF NOT EXISTS``。
+
+    优先保留契约原始 DDL（含 VARCHAR 长度、默认值、注释），仅在契约
+    缺失 DDL 时按字段亲和性兜底。MySQL / PostgreSQL 的常见 SQLite
+    方言会在迁移文件中被纠正，保证同一份契约可执行。
+    """
+    lines = []
+    for name, sqlite_type in column_defs:
+        lines.append(
+            f'  "{name}" {_engine_column_type(sqlite_type, engine, is_id=name == "id")}'
+        )
+    body = ",\n".join(lines)
+    suffix = " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4" if engine == "mysql" else ""
+    return f'CREATE TABLE IF NOT EXISTS "{table}" (\n{body}\n){suffix};\n'
+
+
+def _normalize_contract_ddl(ddl: str, engine: str) -> str:
+    """把契约 DDL 规整为目标方言，并加 ``IF NOT EXISTS`` 保证幂等。"""
+    result = (ddl or "").strip()
+    if not result:
+        return ""
+    if engine == "mysql":
+        # 模型常把 SQLite 的 AUTOINCREMENT 写进 MySQL 契约。
+        result = re.sub(
+            r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b",
+            "BIGINT PRIMARY KEY AUTO_INCREMENT",
+            result,
+            flags=re.IGNORECASE,
+        )
+        result = re.sub(
+            r"\bAUTOINCREMENT\b",
+            "AUTO_INCREMENT",
+            result,
+            flags=re.IGNORECASE,
+        )
+    elif engine == "postgresql":
+        result = re.sub(
+            r"\bBIGINT\s+PRIMARY\s+KEY\s+AUTO_INCREMENT\b",
+            "BIGSERIAL PRIMARY KEY",
+            result,
+            flags=re.IGNORECASE,
+        )
+        result = re.sub(
+            r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b",
+            "SERIAL PRIMARY KEY",
+            result,
+            flags=re.IGNORECASE,
+        )
+        result = re.sub(
+            r"\bINT\s+PRIMARY\s+KEY\s+AUTO_INCREMENT\b",
+            "SERIAL PRIMARY KEY",
+            result,
+            flags=re.IGNORECASE,
+        )
+    if re.search(r"\bCREATE\s+TABLE\b", result, re.IGNORECASE) and not re.search(
+        r"\bCREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\b", result, re.IGNORECASE
+    ):
+        result = re.sub(
+            r"\bCREATE\s+TABLE\b",
+            "CREATE TABLE IF NOT EXISTS",
+            result,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    if not result.endswith(";"):
+        result += ";"
+    if engine == "mysql" and "ENGINE=" not in result.upper() and result.count(";") == 1:
+        # 单条 CREATE TABLE 明确字符集，避免云端默认 latin1 导致中文乱码；
+        # 多语句 DDL 不强行追加，避免把 ENGINE 拼到 CREATE INDEX 后面。
+        result = result.rstrip(";") + " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
+    return result + "\n"
+
+
+def migration_sql(
+    contract: ArchitectContract,
+    table: str,
+    column_defs: list[tuple[str, str]],
+    engine: str,
+) -> str:
+    """生成 ``server/migrations/001_init.sql``。
+
+    生产迁移必须以文件形式进入 Git、可审计、可重放；执行入口是
+    ``npm run db:migrate``，绝不调用 Sequelize ``sync()``。
+    """
+    ddl = _normalize_contract_ddl(contract.database_ddl, engine)
+    if not re.search(r"\bCREATE\s+TABLE\b", ddl, re.IGNORECASE):
+        ddl = schema_for_engine(table, column_defs, engine)
+    header = (
+        "-- 001_init.sql · 由 DBACoder 根据《全栈实施契约》生成\n"
+        f"-- contract: {contract.contract_id}\n"
+        f"-- table: {table}\n"
+        f"-- engine: {engine}\n"
+        "-- 执行：node server/migrate.mjs（生产发布前必须执行）\n"
+        "-- 说明：迁移执行器会记录文件名与 checksum；禁止修改已发布的历史文件，\n"
+        "--       新增结构变更请创建 002_xxx.sql。\n\n"
+    )
+    return header + ddl
+
+
 def _route_key(route: ArchitectApiRoute) -> tuple[str, str]:
     return (str(route.method or "GET").upper(), str(route.path or ""))
 
@@ -499,7 +627,8 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
         f"-- table: {table}\n"
         f"-- 目标数据库: {engine}（生产通过 DATABASE_URL 连接）\n"
         "-- 说明：本文件是沙盒 SQLite 的预览建表语句；\n"
-        "-- 生产 DDL 见 server/schema.<engine>.sql，ORM 见 server/db.js。\n\n"
+        "-- 生产结构变更必须使用 server/migrations/*.sql，并由\n"
+        "-- `node server/migrate.mjs` 显式执行，禁止 Sequelize sync() 自动建表。\n\n"
     )
     db_code = SEQUELIZE_DB_TEMPLATE
     db_replacements = {
@@ -530,12 +659,19 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
         ),
         "server/db.js": db_code,
         "server/migrate.mjs": MIGRATE_SCRIPT_TEMPLATE,
+        "server/migrations.mjs": MIGRATION_RUNNER_TEMPLATE,
+        "server/migrations/001_init.sql": migration_sql(
+            contract,
+            table,
+            column_defs,
+            engine,
+        ),
     }
     return GeneratedBundle(
         files=files,
         summary=(
             f"生成 {table} Sequelize ORM（目标 {engine}，"
-            f"{len(columns)} 个字段）+ SQLite 预览 DDL"
+            f"{len(columns)} 个字段）+ SQLite 预览 DDL + 生产 SQL 迁移"
         ),
         metadata={
             "table": table,
@@ -544,6 +680,8 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
             "databaseEngine": engine,
             "orm": "sequelize",
             "previewStorage": "sqlite",
+            "migration": "server/migrations/001_init.sql",
+            "migrationRunner": "server/migrations.mjs",
         },
     )
 
@@ -916,19 +1054,24 @@ def generate_backend_bundle(
         f"- 集合路由：`{base}`\n"
         f"- 详情路由：`{detail}`\n"
         f"- 通用数据别名：`/api/data`\n"
-        f"- 健康检查：`/api/health`（生产 storage={engine}，沙盒 storage=sqlite）\n"
+        f"- 健康检查：`/api/health`（真实探测数据库；异常返回 503）\n"
         f"- 本地预览库：`data/fullstack.sqlite`\n"
-        "- 迁移：`npm run db:migrate`（生产需 DATABASE_URL）\n\n"
+        "- 生产迁移：`node server/migrate.mjs`（执行 server/migrations/*.sql，\n"
+        "  需要 DATABASE_URL；应用启动不会调用 sync() 自动建表）\n\n"
         "## 契约路由\n\n"
         + ("\n".join(route_lines) if route_lines else "- 无显式路由，使用默认 CRUD")
         + "\n\n## 运行\n\n```bash\nnode server/index.js\n```\n\n"
         "## 生产环境变量\n\n"
         "```bash\n"
+        "NODE_ENV=production\n"
         f"DATABASE_URL='<{engine} 连接串>'\n"
         f"DB_ENGINE={engine}\n"
-        "DB_AUTO_MIGRATE=true\n"
-        "CORS_ORIGIN='https://your-frontend.example.com'\n"
+        "DB_SSL=true\n"
+        "PORT=3000\n"
+        "CORS_ORIGINS='https://your-frontend.example.com'\n"
         "```\n"
+        "\n发布前必须执行迁移：\n\n"
+        "```bash\ndocker run --rm --env-file .env <image> node server/migrate.mjs\n```\n"
     )
 
     files = {
@@ -1017,23 +1160,186 @@ def generate_backend_bundle(
 # ------------------------------------------------------------
 # FrontendCoder
 # ------------------------------------------------------------
+_FRONTEND_API_CLIENT = r"""// 由 FrontendCoder 生成：全局 API 客户端与网络错误拦截器。
+// 目标：
+//   1. API_BASE 只从 VITE_API_BASE_URL 读取，禁止硬编码后端域名；
+//   2. 统一超时、Accept 头与非 2xx 错误体解析；
+//   3. 任何网络失败 / 5xx 都通过 window 事件广播，由顶部横幅统一提示，
+//      页面组件只负责自己的 Loading / 空状态，不再各自吞掉异常。
+import { useEffect, useState } from 'react'
+
+export const API_BASE = String(
+  import.meta.env.VITE_API_BASE_URL || '',
+).replace(/\/$/, '')
+
+const API_ERROR_EVENT = 'vibe:api-error'
+const DEFAULT_TIMEOUT_MS = 20000
+
+export function apiUrl(path) {
+  if (/^https?:\/\//i.test(String(path))) return String(path)
+  const normalized = String(path || '')
+  return `${API_BASE}${normalized.startsWith('/') ? '' : '/'}${normalized}`
+}
+
+export class ApiError extends Error {
+  constructor(message, { status = 0, path = '', payload = null } = {}) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.path = path
+    this.payload = payload
+  }
+}
+
+function emitApiError(detail) {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new CustomEvent(API_ERROR_EVENT, { detail }))
+}
+
+export function installFetchInterceptor() {
+  if (typeof window === 'undefined') return
+  if (window.__VIBE_FETCH_INSTALLED__) return
+  window.__VIBE_FETCH_INSTALLED__ = true
+  const originalFetch = window.fetch.bind(window)
+  window.fetch = async (input, init = {}) => {
+    const path =
+      typeof input === 'string' ? input : String(input?.url || 'unknown')
+    const controller = init.signal ? null : new AbortController()
+    const timer = controller
+      ? window.setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+      : null
+    try {
+      const response = await originalFetch(input, {
+        ...init,
+        signal: init.signal || controller?.signal,
+      })
+      if (response.status >= 500) {
+        const payload = await response
+          .clone()
+          .json()
+          .catch(() => null)
+        emitApiError({
+          path,
+          status: response.status,
+          message:
+            payload?.message ||
+            payload?.code ||
+            `${path} -> HTTP ${response.status}`,
+        })
+      }
+      return response
+    } catch (cause) {
+      const timedOut = cause?.name === 'AbortError'
+      const message = timedOut
+        ? `请求超时（>${DEFAULT_TIMEOUT_MS / 1000}s）：${path}`
+        : `网络异常：${cause?.message || cause}`
+      emitApiError({ path, status: 0, message })
+      throw cause?.name === 'AbortError' ? new ApiError(message, { path }) : cause
+    } finally {
+      if (timer) window.clearTimeout(timer)
+    }
+  }
+}
+
+export async function apiFetch(path, options = {}) {
+  const headers = {
+    Accept: 'application/json',
+    ...(options.headers || {}),
+  }
+  const response = await fetch(apiUrl(path), { ...options, headers })
+  if (!response.ok) {
+    const payload = await response
+      .clone()
+      .json()
+      .catch(() => null)
+    throw new ApiError(
+      payload?.message ||
+        payload?.code ||
+        `${options.method || 'GET'} ${path} -> HTTP ${response.status}`,
+      { status: response.status, path, payload },
+    )
+  }
+  return response
+}
+
+export function onApiError(handler) {
+  if (typeof window === 'undefined') return () => {}
+  const listener = (event) => handler(event.detail)
+  window.addEventListener(API_ERROR_EVENT, listener)
+  return () => window.removeEventListener(API_ERROR_EVENT, listener)
+}
+
+// 全局错误横幅：挂在 App 根节点，任何页面 / 后台轮询的网络异常都会提示。
+export function ApiErrorBanner() {
+  const [error, setError] = useState(null)
+  useEffect(() => {
+    const unsubscribe = onApiError((detail) => {
+      setError({ ...detail, id: Date.now() })
+    })
+    return unsubscribe
+  }, [])
+  useEffect(() => {
+    if (!error) return undefined
+    const timer = window.setTimeout(() => setError(null), 6000)
+    return () => window.clearTimeout(timer)
+  }, [error])
+  if (!error) return null
+  return (
+    <div
+      role="alert"
+      data-api-error-banner
+      style={{
+        position: 'fixed',
+        top: 12,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 10000,
+        maxWidth: 'min(92vw, 620px)',
+        padding: '10px 14px',
+        borderRadius: 10,
+        background: 'rgba(127,29,29,.96)',
+        border: '1px solid rgba(248,113,113,.65)',
+        color: '#fee2e2',
+        fontFamily: '"Inter","Segoe UI",sans-serif',
+        fontSize: 12.5,
+        boxShadow: '0 10px 28px rgba(0,0,0,.35)',
+      }}
+    >
+      <strong style={{ marginRight: 8 }}>网络请求失败</strong>
+      <span>{error.message || '请检查网络或后端服务状态'}</span>
+      <button
+        type="button"
+        onClick={() => setError(null)}
+        aria-label="关闭错误提示"
+        style={{
+          marginLeft: 12,
+          border: 0,
+          background: 'transparent',
+          color: '#fecaca',
+          cursor: 'pointer',
+          fontSize: 14,
+        }}
+      >
+        ×
+      </button>
+    </div>
+  )
+}
+
+installFetchInterceptor()
+"""
+
 _FRONTEND_PANEL = r"""// 由 FrontendCoder 根据契约 componentInteractions 生成。
 // 目标：用真实后端数据替代 Mock 列表，并提供一个最小可验证的写入入口。
+// API_BASE / VITE_API_BASE_URL、超时与全局网络错误由 src/api-client.jsx
+// 的 fetch 拦截器统一处理，本文件不再各自拼接后端域名。
 import { useEffect, useState } from 'react'
+
+import { apiFetch, apiUrl } from './api-client.jsx'
 
 const COLLECTION_PATH = '__COLLECTION_PATH__'
 const ENTITY = '__ENTITY__'
 const TABLE = '__TABLE__'
-// 生产前后端通常分域部署：构建时注入 VITE_API_BASE_URL；
-// 沙盒未配置时为空字符串，继续走 Vite 同源 /api 代理。
-const API_BASE = String(import.meta.env.VITE_API_BASE_URL || '').replace(
-  /\/$/,
-  '',
-)
-
-function apiUrl(path) {
-  return `${API_BASE}${path}`
-}
 
 function normalizeItems(payload) {
   if (Array.isArray(payload)) return payload
@@ -1064,12 +1370,9 @@ export default function FullstackDataPanel() {
     setError('')
     setSuccess('')
     try {
-      const response = await fetch(apiUrl(COLLECTION_PATH), {
+      const response = await apiFetch(COLLECTION_PATH, {
         headers: { Accept: 'application/json' },
       })
-      if (!response.ok) {
-        throw new Error(`GET ${COLLECTION_PATH} -> HTTP ${response.status}`)
-      }
       const payload = await response.json()
       setItems(normalizeItems(payload))
       setStorage(String(payload?.storage || 'database'))
@@ -1091,7 +1394,7 @@ export default function FullstackDataPanel() {
     setError('')
     setSuccess('')
     try {
-      const response = await fetch(apiUrl(COLLECTION_PATH), {
+      const response = await apiFetch(COLLECTION_PATH, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1101,9 +1404,6 @@ export default function FullstackDataPanel() {
         // 提交字段必须与 DDL 可写列一致，避免后端静默丢弃请求体。
         body: JSON.stringify({ __PAYLOAD_KEY__: name.trim() || `新${ENTITY}` }),
       })
-      if (!response.ok) {
-        throw new Error(`POST ${COLLECTION_PATH} -> HTTP ${response.status}`)
-      }
       const payload = await response.json()
       // 兼容直接返回记录与 { data, message } 两种后端响应。
       const created = payload?.data ?? payload
@@ -1255,6 +1555,10 @@ _FRONTEND_SKELETON_TEMPLATE = r"""// 由 FrontendCoder 根据《架构实施契�
 // 绝不猜测用户没有要求的业务表单或卡片。
 import { useMemo, useState } from 'react'
 
+// 生产前后端通常分域部署：API_BASE 只在 src/api-client.jsx 中读取
+// VITE_API_BASE_URL；fetch 拦截器统一处理超时与全局网络错误。
+import { apiFetch, apiUrl, ApiErrorBanner } from './api-client.jsx'
+
 const APP_NAME = __APP_NAME__
 const ROUTES = __ROUTES__
 const LAYOUT = __LAYOUT__
@@ -1262,14 +1566,6 @@ const COMPONENTS = __COMPONENTS__
 // 契约里已确认的组件交互；没有交互的组件保持静态，不生成假按钮。
 const INTERACTIONS = __INTERACTIONS__
 const SKELETON_MODE = __SKELETON_MODE__
-
-// 生产前后端通常分域部署：构建时注入 VITE_API_BASE_URL；
-// 沙盒未配置时为空字符串，继续走 Vite 同源 /api 代理。
-const API_BASE = String(import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
-
-function apiUrl(path) {
-  return `${API_BASE}${path}`
-}
 
 const SECTIONS = COMPONENTS.reduce((groups, component) => {
   const name = component.section || '核心工作区'
@@ -1709,15 +2005,10 @@ function InteractionPanel({ component }) {
           action.payloadKey ? { [action.payloadKey]: value.trim() } : {},
         )
       }
-      const response = await fetch(apiUrl(path), options)
+      // apiFetch 统一处理超时 / 非 2xx / 全局错误横幅；
+      // 这里只负责把业务成功态写回组件。
+      const response = await apiFetch(path, options)
       const payload = await response.json().catch(() => null)
-      if (!response.ok) {
-        throw new Error(
-          payload?.message ||
-            payload?.code ||
-            `${action.method} ${path} -> HTTP ${response.status}`,
-        )
-      }
       setState('success')
       const rows = Array.isArray(payload)
         ? payload
@@ -1875,6 +2166,8 @@ export default function App() {
   return (
     <div className="app-shell">
       <style>{GLOBAL_CSS}</style>
+      {/* 全局网络错误横幅：任何 fetch 失败 / 5xx 都会在这里统一提示。 */}
+      <ApiErrorBanner />
       <aside
         className="app-sidebar"
         data-source="app-sidebar"
@@ -2452,7 +2745,7 @@ def generate_frontend_skeleton_bundle(contract: ArchitectContract) -> GeneratedB
         .replace("__SKELETON_MODE__", "true" if contract.skeleton_mode else "false")
     )
     return GeneratedBundle(
-        files={"src/App.jsx": content},
+        files={"src/App.jsx": content, "src/api-client.jsx": _FRONTEND_API_CLIENT},
         summary=(
             "按契约生成干净的应用骨架："
             f"{len(routes)} 个路由、{len(components)} 个占位/业务组件"
@@ -2496,6 +2789,7 @@ def generate_frontend_bundle(
     )
     files: dict[str, str] = {
         "src/fullstack-api.jsx": panel,
+        "src/api-client.jsx": _FRONTEND_API_CLIENT,
         "scripts/dev.mjs": DEV_SCRIPT_TEMPLATE,
     }
 
@@ -2509,11 +2803,15 @@ def generate_frontend_bundle(
             raise ValueError("src/main.jsx 中未找到 <App />，无法注入全栈数据面板")
         patched_main = existing_main.replace(
             "<App />",
-            "<React.Fragment><App /><FullstackDataPanel /></React.Fragment>",
+            (
+                "<React.Fragment><ApiErrorBanner />"
+                "<App /><FullstackDataPanel /></React.Fragment>"
+            ),
             1,
         )
         patched_main = (
-            "import FullstackDataPanel from './fullstack-api.jsx'\n" + patched_main
+            "import FullstackDataPanel from './fullstack-api.jsx'\n"
+            "import { ApiErrorBanner } from './api-client.jsx'\n" + patched_main
         )
         files["src/main.jsx"] = patched_main
 

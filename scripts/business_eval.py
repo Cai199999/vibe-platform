@@ -516,6 +516,8 @@ def runtime_checks(
                 mysql_container = acceptance.docker_run_and_verify_mysql(
                     tag,
                     collection_path,
+                    package_root,
+                    contract,
                     report,
                 )
                 if mysql_container:

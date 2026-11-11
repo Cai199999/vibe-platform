@@ -418,6 +418,26 @@ priority: 10
             path.write_text("# 没有 frontmatter\n", encoding="utf-8")
             self.assertEqual(load_skill_directory(tmp), [])
 
+    def test_production_ready_skill_is_mounted_to_backend_and_infra(self) -> None:
+        """同一份生产规范必须同时进入 BackendCoder 与 InfraCoder。"""
+        skills = load_skill_directory(ACCESSIBILITY_DIR)
+        by_id = {item.skill_id: item for item in skills}
+        backend = by_id["production.ready"]
+        infra = by_id["production.ready.devops_agent"]
+        self.assertEqual(backend.agent_id, "backend_coder")
+        self.assertEqual(infra.agent_id, "devops_agent")
+        self.assertIn("SQL 迁移", backend.system_prompt)
+        self.assertIn("多阶段构建", infra.system_prompt)
+        self.assertIn("CORS", infra.system_prompt)
+        self.assertIn(
+            "生产级后端与部署基线",
+            skill_prompts_to_system("backend_coder", ACCESSIBILITY_DIR),
+        )
+        self.assertIn(
+            "生产级后端与部署基线",
+            skill_prompts_to_system("devops_agent", ACCESSIBILITY_DIR),
+        )
+
     def test_accessibility_skill_is_mounted_to_ui_graph(self) -> None:
         skills = load_skill_directory(ACCESSIBILITY_DIR)
         by_id = {item.skill_id: item for item in skills}
