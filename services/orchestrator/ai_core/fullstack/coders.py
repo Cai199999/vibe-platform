@@ -99,6 +99,47 @@ _CREATE_TABLE = re.compile(
     re.IGNORECASE,
 )
 _COLUMN_LINE = re.compile(r"^\s*[`\"]?([a-zA-Z0-9_]+)[`\"]?\s+")
+# 形如 /api/v1/users/:id/<segment> 的路径段若是动作端点，就不是 JOIN
+# 子资源别名。未列出的未知段仍按别名校验，避免漏掉真正的拼写错误。
+_ACTION_PATH_SEGMENTS = {
+    "analyze",
+    "analyse",
+    "apply",
+    "approve",
+    "batch",
+    "cancel",
+    "confirm",
+    "detail",
+    "details",
+    "download",
+    "execute",
+    "export",
+    "generate",
+    "health",
+    "import",
+    "login",
+    "logout",
+    "preview",
+    "process",
+    "publish",
+    "refresh",
+    "register",
+    "reject",
+    "reset",
+    "retry",
+    "rewrite",
+    "run",
+    "search",
+    "send",
+    "start",
+    "status",
+    "stop",
+    "stream",
+    "submit",
+    "test",
+    "upload",
+    "validate",
+}
 _COLUMN_STOPWORDS = {
     "key",
     "unique",
@@ -668,6 +709,38 @@ def check_orm_schema(
                 f"Express 会话层表名不一致：index.js TABLE={index_schema.table}，"
                 f"DDL 核心表={table}"
             )
+        # ---- 多表 JOIN：静态别名必须与 db.js 的 RELATIONS 完全一致 ----
+        # 这里检查的是 Express 会话层真正写进 include / 嵌套路由的别名，
+        # 而不是 db.js 自洽性：拼错一个字母，Sequelize 运行期才会报
+        # "X is not associated to Y"，Applier 必须提前阻断。
+        nested_expected: set[str] = set()
+        include_expected: set[str] = set()
+        for relation in db_schema.relations:
+            parent = relation.parent_table.lower()
+            child = relation.child_table.lower()
+            child_alias = (relation.child_alias or relation.child_table).lower()
+            parent_alias = (
+                relation.parent_alias or _singular_word(relation.parent_table)
+            ).lower()
+            if parent == str(table).lower():
+                nested_expected.add(child_alias)
+            if parent == str(table).lower() or child == str(table).lower():
+                include_expected.update({child_alias, parent_alias})
+        for alias in index_schema.join_aliases:
+            if alias.lower() in _ACTION_PATH_SEGMENTS:
+                # /users/:id/rewrite 之类的动作端点不是关联别名。
+                continue
+            if alias.lower() not in nested_expected:
+                issues.append(
+                    f"server/index.js 嵌套路由引用了不存在的 JOIN 别名：{alias}"
+                    f"（可用：{'、'.join(sorted(nested_expected)) or '无'}）"
+                )
+        for alias in index_schema.include_aliases:
+            if alias.lower() not in include_expected:
+                issues.append(
+                    f"server/index.js include 引用了不存在的 JOIN 别名：{alias}"
+                    f"（可用：{'、'.join(sorted(include_expected)) or '无'}）"
+                )
     return issues
 
 
@@ -2198,22 +2271,10 @@ def generate_backend_bundle(
     server_code = EXPRESS_SERVER_TEMPLATE
     for key, value in replacements.items():
         server_code = server_code.replace(key, value)
-    # 生成期门禁：Express 会话层表名必须与 DBACoder 的 ORM / 迁移一致。
-    # 使用 Babel AST，而不是正则扫描 const TABLE。
-    index_schema = analyze_js_files({"server/index.js": server_code}).get(
-        "server/index.js"
-    )
-    if index_schema is not None:
-        if index_schema.errors:
-            raise ValueError(
-                "BackendCoder 生成的 server/index.js AST 校验失败："
-                + "；".join(index_schema.errors)
-            )
-        if index_schema.table and index_schema.table.lower() != table.lower():
-            raise ValueError(
-                "BackendCoder 生成的 server/index.js 表名与 DDL 不一致："
-                f"index={index_schema.table}，DDL={table}"
-            )
+
+    # BackendCoder 只负责“按 schema.core.json 生成代码”，不做任何 AST
+    # 校验或自我裁决；落盘前的 AST 门禁统一由 Applier 无条件执行。
+    # 这样节点职责单一，也不会出现“生成器自己判自己合格”的盲区。
 
     # 通用 CRUD 已覆盖的路由不再重复注册；其余契约动作逐个生成独立端点。
     # 前端请求路径与 Express 注册路径都经过 _express_path，保证逐字符一致。

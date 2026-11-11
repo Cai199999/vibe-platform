@@ -560,9 +560,125 @@ function collectRelations(ast, bindings, errors, coreTable, coreColumns, related
         return
       }
     }
-    relations.push({ parentTable, childTable, foreignKey, type })
+    const childAlias = readString(item, 'childAlias')
+    const parentAlias = readString(item, 'parentAlias')
+    relations.push({
+      parentTable,
+      childTable,
+      foreignKey,
+      type,
+      parentKey: readString(item, 'parentKey') || 'id',
+      childAlias,
+      parentAlias,
+    })
   })
   return relations
+}
+
+/**
+ * 静态提取 Express 会话层实际使用的 JOIN 别名。
+ *
+ * Sequelize 的 include / 嵌套子资源查询全部依赖 ``as`` 别名：
+ *  - ``listRelatedRecords(request.params.id, 'resumes', ...)``；
+ *  - ``app.get('/api/v1/users/:id/resumes', ...)``；
+ *  - ``{ include: [{ model, as: 'resumes' }] }``。
+ *
+ * 别名写错不会被语法检查发现，却会在运行期抛
+ * ``resumes is not associated to users``；Applier 必须在落盘前拦截。
+ * 因此这里只收集静态字符串，动态拼接一律交给静态性错误处理。
+ */
+function collectJoinReferences(ast, bindings, coreTable, relations) {
+  const nested = []
+  const includes = []
+  const seenNested = new Set()
+  const seenIncludes = new Set()
+  const addNested = (alias) => {
+    const value = typeof alias === 'string' ? alias.trim() : ''
+    if (!value || seenNested.has(value)) return
+    seenNested.add(value)
+    nested.push(value)
+  }
+  const addInclude = (alias) => {
+    const value = typeof alias === 'string' ? alias.trim() : ''
+    if (!value || seenIncludes.has(value)) return
+    seenIncludes.add(value)
+    includes.push(value)
+  }
+  const nestedAliases = new Set(
+    (relations || [])
+      .filter(
+        (relation) =>
+          coreTable &&
+          String(relation.parentTable || '').toLowerCase() ===
+            coreTable.toLowerCase(),
+      )
+      .map((relation) => String(relation.childAlias || relation.childTable || '')),
+  )
+  const readStatic = (node) => {
+    if (!node) return ''
+    const value = staticValue(node, bindings, new Set())
+    return value.ok && typeof value.value === 'string' ? value.value : ''
+  }
+  walk(ast, (node) => {
+    if (node.type === 'CallExpression') {
+      const callee = node.callee
+      if (callee.type === 'Identifier' && node.arguments.length >= 2) {
+        if (callee.name === 'listRelatedRecords' || callee.name === 'createRelatedRecord') {
+          addNested(readStatic(node.arguments[1]))
+        }
+      }
+      if (
+        callee.type === 'MemberExpression' &&
+        !callee.computed &&
+        callee.property.type === 'Identifier' &&
+        ['get', 'post', 'put', 'patch', 'delete'].includes(callee.property.name)
+      ) {
+        const path = readStatic(node.arguments[0])
+        // 只接受 /:id/<segment> 形式的嵌套路径；segment 是子资源别名
+        // 还是动作端点（rewrite / submit）由 Python 侧按关系集合裁决。
+        const match = path.match(/\/:([A-Za-z_][\w]*)\/([A-Za-z_][\w-]*)\/?$/)
+        if (match) addNested(match[2])
+      }
+      // include 对象里的 as 别名：{ model, as: 'resumes' }
+      for (const argument of node.arguments) {
+        if (argument?.type !== 'ObjectExpression') continue
+        for (const property of argument.properties || []) {
+          if (property.type !== 'ObjectProperty' || property.computed) continue
+          const key =
+            property.key.type === 'Identifier'
+              ? property.key.name
+              : property.key.type === 'StringLiteral'
+                ? property.key.value
+                : ''
+          if (key === 'as' && property.value.type === 'StringLiteral') {
+            addInclude(property.value.value)
+          }
+          if (key === 'include' && property.value.type === 'ArrayExpression') {
+            for (const item of property.value.elements || []) {
+              if (!item || item.type !== 'ObjectExpression') continue
+              for (const entry of item.properties || []) {
+                if (entry.type !== 'ObjectProperty' || entry.computed) continue
+                const entryKey =
+                  entry.key.type === 'Identifier'
+                    ? entry.key.name
+                    : entry.key.type === 'StringLiteral'
+                      ? entry.key.value
+                      : ''
+                if (entryKey === 'as' && entry.value.type === 'StringLiteral') {
+                  addInclude(entry.value.value)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  })
+  // 嵌套路由别名必须是 db.js 中真实声明的 childAlias；拼写错误直接暴露。
+  const unknown = nested.filter(
+    (alias) => nestedAliases.size > 0 && !nestedAliases.has(alias),
+  )
+  return { nested, includes, unknownNested: unknown }
 }
 
 function analyzeSource(source, file) {
@@ -589,6 +705,8 @@ function analyzeSource(source, file) {
       defineTables: [],
       relatedModels: [],
       relations: [],
+      joinAliases: [],
+      includeAliases: [],
       errors: [
         {
           line: loc.line,
@@ -709,6 +827,7 @@ function analyzeSource(source, file) {
   collectMutations(ast, 'RELATIONS', errors)
   const relatedModels = collectRelatedModels(ast, bindings, errors, table)
   const relations = collectRelations(ast, bindings, errors, table, columns, relatedModels)
+  const joins = collectJoinReferences(ast, bindings, table, relations)
 
   return {
     table,
@@ -719,6 +838,8 @@ function analyzeSource(source, file) {
     defineTables,
     relatedModels,
     relations,
+    joinAliases: joins.nested,
+    includeAliases: joins.includes,
     errors,
   }
 }
@@ -756,6 +877,8 @@ async function main() {
         defineTables: [],
         relatedModels: [],
         relations: [],
+        joinAliases: [],
+        includeAliases: [],
         errors: [{ line: 1, column: 1, message: '文件内容不是字符串' }],
       }
       ok = false
@@ -775,6 +898,8 @@ async function main() {
         defineTables: [],
         relatedModels: [],
         relations: [],
+        joinAliases: [],
+        includeAliases: [],
         errors: [{ line: 1, column: 1, message: `AST 分析异常：${error.message}` }],
       }
       ok = false

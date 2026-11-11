@@ -729,13 +729,29 @@ class ArchitectGraphRunner:
                 "contract_issues": ["契约草稿为空"],
             }
         draft = draft_from_dict(raw)
-        validation = validate_draft(str(state.get("app_shape") or ""), draft)
+        shape = str(state.get("app_shape") or "")
+        validation = validate_draft(shape, draft)
+        issues = list(validation.issues)
         if validation.valid and validation.draft is not None:
-            return {
-                "contract_draft": draft_to_dict(validation.draft),
-                "contract_issues": [],
-                "status": "DRAFTING_CONTRACT",
-            }
+            # 契约确认前的最后一道自检：DDL 表、relations、apiRoutes 与
+            # 组件交互必须彼此自洽。这里与运行期 audit_contract 共用同一
+            # 实现（只读、无副作用），避免把矛盾带进代码生成。
+            if shape == "full_stack_system":
+                # 延迟导入：fullstack 包会反向依赖 architect.service，
+                # 顶层导入会造成循环依赖。
+                from ai_core.fullstack.contract_audit import validate_contract
+
+                audit = validate_contract(
+                    self._contract_view(state, validation.draft),
+                    mode="fullstack",
+                )
+                issues.extend(problem.message for problem in audit.problems)
+            if not issues:
+                return {
+                    "contract_draft": draft_to_dict(validation.draft),
+                    "contract_issues": [],
+                    "status": "DRAFTING_CONTRACT",
+                }
 
         repair_limit = int(state.get("repair_limit") or 1)
         repair_count = int(state.get("repair_count") or 0)
@@ -744,7 +760,7 @@ class ArchitectGraphRunner:
                 "architect.contract.repair.requested",
                 {
                     "contractId": state.get("contract_id"),
-                    "issues": validation.issues,
+                    "issues": issues,
                     "attempt": repair_count + 1,
                 },
                 dedupe_key=(
@@ -754,18 +770,42 @@ class ArchitectGraphRunner:
             )
             return {
                 "contract_draft": raw,
-                "contract_issues": validation.issues,
-                "contract_feedback": "；".join(validation.issues),
+                "contract_issues": issues,
+                "contract_feedback": "；".join(issues),
                 "repair_count": repair_count + 1,
                 "status": "REPAIRING_CONTRACT",
             }
         return {
             "contract_draft": raw,
-            "contract_issues": validation.issues,
+            "contract_issues": issues,
             "status": "FAILED",
-            "error": "实施契约未通过分级校验：" + "；".join(validation.issues),
+            "error": "实施契约未通过分级校验：" + "；".join(issues),
             "error_code": "CONTRACT_VALIDATION_FAILED",
         }
+
+    @staticmethod
+    def _contract_view(
+        state: ArchitectState, draft: ContractDraft
+    ) -> ArchitectContract:
+        """把待确认草稿包装成只读契约视图，供 ``validate_contract`` 自检。
+
+        这里不落库、不改状态；审计函数只读取 DDL / relations / 路由 /
+        组件交互四个维度。
+        """
+        return ArchitectContract(
+            contract_id=str(state.get("contract_id") or "ctr_draft"),
+            run_id=str(state.get("run_id") or ""),
+            app_shape="full_stack_system",
+            confidence_score=min(
+                max(float(state.get("confidence_score") or 0.0), 0.0), 1.0
+            ),
+            contract_markdown=draft.contract_markdown,
+            tech_stack=draft.tech_stack,
+            api_routes=draft.api_routes,
+            database_ddl=draft.database_ddl,
+            relations=draft.relations,
+            component_interactions=draft.component_interactions,
+        )
 
     def _revise_contract(self, state: ArchitectState) -> dict[str, Any]:
         self._check_cancelled()

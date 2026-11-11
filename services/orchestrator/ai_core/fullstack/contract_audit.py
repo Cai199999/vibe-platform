@@ -24,6 +24,7 @@ from typing import Iterable
 
 from ai_core.domain.architect import ArchitectContract
 from ai_core.domain.relations import (
+    normalize_table_relations,
     parse_ddl_table_columns,
     relation_audit_issues,
 )
@@ -31,6 +32,10 @@ from ai_core.fullstack.coders import collection_path, core_table_for_contract
 
 FAILURE_KIND_CONTRACT = "CONTRACT"
 FAILURE_KIND_CODE = "CODE"
+
+# 缺陷归因：前端/编排层使用这两个稳定枚举，不再依赖自由文本。
+DEFECT_CONTRACT = "CONTRACT_DEFECT"
+DEFECT_CODE = "CODE_DEFECT"
 
 # 交互记录里表示“纯前端 / 无接口”的占位写法。
 _NON_API_ROUTE_VALUES = {"", "LOCAL", "NONE", "NULL", "-"}
@@ -54,6 +59,8 @@ class ContractAudit:
     """契约审计结果；``ok`` 表示不存在结构性矛盾。"""
 
     problems: tuple[ContractProblem, ...] = ()
+    # 生成代码侧的诊断（可选）：只用于说明“契约没问题，是代码写错了”。
+    code_issues: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -62,6 +69,10 @@ class ContractAudit:
     @property
     def failure_kind(self) -> str:
         return FAILURE_KIND_CONTRACT if self.problems else FAILURE_KIND_CODE
+
+    @property
+    def defect_kind(self) -> str:
+        return DEFECT_CONTRACT if self.problems else DEFECT_CODE
 
     def summary(self) -> str:
         if not self.problems:
@@ -91,6 +102,8 @@ class ContractAudit:
             "summary": self.summary(),
             "prompt": self.clarification_prompt(),
             "problems": [problem.to_dict() for problem in self.problems],
+            "defectKind": self.defect_kind,
+            "codeIssues": list(self.code_issues),
         }
 
 
@@ -150,6 +163,159 @@ def _table_exists_for_resource(resource: str, tables: Iterable[str]) -> bool:
     return any(_singular(table) == target for table in tables)
 
 
+def _table_for_resource(resource: str, tables: Iterable[str]) -> str:
+    target = _singular(resource)
+    for table in tables:
+        if _singular(table) == target:
+            return table
+    return ""
+
+
+# 路径末段若命中这些动作词，即使以 s 结尾（status / process）也不是子表。
+_ACTION_SEGMENTS = {
+    "analyze",
+    "analyse",
+    "apply",
+    "approve",
+    "batch",
+    "cancel",
+    "confirm",
+    "details",
+    "download",
+    "execute",
+    "export",
+    "generate",
+    "health",
+    "import",
+    "login",
+    "logout",
+    "preview",
+    "process",
+    "publish",
+    "refresh",
+    "register",
+    "reject",
+    "reset",
+    "retry",
+    "rewrite",
+    "run",
+    "search",
+    "send",
+    "start",
+    "status",
+    "stop",
+    "stream",
+    "submit",
+    "test",
+    "upload",
+    "validate",
+}
+
+
+def _looks_like_collection(segment: str) -> bool:
+    """粗判一个路径段是“子资源集合”还是“动作端点”。
+
+    ``/resumes/:id/rewrite`` 里的 ``rewrite`` 是动作，不是子表；只有
+    复数形式且不在动作词表中的段才按嵌套资源审计，避免把合法业务动作
+    误判成缺失表。
+    """
+    value = segment.strip().lower()
+    if value in _ACTION_SEGMENTS:
+        return False
+    return len(value) > 1 and value.endswith("s") and not value.endswith("ss")
+
+
+def _nested_resource_pairs(routes: Iterable[str]) -> list[tuple[str, str]]:
+    """从 ``/api/v1/users/:id/resumes`` 提取 ``(users, resumes)``。"""
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for route in routes:
+        segments = [segment for segment in _normalize_path(route).split("/") if segment]
+        if not segments or segments[0] != "api":
+            continue
+        param_index = next(
+            (
+                index
+                for index, segment in enumerate(segments)
+                if segment.startswith(":") or segment.startswith("{")
+            ),
+            -1,
+        )
+        if param_index <= 1 or param_index + 1 >= len(segments):
+            continue
+        parent = segments[param_index - 1]
+        child = segments[param_index + 1]
+        if parent in {"v1", "v2", "api"} or child in {"v1", "v2", "api"}:
+            continue
+        if not _looks_like_collection(child):
+            continue
+        key = (parent.lower(), child.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        pairs.append((parent, child))
+    return pairs
+
+
+def _audit_nested_routes(
+    contract: ArchitectContract,
+    tables: dict[str, tuple[str, ...]],
+) -> list[ContractProblem]:
+    """嵌套子资源路由必须在契约里有对应 JOIN 关系。
+
+    前后端都能生成 ``/users/:id/resumes``，但如果 ``relations`` / DDL
+    里没有 ``users.id ← resumes.user_id``，运行期必然 500。这种矛盾
+    不是 AI 拼错代码，而是契约缺少 JOIN 定义，必须判 ``CONTRACT_DEFECT``。
+    """
+    problems: list[ContractProblem] = []
+    # 显式 relations 优先；漏写时仍按 DDL 外键列推导，避免把可推导的
+    # 关系误判为契约缺陷。
+    relations, _ = normalize_table_relations(
+        tables,
+        contract.relations,
+        derive_when_empty=True,
+    )
+    for parent_resource, child_resource in _nested_resource_pairs(
+        route.path for route in contract.api_routes or []
+    ):
+        parent = _table_for_resource(parent_resource, tables)
+        child = _table_for_resource(child_resource, tables)
+        if not child:
+            problems.append(
+                ContractProblem(
+                    code="nested_table_missing",
+                    message=(
+                        f"嵌套路由引用了 DDL 中不存在的子表 {child_resource}"
+                        f"（父资源 {parent_resource}）"
+                    ),
+                    hint=f"在 databaseDdl 中创建 {child_resource} 表，并声明外键列",
+                )
+            )
+            continue
+        if not parent:
+            continue
+        related = any(
+            relation.parent_table.lower() == parent.lower()
+            and relation.child_table.lower() == child.lower()
+            for relation in relations
+        )
+        if not related:
+            problems.append(
+                ContractProblem(
+                    code="missing_relation",
+                    message=(
+                        f"嵌套路由 {parent_resource}/:id/{child_resource} 缺少 JOIN 关系："
+                        f"契约没有声明 {parent} → {child}"
+                    ),
+                    hint=(
+                        f"在 relations 中声明 parentTable={parent}、"
+                        f"childTable={child}，并确保 {child} 表存在外键列"
+                    ),
+                )
+            )
+    return problems
+
+
 def _audit_database(contract: ArchitectContract, mode: str) -> list[ContractProblem]:
     problems: list[ContractProblem] = []
     if mode not in {"fullstack", "dba", "backend"}:
@@ -207,6 +373,7 @@ def _audit_database(contract: ArchitectContract, mode: str) -> list[ContractProb
                     hint="关联的父子表与外键列必须同时存在于 databaseDdl",
                 )
             )
+        problems.extend(_audit_nested_routes(contract, tables))
     return problems
 
 
@@ -279,8 +446,14 @@ def audit_contract(
     contract: ArchitectContract,
     *,
     mode: str = "fullstack",
+    code_issues: Iterable[str] = (),
 ) -> ContractAudit:
-    """确定性审计契约结构；不依赖模型与生成产物。"""
+    """确定性审计契约结构；不依赖模型与生成产物。
+
+    ``code_issues`` 是生成代码侧的诊断文本。它不会改变契约结论，只用于
+    在归因为 ``CODE_DEFECT`` 时把证据一并回传，避免“契约没问题”变成
+    无法解释的断言。
+    """
     problems = [
         *_audit_database(contract, mode),
         *_audit_routes(contract, mode),
@@ -289,13 +462,33 @@ def audit_contract(
     unique: dict[tuple[str, str], ContractProblem] = {}
     for problem in problems:
         unique.setdefault((problem.code, problem.message), problem)
-    return ContractAudit(problems=tuple(unique.values()))
+    return ContractAudit(
+        problems=tuple(unique.values()),
+        code_issues=tuple(str(item) for item in code_issues if str(item).strip()),
+    )
+
+
+def validate_contract(
+    contract: ArchitectContract,
+    *,
+    mode: str = "fullstack",
+) -> ContractAudit:
+    """Architect 确认前的契约自检工具（与运行时审计同一实现）。
+
+    只读、无副作用；Architect 在 ``validate_contract`` 节点调用，确保
+    DDL 表、relations、apiRoutes 与组件交互彼此自洽，避免把矛盾带进
+    生成阶段。
+    """
+    return audit_contract(contract, mode=mode)
 
 
 __all__ = [
     "ContractAudit",
     "ContractProblem",
+    "DEFECT_CODE",
+    "DEFECT_CONTRACT",
     "FAILURE_KIND_CODE",
     "FAILURE_KIND_CONTRACT",
     "audit_contract",
+    "validate_contract",
 ]

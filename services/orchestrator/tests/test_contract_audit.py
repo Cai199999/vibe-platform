@@ -5,10 +5,11 @@ from __future__ import annotations
 import unittest
 
 from ai_core.domain.architect import (
+    ArchitectApiRoute,
     ArchitectComponentInteraction,
     ArchitectTableRelation,
 )
-from ai_core.fullstack.contract_audit import audit_contract
+from ai_core.fullstack.contract_audit import audit_contract, validate_contract
 from tests.test_fullstack import DDL, _contract, _resume_contract
 
 
@@ -84,6 +85,113 @@ class ContractAuditTest(unittest.TestCase):
     def test_ddl_without_create_table_is_contract_problem(self) -> None:
         audit = audit_contract(_contract(databaseDdl="-- 空 DDL"))
         self.assertTrue(any(item.code == "missing_ddl" for item in audit.problems))
+
+    def test_nested_route_without_child_table(self) -> None:
+        """契约要求 users/:id/resumes，但 DDL 没有 resumes 表。"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="GET", path="/api/v1/users", description="用户列表"
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/users/:id/resumes",
+                    description="用户简历",
+                ),
+            ],
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="UserList",
+                    event="load",
+                    api_route="GET /api/v1/users",
+                    logic="加载用户列表",
+                )
+            ],
+            databaseDdl=(
+                "CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR(64));"
+            ),
+        )
+        audit = audit_contract(contract)
+        self.assertFalse(audit.ok)
+        self.assertTrue(
+            any(item.code == "nested_table_missing" for item in audit.problems),
+            audit.summary(),
+        )
+        self.assertEqual(audit.defect_kind, "CONTRACT_DEFECT")
+
+    def test_nested_route_without_relation(self) -> None:
+        """两张表都存在，但 DDL 没有外键列、relations 也没声明 JOIN。"""
+        ddl = """CREATE TABLE users (
+  id BIGINT PRIMARY KEY,
+  name VARCHAR(64)
+);
+CREATE TABLE resumes (
+  id BIGINT PRIMARY KEY,
+  file_name VARCHAR(255)
+);"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="GET", path="/api/v1/users", description="用户列表"
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/users/:id/resumes",
+                    description="用户简历",
+                ),
+            ],
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="UserList",
+                    event="load",
+                    api_route="GET /api/v1/users",
+                    logic="加载用户列表",
+                )
+            ],
+            databaseDdl=ddl,
+            relations=[],
+        )
+        audit = audit_contract(contract)
+        self.assertFalse(audit.ok)
+        self.assertTrue(
+            any(item.code == "missing_relation" for item in audit.problems),
+            audit.summary(),
+        )
+
+    def test_action_endpoint_is_not_nested_resource(self) -> None:
+        """``users/:id/status`` 是动作端点，不能误判为缺失子表。"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="GET", path="/api/v1/users", description="用户列表"
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/users/:id/status",
+                    description="查询用户状态",
+                ),
+            ],
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="UserList",
+                    event="load",
+                    api_route="GET /api/v1/users",
+                    logic="加载用户列表",
+                )
+            ],
+            databaseDdl=(
+                "CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR(64));"
+            ),
+        )
+        audit = audit_contract(contract)
+        self.assertTrue(audit.ok, audit.summary())
+
+    def test_architect_validate_contract_matches_runtime_audit(self) -> None:
+        audit = validate_contract(_contract())
+        self.assertTrue(audit.ok, audit.summary())
+        broken = validate_contract(_contract(databaseDdl=""))
+        self.assertFalse(broken.ok)
+        self.assertEqual(broken.defect_kind, "CONTRACT_DEFECT")
 
     def test_reference_ddl_fixture_is_self_consistent(self) -> None:
         self.assertIn("CREATE TABLE todos", DDL)

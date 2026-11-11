@@ -51,6 +51,7 @@ from ai_core.domain.architect import (
 from ai_core.architect.source import collect_source
 from ai_core.config import Settings, get_settings
 from ai_core.domain.scope import scoped_checkpoint_key
+from ai_core.observability.fullstack_metrics import FULLSTACK_METRICS
 from ai_core.ports.rag import RAGProviderError
 from ai_core.ports.sandbox import SandboxProvider
 
@@ -519,6 +520,12 @@ class ArchitectService:
                 )
             if decision == "REVISE" and not (request.comment or "").strip():
                 raise ArchitectStateConflictError("REVISE 必须提供 comment")
+            # Contract_Revision_Rate = 契约回改次数 / 契约确认次数。
+            # 幂等重复 CONFIRM 已在上面提前返回，不会重复计数。
+            if decision == "CONFIRM":
+                FULLSTACK_METRICS.record_contract_confirmation()
+            elif decision == "REVISE":
+                FULLSTACK_METRICS.record_contract_revision()
             if confirming_revision:
                 revision_count = int(active.state.get("contract_revision_count") or 0)
                 if revision_count >= CONTRACT_REVISION_SOFT_LIMIT:

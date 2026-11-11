@@ -270,9 +270,15 @@ class ArchitectTableRelation(CamelModel):
          "foreignKey": "user_id", "type": "one_to_many"}
     """
 
-    parent_table: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
-    child_table: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
-    foreign_key: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    parent_table: str = Field(
+        min_length=1, max_length=64, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"
+    )
+    child_table: str = Field(
+        min_length=1, max_length=64, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"
+    )
+    foreign_key: str = Field(
+        min_length=1, max_length=64, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"
+    )
     type: Literal["one_to_many", "many_to_one", "one_to_one"] = "one_to_many"
     # 父表被引用的键，默认主键 id。
     parent_key: str = Field(default="id", max_length=64)

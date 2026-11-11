@@ -26,8 +26,10 @@ React + Vite → Java 21 BFF → Python 3.12 FastAPI/LangGraph → Docker 沙盒
 - **Unknown column 三层门禁**：多表 DDL 按集合路由选核心业务表，禁止 `users`/`name` 兜底；DBA 产出 `schema.core.json`，Backend 强制绑定并在生成期断言；ConsistencyVerifier 新增 ORM↔迁移字段比对，错位自动回退 DBACoder（≤2 次）；验收脚本增加静态 ORM/DDL 对比与运行时“核心表 GET/POST 不因缺字段 500”断言。
 - **ORM 门禁 AST 化**：`schema_ast_check.mjs` 用 Babel 解析 `server/db.js` / `server/index.js`，静态求值常量 / 拼接 / `JSON.parse`，并阻断 `COLUMN_DEFS.push` 等运行期变更；`schema_ast.py` 封装为 `SchemaAstUnavailable` 硬失败（禁止回退正则，环境问题不触发模型自愈）；生成期、ConsistencyVerifier、验收脚本共用同一引擎；镜像补 `nodejs`。
 - **主从表契约**：`relations` 显式声明或从 `<parent>_id` 推导；DBA 生成 `RELATED_MODELS`/`RELATIONS`，Backend 生成 `hasMany`/`belongsTo`、`include + separate` 预加载与嵌套子资源路由；AST 门禁校验关系两端与外键，关联系统表敏感列剥离。
-- **契约缺陷 vs 代码缺陷**：`contract_audit.py` 确定性审计（缺 DDL/核心表、集合无表、非法关系、未声明交互路由）；生成前与重试耗尽时抛出 `FULLSTACK_CONTRACT_CONTRADICTION`，载荷带 `failureKind=CONTRACT` / `needsClarification` / `clarification`；前端弹出重新澄清对话框并回传 `REVISE`，禁用重试按钮。
-- 验证：全量 Python 单测 417 项通过（排除历史 `test_eval_suite`）；前端 `npm run build` 通过。
+- **契约缺陷 vs 代码缺陷**：`contract_audit.py` 确定性审计（缺 DDL/核心表、集合无表、非法关系、嵌套路由缺表/缺 JOIN、未声明交互路由）；统一错误码 `CONTRACT_REVISION_REQUIRED`，载荷带 `failureKind=CONTRACT` / `defectKind=CONTRACT_DEFECT` / `needsClarification` / `clarification`；前端回传 `REVISE`。
+- **责任隔离 + Applier 门禁**：BackendCoder 只消费 `schema.core.json` 且不再自检；ConsistencyVerifier 只做 AST 诊断；所有 `server/` 落盘经 `Applier` 无条件 Babel 门禁，拦截后由 `audit_contract` 判 `CODE_DEFECT`（重试 ≤2）或 `CONTRACT_DEFECT`（立即退回契约）；Architect 确认前调用同一 `validate_contract` 自检。
+- **核心指标**：`Applier_Block_Rate` / `Contract_Misretry_Count` / `MultiTable_AST_Pass_Rate` / `Contract_Revision_Rate`，经 SSE 终态事件与 `GET /api/v1/internal/fullstack/metrics` 输出。
+- 验证：全量 Python 单测 428 项通过（排除历史 `test_eval_suite`）；新增 JOIN 错位自愈与缺表契约回改两条 E2E；Java BFF 全栈生成 / CRUD 联调通过。
 
 ## 真假边界
 

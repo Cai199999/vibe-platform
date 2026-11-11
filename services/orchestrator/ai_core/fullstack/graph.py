@@ -50,8 +50,16 @@ from ai_core.fullstack.consistency import (
     ConsistencyReport,
     verify_consistency,
 )
-from ai_core.fullstack.contract_audit import ContractAudit, audit_contract
+from ai_core.fullstack.applier import Applier, ApplierSafetyBlock
+from ai_core.fullstack.contract_audit import (
+    DEFECT_CODE,
+    DEFECT_CONTRACT,
+    ContractAudit,
+    audit_contract,
+)
+from ai_core.fullstack.diagnostics import DIAG_AST_UNAVAILABLE
 from ai_core.fullstack.schema_mcp import verify_schema_with_mcp
+from ai_core.observability.fullstack_metrics import FULLSTACK_METRICS
 from ai_core.ports.sandbox import SandboxProvider
 
 logger = logging.getLogger(__name__)
@@ -62,6 +70,10 @@ GRAPH_NODE_TOTAL = 7
 MAX_CONSISTENCY_REPAIRS = 2
 # ORM 模型与迁移 DDL 字段错位时，最多让 DBACoder 按 DDL 重写 2 次。
 MAX_ORM_REPAIRS = 2
+# JOIN 别名 / include 关系与契约不一致时，最多让 BackendCoder 重建 2 次。
+MAX_JOIN_REPAIRS = 2
+# Applier AST 门禁拦截后，最多让 BackendCoder 重新生成 2 次。
+MAX_APPLIER_REPAIRS = 2
 # 对话前置模式的初始前端骨架只执行三个节点。
 FRONTEND_GRAPH_NODE_TOTAL = 3
 FULLSTACK_NODE_ORDER = [
@@ -106,6 +118,7 @@ class FullstackGenerationError(Exception):
 
     code = "FULLSTACK_GENERATION_FAILED"
     failure_kind = "CODE"
+    defect_kind = DEFECT_CODE
     needs_clarification = False
     clarification: dict[str, Any] | None = None
 
@@ -117,6 +130,8 @@ class FullstackGenerationError(Exception):
 class FullstackBuildError(FullstackGenerationError):
     code = "FULLSTACK_BUILD_FAILED"
     failure_kind = "ENVIRONMENT"
+    # 构建 / 校验器环境问题不属于契约或代码归因。
+    defect_kind = None
 
     def __init__(self, message: str) -> None:
         super().__init__(message, node="BuildVerifier")
@@ -135,12 +150,15 @@ class FullstackConsistencyError(FullstackGenerationError):
 class FullstackContractContradictionError(FullstackGenerationError):
     """契约自相矛盾：停止重试，要求用户回到 Architect 修改契约。"""
 
-    code = "FULLSTACK_CONTRACT_CONTRADICTION"
+    code = "CONTRACT_REVISION_REQUIRED"
     failure_kind = "CONTRACT"
+    defect_kind = DEFECT_CONTRACT
     needs_clarification = True
 
-    def __init__(self, audit: ContractAudit) -> None:
-        super().__init__(audit.summary(), node="ConsistencyVerifier")
+    def __init__(
+        self, audit: ContractAudit, *, node: str = "ConsistencyVerifier"
+    ) -> None:
+        super().__init__(audit.summary(), node=node)
         self.audit = audit
         self.clarification = audit.payload()
 
@@ -167,9 +185,13 @@ class FullstackState(TypedDict, total=False):
     consistency_applied_routes: list[dict[str, str]]
     consistency_repair_count: int
     consistency_dba_repair_count: int
+    consistency_join_repair_count: int
     consistency_ok: bool
     needs_backend_repair: bool
     needs_dba_repair: bool
+    # Applier AST 门禁：拦截后先分类，再决定重生成 Backend 还是要求改契约。
+    applier_retry_count: int
+    needs_backend_retry: bool
 
 
 class FullstackGraphRunner:
@@ -235,7 +257,11 @@ class FullstackGraphRunner:
             builder.add_node("BackendCoder", self._backend_coder)
             builder.add_edge(START, "DBACoder")
             builder.add_edge("DBACoder", "BackendCoder")
-            builder.add_edge("BackendCoder", "BuildVerifier")
+            builder.add_conditional_edges(
+                "BackendCoder",
+                self._route_after_backend_coder,
+                {"retry": "BackendCoder", "frontend": "BuildVerifier"},
+            )
             builder.add_edge("BuildVerifier", "SandboxRestart")
             builder.add_edge("SandboxRestart", END)
             return builder.compile()
@@ -262,6 +288,9 @@ class FullstackGraphRunner:
             {
                 "frontend": "FrontendCoder",
                 "consistency": "ConsistencyVerifier",
+                # Applier 拦截了 JOIN/ORM 缺陷：只重跑 BackendCoder，
+                # 不重新生成 DDL，也不进入注定失败的构建。
+                "retry": "BackendCoder",
             },
         )
         builder.add_edge("FrontendCoder", "InfraCoder")
@@ -285,8 +314,30 @@ class FullstackGraphRunner:
 
     @staticmethod
     def _route_after_backend_coder(state: FullstackState) -> str:
-        """修复模式只回一致性检查；正常模式继续生成前端。"""
-        return "consistency" if state.get("needs_backend_repair") else "frontend"
+        """Applier 拦截优先重跑；一致性自愈回检查；正常继续前端。
+
+        后端子图没有 ConsistencyVerifier 节点（构建后直接重启），因此
+        只在 fullstack 模式下允许返回 ``consistency``。
+        """
+        if state.get("needs_backend_retry"):
+            return "retry"
+        options = state.get("options") or FullstackRunOptions()
+        if state.get("needs_backend_repair") and options.mode == "fullstack":
+            return "consistency"
+        return "frontend"
+
+    @staticmethod
+    def _has_retried(state: FullstackState) -> bool:
+        """本次图执行是否已经发生过任意一次自愈重试。"""
+        return any(
+            int(state.get(key) or 0) > 0
+            for key in (
+                "applier_retry_count",
+                "consistency_repair_count",
+                "consistency_dba_repair_count",
+                "consistency_join_repair_count",
+            )
+        )
 
     @staticmethod
     def _route_after_consistency_verifier(state: FullstackState) -> str:
@@ -340,24 +391,35 @@ class FullstackGraphRunner:
             for route in fix_routes:
                 if route not in applied_routes:
                     applied_routes.append(route)
-            # 显式读取 DBACoder 刚产出的权威表结构：优先机器可读的
-            # schema.core.json，缺失时退回真实迁移 SQL，最后才由契约推导。
-            # 这保证 BackendCoder 不会与 DBACoder 各自“猜”出不同表。
+            # BackendCoder 的唯一输入事实是 DBACoder 的 schema.core.json
+            # （tables + relations）。缺失说明上游节点没有产出契约结构，
+            # 此时禁止回退到“自己解析 DDL / 猜关系”，直接失败。
             dba_schema = self._read_optional(sandbox_id, "server/schema.core.json")
             if not dba_schema:
-                dba_schema = self._read_optional(
-                    sandbox_id, "server/migrations/001_init.sql"
+                raise FullstackGenerationError(
+                    "BackendCoder 缺少 DBACoder 的 server/schema.core.json，"
+                    "拒绝在无权威表结构的情况下生成后端",
+                    node="BackendCoder",
                 )
             bundle = generate_backend_bundle(
                 contract,
                 extra_routes=applied_routes,
                 dba_schema=dba_schema,
             )
-            files = self._write_bundle(state, bundle)
+            try:
+                files = self._write_bundle(state, bundle)
+            except ApplierSafetyBlock as exc:
+                return self._handle_applier_block(state, exc, started)
             collection = str(bundle.metadata.get("collectionPath") or "")
             summary = bundle.summary
             if fix_routes:
                 summary = f"一致性自愈：补齐 {len(fix_routes)} 条缺失路由；" + summary
+            if int(state.get("applier_retry_count") or 0):
+                summary = (
+                    f"Applier AST 门禁复核通过（第 "
+                    f"{int(state.get('applier_retry_count') or 0)} 次重生成）；"
+                    + summary
+                )
             self._emit_outputs("BackendCoder", bundle, state)
             self._node_completed("BackendCoder", state, summary, bundle.files, started)
             return {
@@ -367,12 +429,91 @@ class FullstackGraphRunner:
                 "consistency_fix_routes": [],
                 "consistency_applied_routes": applied_routes,
                 "needs_backend_repair": False,
+                "needs_backend_retry": False,
             }
+        except FullstackGenerationError:
+            raise
         except Exception as exc:
             self._node_failed("BackendCoder", state, exc)
             raise FullstackGenerationError(
                 f"BackendCoder 生成失败: {exc}", node="BackendCoder"
             ) from exc
+
+    def _handle_applier_block(
+        self,
+        state: FullstackState,
+        exc: ApplierSafetyBlock,
+        started: float,
+    ) -> dict[str, Any]:
+        """Applier 拦截后的归因与重试决策。
+
+        先让 ``audit_contract`` 判断“契约本身是否缺字段/缺 JOIN”：
+          - CONTRACT_DEFECT：立即要求重修契约，不浪费一次重试；
+          - CODE_DEFECT：BackendCoder 重新生成，最多 ``MAX_APPLIER_REPAIRS`` 次。
+        """
+        contract = state["contract"]
+        options = state.get("options") or FullstackRunOptions()
+        retry_count = int(state.get("applier_retry_count") or 0)
+        report = exc.report
+        audit = audit_contract(
+            contract,
+            mode=options.mode,
+            code_issues=report.messages(),
+        )
+        self._emit(
+            "fullstack.applier.blocked",
+            {
+                "runId": state["run_id"],
+                "node": "BackendCoder",
+                "attempt": retry_count,
+                "maxAttempts": MAX_APPLIER_REPAIRS,
+                "defectKind": audit.defect_kind,
+                "issues": [issue.to_dict() for issue in report.issues],
+                "metrics": FULLSTACK_METRICS.snapshot(),
+            },
+        )
+        if not audit.ok:
+            if retry_count > 0:
+                FULLSTACK_METRICS.record_contract_misretry()
+            self._node_failed("BackendCoder", state, RuntimeError(audit.summary()))
+            raise FullstackContractContradictionError(audit, node="BackendCoder")
+        # 校验器本身不可用（缺 node / Babel）属于环境缺陷，重跑生成器
+        # 不会恢复；直接按环境失败上报，禁止伪装成可自愈的代码缺陷。
+        if report.issues and all(
+            issue.code == DIAG_AST_UNAVAILABLE for issue in report.issues
+        ):
+            self._node_failed("BackendCoder", state, RuntimeError(report.summary()))
+            raise FullstackBuildError("ORM AST 校验器不可用，Applier 拒绝落盘")
+        if retry_count >= MAX_APPLIER_REPAIRS:
+            self._node_failed("BackendCoder", state, RuntimeError(report.summary()))
+            raise FullstackGenerationError(
+                "Applier AST 门禁连续拦截，代码自愈耗尽："
+                + "；".join(report.messages()),
+                node="BackendCoder",
+            )
+        next_count = retry_count + 1
+        logger.warning(
+            "Applier 拦截 %d 处代码缺陷，转 BackendCoder 重生成 [%d/%d] run_id=%s",
+            len(report.issues),
+            next_count,
+            MAX_APPLIER_REPAIRS,
+            state.get("run_id"),
+        )
+        self._node_completed(
+            "BackendCoder",
+            state,
+            (
+                f"Applier AST 门禁拦截 {len(report.issues)} 处代码缺陷，"
+                f"转 BackendCoder 重新生成（第 {next_count}/{MAX_APPLIER_REPAIRS} 次）"
+            ),
+            [],
+            started,
+        )
+        return {
+            "needs_backend_retry": True,
+            "applier_retry_count": next_count,
+            "consistency_ok": False,
+        }
 
     # --------------------------------------------------------
     # 节点：FrontendCoder
@@ -462,6 +603,10 @@ class FullstackGraphRunner:
         options = state.get("options") or FullstackRunOptions()
         contract_audit = audit_contract(contract, mode=options.mode)
         if not contract_audit.ok:
+            if self._has_retried(state):
+                # 已经跑过至少一次自愈仍暴露出契约问题：这是一次“本可
+                # 避免的误重试”，计入 Contract_Misretry_Count。
+                FULLSTACK_METRICS.record_contract_misretry()
             logger.warning(
                 "ConsistencyVerifier 契约自相矛盾，停止重试 run_id=%s problems=%s",
                 state.get("run_id"),
@@ -591,6 +736,51 @@ class FullstackGraphRunner:
                 "consistency_fix_routes": [],
             }
 
+        # JOIN 别名 / include 关系错误：契约有 relations，但 BackendCoder
+        # 把别名或外键写错。这类问题只需重跑 BackendCoder，不重写 DBACoder。
+        join_repair_count = int(state.get("consistency_join_repair_count") or 0)
+        if report.needs_join_repair and join_repair_count < MAX_JOIN_REPAIRS:
+            next_count = join_repair_count + 1
+            logger.warning(
+                "ConsistencyVerifier 发现 JOIN 关系错位，转 BackendCoder 重建 [%d/%d] run_id=%s",
+                next_count,
+                MAX_JOIN_REPAIRS,
+                state.get("run_id"),
+            )
+            self._emit(
+                "fullstack.consistency.repair",
+                {
+                    "runId": state["run_id"],
+                    "attempt": next_count,
+                    "maxAttempts": MAX_JOIN_REPAIRS,
+                    "node": "BackendCoder",
+                    "reason": "JOIN_SCHEMA_MISMATCH",
+                    "issues": [
+                        issue.to_dict()
+                        for issue in report.issues
+                        if issue.fix_action == "REPAIR_BACKEND_JOIN"
+                    ],
+                    "report": report.to_dict(),
+                },
+            )
+            self._node_completed(
+                "ConsistencyVerifier",
+                state,
+                (
+                    "JOIN 别名 / include 关系与契约不一致，转交 BackendCoder "
+                    f"重建（第 {next_count}/{MAX_JOIN_REPAIRS} 次）"
+                ),
+                [],
+                started,
+            )
+            return {
+                "consistency_ok": False,
+                "needs_backend_repair": True,
+                "needs_dba_repair": False,
+                "consistency_join_repair_count": next_count,
+                "consistency_fix_routes": [],
+            }
+
         repair_count = int(state.get("consistency_repair_count") or 0)
         missing_routes = list(report.missing_routes())
         if missing_routes and repair_count < MAX_CONSISTENCY_REPAIRS:
@@ -636,8 +826,14 @@ class FullstackGraphRunner:
         # 重试耗尽，或差异无法通过补齐路由解决（如 Payload 字段冲突）。
         # 终止前再做一次契约审计：若矛盾来自契约，必须明确告知用户
         # “改契约”而不是继续重跑代码生成。
-        final_audit = audit_contract(contract, mode=options.mode)
+        final_audit = audit_contract(
+            contract,
+            mode=options.mode,
+            code_issues=[issue.message for issue in report.issues],
+        )
         if not final_audit.ok:
+            if self._has_retried(state):
+                FULLSTACK_METRICS.record_contract_misretry()
             logger.warning(
                 "ConsistencyVerifier 重试耗尽且契约自相矛盾 run_id=%s problems=%s",
                 state.get("run_id"),
@@ -777,7 +973,15 @@ class FullstackGraphRunner:
     def _write_bundle(
         self, state: FullstackState, bundle: GeneratedBundle
     ) -> list[str]:
-        changed = self._sandbox.apply_patch(state["sandbox_id"], files=bundle.files)
+        # 所有产物统一经 Applier 落盘：AST 门禁是唯一写入口，Coder
+        # 无法绕过，也不存在“先生成后检查”的半写盘状态。
+        options = state.get("options") or FullstackRunOptions()
+        applier = Applier(self._sandbox, state["contract"])
+        changed = applier.apply(
+            state["sandbox_id"],
+            bundle.files,
+            mode=options.mode,
+        )
         merged = set(state.get("files") or [])
         merged.update(changed)
         files = sorted(merged)

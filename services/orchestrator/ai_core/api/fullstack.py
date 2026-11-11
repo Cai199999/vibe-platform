@@ -16,6 +16,7 @@ from ai_core.fullstack.service import (
     FullstackService,
     FullstackServiceError,
 )
+from ai_core.observability.fullstack_metrics import snapshot_fullstack_metrics
 from ai_core.ports.sandbox import SandboxError
 
 router = APIRouter(prefix="/api/v1/internal/fullstack", tags=["fullstack"])
@@ -74,6 +75,15 @@ def get_fullstack_run(run_id: str) -> FullstackRunSnapshot:
         return service.snapshot(run_id)
     except Exception as exc:  # noqa: BLE001
         _raise_http(exc)
+
+
+@router.get("/metrics")
+def get_fullstack_metrics() -> dict[str, object]:
+    """四个核心指标的进程内聚合快照。
+
+    只暴露计数与比率，不包含源码 / run_id，供监控系统周期抓取。
+    """
+    return snapshot_fullstack_metrics()
 
 
 # ------------------------------------------------------------

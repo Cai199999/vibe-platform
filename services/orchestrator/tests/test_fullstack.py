@@ -17,6 +17,7 @@ import unittest
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from ai_core.agent.events import TERMINAL_EVENT_TYPES, RunEventBuffer
 from ai_core.config import Settings
@@ -28,6 +29,7 @@ from ai_core.domain.architect import (
 )
 from ai_core.domain.fullstack import FullstackRunOptions, FullstackRunRequest
 from ai_core.fullstack.coders import (
+    GeneratedBundle,
     check_orm_schema,
     collection_path,
     contract_database_engine,
@@ -51,6 +53,7 @@ from ai_core.fullstack.graph import (
 from ai_core.fullstack.schema_mcp import verify_schema_with_mcp
 from ai_core.fullstack.service import FullstackService
 from ai_core.mcp.client import McpServerConfig, McpStdioClient
+from ai_core.observability.fullstack_metrics import FULLSTACK_METRICS
 from ai_core.ports.sandbox import SandboxHandle, SandboxProvider, VerifyResult
 
 DDL = """CREATE TABLE todos (
@@ -127,6 +130,56 @@ def _resume_contract(**overrides) -> ArchitectContract:
         ],
         databaseDdl=MULTI_TABLE_DDL,
         **overrides,
+    )
+
+
+def _master_detail_contract() -> ArchitectContract:
+    """核心表 users 为父表，resumes 为子表；用于 JOIN / Applier 测试。"""
+    ddl = """CREATE TABLE users (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE resumes (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  user_id BIGINT NOT NULL,
+  file_name VARCHAR(255),
+  content MEDIUMTEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);"""
+    return _contract(
+        apiRoutes=[
+            ArchitectApiRoute(
+                method="GET", path="/api/v1/users", description="用户列表"
+            ),
+            ArchitectApiRoute(
+                method="POST", path="/api/v1/users", description="创建用户"
+            ),
+            ArchitectApiRoute(
+                method="GET", path="/api/v1/users/:id", description="用户详情"
+            ),
+            ArchitectApiRoute(
+                method="GET",
+                path="/api/v1/users/:id/resumes",
+                description="用户简历",
+            ),
+        ],
+        componentInteractions=[
+            ArchitectComponentInteraction(
+                component="UserList",
+                event="load",
+                api_route="GET /api/v1/users",
+                logic="加载用户列表",
+            )
+        ],
+        databaseDdl=ddl,
+        relations=[
+            ArchitectTableRelation(
+                parentTable="users",
+                childTable="resumes",
+                foreignKey="user_id",
+            )
+        ],
     )
 
 
@@ -1523,7 +1576,7 @@ class GraphTests(unittest.TestCase):
                     "files": [],
                 }
             )
-        self.assertEqual(ctx.exception.code, "FULLSTACK_CONTRACT_CONTRADICTION")
+        self.assertEqual(ctx.exception.code, "CONTRACT_REVISION_REQUIRED")
         self.assertEqual(ctx.exception.failure_kind, "CONTRACT")
         self.assertTrue(ctx.exception.needs_clarification)
         self.assertIn("resumes/summary", ctx.exception.clarification["prompt"])
@@ -1736,6 +1789,89 @@ class GraphTests(unittest.TestCase):
             if event.payload["truncated"]:
                 self.assertEqual(len(event.payload["content"]), 500)
 
+    def test_applier_blocks_bad_join_then_backend_self_heals(self) -> None:
+        """E2E：JOIN 别名写错 -> Applier 拦截 -> 代码缺陷 -> 重试成功。
+
+        第一次 BackendCoder 产物把嵌套路由别名写成 ``resumez``；Applier
+        必须在落盘前拦截。``audit_contract`` 确认契约本身有 users→resumes
+        关系，因此归因为 ``CODE_DEFECT``，只重跑 BackendCoder；第二次产物
+        正确后正常构建与重启。
+        """
+        FULLSTACK_METRICS.reset()
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        contract = _master_detail_contract()
+        buffer = RunEventBuffer("fsk_applier_join_repair")
+        runner = FullstackGraphRunner(sandbox, event_sink=buffer)
+
+        from ai_core.fullstack import graph as graph_module
+
+        real_generator = generate_backend_bundle
+        calls = {"count": 0}
+
+        def generate_with_bad_join(*args, **kwargs):
+            bundle = real_generator(*args, **kwargs)
+            calls["count"] += 1
+            if calls["count"] != 1:
+                return bundle
+            files = dict(bundle.files)
+            code = files["server/index.js"]
+            self.assertIn("/:id/resumes", code)
+            files["server/index.js"] = code.replace("/:id/resumes", "/:id/resumez")
+            return GeneratedBundle(
+                files=files,
+                summary=bundle.summary,
+                metadata=bundle.metadata,
+            )
+
+        with patch.object(
+            graph_module,
+            "generate_backend_bundle",
+            side_effect=generate_with_bad_join,
+        ):
+            result = runner.run(
+                {
+                    "run_id": "fsk_applier_join_repair",
+                    "project_id": "proj_fullstack",
+                    "sandbox_id": sandbox.handle.sandbox_id,
+                    "preview_url": sandbox.handle.preview_url,
+                    "contract": contract,
+                    "files": [],
+                }
+            )
+
+        # 第一次被拦截并重试，第二次落盘成功。
+        self.assertEqual(calls["count"], 2)
+        self.assertNotIn("resumez", sandbox.files["server/index.js"])
+        self.assertIn("/api/v1/users/:id/resumes", sandbox.files["server/index.js"])
+        self.assertIn("server/index.js", result["files"])
+        self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/api/health")])
+
+        events = buffer.snapshot()
+        blocked = [
+            event for event in events if event.type == "fullstack.applier.blocked"
+        ]
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0].payload["defectKind"], "CODE_DEFECT")
+        self.assertTrue(blocked[0].payload["issues"])
+        self.assertFalse(
+            any(
+                event.type == "fullstack.node.failed"
+                and event.payload["node"] == "ConsistencyVerifier"
+                for event in events
+            )
+        )
+
+        metrics = FULLSTACK_METRICS.snapshot()
+        applier_rate = metrics["Applier_Block_Rate"]
+        self.assertEqual(applier_rate["numerator"], 1)
+        self.assertEqual(applier_rate["denominator"], 3)
+        self.assertAlmostEqual(applier_rate["rate"], 1 / 3, places=5)
+        self.assertEqual(metrics["Contract_Misretry_Count"], 0)
+        pass_rate = metrics["MultiTable_AST_Pass_Rate"]
+        self.assertGreaterEqual(pass_rate["numerator"], 2)
+        self.assertGreaterEqual(pass_rate["denominator"], 3)
+
 
 class ServiceTests(unittest.TestCase):
     """契约校验、请求解析与后台 Run 的终态事件。"""
@@ -1826,8 +1962,9 @@ class ServiceTests(unittest.TestCase):
 
         snapshot = service.snapshot(run_id)
         self.assertEqual(snapshot.status, "FAILED")
-        self.assertEqual(snapshot.error_code, "FULLSTACK_CONTRACT_CONTRADICTION")
+        self.assertEqual(snapshot.error_code, "CONTRACT_REVISION_REQUIRED")
         self.assertEqual(snapshot.failure_kind, "CONTRACT")
+        self.assertEqual(snapshot.defect_kind, "CONTRACT_DEFECT")
         self.assertTrue(snapshot.needs_clarification)
         self.assertIn("/api/v1/ghost", snapshot.clarification["prompt"])
         failed = next(
@@ -1837,6 +1974,88 @@ class ServiceTests(unittest.TestCase):
         )
         self.assertTrue(failed.payload["needsClarification"])
         self.assertEqual(failed.payload["failureKind"], "CONTRACT")
+        self.assertEqual(failed.payload["defectKind"], "CONTRACT_DEFECT")
+        self.assertIn("metrics", failed.payload)
+        self.assertEqual(sandbox.verified, [])
+
+    def test_nested_route_without_child_table_requires_contract_revision(
+        self,
+    ) -> None:
+        """契约要查询 users/:id/resumes，但 DDL 没建 resumes 表。
+
+        这不是代码拼写问题：任何重试都无法凭空建出子表。服务层必须在
+        生成前判 ``CONTRACT_DEFECT``，直接要求前端重修契约，且不触发
+        任何沙盒构建。
+        """
+        sandbox = _MemorySandbox()
+        service = FullstackService(sandbox=sandbox)
+        run_id = f"fsk_{uuid.uuid4().hex[:12]}"
+        only_users_ddl = """CREATE TABLE users (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL
+);"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="GET", path="/api/v1/users", description="用户列表"
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/users/:id/resumes",
+                    description="用户简历（子表未建）",
+                ),
+            ],
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="UserList",
+                    event="load",
+                    api_route="GET /api/v1/users",
+                    logic="加载用户列表",
+                )
+            ],
+            databaseDdl=only_users_ddl,
+        )
+        request = FullstackRunRequest.model_validate(
+            {
+                "runId": run_id,
+                "projectId": "proj_fullstack",
+                "contractId": contract.contract_id,
+                "contract": contract.model_dump(mode="json", by_alias=True),
+                "source": {"files": _base_files()},
+            }
+        )
+        active = service.start_stream(request)
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            snapshot = service.snapshot(run_id)
+            if snapshot.status in {"SUCCEEDED", "FAILED"}:
+                break
+            time.sleep(0.02)
+
+        snapshot = service.snapshot(run_id)
+        self.assertEqual(snapshot.status, "FAILED")
+        self.assertEqual(snapshot.error_code, "CONTRACT_REVISION_REQUIRED")
+        self.assertEqual(snapshot.defect_kind, "CONTRACT_DEFECT")
+        self.assertTrue(snapshot.needs_clarification)
+        self.assertTrue(
+            any(
+                problem["code"] == "nested_table_missing"
+                for problem in snapshot.clarification["problems"]
+            )
+        )
+        failed = next(
+            event
+            for event in active.buffer.snapshot()
+            if event.type == "fullstack.failed"
+        )
+        self.assertEqual(failed.payload["defectKind"], "CONTRACT_DEFECT")
+        self.assertFalse(
+            any(
+                event.type == "fullstack.node.started"
+                for event in active.buffer.snapshot()
+            )
+        )
         self.assertEqual(sandbox.verified, [])
 
     def test_frontend_bootstrap_accepts_empty_source_and_returns_entry(self) -> None:

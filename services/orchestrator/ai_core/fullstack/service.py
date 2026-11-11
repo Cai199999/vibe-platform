@@ -45,6 +45,7 @@ from ai_core.fullstack.graph import (
     FullstackGraphRunner,
     FullstackState,
 )
+from ai_core.observability.fullstack_metrics import FULLSTACK_METRICS
 from ai_core.ports.sandbox import SandboxError, SandboxProvider
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,8 @@ class ActiveFullstackRun:
     error_code: str | None = None
     # 失败归因：CODE（代码缺陷）/ CONTRACT（契约矛盾）/ ENVIRONMENT。
     failure_kind: str | None = None
+    # 缺陷归因：CODE_DEFECT / CONTRACT_DEFECT（见 contract_audit）。
+    defect_kind: str | None = None
     needs_clarification: bool = False
     clarification: dict[str, Any] | None = None
     # 前端骨架模式下生成的完整 src/App.jsx，用于前端把真实源码写回项目。
@@ -239,9 +242,10 @@ class FullstackService:
             self._complete_failure(
                 active,
                 audit.summary(),
-                "FULLSTACK_CONTRACT_CONTRADICTION",
+                "CONTRACT_REVISION_REQUIRED",
                 node="ConsistencyVerifier",
                 failure_kind="CONTRACT",
+                defect_kind=audit.defect_kind,
                 needs_clarification=True,
                 clarification=audit.payload(),
             )
@@ -294,6 +298,8 @@ class FullstackService:
                         else ""
                     ),
                     "infraFiles": list(outcome.get("infra_files") or []),
+                    # 四个核心指标的当前聚合快照，便于前端 / 监控直接消费。
+                    "metrics": FULLSTACK_METRICS.snapshot(),
                     "elapsedMs": int((time.monotonic() - started) * 1000),
                 },
                 dedupe_key=f"fullstack.completed:{active.run_id}",
@@ -305,6 +311,7 @@ class FullstackService:
                 exc.code,
                 node=exc.node,
                 failure_kind=getattr(exc, "failure_kind", "CODE"),
+                defect_kind=getattr(exc, "defect_kind", "CODE_DEFECT"),
                 needs_clarification=bool(getattr(exc, "needs_clarification", False)),
                 clarification=getattr(exc, "clarification", None),
             )
@@ -328,6 +335,7 @@ class FullstackService:
         *,
         node: str | None = None,
         failure_kind: str = "CODE",
+        defect_kind: str | None = None,
         needs_clarification: bool = False,
         clarification: dict[str, Any] | None = None,
     ) -> None:
@@ -336,6 +344,7 @@ class FullstackService:
             active.error = error
             active.error_code = code
             active.failure_kind = failure_kind
+            active.defect_kind = defect_kind
             active.needs_clarification = needs_clarification
             active.clarification = clarification
             active.touch()
@@ -352,8 +361,10 @@ class FullstackService:
                 "errorCode": code,
                 # 前端据此决定是“重试生成”还是“回到契约澄清”。
                 "failureKind": failure_kind,
+                "defectKind": defect_kind,
                 "needsClarification": needs_clarification,
                 "clarification": clarification or {},
+                "metrics": FULLSTACK_METRICS.snapshot(),
             },
             dedupe_key=f"fullstack.failed:{active.run_id}:{code}",
         )
@@ -458,6 +469,7 @@ class FullstackService:
                 error=active.error,
                 error_code=active.error_code,
                 failure_kind=active.failure_kind,
+                defect_kind=active.defect_kind,
                 needs_clarification=active.needs_clarification,
                 clarification=active.clarification or {},
                 last_seq=active.buffer.last_seq,

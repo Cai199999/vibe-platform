@@ -264,9 +264,7 @@ def normalize_table_relations(
             continue
         seen.add(key)
         accepted.append(
-            relation.model_copy(
-                update={"parent_table": parent, "child_table": child}
-            )
+            relation.model_copy(update={"parent_table": parent, "child_table": child})
         )
 
     if not accepted and derive_when_empty and tables:

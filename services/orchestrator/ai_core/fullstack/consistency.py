@@ -32,13 +32,18 @@ from typing import Iterable, Mapping
 
 from ai_core.domain.architect import ArchitectContract
 from ai_core.fullstack.coders import (
-    check_orm_schema,
     collection_path,
     core_table_for_contract,
     item_path,
     parse_ddl_tables,
 )
-from ai_core.fullstack.schema_ast import SchemaAstUnavailable
+from ai_core.fullstack.diagnostics import (
+    DIAG_AST_UNAVAILABLE,
+    DIAG_JOIN_ALIAS,
+    DIAG_ORM_SCHEMA,
+    OrmDiagnostic,
+    check_orm_syntax,
+)
 
 # 后端 Express 模板固定注册的通用路由：健康检查 + 通用数据别名。
 HEALTH_PATH = "/api/health"
@@ -158,13 +163,22 @@ class ConsistencyReport:
 
     @property
     def repairable(self) -> bool:
-        """是否存在可自动修复的差异（缺失路由或 ORM/DDL 字段错位）。"""
-        return bool(self.missing_routes()) or self.needs_orm_repair
+        """是否存在可自动修复的差异（路由 / ORM / JOIN 别名）。"""
+        return (
+            bool(self.missing_routes())
+            or self.needs_orm_repair
+            or self.needs_join_repair
+        )
 
     @property
     def needs_orm_repair(self) -> bool:
         """是否需要 DBACoder 按 DDL 重新生成 ORM 与迁移。"""
         return any(issue.fix_action == "REGENERATE_ORM" for issue in self.issues)
+
+    @property
+    def needs_join_repair(self) -> bool:
+        """是否需要 BackendCoder 按 relations 重建 JOIN / 嵌套路由。"""
+        return any(issue.fix_action == "REPAIR_BACKEND_JOIN" for issue in self.issues)
 
     def summary(self) -> str:
         if self.ok:
@@ -220,6 +234,7 @@ class ConsistencyReport:
             "missingRoutes": list(self.missing_routes()),
             "repairable": self.repairable,
             "needsOrmRepair": self.needs_orm_repair,
+            "needsJoinRepair": self.needs_join_repair,
             "issues": [issue.to_dict() for issue in self.issues],
             "schema": self.schema,
         }
@@ -574,22 +589,20 @@ def _orm_schema_issues(
     files: Mapping[str, str],
     contract: ArchitectContract,
 ) -> tuple[list[ConsistencyIssue], list[str]]:
-    """ORM 模型（server/db.js）与生产迁移 DDL 的字段一致性校验。
+    """只读诊断 ORM / Express 与 DDL 的一致性。
 
-    这是 ``Unknown column 'name'`` 的构建前门禁：
+    ConsistencyVerifier 不生成、不修改代码，只把 ``check_orm_syntax``
+    的结构化结果翻译成一致性报告：
 
-      - 解析 ``server/db.js`` 的 ``const TABLE`` 与 ``COLUMN_DEFS``；
-      - 解析 ``server/migrations/001_init.sql`` 中核心业务表的真实字段；
-      - 代码引用了 DDL 不存在的字段（如多表 DDL 里把 users 当业务表）
-        立即产出 ``REGENERATE_ORM`` 阻断项，驱动 DBACoder 重写。
-
-    快照里没有 ``server/db.js`` 时返回空列表，保证只做路由校验的
-    单元测试与局部调用保持兼容；完整全栈图一定会带上该文件。
+      - JOIN 别名/外键写错：``REPAIR_BACKEND_JOIN``，交给 BackendCoder；
+      - ORM 表/字段漂移：``REGENERATE_ORM``，交给 DBACoder；
+      - AST 校验器不可用：``FIX_ENVIRONMENT``，禁止正则降级。
     """
-    db_js = files.get("server/db.js")
-    if not isinstance(db_js, str) or not db_js.strip():
+    report = check_orm_syntax(files, contract)
+    if not report.applicable:
         return [], []
     core = core_table_for_contract(contract)
+
     migration = files.get("server/migrations/001_init.sql")
     migration_text = (
         migration if isinstance(migration, str) and migration.strip() else ""
@@ -597,68 +610,63 @@ def _orm_schema_issues(
     migration_tables = {
         table.name.lower(): table for table in parse_ddl_tables(migration_text)
     }
-    migration_table = migration_tables.get(core.name.lower())
-    expected = (
-        list(migration_table.column_names)
-        if migration_table is not None
-        else list(core.column_names)
-    )
-    # 主从表要求逐表对比：迁移存在时以迁移为准，否则用契约 DDL。
-    # 只校验核心表会放过关联模型的字段漂移。
-    ddl_source = migration_text or (contract.database_ddl or "")
-    expected_tables = {
-        table.name: table.column_names for table in parse_ddl_tables(ddl_source)
-    }
-    if core.name.lower() not in {name.lower() for name in expected_tables}:
-        expected_tables[core.name] = tuple(expected)
-    try:
-        messages = check_orm_schema(
-            files,
-            table=core.name,
-            expected_columns=expected,
-            expected_tables=expected_tables,
-        )
-    except SchemaAstUnavailable as exc:
-        # 校验器缺失属于环境问题，不能伪装成“代码可自愈”去重跑 DBACoder。
-        # 直接阻断，并给出可执行的修复方向。
-        return [
-            ConsistencyIssue(
-                kind="ast_unavailable",
-                component="ConsistencyVerifier",
-                method="",
-                path="schema_ast",
-                message=f"ORM/DDL AST 校验器不可用：{exc}",
-                suggestion=(
-                    "检查 Python AI 镜像是否安装 nodejs，且 "
-                    "/app/sandbox_template/node_modules/@babel/parser 可读；"
-                    "禁止回退到正则校验后继续构建"
-                ),
-                fix_action="FIX_ENVIRONMENT",
-            )
-        ], ["schema_ast"]
-    if migration_text and migration_table is None:
+    messages = list(report.issues)
+    if migration_text and core.name.lower() not in migration_tables:
         messages.insert(
             0,
-            f"迁移 001_init.sql 未包含核心业务表 {core.name}，" "部署后 CRUD 必然失败",
-        )
-    issues = [
-        ConsistencyIssue(
-            kind="orm_schema",
-            component="DBACoder",
-            method="",
-            path="server/db.js",
-            message=message,
-            suggestion=(
-                "由 DBACoder 按 databaseDdl 的核心业务表重新生成 "
-                "server/db.js 与 server/migrations/001_init.sql，"
-                "再由 BackendCoder 重新绑定同一张表；"
-                "禁止使用 users / name 作为默认占位符"
+            OrmDiagnostic(
+                code=DIAG_ORM_SCHEMA,
+                message=(
+                    f"迁移 001_init.sql 未包含核心业务表 {core.name}，"
+                    "部署后 CRUD 必然失败"
+                ),
+                source="server/migrations/001_init.sql",
             ),
-            fix_action="REGENERATE_ORM",
         )
-        for message in messages
-    ]
+
+    issues: list[ConsistencyIssue] = []
+    for diagnostic in messages:
+        if diagnostic.code == DIAG_AST_UNAVAILABLE:
+            issues.append(
+                ConsistencyIssue(
+                    kind="ast_unavailable",
+                    component="ConsistencyVerifier",
+                    method="",
+                    path=diagnostic.source,
+                    message=diagnostic.message,
+                    suggestion=(
+                        "检查 Python AI 镜像是否安装 nodejs，且 "
+                        "/app/sandbox_template/node_modules/@babel/parser 可读；"
+                        "禁止回退到正则校验后继续构建"
+                    ),
+                    fix_action="FIX_ENVIRONMENT",
+                )
+            )
+            continue
+        is_join = diagnostic.code == DIAG_JOIN_ALIAS
+        issues.append(
+            ConsistencyIssue(
+                kind="join_schema" if is_join else "orm_schema",
+                component="BackendCoder" if is_join else "DBACoder",
+                method="",
+                path=diagnostic.source,
+                message=diagnostic.message,
+                suggestion=(
+                    "由 BackendCoder 按 schema.core.json 的 relations 重新生成 "
+                    "include / 嵌套子资源路由，JOIN 别名必须与 RELATIONS 一致"
+                    if is_join
+                    else (
+                        "由 DBACoder 按 databaseDdl 重新生成 server/db.js 与 "
+                        "server/migrations/001_init.sql，再由 BackendCoder 重新绑定；"
+                        "禁止使用 users / name 作为默认占位符"
+                    )
+                ),
+                fix_action="REPAIR_BACKEND_JOIN" if is_join else "REGENERATE_ORM",
+            )
+        )
     checked = ["server/db.js"]
+    if "server/index.js" in files:
+        checked.append("server/index.js")
     if migration_text:
         checked.append("server/migrations/001_init.sql")
     return issues, checked

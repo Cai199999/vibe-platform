@@ -52,6 +52,9 @@ class JsRelation:
     child_table: str
     foreign_key: str
     type: str = "one_to_many"
+    parent_key: str = "id"
+    child_alias: str = ""
+    parent_alias: str = ""
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,10 @@ class JsFileSchema:
     define_tables: tuple[str, ...] = ()
     related_models: tuple[JsRelatedModel, ...] = ()
     relations: tuple[JsRelation, ...] = ()
+    # Express 会话层实际引用的 JOIN 别名：嵌套路由 / listRelatedRecords /
+    # include.as。Applier 据此拦截“别名字段写错”的落盘。
+    join_aliases: tuple[str, ...] = ()
+    include_aliases: tuple[str, ...] = ()
     errors: tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -258,6 +265,9 @@ def analyze_js_files(
                     child_table=child,
                     foreign_key=foreign_key,
                     type=str(relation.get("type") or "one_to_many"),
+                    parent_key=str(relation.get("parentKey") or "id"),
+                    child_alias=str(relation.get("childAlias") or "").strip(),
+                    parent_alias=str(relation.get("parentAlias") or "").strip(),
                 )
             )
         result[str(path)] = JsFileSchema(
@@ -284,6 +294,16 @@ def analyze_js_files(
             ),
             related_models=tuple(related_models),
             relations=tuple(relations),
+            join_aliases=tuple(
+                str(name).strip()
+                for name in (item.get("joinAliases") or [])
+                if str(name).strip()
+            ),
+            include_aliases=tuple(
+                str(name).strip()
+                for name in (item.get("includeAliases") or [])
+                if str(name).strip()
+            ),
             errors=tuple(messages),
         )
     return result

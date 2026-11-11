@@ -129,6 +129,8 @@ class FullstackRunSnapshot(CamelModel):
     error_code: str | None = None
     # 失败归因：CODE / CONTRACT / ENVIRONMENT；契约矛盾时前端弹窗重新澄清。
     failure_kind: str | None = None
+    # 缺陷归因：CODE_DEFECT / CONTRACT_DEFECT，前端用于展示不同处置动作。
+    defect_kind: str | None = None
     needs_clarification: bool = False
     clarification: dict[str, Any] = Field(default_factory=dict)
     last_seq: int = 0
