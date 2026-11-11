@@ -51,10 +51,13 @@ export default function ScaledPreview({
   dragRollback = null,
   // 后端同步成功：清理 SDK 内的临时位移记录，避免 iframe 重载后重复叠加。
   dragCommit = null,
+  // iframe 内部路由切换 / 重载：父页面需要清空落在旧页面上的标注。
+  onRouteChange,
 }) {
   const screenRef = useRef(null)
   const iframeRef = useRef(null)
   const onPickRef = useRef(onInspectPick)
+  const onRouteChangeRef = useRef(onRouteChange)
   const inspectModeRef = useRef(inspectMode)
   // SDK 是否已握手；未就绪时不拦截滚轮、不强制滚动。
   const readyRef = useRef(false)
@@ -92,6 +95,10 @@ export default function ScaledPreview({
   useEffect(() => {
     onPickRef.current = onInspectPick
   }, [onInspectPick])
+
+  useEffect(() => {
+    onRouteChangeRef.current = onRouteChange
+  }, [onRouteChange])
 
   useEffect(() => {
     inspectModeRef.current = inspectMode
@@ -182,6 +189,13 @@ export default function ScaledPreview({
       if (data.type === 'scroll') {
         // 预览自身滚动快照：只用于滚轮边界判断，不反向驱动画布。
         scrollStateRef.current = data.payload ?? null
+        return
+      }
+      if (data.type === 'route-change') {
+        // 预览与画布是两个独立 React 实例，但共享同一组标注。任一页面
+        // 切换路由都意味着标注失效，交给上层统一清空（不回滚代码）。
+        setHover(null)
+        onRouteChangeRef.current?.(data.payload)
       }
     }
     window.addEventListener('message', handler)

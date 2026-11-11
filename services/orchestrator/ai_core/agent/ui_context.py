@@ -269,8 +269,41 @@ def _selector_hints(
     return list(dict.fromkeys(hint for hint in hints if hint))
 
 
+# selector 缺失（真实画布无法注入 data-source 时的兜底）时，按“主内容区”
+# 优先级定位锚点。绝不能回退到文件开头：文件头通常是 import/常量，会让
+# Coder 误以为“无法定位插入位置”，从而只输出无意义的 import 补丁。
+_STRUCTURAL_ANCHORS = (
+    'data-source="app-main"',
+    "<main",
+    'role="main"',
+    'data-source="page"',
+    'data-source-kind="container"',
+)
+# `return (` 是组件主体入口，取最后一次出现（函数末尾的最终返回）。
+_STRUCTURAL_RETURN = "return ("
+
+
+def _structural_anchor(source: str) -> int:
+    """在没有可用 selector 时定位主内容区；找不到再退回文件开头。"""
+    lowered = source.lower()
+    for pattern in _STRUCTURAL_ANCHORS:
+        index = lowered.find(pattern)
+        if index >= 0:
+            # 回退到所在行行首，保证行窗口从完整标签开始。
+            return lowered.rfind("\n", 0, index) + 1
+    index = lowered.rfind(_STRUCTURAL_RETURN)
+    if index >= 0:
+        return lowered.rfind("\n", 0, index) + 1
+    return 0
+
+
 def _find_anchor(source: str, selector: str | None, component: str | None) -> int:
-    """返回标注目标的字符偏移；找不到时回退到文件开头。"""
+    """返回标注目标的字符偏移。
+
+    找不到目标时回退到“主内容区”而不是文件开头：真实画布的 live iframe
+    无法注入 ``data-source``，标注 ``selector`` 往往为空，此时只有主内容区
+    的结构锚点才能给 Coder 一个可插入的父容器。
+    """
     lines = source.splitlines(keepends=True)
     hints = _selector_hints(selector, component)
     offset = 0
@@ -289,7 +322,7 @@ def _find_anchor(source: str, selector: str | None, component: str | None) -> in
             if hint in lowered:
                 return offset
         offset += len(line)
-    return 0
+    return _structural_anchor(source)
 
 
 def _jsx_pairs(source: str) -> list[_JsxPair]:
@@ -347,10 +380,15 @@ def extract_jsx_window(
     *,
     selector: str | None = None,
     component: str | None = None,
+    line: int | None = None,
     max_lines: int = UI_WINDOW_MAX_LINES,
     max_tokens: int = UI_WINDOW_MAX_TOKENS,
 ) -> SourceWindow:
-    """提取目标节点附近窗口：父级最多 3 层 + 兄弟节点。"""
+    """提取目标节点附近窗口：父级最多 3 层 + 兄弟节点。
+
+    ``line`` 是 SDK 回传的精确源码行号（live 画布的 data-source 是构建期
+    注入的，源码里并不存在），优先级高于 selector 文本匹配。
+    """
     lines = source.splitlines(keepends=True)
     total_lines = len(lines)
     if not source.strip():
@@ -358,7 +396,10 @@ def extract_jsx_window(
     if count_tokens(source) <= UI_FULL_FILE_TOKEN_LIMIT:
         return SourceWindow(source, 1, max(total_lines, 1), total_lines, False)
 
-    anchor = _find_anchor(source, selector, component)
+    if line and 1 <= int(line) <= total_lines:
+        anchor = sum(len(item) for item in lines[: int(line) - 1])
+    else:
+        anchor = _find_anchor(source, selector, component)
     pairs = _jsx_pairs(source)
     containing = sorted(
         (pair for pair in pairs if pair.open_start <= anchor < pair.close_end),
@@ -438,6 +479,19 @@ def _annotation_component(annotation: dict[str, Any]) -> str | None:
     return source.get("component") or annotation.get("component")
 
 
+def _annotation_line(annotation: dict[str, Any]) -> int | None:
+    """读取 SDK / Inspect 回传的精确源码行号。"""
+    target = (
+        annotation.get("target") if isinstance(annotation.get("target"), dict) else {}
+    )
+    source = target.get("source") if isinstance(target.get("source"), dict) else {}
+    try:
+        value = int(source.get("line") or annotation.get("line") or 0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def build_ui_coder_context(
     current_files: dict[str, str],
     target_files: list[str],
@@ -490,6 +544,7 @@ def build_ui_coder_context(
                 source,
                 selector=_annotation_selector(annotation) if annotation else None,
                 component=_annotation_component(annotation) if annotation else None,
+                line=_annotation_line(annotation) if annotation else None,
                 max_lines=max_lines,
                 max_tokens=max_tokens,
             )

@@ -68,6 +68,7 @@ from ai_core.agent.preferences import (
     should_interrupt,
 )
 from ai_core.context_memory import get_project_memory
+from ai_core.domain.actions import is_create_action
 from ai_core.domain.state import AgentState
 from ai_core.config import get_settings
 from ai_core.observability.streaming import (
@@ -120,6 +121,7 @@ class CoderTimeoutError(Exception):
 
 
 CODER_TIMEOUT_MESSAGE = "由于代码结构复杂，AI 生成超时，请尝试缩小标注范围"
+CODER_GENERATION_FAILED_MESSAGE = "AI 未生成可落地的新增组件，请重新描述或缩小标注范围"
 # 首次超时后自动降级重试；让用户看到“系统在自救”，而不是干等 30s 后失败。
 CODER_FALLBACK_PROGRESS = "已精简上下文并切换快速模型重试"
 # 降级仍失败：不再把用户钉死在失败页，而是提供“转后台运行”的可恢复出口。
@@ -1283,9 +1285,16 @@ class AgentGraphRunner:
             # 结构化输出连续失败：不做后台重试（换更长超时也无济于事），
             # 让用户缩小标注范围或重新表述。
             logger.warning("coder failed without repair loop: %s", exc)
+            # 透出具体校验原因（如“缺少 data-vibe-created 标记”），
+            # 不能把“模型只改了 import”误报成超时。
+            detail = str(exc).strip()
             return self._coder_failure_result(
                 code="CODER_GENERATION_FAILED",
-                message=CODER_TIMEOUT_MESSAGE,
+                message=(
+                    f"{CODER_GENERATION_FAILED_MESSAGE}（{detail[:200]}）"
+                    if detail
+                    else CODER_GENERATION_FAILED_MESSAGE
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - 未预期异常同样不能再阻塞
             logger.exception("coder crashed")
@@ -1398,7 +1407,7 @@ class AgentGraphRunner:
         key = f"{state.get('run_id')}:{round_no}:{retry_count}"
         self._emit(
             "verify.started",
-            {"checks": ["npm run build"]},
+            {"checks": ["npm run build", "created-markers"]},
             dedupe_key=f"verify.started:{key}",
         )
         try:
@@ -1430,7 +1439,31 @@ class AgentGraphRunner:
             "error_context": "",
             "error_fingerprint": "",
         }
-        if result.success:
+        # 构建通过 ≠ 需求完成：真实事故中 Coder 只新增了一行 import，
+        # Vite 构建成功，前端却宣告“已添加按钮”。这里回读沙盒文件，
+        # 校验每个 CREATE_NEW 标注的 data-vibe-created 标记是否真实落地。
+        missing_markers = self._missing_created_markers(state) if result.success else []
+        if result.success and missing_markers:
+            detail = "；".join(
+                f'{item["annotationId"]} 未出现在 {item["file"]}'
+                for item in missing_markers
+            )
+            verify_state["success"] = False
+            verify_state["error_logs"] = (
+                f"npm run build 通过，但新增组件未写入文件: {detail}"
+            )
+            verify_state["error_context"] = verify_state["error_logs"]
+            self._emit(
+                "verify.failed",
+                {
+                    "exitCode": result.exit_code,
+                    "durationMs": result.duration_ms,
+                    "errorSummary": verify_state["error_context"][:1000],
+                    "fingerprint": "",
+                },
+                dedupe_key=f"verify.failed:{key}",
+            )
+        elif result.success:
             self._emit(
                 "verify.passed",
                 {"exitCode": result.exit_code, "durationMs": result.duration_ms},
@@ -1457,17 +1490,86 @@ class AgentGraphRunner:
                 },
                 dedupe_key=f"verify.failed:{key}",
             )
-        summary = (
-            f"npm run build 成功，用时 {result.duration_ms}ms"
-            if result.success
-            else f"npm run build 失败 (exit={result.exit_code})，用时 {result.duration_ms}ms"
-        )
+        if result.success and missing_markers:
+            summary = "构建通过，但新增组件未写入文件: " + ", ".join(
+                item["annotationId"] for item in missing_markers
+            )
+        elif result.success:
+            summary = f"npm run build 成功，用时 {result.duration_ms}ms"
+        else:
+            summary = (
+                f"npm run build 失败 (exit={result.exit_code})，"
+                f"用时 {result.duration_ms}ms"
+            )
         return {
             "apply_failed": False,
             "verify_result": verify_state,
             "status": "VERIFYING",
-            "messages": [_message("verifier", summary, error=not result.success)],
+            "messages": [
+                _message("verifier", summary, error=not verify_state["success"])
+            ],
         }
+
+    def _missing_created_markers(self, state: AgentState) -> list[dict[str, str]]:
+        """回读沙盒文件，找出没有真正落地的 CREATE_NEW 标注。
+
+        Coder 的解析层已经拦截了“只改 import”的补丁，但 Applier 仍可能
+        因为 hunk 偏移、文件写错等原因丢掉新增节点。Verifier 是最后一道
+        防线：构建成功但标记不存在时，必须判失败并让 Coder 带上上下文重试。
+        """
+        context = state.get("annotation_context") or {}
+        target_files = [str(path) for path in (state.get("target_files") or [])]
+        missing: list[dict[str, str]] = []
+        for item in context.get("annotations") or []:
+            if not isinstance(item, dict):
+                continue
+            annotation = item.get("annotation")
+            if not isinstance(annotation, dict):
+                continue
+            action = (
+                annotation.get("action")
+                or annotation.get("intentAction")
+                or annotation.get("intent_action")
+            )
+            if not is_create_action(action):
+                continue
+            marker = annotation.get("annotationId") or annotation.get("annotation_id")
+            if not marker:
+                continue
+            target = annotation.get("target")
+            target = target if isinstance(target, dict) else {}
+            source = target.get("source")
+            source = source if isinstance(source, dict) else {}
+            path = str(
+                source.get("file")
+                or annotation.get("targetFile")
+                or annotation.get("target_file")
+                or ""
+            ).strip()
+            if not path:
+                path = target_files[0] if target_files else ""
+            if not path:
+                missing.append({"annotationId": str(marker), "file": "未知文件"})
+                continue
+            try:
+                content = self._sandbox.read_file(state["sandbox_id"], path)
+            except SandboxError as exc:
+                # 读取失败无法证明“没生成”，宁可跳过也不误杀；构建日志
+                # 仍保留在 verify_result 中供人工排查。
+                logger.warning(
+                    "verifier 读取标注目标文件失败 marker=%s path=%s: %s",
+                    marker,
+                    path,
+                    exc,
+                )
+                continue
+            marker = str(marker)
+            if (
+                f'data-vibe-created="{marker}"' not in content
+                and f"data-vibe-created='{marker}'" not in content
+            ):
+                missing.append({"annotationId": marker, "file": path})
+        return missing
 
     def _evaluator(self, state: AgentState) -> dict[str, Any]:
         verify = state.get("verify_result") or {}

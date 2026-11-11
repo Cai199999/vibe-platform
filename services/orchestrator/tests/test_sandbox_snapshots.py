@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime
+from types import SimpleNamespace
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -54,6 +56,51 @@ class GitLogParserTest(unittest.TestCase):
         self.assertEqual(commits[0].commit_hash, "c" * 40)
         # 非法时间戳回退为当前时间，绝不能因为一条脏记录让整页历史 500。
         self.assertIsInstance(commits[0].committed_at, datetime)
+
+
+class UnifiedDiffApplyTest(unittest.TestCase):
+    """复现真实事故：hunk 头行数写错时，补丁仍必须能落盘。"""
+
+    # 模型把 3 行插入声明成 ``+1,4``（实际应为 +1,6），严格 git apply 会
+    # 报 ``corrupt patch``；这是线上“代码生成成功但按钮没出现”的根因之一。
+    MISCCOUNT_PATCH = (
+        "--- a/src/App.jsx\n"
+        "+++ b/src/App.jsx\n"
+        "@@ -1,3 +1,4 @@\n"
+        " import { useMemo } from 'react'\n"
+        "+import { Plus } from 'lucide-react'\n"
+        "+const EXTRA_ONE = 1\n"
+        "+const EXTRA_TWO = 2\n"
+        " \n"
+        " export default function App() {\n"
+        " \n"
+    )
+
+    @staticmethod
+    def _sandbox() -> tuple[LocalDockerSandbox, list[list[str]]]:
+        sandbox = object.__new__(LocalDockerSandbox)
+        sandbox.settings = SimpleNamespace(sandbox_workdir="/app")  # type: ignore[assignment]
+        commands: list[list[str]] = []
+
+        def exec_(container: Any, argv: list[str], workdir: str | None = None) -> Any:
+            commands.append(argv)
+            script = argv[-1]
+            # 模拟 Git：没有 --recount 时拒绝计错补丁。
+            if "git apply" in script and "--recount" not in script:
+                return 128, b"error: corrupt patch at /tmp/vibe.patch.diff:9\n"
+            return 0, b""
+
+        sandbox._exec = exec_  # type: ignore[method-assign]
+        return sandbox, commands
+
+    def test_miscounted_hunk_applies_with_recount(self) -> None:
+        sandbox, commands = self._sandbox()
+        container = SimpleNamespace(put_archive=lambda path, data: True)
+
+        sandbox._apply_unified_diff(container, self.MISCCOUNT_PATCH)
+
+        self.assertTrue(commands)
+        self.assertIn("--recount", commands[0][-1])
 
 
 class SnapshotSchemaTest(unittest.TestCase):

@@ -630,6 +630,8 @@ export default function RuntimePanel({
   onCancelRun,
   inspectMode = false,
   onInspectPick,
+  // 预览 iframe 内部路由切换 / 重载：与画布共用同一套标注清理逻辑。
+  onFrameRouteChange,
   inspectDraft = null,
   onInspectDraftChange,
   onInspectDraftCancel,
@@ -778,6 +780,7 @@ export default function RuntimePanel({
             dragFeedback={dragFeedback}
             dragRollback={dragRollback}
             dragCommit={dragCommit}
+            onRouteChange={onFrameRouteChange}
           />
         )}
 

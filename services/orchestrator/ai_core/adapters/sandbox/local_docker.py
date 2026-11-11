@@ -954,6 +954,14 @@ class LocalDockerSandbox(SandboxProvider):
             raise SandboxError("写入导入文件失败: put_archive 返回 False")
 
     def _apply_unified_diff(self, container: Any, patch: str) -> None:
+        """应用 LLM 生成的 unified diff。
+
+        ``--recount`` 是关键：模型经常把 hunk 头的行数写错（例如插入 35 行
+        却声明 ``@@ -893,6 +893,24 @@``），严格的 ``git apply`` 会直接报
+        ``corrupt patch``，导致代码生成明明正确却写不进沙盒。--recount 让
+        Git 忽略 hunk 头里的计数、按实际 +/-/空格 行重新统计；行号偏移
+        （模型从裁剪窗口的行号起算）仍由 git apply 的上下文搜索自动容忍。
+        """
         patch_archive = self._build_tar({"vibe.patch.diff": patch})
         try:
             container.put_archive("/tmp", patch_archive)
@@ -962,7 +970,7 @@ class LocalDockerSandbox(SandboxProvider):
                 [
                     "sh",
                     "-lc",
-                    "git apply --whitespace=nowarn /tmp/vibe.patch.diff",
+                    "git apply --recount --whitespace=nowarn /tmp/vibe.patch.diff",
                 ],
                 workdir=self.settings.sandbox_workdir,
             )

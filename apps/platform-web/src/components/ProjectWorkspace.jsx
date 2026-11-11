@@ -59,6 +59,8 @@ function ProjectWorkspaceInner({
   onPlacementConfirm,
   onPlacementDismiss,
   onClearAnnotations,
+  // iframe 内部路由切换 / 重载：清空画布标注与当前 Inspect 草稿。
+  onFrameRouteChange,
   onApprovalDecision,
   onCancelRun,
   onSubmit,
@@ -403,6 +405,19 @@ function ProjectWorkspaceInner({
         : null,
       rect,
       worldRect,
+      // 文档坐标 + 滚动快照：Inspect 草稿同样必须跟随 iframe 滚动。
+      documentRect: {
+        x: Number(rect.x) + Number(payload.viewport?.scrollX || 0),
+        y: Number(rect.y) + Number(payload.viewport?.scrollY || 0),
+        width: Number(rect.width) || 0,
+        height: Number(rect.height) || 0,
+      },
+      frameScroll: {
+        scrollX: Number(payload.viewport?.scrollX || 0),
+        scrollY: Number(payload.viewport?.scrollY || 0),
+        width: viewportWidth,
+        height: viewportHeight,
+      },
       tag: payload.tag || source.tag || 'element',
       role: payload.role || source.tag || 'element',
       label: payload.label || source.component || source.tag || '组件',
@@ -457,6 +472,8 @@ function ProjectWorkspaceInner({
             })
           : null,
       action,
+      documentRect: inspectDraft.documentRect ?? null,
+      frameScroll: inspectDraft.frameScroll ?? null,
       measured: {
         mode: 'inspect',
         source: effective,
@@ -473,6 +490,16 @@ function ProjectWorkspaceInner({
       },
     })
     setInspectDraft(null)
+  }
+
+  /**
+   * iframe 路由切换 / 重载：当前页面已变。
+   * 本组件先丢弃未提交的 Inspect 草稿，再把事件交给 WorkspacePage
+   * 清空整组标注（只清前端状态，不回滚代码）。
+   */
+  const handleFrameRouteChange = (payload) => {
+    setInspectDraft(null)
+    onFrameRouteChange?.(payload)
   }
 
   return (
@@ -808,6 +835,7 @@ function ProjectWorkspaceInner({
               inspectMode={inspectMode && canvasVisible && !inspectBlocked}
               onInspectPick={handleInspectPick}
               onFrameScroll={handleFrameScroll}
+              onFrameRouteChange={handleFrameRouteChange}
               onFrameInteraction={handleFrameInteraction}
               onComponentDragStart={handleComponentDragStart}
               onComponentDragMove={handleComponentDragMove}
@@ -889,6 +917,7 @@ function ProjectWorkspaceInner({
               onCancelRun={onCancelRun}
               inspectMode={inspectMode && previewVisible && !inspectBlocked}
               onInspectPick={handleInspectPick}
+              onFrameRouteChange={handleFrameRouteChange}
               inspectDraft={inspectDraft}
               onInspectDraftChange={handleInspectDraftChange}
               onInspectDraftCancel={() => setInspectDraft(null)}

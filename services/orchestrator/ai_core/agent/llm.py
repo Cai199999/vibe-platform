@@ -663,6 +663,9 @@ class DeepSeekAgentLLM(AgentLLM):
             diff_token_threshold=diff_threshold,
         )
         force_diff = ui_context.force_diff or compact or prefer_fast
+        # CREATE_NEW 必须真正新增 JSX 节点。仅改 import / 样式的“假补丁”
+        # 会让 Verifier 只凭构建通过就宣告成功，这里在解析阶段硬拦截。
+        required_markers = _required_create_markers(annotations, target_files)
         plan_text = _truncate(str(plan or "").strip(), 500 if compact else 1600)
         verify_text = json.dumps(
             _compact_verify_result(verify_result),
@@ -722,6 +725,10 @@ class DeepSeekAgentLLM(AgentLLM):
             "逐字符一致的上下文；上下文对不上会导致 Applier 失败。\n"
             "- mode=files：仅在小文件且上下文完整时使用，files 必须覆盖全部"
             "目标文件。\n"
+            "- **完成判定**：CREATE_NEW / ADD 的补丁新增行必须包含完整 JSX "
+            '节点与 `data-vibe-created="<annotationId>"`。只新增 import、'
+            "只改样式或只改注释都会被校验拒绝；summary 必须描述真实落地的"
+            "节点，禁止声称完成了实际未写入的内容。\n"
             f"{self._skill_system}"
             f"{self._memory_block()}"
             f"{self._preference_block()}"
@@ -751,6 +758,7 @@ class DeepSeekAgentLLM(AgentLLM):
                 raw,
                 target_files,
                 force_diff=force_diff,
+                required_markers=required_markers,
             ),
             label="代码修改",
         )
@@ -839,6 +847,7 @@ class DeepSeekAgentLLM(AgentLLM):
         target_files: list[str],
         *,
         force_diff: bool = False,
+        required_markers: tuple[str, ...] = (),
     ) -> CodeResult:
         payload = _extract_json(raw)
         summary = str(payload.get("summary", "模型生成代码修改"))
@@ -860,6 +869,18 @@ class DeepSeekAgentLLM(AgentLLM):
                     f"模型 diff 未覆盖全部目标文件: {missing}；"
                     "请一次性修改所有标注，或改用 mode=files"
                 )
+            missing_markers = [
+                marker
+                for marker in required_markers
+                if not _has_created_marker(_diff_added_text(patch), marker)
+            ]
+            if missing_markers:
+                raise AgentLLMError(
+                    "新增组件未落地：diff 新增行缺少 data-vibe-created 标记 "
+                    f"{missing_markers}。只改 import / 样式不算完成；"
+                    "请在标注指定的父容器内插入完整可编译 JSX 节点，"
+                    '并给新增节点加 data-vibe-created="<annotationId>"。'
+                )
             return CodeResult(summary=summary, patch=patch)
 
         files = payload.get("files")
@@ -870,6 +891,18 @@ class DeepSeekAgentLLM(AgentLLM):
                 raise AgentLLMError(
                     f"模型返回的 files 缺少目标文件 {missing}；"
                     "必须一次性返回全部目标文件的完整内容"
+                )
+            joined = "\n".join(normalized.values())
+            missing_markers = [
+                marker
+                for marker in required_markers
+                if not _has_created_marker(joined, marker)
+            ]
+            if missing_markers:
+                raise AgentLLMError(
+                    "新增组件未落地：完整文件缺少 data-vibe-created 标记 "
+                    f"{missing_markers}。只改 import / 样式不算完成；"
+                    "请插入完整可编译 JSX 节点并保留标注标记。"
                 )
             return CodeResult(summary=summary, files=normalized)
 
@@ -1276,7 +1309,63 @@ def _annotation_target_file(
 
 def _annotation_action(annotation: dict[str, Any]) -> str:
     """读取操作类型；保留原始值，统一由 domain.actions 判断语义。"""
-    return str(annotation.get("action") or "MODIFY").upper()
+    return str(
+        annotation.get("action")
+        or annotation.get("intentAction")
+        or annotation.get("intent_action")
+        or "MODIFY"
+    ).upper()
+
+
+def _required_create_markers(
+    annotations: list[dict[str, Any]],
+    target_files: list[str],
+) -> tuple[str, ...]:
+    """收集 CREATE_NEW 标注必须落地的 ``data-vibe-created`` 标记。
+
+    只校验目标文件在当前可编辑集合内的标注：未加载文件本来就禁止修改，
+    交给上下文层拒绝，不能在这里误判。
+    """
+    allowed = set(target_files)
+    markers: list[str] = []
+    for annotation in annotations:
+        if not is_create_action(_annotation_action(annotation)):
+            continue
+        target = (
+            annotation.get("target")
+            if isinstance(annotation.get("target"), dict)
+            else {}
+        )
+        source = target.get("source") if isinstance(target.get("source"), dict) else {}
+        path = str(
+            source.get("file")
+            or annotation.get("targetFile")
+            or annotation.get("target_file")
+            or ""
+        ).strip()
+        if path and allowed and path not in allowed:
+            continue
+        marker = _annotation_id(annotation)
+        if marker:
+            markers.append(marker)
+    return tuple(dict.fromkeys(markers))
+
+
+def _diff_added_text(patch: str) -> str:
+    """提取 unified diff 的新增行（排除 ``+++ b/file`` 文件头）。"""
+    lines: list[str] = []
+    for line in patch.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            lines.append(line[1:])
+    return "\n".join(lines)
+
+
+def _has_created_marker(text: str, marker: str) -> bool:
+    """兼容单双引号；生成器统一输出双引号，但自修复偶尔会用单引号。"""
+    return (
+        f'data-vibe-created="{marker}"' in text
+        or f"data-vibe-created='{marker}'" in text
+    )
 
 
 def _annotation_position(annotation: dict[str, Any]) -> dict[str, Any] | None:

@@ -1578,6 +1578,10 @@ export default function WorkspacePage() {
       relativeRect,
       action: geometryAction,
       measured,
+      // live 画布：iframe 文档坐标 + 圈选时滚动快照。滚动时 CanvasStage
+      // 据此把圈重新投影到视口；页面切换 / 重载时整组标注会被清空。
+      documentRect = null,
+      frameScroll = null,
       intent: presetIntent = '',
       source: inspectSource = null,
     },
@@ -1608,6 +1612,9 @@ export default function WorkspacePage() {
           {
             id: newId('ann'),
             rect,
+            // live 画布专用的文档坐标（不受 iframe 滚动影响）。
+            documentRect,
+            frameScroll,
             // 圈实际覆盖到的叶子节点（MODIFY 目标）。
             target,
             // 最近 data-source 容器（ADD 的插入父级）。
@@ -1873,6 +1880,47 @@ export default function WorkspacePage() {
         pendingAnnotationId: null,
         pendingAction: null,
       })
+    }
+  }
+
+  /**
+   * iframe 内部路由切换 / 整页重载：当前页面已经不是圈选时那一个。
+   *
+   * 只清前端标注与拖拽草稿，**绝不回滚代码**——用户可能只是切了个 Tab，
+   * 已生成的修改仍然有效。与“清空标注”按钮（会 reset 到基线）严格区分。
+   */
+  const handleFrameRouteChange = (projectId, payload) => {
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const hadAnnotations =
+      run.annotations.length > 0 || Boolean(run.clarification)
+    pendingLayoutChangesRef.current.delete(projectId)
+    setPendingLayoutChanges((previous) => {
+      if (!previous[projectId]) return previous
+      const next = { ...previous }
+      delete next[projectId]
+      return next
+    })
+    patchRun(projectId, (previous) => {
+      if (
+        previous.annotations.length === 0 &&
+        !previous.clarification &&
+        !previous.pendingAnnotationId
+      ) {
+        return previous
+      }
+      return {
+        ...previous,
+        annotations: [],
+        clarification: null,
+        pendingAnnotationId: null,
+        pendingAction: null,
+      }
+    })
+    if (hadAnnotations) {
+      showToast(
+        'info',
+        `页面已切换（${payload?.reason === 'reload' ? '重新加载' : '路由变化'}），已清除旧标注，请重新圈选`,
+      )
     }
   }
 
@@ -4543,6 +4591,8 @@ export default function WorkspacePage() {
         onAnnotationRollback: (annotationId, message) =>
           call('handleAnnotationRollback', annotationId, message),
         onClearAnnotations: () => call('handleClearAnnotations'),
+        onFrameRouteChange: (payload) =>
+          call('handleFrameRouteChange', payload),
         onApprovalDecision: (decision, comment) =>
           call('handleApprovalDecision', decision, comment),
         onCancelRun: () => call('handleCancelRun'),

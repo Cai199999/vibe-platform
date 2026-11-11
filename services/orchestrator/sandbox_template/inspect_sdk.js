@@ -263,6 +263,191 @@
   }
 
   /**
+   * 描述一个 data-source 节点，供父页面构造 AnnotationEnvelope。
+   *
+   * 与父页面 CanvasStage.targetForNode 保持同一字段集合；区别是这里运行
+   * 在 iframe 内部，能拿到构建期注入的 file / line / column。
+   */
+  function targetDescriptor(node) {
+    if (!node) return null
+    var source = readSource(node)
+    if (!source) return null
+    var label =
+      source.component && source.component !== 'Component'
+        ? source.component
+        : source.tag
+    return {
+      marker: source.marker,
+      selector: source.selector,
+      label: label,
+      role:
+        node.getAttribute('role') ||
+        (source.kind === 'container' ? 'container' : source.tag),
+      component: source.component,
+      tag: source.tag,
+      kind: source.kind,
+      file: source.file,
+      line: source.line,
+      column: source.column,
+      sourceKind: source.sourceKind,
+    }
+  }
+
+  /** 页面根目标：所有组件都没带 data-source 时的兜底插入容器。 */
+  function pageTarget() {
+    return {
+      marker: 'page',
+      selector: '',
+      label: '页面',
+      role: 'container',
+      component: 'App',
+      tag: 'div',
+      kind: 'container',
+      file: '',
+      line: 0,
+      column: 0,
+      sourceKind: 'jsx',
+    }
+  }
+
+  function intersectionArea(a, b) {
+    var left = Math.max(a.left, b.left)
+    var right = Math.min(a.right, b.right)
+    var top = Math.max(a.top, b.top)
+    var bottom = Math.min(a.bottom, b.bottom)
+    if (right <= left || bottom <= top) return 0
+    return (right - left) * (bottom - top)
+  }
+
+  /** 选择框（iframe 视口 CSS 像素）→ 文档坐标。 */
+  function toDocumentRect(rect) {
+    return {
+      x: round2(rect.x + (window.scrollX || 0)),
+      y: round2(rect.y + (window.scrollY || 0)),
+      width: round2(rect.width),
+      height: round2(rect.height),
+    }
+  }
+
+  var MODIFY_MIN_COVERAGE = 0.35
+  var ADD_AREA_RATIO = 4
+  var MODIFY_MIN_SELECTION_SHARE = 0.12
+
+  /**
+   * 在 iframe 内部完成圈选几何判定。
+   *
+   * 平台不能跨域读取 live 页面 DOM，所以旧实现只能回传“屏幕坐标”并假定
+   * 目标是一个空 selector 的页面根节点。这里把与 Mock 画布完全一致的
+   * 覆盖面积算法下放到 SDK：
+   *   - 命中叶子且覆盖充分 → MODIFY_EXISTING，target = 该节点；
+   *   - 否则 → CREATE_NEW，addTarget = 最近的容器型 data-source 祖先；
+   *   - 同时返回 relativeRect（相对父容器）与 documentRect（文档坐标）。
+   */
+  function analyzeSelection(rect) {
+    var selectionRect = {
+      left: rect.x,
+      top: rect.y,
+      right: rect.x + rect.width,
+      bottom: rect.y + rect.height,
+      width: rect.width,
+      height: rect.height,
+    }
+    var selectionArea = Math.max(0, rect.width) * Math.max(0, rect.height)
+    var nodes = []
+    var seen = {}
+    var candidates = document.querySelectorAll(
+      '[data-source], [data-vibe-target]',
+    )
+    for (var i = 0; i < candidates.length; i += 1) {
+      var node = candidates[i]
+      if (seen[node] || !node.isConnected) continue
+      seen[node] = true
+      var nodeRect = node.getBoundingClientRect()
+      var area = nodeRect.width * nodeRect.height
+      if (area <= 0) continue
+      var overlap = intersectionArea(nodeRect, selectionRect)
+      if (overlap <= 0) continue
+      var source = readSource(node)
+      if (!source) continue
+      nodes.push({
+        node: node,
+        rect: nodeRect,
+        area: area,
+        overlap: overlap,
+        coverage: overlap / area,
+        share: overlap / selectionArea,
+        source: source,
+        isContainer: source.kind === 'container',
+      })
+    }
+    var leaves = nodes
+      .filter(function (item) {
+        return !item.isContainer && item.source.selector
+      })
+      .sort(function (a, b) {
+        if (b.overlap !== a.overlap) return b.overlap - a.overlap
+        return a.area - b.area
+      })
+    var best = leaves[0] || null
+    var coversEnough =
+      best &&
+      best.coverage >= MODIFY_MIN_COVERAGE &&
+      selectionArea <= best.area * ADD_AREA_RATIO &&
+      best.share >= MODIFY_MIN_SELECTION_SHARE
+    var action = coversEnough ? 'MODIFY_EXISTING' : 'CREATE_NEW'
+
+    // ADD 父容器：中心点命中的最近容器 → 命中节点祖先 → 重叠最大的容器。
+    var centerX = rect.x + rect.width / 2
+    var centerY = rect.y + rect.height / 2
+    var centerNode = document.elementFromPoint(centerX, centerY)
+    var parentNode = centerNode ? findContainer(centerNode) : null
+    if (!parentNode && best) {
+      var ancestor = best.node.parentElement
+      parentNode = ancestor ? findContainer(ancestor) : null
+    }
+    if (!parentNode) {
+      parentNode = nodes
+        .filter(function (item) {
+          return item.isContainer
+        })
+        .sort(function (a, b) {
+          return b.overlap - a.overlap || a.area - b.area
+        })[0]?.node || null
+    }
+    var targetNode = coversEnough ? best.node : parentNode
+    var relative = null
+    if (targetNode) {
+      var targetRect = rectOf(targetNode)
+      relative = relativeRect(rect, targetRect)
+    }
+    var scroll = scrollSnapshot()
+    return {
+      ok: true,
+      action: action,
+      target: coversEnough ? targetDescriptor(best.node) : null,
+      addTarget: targetDescriptor(parentNode) || pageTarget(),
+      relativeRect: relative,
+      documentRect: toDocumentRect(rect),
+      measured: {
+        mode: 'sdk-live',
+        selectionArea: Math.round(selectionArea),
+        hitArea: best ? Math.round(best.overlap) : 0,
+        hitCoverage: best ? Number(best.coverage.toFixed(3)) : 0,
+        candidateCount: leaves.length,
+      },
+      source: best ? readSource(best.node) : parentNode ? readSource(parentNode) : null,
+      addSource: parentNode ? readSource(parentNode) : null,
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        scrollX: scroll.scrollX,
+        scrollY: scroll.scrollY,
+      },
+      scroll: scroll,
+    }
+  }
+
+  /**
    * 按 CSS selector 安全查找节点。
    *
    * selector 由平台根据 annotationId 生成（[data-vibe-created="..."]），
@@ -725,6 +910,27 @@
       var measured = measureElement(data.selector, data.parentSelector)
       measured.requestId = data.requestId || ''
       reply(event.source, event.origin, 'measured', measured)
+    }
+    if (data.type === 'analyze-selection') {
+      // 圈选分析：父页面把归一化选区换算成 iframe 视口 CSS 像素后发进来，
+      // SDK 在真实 DOM 上完成覆盖面积判定，返回目标 / 父容器 / 局部坐标。
+      var analyzeBody = bodyOf(data)
+      var analyzeRect = analyzeBody.rect || {
+        x: readNumber(data, analyzeBody, 'x'),
+        y: readNumber(data, analyzeBody, 'y'),
+        width: readNumber(data, analyzeBody, 'width'),
+        height: readNumber(data, analyzeBody, 'height'),
+      }
+      var analyzed = analyzeSelection({
+        x: Number(analyzeRect.x) || 0,
+        y: Number(analyzeRect.y) || 0,
+        width: Number(analyzeRect.width) || 0,
+        height: Number(analyzeRect.height) || 0,
+      })
+      analyzed.requestId = String(
+        analyzeBody.requestId || data.requestId || '',
+      )
+      reply(event.source, event.origin, 'selection-analyzed', analyzed)
     }
     /*
      * 双屏滚动同步 + 标注态滚轮转发。
@@ -1249,11 +1455,95 @@
   window.addEventListener('resize', scheduleScrollSnapshot)
   window.addEventListener('load', scheduleScrollSnapshot)
 
+  /*
+   * 路由 / 页面切换通知。
+   * ------------------------------------------------------------------
+   * 标注圈记录的是“某个页面上的某个元素”。一旦 iframe 内部换了路由，
+   * 原来的圈就画在空气上，甚至会把改动提交到错误的页面。SDK 因此监听：
+   *   - history.pushState / replaceState（React Router 等 SPA 跳转）；
+   *   - popstate / hashchange（浏览器前进后退、锚点跳转）；
+   *   - 整页 reload（PerformanceNavigationTiming.type === 'reload'）。
+   * 父页面收到 route-change 后主动清空标注与草稿，不做代码回滚。
+   */
+  var lastRouteKey = ''
+  var routeTimer = 0
+
+  function routeKey() {
+    return (
+      String(window.location.pathname || '/') +
+      String(window.location.search || '') +
+      String(window.location.hash || '')
+    )
+  }
+
+  function announceRoute(reason, force) {
+    var key = routeKey()
+    if (!force && key === lastRouteKey) return
+    lastRouteKey = key
+    post('route-change', {
+      reason: reason,
+      path: key,
+      url: window.location.href,
+      scroll: scrollSnapshot(),
+    })
+  }
+
+  function scheduleRoute(reason) {
+    if (routeTimer) return
+    // 放到宏任务：Framework 往往在 pushState 后同一事件循环内同步渲染，
+    // 等 DOM 提交完再通知父页面，避免父页面清空后又被旧渲染覆盖。
+    routeTimer = window.setTimeout(function () {
+      routeTimer = 0
+      announceRoute(reason)
+    }, 0)
+  }
+
+  lastRouteKey = routeKey()
+
+  ;['pushState', 'replaceState'].forEach(function (method) {
+    var original = window.history && window.history[method]
+    if (typeof original !== 'function') return
+    window.history[method] = function () {
+      var result = original.apply(this, arguments)
+      scheduleRoute(method === 'pushState' ? 'push' : 'replace')
+      return result
+    }
+  })
+  window.addEventListener('popstate', function () {
+    scheduleRoute('popstate')
+  })
+  window.addEventListener('hashchange', function () {
+    scheduleRoute('hash')
+  })
+
+  // 整页 reload：新文档无法知道父页面还存着旧标注，必须主动告知。
+  var navigationType = ''
+  try {
+    if (typeof performance.getEntriesByType === 'function') {
+      var navEntry = performance.getEntriesByType('navigation')[0]
+      navigationType = navEntry ? navEntry.type : ''
+    }
+    if (
+      !navigationType &&
+      performance.navigation &&
+      typeof performance.navigation.type === 'number'
+    ) {
+      navigationType = performance.navigation.type === 1 ? 'reload' : ''
+    }
+  } catch (error) {
+    navigationType = ''
+  }
+
   // 通知父页面 SDK 已就绪；父页面收到后再下发 enable，避免首次点击丢失。
   post('ready', {
     url: window.location.href,
+    route: routeKey(),
+    navigationType: navigationType,
     scroll: scrollSnapshot(),
   })
+  if (navigationType === 'reload') {
+    announceRoute('reload', true)
+  }
   // 首次绘制完成后再补几次滚动快照，覆盖字体 / 图片 / 异步渲染撑开
   // 文档的情况。每次 publishScroll 内部会做指纹去重。
   ;[0, 60, 300, 1000, 2500].forEach(function (delay) {

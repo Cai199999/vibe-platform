@@ -2004,6 +2004,7 @@ class RunExecutionService:
                         current_source,
                         selector=target.selector if target else None,
                         component=source.component if source else None,
+                        line=source.line if source else None,
                     )
                     snippet["content"] = window.text
                     snippet["startLine"] = window.start_line

@@ -106,6 +106,40 @@ class UiContextWindowTest(unittest.TestCase):
             window.end_line - window.start_line + 1, len(source.splitlines())
         )
 
+    def test_empty_selector_falls_back_to_main_content(self) -> None:
+        """真实画布 selector 为空时必须锚定主内容区，而不是文件头。"""
+        source = (
+            "import { Plus } from 'lucide-react'\n"
+            + "".join(
+                f'const HEADER_{index} = "文件头噪声内容文件头噪声内容{index}"\n'
+                for index in range(320)
+            )
+            + "export default function App() {\n"
+            '  return <div className="page" data-source="page">\n'
+            '    <main className="shell" data-source="app-main">\n'
+            "      <h1>工作台</h1>\n"
+            "    </main>\n"
+            "  </div>\n"
+            "}\n"
+        )
+        window = extract_jsx_window(source, selector="", max_lines=90)
+        self.assertIn('data-source="app-main"', window.text)
+        self.assertNotIn("HEADER_0", window.text)
+
+    def test_explicit_line_wins_over_structural_fallback(self) -> None:
+        """SDK 精确行号必须优先于 selector / 结构兜底。"""
+        source = _big_source()
+        window = extract_jsx_window(
+            source,
+            selector="",
+            line=50,
+            max_lines=40,
+            max_tokens=1200,
+        )
+        self.assertLessEqual(window.start_line, 50)
+        self.assertGreaterEqual(window.end_line, 50)
+        self.assertNotIn('data-source="card"', window.text)
+
     def test_large_file_forces_local_diff(self) -> None:
         context = build_ui_coder_context(
             {APP_PATH: _big_source()},
@@ -191,7 +225,8 @@ class UiCoderPromptTest(unittest.TestCase):
                     "files": {
                         APP_PATH: (
                             "export default function App() {\n"
-                            "  return <main><button onClick={() => "
+                            '  return <main><button data-vibe-created="ann_1" '
+                            "onClick={() => "
                             "console.log('待绑定逻辑')}>提交</button></main>\n"
                             "}\n"
                         )
@@ -233,6 +268,57 @@ class UiCoderPromptTest(unittest.TestCase):
         # 业务契约绝不能进入 UI Coder 的上下文。
         self.assertNotIn("/api/orders", client.human)
         self.assertNotIn("/api/orders", client.system)
+
+    def test_create_patch_with_only_import_is_rejected(self) -> None:
+        """复现真实事故：ADD 只返回 import，必须判为未完成。"""
+        llm, _ = self._llm(
+            json.dumps(
+                {
+                    "mode": "diff",
+                    "patch": (
+                        "--- a/src/App.jsx\n"
+                        "+++ b/src/App.jsx\n"
+                        "@@ -1,3 +1,4 @@\n"
+                        " import { useMemo, useState } from 'react'\n"
+                        "+import { Plus } from 'lucide-react'\n"
+                        " \n"
+                        " export default function App() {\n"
+                    ),
+                    "summary": "已应用：添加按钮",
+                },
+                ensure_ascii=False,
+            )
+        )
+        with self.assertRaises(Exception) as ctx:
+            llm.generate(
+                annotations=[
+                    {
+                        "annotationId": "ann_b870aabe750a",
+                        "action": "ADD",
+                        "target": {
+                            "selector": "",
+                            "source": {"file": APP_PATH},
+                        },
+                        "payload": {"text": "添加按钮"},
+                    }
+                ],
+                plan="在页面添加按钮",
+                current_files={
+                    APP_PATH: (
+                        "import { useMemo, useState } from 'react'\n"
+                        "\n"
+                        "export default function App() {\n"
+                        "  return <main>页面</main>\n"
+                        "}\n"
+                    )
+                },
+                target_files=[APP_PATH],
+                verify_result={},
+                retry_count=0,
+                compact=True,
+                prefer_fast=True,
+            )
+        self.assertIn("data-vibe-created", str(ctx.exception))
 
     def test_compact_mode_selects_fast_model_and_forbids_full_files(self) -> None:
         llm, client = self._llm(
@@ -385,6 +471,91 @@ class CoderFallbackTest(unittest.TestCase):
         self.assertEqual(len(plan.calls), 1)
         self.assertTrue(update["background_available"])
         self.assertEqual(update["error_code"], "CODER_TIMEOUT_RECOVERABLE")
+
+
+class VerifierCreatedMarkerTest(unittest.TestCase):
+    """构建通过但新增组件缺失时，Verifier 必须判失败。"""
+
+    @staticmethod
+    def _runner(content: str) -> AgentGraphRunner:
+        from ai_core.ports.sandbox import VerifyResult
+
+        runner = object.__new__(AgentGraphRunner)
+        runner.events = []
+        runner._settings = SimpleNamespace(
+            error_context_lines=3,
+            error_context_max_chars=2000,
+        )
+
+        def emit(event_type: str, payload: dict, **kwargs: Any) -> None:
+            runner.events.append((event_type, payload))
+
+        runner._emit = emit  # type: ignore[method-assign]
+
+        class _Sandbox:
+            def verify(self, sandbox_id: str, check: str = "build") -> Any:
+                return VerifyResult(
+                    success=True,
+                    exit_code=0,
+                    timed_out=False,
+                    duration_ms=900,
+                    logs="build ok",
+                    logs_truncated=False,
+                )
+
+            def read_file(self, sandbox_id: str, path: str) -> str:
+                return content
+
+        runner._sandbox = _Sandbox()  # type: ignore[assignment]
+        return runner
+
+    @staticmethod
+    def _state() -> dict[str, Any]:
+        return {
+            "run_id": "run_1",
+            "sandbox_id": "sbx_1",
+            "retry_count": 0,
+            "clarification_round": 0,
+            "target_files": [APP_PATH],
+            "annotation_context": {
+                "annotations": [
+                    {
+                        "annotation": {
+                            "annotationId": "ann_b870aabe750a",
+                            "action": "ADD",
+                            "target": {"source": {"file": APP_PATH}},
+                            "payload": {"text": "添加按钮"},
+                        }
+                    }
+                ]
+            },
+        }
+
+    def test_build_success_without_created_marker_fails(self) -> None:
+        runner = self._runner(
+            "import { Plus } from 'lucide-react'\n"
+            "export default function App() { return <main /> }\n"
+        )
+        update = runner._verifier(self._state())
+
+        self.assertFalse(update["verify_result"]["success"])
+        self.assertIn("新增组件未写入文件", update["verify_result"]["error_logs"])
+        self.assertTrue(
+            any(event_type == "verify.failed" for event_type, _ in runner.events)
+        )
+
+    def test_build_success_with_created_marker_passes(self) -> None:
+        runner = self._runner(
+            "export default function App() { return <main>"
+            '<button data-vibe-created="ann_b870aabe750a">按钮</button>'
+            "</main> }\n"
+        )
+        update = runner._verifier(self._state())
+
+        self.assertTrue(update["verify_result"]["success"])
+        self.assertTrue(
+            any(event_type == "verify.passed" for event_type, _ in runner.events)
+        )
 
 
 if __name__ == "__main__":

@@ -44,6 +44,36 @@ function normalizeRect(originX, originY, x, y) {
   }
 }
 
+/**
+ * 标注圈显示坐标。
+ *
+ * live 画布的圈存的是「iframe 文档坐标」（documentRect），页面滚动后必须
+ * 减去当前 scrollY 重新投影到逻辑视口，否则圈会停在屏幕上不动。完全滚出
+ * 视口的标注直接隐藏，避免用户对着看不见的圈继续输入。
+ */
+function resolveAnnotationRect(annotation, frameScroll) {
+  const documentRect = annotation.documentRect
+  if (!documentRect) return { ...annotation.rect, visible: true }
+  const width = Number(frameScroll.width) || 1440
+  const height = Number(frameScroll.height) || 900
+  const scrollX = Number(frameScroll.scrollX) || 0
+  const scrollY = Number(frameScroll.scrollY) || 0
+  const rect = {
+    x: (Number(documentRect.x) - scrollX) / width,
+    y: (Number(documentRect.y) - scrollY) / height,
+    width: Number(documentRect.width) / width,
+    height: Number(documentRect.height) / height,
+  }
+  return {
+    ...rect,
+    visible:
+      rect.x < 1 &&
+      rect.x + rect.width > 0 &&
+      rect.y < 1 &&
+      rect.y + rect.height > 0,
+  }
+}
+
 /** 把一个带标记的 DOM 节点转换为可序列化的目标描述。 */
 function targetForNode(node) {
   if (!node) return null
@@ -306,6 +336,8 @@ const CLARIFICATION_REASON_TEXT = {
  */
 function AnnotationPopover({
   annotation,
+  // live 画布的显示坐标（已按当前滚动位置重投影）；缺省时回退到圈选时坐标。
+  displayRect = null,
   index,
   submitting,
   // 审批未决时禁止修改标注 / 发起新 Run，但聊天记录仍可查看。
@@ -331,16 +363,17 @@ function AnnotationPopover({
   viewportHeight,
 }) {
   const historyRef = useRef(null)
+  const anchorRect = displayRect ?? annotation.rect
   const style = useMemo(
     () =>
       popoverStyleFor(
-        annotation.rect,
+        anchorRect,
         index,
         active,
         viewportWidth,
         viewportHeight,
       ),
-    [annotation.rect, index, active, viewportWidth, viewportHeight],
+    [anchorRect, index, active, viewportWidth, viewportHeight],
   )
   const history = annotation.chatHistory ?? []
   const [answers, setAnswers] = useState({})
@@ -1008,6 +1041,8 @@ function CanvasStage({
   // 画布内的页面滚动 / 点击由 SDK 回传，父级据此同步右侧预览。
   onFrameScroll,
   onFrameInteraction,
+  // iframe 内部路由切换 / 整页重载：父级必须清空当前标注，避免圈画在空气上。
+  onFrameRouteChange,
   // 直接拖拽：SDK 在 iframe 内完成手势与临时位移，松手后把目标与
   // 累计位移回传父页面，由 WorkspacePage 静默提交给 UI Agent。
   onComponentDragStart,
@@ -1027,12 +1062,27 @@ function CanvasStage({
   const viewportRef = useRef(null)
   const onFrameScrollRef = useRef(onFrameScroll)
   const onFrameInteractionRef = useRef(onFrameInteraction)
+  const onFrameRouteChangeRef = useRef(onFrameRouteChange)
+  // iframe 内部滚动位置：标注圈用文档坐标存储，显示时减去 scrollY 重绘。
+  // 这份状态只用于渲染，不同步给预览（预览有自己的 scrollStateRef）。
+  const [frameScroll, setFrameScroll] = useState({
+    scrollX: 0,
+    scrollY: 0,
+    width: 1440,
+    height: 900,
+  })
+  // 圈选几何分析是异步 postMessage；requestId → resolve。
+  const pendingAnalysisRef = useRef(new Map())
+  const analysisSeedRef = useRef(0)
+  // 每次圈选递增；异步分析返回时若已开始下一笔（或页面已切换）就丢弃。
+  const liveSelectionSeedRef = useRef(0)
   const onComponentDragStartRef = useRef(onComponentDragStart)
   const onComponentDragMoveRef = useRef(onComponentDragMove)
   const onComponentDragEndRef = useRef(onComponentDragEnd)
   const onComponentDragCancelRef = useRef(onComponentDragCancel)
   onFrameScrollRef.current = onFrameScroll
   onFrameInteractionRef.current = onFrameInteraction
+  onFrameRouteChangeRef.current = onFrameRouteChange
   onComponentDragStartRef.current = onComponentDragStart
   onComponentDragMoveRef.current = onComponentDragMove
   onComponentDragEndRef.current = onComponentDragEnd
@@ -1318,11 +1368,52 @@ function CanvasStage({
             '*',
           )
         setInspectHover(null)
+        // 旧文档里的圈选请求已经不可能再返回，统一按失败收口。
+        liveSelectionSeedRef.current += 1
+        pendingAnalysisRef.current.forEach((resolve) => resolve(null))
+        pendingAnalysisRef.current.clear()
+        const readyScroll = data.payload?.scroll
+        if (readyScroll) {
+          setFrameScroll((current) => ({
+            ...current,
+            scrollX: Number(readyScroll.scrollX) || 0,
+            scrollY: Number(readyScroll.scrollY) || 0,
+            width: Number(readyScroll.width) || current.width,
+            height: Number(readyScroll.height) || current.height,
+          }))
+        }
         return
       }
       if (data.type === 'scroll') {
-        // 页面内部滚动位置：用于驱动右侧预览同步。
-        onFrameScrollRef.current?.(data.payload)
+        // 页面内部滚动位置：用于驱动右侧预览同步，同时重绘标注圈。
+        const payload = data.payload
+        if (payload) {
+          setFrameScroll((current) => ({
+            ...current,
+            scrollX: Number(payload.scrollX) || 0,
+            scrollY: Number(payload.scrollY) || 0,
+            width: Number(payload.width) || current.width,
+            height: Number(payload.height) || current.height,
+          }))
+        }
+        onFrameScrollRef.current?.(payload)
+        return
+      }
+      if (data.type === 'selection-analyzed') {
+        const requestId = data.payload?.requestId
+        const resolve = pendingAnalysisRef.current.get(requestId)
+        if (resolve) {
+          pendingAnalysisRef.current.delete(requestId)
+          resolve(data.payload)
+        }
+        return
+      }
+      if (data.type === 'route-change') {
+        // 页面已切换：作废进行中的圈选分析，再通知上层清空标注。
+        liveSelectionSeedRef.current += 1
+        pendingAnalysisRef.current.forEach((resolve) => resolve(null))
+        pendingAnalysisRef.current.clear()
+        onFrameRouteChangeRef.current?.(data.payload)
         return
       }
       if (data.type === 'click') {
@@ -1492,6 +1583,50 @@ function CanvasStage({
     frame.contentWindow.postMessage({ channel: 'vibe-inspect', ...payload }, '*')
   }
 
+  /**
+   * 请求 SDK 在 iframe 内部完成圈选分析。
+   *
+   * rect 使用 iframe 视口 CSS 像素；SDK 返回 target / addTarget /
+   * relativeRect / documentRect。iframe 未就绪或 600ms 未响应时返回 null，
+   * 调用方回退到“页面根容器 + 结构锚点”，绝不阻塞用户继续圈选。
+   */
+  const analyzeLiveSelection = (frameRect) =>
+    new Promise((resolve) => {
+      const frame = liveFrameRef.current
+      if (!frame?.contentWindow) {
+        resolve(null)
+        return
+      }
+      analysisSeedRef.current += 1
+      const requestId = `sel_${Date.now().toString(36)}_${analysisSeedRef.current}`
+      let settled = false
+      const finish = (value) => {
+        if (settled) return
+        settled = true
+        pendingAnalysisRef.current.delete(requestId)
+        resolve(value)
+      }
+      pendingAnalysisRef.current.set(requestId, finish)
+      frame.contentWindow.postMessage(
+        {
+          channel: 'vibe-inspect',
+          type: 'analyze-selection',
+          payload: { requestId, rect: frameRect },
+        },
+        '*',
+      )
+      window.setTimeout(() => finish(null), 600)
+    })
+
+  // 卸载时让所有等待中的分析立即收口，避免 setTimeout / Promise 泄漏。
+  useEffect(
+    () => () => {
+      pendingAnalysisRef.current.forEach((resolve) => resolve(null))
+      pendingAnalysisRef.current.clear()
+    },
+    [],
+  )
+
   // Inspect 开关或 iframe 地址变化时同步 SDK；iframe 自己发 ready 时也会补发。
   useEffect(() => {
     if (mode !== 'live') return
@@ -1641,10 +1776,67 @@ function CanvasStage({
     }
 
     if (rect.width > 0.02 && rect.height > 0.02) {
-      // 把归一化选区还原为屏幕坐标，直接测量 DOM 节点的真实覆盖面积。
-      // 不再只看“中心点命中谁”，否则空白区域会被误判成修改父容器。
-      // 直接使用视口元素的屏幕矩形：滚动偏移与 zoom transform 都已包含，
-      // 因此无论容器滚到哪里、缩放多少，选区的屏幕坐标都准确。
+      if (mode === 'live') {
+        /*
+         * 坐标系下放：画布不再猜“用户圈的是页面根节点”，而是在 iframe
+         * 内部测量真实 DOM 覆盖面积，并把结果换算成：
+         *   - target / addTarget：命中的叶子 / 最近容器（含 data-source）；
+         *   - relativeRect：圈相对父容器的局部坐标；
+         *   - documentRect：iframe 文档坐标，滚动时据此重绘。
+         * 分析是异步 postMessage；失败时回退到页面根节点，后端会按
+         * “主内容区结构锚点”定位，不会再退回文件头。
+         */
+        const seed = ++liveSelectionSeedRef.current
+        const frameRect = {
+          x: rect.x * designWidth,
+          y: rect.y * designHeight,
+          width: rect.width * designWidth,
+          height: rect.height * designHeight,
+        }
+        analyzeLiveSelection(frameRect).then((analysis) => {
+          // 用户已开始下一笔，或 iframe 已切换页面：丢弃过期结果。
+          if (liveSelectionSeedRef.current !== seed) return
+          if (!analysis || analysis.ok === false) {
+            const fallbackDocumentRect = {
+              x: frameRect.x + (Number(frameScroll.scrollX) || 0),
+              y: frameRect.y + (Number(frameScroll.scrollY) || 0),
+              width: frameRect.width,
+              height: frameRect.height,
+            }
+            onAnnotationAdd?.({
+              rect,
+              action: CREATE_NEW,
+              target: LIVE_PAGE_TARGET,
+              addTarget: LIVE_PAGE_TARGET,
+              relativeRect: rect,
+              measured: { mode: 'canvas-live-fallback' },
+              documentRect: fallbackDocumentRect,
+              frameScroll,
+              source: null,
+            })
+            return
+          }
+          onAnnotationAdd?.({
+            rect,
+            action: analysis.action,
+            target: analysis.target ?? null,
+            addTarget: analysis.addTarget ?? LIVE_PAGE_TARGET,
+            relativeRect: analysis.relativeRect ?? rect,
+            measured: analysis.measured,
+            documentRect: analysis.documentRect ?? null,
+            frameScroll: analysis.scroll ?? null,
+            // CREATE_NEW 的落点是父容器；MODIFY 的落点是命中的叶子。
+            source:
+              analysis.action === CREATE_NEW
+                ? analysis.addSource ?? null
+                : analysis.source ?? null,
+          })
+        })
+        startTargetRef.current = null
+        return
+      }
+
+      // Mock 画布与 iframe 同文档，直接测量真实 DOM 覆盖面积。
       const box = viewportRef.current.getBoundingClientRect()
       const left = box.left + rect.x * designWidth * viewport.scale
       const top = box.top + rect.y * designHeight * viewport.scale
@@ -1656,30 +1848,16 @@ function CanvasStage({
         width: rect.width * designWidth * viewport.scale,
         height: rect.height * designHeight * viewport.scale,
       }
-      // live 模式的页面在 iframe 里，画布无法跨文档读取 data-source。
-      // 圈选仍然保留为“页面区域新增”，后续由 Inspect / 预览面板精确定位。
-      const pageRoot =
-        mode === 'mock'
-          ? stageRef.current.querySelector('.mock-page')
-          : null
-      const analysis =
-        mode === 'live'
-          ? {
-              action: CREATE_NEW,
-              target: LIVE_PAGE_TARGET,
-              addTarget: LIVE_PAGE_TARGET,
-              relativeRect: rect,
-              measured: { mode: 'canvas-live' },
-            }
-          : analyzeSelection(
-              pageRoot,
-              screenRect,
-              {
-                x: left + screenRect.width / 2,
-                y: top + screenRect.height / 2,
-              },
-              viewport.scale,
-            )
+      const pageRoot = stageRef.current.querySelector('.mock-page')
+      const analysis = analyzeSelection(
+        pageRoot,
+        screenRect,
+        {
+          x: left + screenRect.width / 2,
+          y: top + screenRect.height / 2,
+        },
+        viewport.scale,
+      )
       onAnnotationAdd?.({ rect, ...analysis })
     }
     startTargetRef.current = null
@@ -1687,6 +1865,11 @@ function CanvasStage({
 
   const movingAnnotation = movingId
     ? annotations.find((item) => item.id === movingId) || null
+    : null
+  const movingDisplayRect = movingAnnotation
+    ? mode === 'live'
+      ? resolveAnnotationRect(movingAnnotation, frameScroll)
+      : movingAnnotation.rect
     : null
 
   /** 移动预览开始：只记录起点，不修改任何宽高 / left/top。 */
@@ -1884,6 +2067,13 @@ function CanvasStage({
           <div className="annotation-layer">
             {annotations.map((annotation, index) => {
               const active = annotation.id === activeAnnotationId
+              // live 画布的圈以 iframe 文档坐标保存；滚动时按当前 scroll
+              // 实时重投影，完全移出视口则隐藏。
+              const displayRect =
+                mode === 'live'
+                  ? resolveAnnotationRect(annotation, frameScroll)
+                  : annotation.rect
+              if (displayRect.visible === false) return null
               return (
                 <div
                   key={annotation.id}
@@ -1891,10 +2081,10 @@ function CanvasStage({
                   data-annotation-id={annotation.id}
                   data-annotation-index={index}
                   style={{
-                    left: `${annotation.rect.x * 100}%`,
-                    top: `${annotation.rect.y * 100}%`,
-                    width: `${annotation.rect.width * 100}%`,
-                    height: `${annotation.rect.height * 100}%`,
+                    left: `${displayRect.x * 100}%`,
+                    top: `${displayRect.y * 100}%`,
+                    width: `${displayRect.width * 100}%`,
+                    height: `${displayRect.height * 100}%`,
                     zIndex: active ? 100 : 20 + index,
                   }}
                 >
@@ -1917,15 +2107,16 @@ function CanvasStage({
               </div>
             )}
 
-            {movingAnnotation && (
+            {movingAnnotation && movingDisplayRect && (
               <div
                 className={`move-frame ${moveDragRef.current ? 'is-dragging' : ''}`}
                 data-move-frame
                 style={{
-                  left: `${movingAnnotation.rect.x * 100}%`,
-                  top: `${movingAnnotation.rect.y * 100}%`,
-                  width: `${movingAnnotation.rect.width * 100}%`,
-                  height: `${movingAnnotation.rect.height * 100}%`,
+                  left: `${movingDisplayRect.x * 100}%`,
+                  top: `${movingDisplayRect.y * 100}%`,
+                  width: `${movingDisplayRect.width * 100}%`,
+                  height: `${movingDisplayRect.height * 100}%`,
+                  display: movingDisplayRect.visible === false ? 'none' : undefined,
                   transform: `translate3d(${moveOffset.x}px, ${moveOffset.y}px, 0)`,
                   willChange: 'transform',
                 }}
@@ -1940,12 +2131,19 @@ function CanvasStage({
               </div>
             )}
 
-            {annotations.map((annotation, index) => (
+            {annotations.map((annotation, index) => {
+                const displayRect =
+                  mode === 'live'
+                    ? resolveAnnotationRect(annotation, frameScroll)
+                    : annotation.rect
+                return (
                 <AnnotationPopover
                   key={annotation.id}
                   annotation={annotation}
+                  displayRect={displayRect}
                   index={index}
-                  hidden={skipPopovers}
+                  // 完全滚出视口的圈不显示浮层，但标注数据仍保留。
+                  hidden={skipPopovers || displayRect.visible === false}
                   submitting={submitting}
                   blocked={blocked}
                   pending={pendingAnnotationId === annotation.id}
@@ -1977,7 +2175,8 @@ function CanvasStage({
                   viewportWidth={designWidth}
                   viewportHeight={designHeight}
                 />
-              ))}
+                )
+              })}
           </div>
 
           {/* 画布模式下的 Inspect 高亮：位于 canvas-viewport 内部，直接使用
