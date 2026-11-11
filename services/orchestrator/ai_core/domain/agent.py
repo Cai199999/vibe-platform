@@ -95,9 +95,19 @@ class AnnotationEnvelope(CamelModel):
     #   - MODIFY_EXISTING：修改、移动或重新定位已有元素。
     #   - MOVE：直接拖拽产生的确定性位移。payload.move 携带累计 dx/dy
     #     与选择器，UI Graph 不再调用规划模型，直接走 move_component Tool。
+    #   - BATCH_MOVE：用户连续拖拽多个组件后统一提交。payload.moves 是
+    #     [{source, file, selector, dx, dy}] 数组，Coder 一次生成合并补丁，
+    #     避免多个 Run 并发写同一文件。
     # 旧客户端仍发送 MODIFY / ADD，领域层通过 actions.normalize_action()
     # 统一语义，避免历史数据失效。
-    action: Literal["MODIFY", "ADD", "CREATE_NEW", "MODIFY_EXISTING", "MOVE"] = "MODIFY"
+    action: Literal[
+        "MODIFY",
+        "ADD",
+        "CREATE_NEW",
+        "MODIFY_EXISTING",
+        "MOVE",
+        "BATCH_MOVE",
+    ] = "MODIFY"
     world_target: dict[str, Any] = Field(default_factory=dict)
     # ADD 专用：圈选区域相对“最近 data-source 父容器”的位置。
     # 契约同时包含两套坐标：

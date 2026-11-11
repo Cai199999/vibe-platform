@@ -244,15 +244,19 @@ export default function ScaledPreview({
    * 只改 translate，不触发 layout；最终位置仍以后端写入的 CSS 为准。
    */
   useEffect(() => {
-    if (!dragFeedback?.selector || !readyRef.current) return
-    sendInspect(
-      message('drag-apply', {
-        token: dragFeedback.token,
-        selector: dragFeedback.selector,
-        x: Number(dragFeedback.inlineX) || 0,
-        y: Number(dragFeedback.inlineY) || 0,
-      }),
-    )
+    if (!dragFeedback?.items?.length || !readyRef.current) return
+    // 批量布局：一次补齐所有未保存组件的临时位移，而不是只跟最后一个。
+    dragFeedback.items.forEach((item) => {
+      if (!item?.selector) return
+      sendInspect(
+        message('drag-apply', {
+          token: item.token,
+          selector: item.selector,
+          x: Number(item.inlineX) || 0,
+          y: Number(item.inlineY) || 0,
+        }),
+      )
+    })
     // sendInspect 只做 postMessage；按 nonce 驱动一次同步。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dragFeedback?.nonce])

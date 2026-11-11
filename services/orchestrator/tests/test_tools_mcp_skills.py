@@ -22,6 +22,7 @@ from pathlib import Path
 
 from ai_core.agent.graph import (
     AgentGraphRunner,
+    _explicit_batch_moves,
     _explicit_move_offset,
     _extract_research_query,
     _is_explicit_move_batch,
@@ -291,6 +292,142 @@ class DirectDragMoveTest(unittest.TestCase):
                 ]
             )
         )
+
+    def test_batch_move_envelope_is_deterministic(self) -> None:
+        envelope = AnnotationEnvelope.model_validate(
+            {
+                "annotationId": "ann_layout_1",
+                "type": "drag",
+                "action": "BATCH_MOVE",
+                "target": {"selector": '[data-source="cta"]'},
+                "payload": {
+                    "moves": [
+                        {
+                            "source": "src/App.jsx:12",
+                            "file": "src/App.jsx",
+                            "selector": '[data-source="cta"]',
+                            "dx": 10,
+                            "dy": 20,
+                        },
+                        {
+                            "source": "src/App.jsx:18",
+                            "file": "src/App.jsx",
+                            "selector": '[data-source="hero"]',
+                            "dx": -50,
+                            "dy": 0,
+                        },
+                    ]
+                },
+            }
+        )
+        self.assertEqual(envelope.action, "BATCH_MOVE")
+        # 业务语义仍是“修改已有元素”，不会被误判为新增组件。
+        self.assertTrue(envelope.is_modify_existing)
+        moves = _explicit_batch_moves(envelope.model_dump(mode="json"))
+        self.assertIsNotNone(moves)
+        assert moves is not None
+        self.assertEqual(
+            [move["selector"] for move in moves],
+            [
+                '[data-source="cta"]',
+                '[data-source="hero"]',
+            ],
+        )
+        self.assertTrue(_is_explicit_move_batch([envelope.model_dump(mode="json")]))
+
+    def test_batch_move_rejects_invalid_move_records(self) -> None:
+        base = {
+            "action": "BATCH_MOVE",
+            "payload": {
+                "moves": [
+                    {
+                        "selector": '[data-source="cta"]',
+                        "dx": 10,
+                        "dy": 20,
+                    }
+                ]
+            },
+        }
+        self.assertIsNotNone(_explicit_batch_moves(base))
+        self.assertIsNone(_explicit_batch_moves({**base, "payload": {"moves": []}}))
+        self.assertIsNone(
+            _explicit_batch_moves(
+                {
+                    **base,
+                    "payload": {
+                        "moves": [
+                            {"selector": "", "dx": 10, "dy": 20},
+                        ]
+                    },
+                }
+            )
+        )
+        self.assertIsNone(
+            _explicit_batch_moves(
+                {
+                    **base,
+                    "payload": {
+                        "moves": [
+                            {"selector": '[data-source="cta"]', "dx": 9999, "dy": 0},
+                        ]
+                    },
+                }
+            )
+        )
+
+    def test_batch_move_tool_emits_one_combined_patch(self) -> None:
+        runner, events = self._runner()
+        annotation = {
+            "annotationId": "ann_layout_2",
+            "action": "BATCH_MOVE",
+            "target": {
+                "selector": '[data-source="cta"]',
+                "source": {"file": "src/App.jsx"},
+            },
+            "payload": {
+                "moves": [
+                    {
+                        "source": "src/App.jsx:12",
+                        "file": "src/App.jsx",
+                        "selector": '[data-source="cta"]',
+                        "dx": 10,
+                        "dy": 20,
+                    },
+                    {
+                        "source": "src/App.jsx:18",
+                        "file": "src/App.jsx",
+                        "selector": '[data-source="hero"]',
+                        "dx": -50,
+                        "dy": 0,
+                    },
+                ]
+            },
+        }
+        result = runner._try_move_tool(
+            {"run_id": "run_layout", "target_files": ["src/App.jsx"]},
+            [annotation],
+            {"src/App.jsx": self.APP},
+            0,
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        generated = result["generated_files"]["src/App.jsx"]
+        # 两个组件必须写进同一份文件、同一次补丁。
+        self.assertIn('[data-source="cta"]', generated)
+        self.assertIn("translate3d(10.00px,20.00px,0)", generated)
+        self.assertIn('[data-source="hero"]', generated)
+        self.assertIn("translate3d(-50.00px,0.00px,0)", generated)
+        self.assertEqual(list(result["generated_files"]), ["src/App.jsx"])
+        patch_events = [
+            payload for event, payload, _kwargs in events if event == "patch.proposed"
+        ]
+        self.assertEqual(len(patch_events), 1)
+        progress = [
+            payload["message"]
+            for event, payload, _kwargs in events
+            if event == "node.progress"
+        ]
+        self.assertTrue(any("批量布局" in item for item in progress))
 
     def test_move_tool_uses_payload_offset_without_text(self) -> None:
         runner, events = self._runner()

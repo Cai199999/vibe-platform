@@ -20,7 +20,7 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒；中间�
 - **体验断层修复（六项）**：契约确认后对话栏常驻、可追加需求并走同一契约 REVISE；Inspect 在 live 画布可用；全栈前后端共用 collectionPath（不再猜 `/stream`）；侧边栏按路由真实切换内容；拖拽痕仅在画布、展示区渲染最终代码；移动改为 `move_component` Tool，只写 `transform: translate3d`，拖拽仅转自然语言指令。
 - **企业级升级（五问题）**：画布完整 flex 链 + 自适应缩放，Tab 激活强制重算并重载 iframe；`管理 Agent` 支持内置锁定、AgentBuilder 新建/删除、知识库 `.md/.txt` 上传；Architect 强制交互澄清，前端按契约生成真实 onClick + Loading/Error/Success；新增 `ConsistencyVerifier`，构建前比对前端 Method/Path/Payload 与后端实际路由，缺失路由回传 BackendCoder 自愈（最多 2 次），耗尽才阻断。
 - **Phase B 交互闭环**：画布/预览固定 1440×900 + 文档原生滚动；焦点模型——点击页面进网页焦点（滚轮滚页面），点击画布空白回画布焦点（滚轮缩放），中键/空格始终平移；SDK 补发真实滚动快照，双屏同步 scroll-to，并在预览重放 click 使 React 状态一致；Architect 双 Tab（架构确认/影子助手），影子 LLM 只读问答 + 顶部不可关闭待答 Banner + 生成门禁。
-- **直接拖拽静默同步**：SDK 接管 pointer 手势，拖拽期间只写内联 `translate`（零 API）；宿主 300ms 防抖合并后以 `action=MOVE`（携带 dx/dy/selector）静默派发 `ui_graph`，后端确定性调用 `move_component` 只写 `transform: translate3d` 并经 Vite HMR 生效；成功后清内联位移与记录，失败/超时回滚到拖前位置并 Toast；同步期间保持画布焦点与拖拽模式并显示“代码同步中...”。E2E 覆盖防抖累计、二次叠加与失败回滚。
+- **批量拖拽与统一提交**：SDK 手势只写内联 `translate`（零 API）；松手只更新前端 `pendingLayoutChanges`（projectId → Map<selector, {source,dx,dy}>），不再防抖提交。悬浮条显示“已修改 X 个组件位置”，支持【撤销】（清空草稿并恢复 DOM 原位）与【保存布局】。保存时打包单个 `action=BATCH_MOVE, payload.moves[]`；后端 `_is_explicit_move_batch` 跳过 RAG/Planner，确定性 `move_component` 一次生成合并补丁；成功清空草稿并 Toast“布局已同步”，失败/超时保留全部草稿供重试。
 - **全栈语义路由自愈**：BackendCoder 为契约每个业务动作（抓取/改写/投递/对话等）注册独立 Express 路由并生成 Mock 处理，不再折叠为通用 CRUD；`api-routes.json.routes` 记录全部实际路由；一致性 FixAction 只让后端补路由，绝不改前端到无关接口；LangGraph `ConsistencyVerifier -> BackendCoder -> ConsistencyVerifier` 自愈最多 2 次。280 tests 通过，真实 Node 服务四端点均 201。
 - **Architect 面板收尾**：移除架构确认/随意提问双 Tab，主状态机与影子助手问答合并为统一时间轴，正式提问高亮；正式推进只保留正文“追加修改需求…”，底部仅保留只读助手输入（标题已删），提问绝不触发决策；全栈 SUCCEEDED 且一致性通过后成功卡一键导出 tar.gz。E2E 覆盖路由隔离与真实下载。
 - **全栈产物验收**：新增 `scripts/acceptance_test.py`，生成→导出→安全解压→校验三件套→前后端路由比对→纯净容器 npm build→无 DB env 跑通 SQLite CRUD；生成 Dockerfile 已改为保留 `server/` 层级，修复 `/data` EACCES。
@@ -32,7 +32,7 @@ React+Vite → Java BFF → Python FastAPI/LangGraph → Docker 沙盒；中间�
 - **混合 RAG（2026-11-11）**：本地 `chromadb` PersistentClient + ONNX MiniLM（镜像预热、离线可用）；`HybridRAGProvider` 并行跑 BM25 与向量、RRF(k=60) 融合、单路故障降级；Architect/Planner 默认切到 `hybrid`，Planner 结果写入 `rag_context/rag_citations`。新增《企业内部安全开发规范与 JWT 鉴权指南》；演示两问 Top-3 精准命中 OAuth 2.1 / 15 分钟；316 单测全绿。
 - **M3 收尾（2026-11-11）**：根 README 重写为“双核架构 / 多智能体 / Hybrid RAG / 沙盒自愈 / 全栈交付”并附 Mermaid 全局图；新增 `docs/INTERVIEW_GUIDE.md`（5 个踩坑与自愈案例）；预留 `EMBEDDING_MODEL` 供 BGE-M3 升级。
 - **M3 交互与专家激活（2026-11-11）**：`backend_coder` / `dba_agent` 转 available，路由新增后端 / DBA 动作词并派发 FullstackGraph `backend` / `dba` 子图；前端支持 `handoff_agent` 与按 runId 挂载事件流。画布恢复双态指针：中键平移经 iframe SDK → 父页面遮罩持续追踪，拖拽期间锁定 `dragArmed`，SDK 不再用 `buttons` 误取消。FrontendCoder Prompt 强制响应式 Grid；BackendCoder Prompt 强制完整 AST 节点 / 全文件替换。新增 `frontend_ui_ecosystem` Skill（lucide-react/clsx）与 `knowledge/backend_docs` Hybrid RAG。322 单测 + 前端 build 全绿。
-- **真实模型体验专项（2026-11-11）**：Planner/Architect 温度固定 0.1，Prompt 限制每轮最多 2 问且必须 A/B/C；Coder 30s 硬超时熔断，JSON 重试降为 1 次（共 2 次），失败直接 `FAILED` 并返回“由于代码结构复杂，AI 生成超时，请尝试缩小标注范围”，不再进入构建自愈死循环；拖拽 300ms 防抖 + 失败强制解除“代码同步中”；Planner/Coder/Architect 节点接入 token SSE 与前端打字机，Supervisor 保持规则路由。325 单测 + 前端 build 全绿。
+- **真实模型体验专项（2026-11-11）**：Planner/Architect 温度固定 0.1，Prompt 限制每轮最多 2 问且必须 A/B/C；Coder 30s 硬超时熔断，JSON 重试降为 1 次（共 2 次），失败直接 `FAILED` 并返回“由于代码结构复杂，AI 生成超时，请尝试缩小标注范围”，不再进入构建自愈死循环；拖拽改为批量提交（见上）；Planner/Coder/Architect 节点接入 token SSE 与前端打字机，Supervisor 保持规则路由。331 单测 + 前端 build 全绿。
 
 ### Embedding 升级预留（BGE-M3）
 

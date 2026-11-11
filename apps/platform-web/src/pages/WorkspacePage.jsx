@@ -47,12 +47,9 @@ import { INITIAL_APP } from '../mockProject.js'
 
 const TARGET_FILE = 'src/App.jsx'
 const MAX_ANNOTATIONS = 3
-// 直接拖拽的静默同步超时：Coder 已在后端 30s 熔断，这里留出构建与
-// HMR 的余量；超过后前端必须回滚视觉位置，不能无限等待。
-const MOVE_SYNC_TIMEOUT_MS = 60000
-// 松手后只提交一次最终位移；300ms 足以合并连续微调手势。
-const MOVE_SYNC_DEBOUNCE_MS = 300
-const MOVE_BATCH_LIMIT = 3
+// 批量布局提交超时：Coder 已在后端 30s 熔断，这里留出合并补丁、
+// 构建与 HMR 的余量；超时后保留用户草稿，不能回滚视觉位置。
+const LAYOUT_SYNC_TIMEOUT_MS = 60000
 
 /** Promise + 超时竞速；超时返回 `{ timedOut: true }`，不拒绝。 */
 function raceWithTimeout(promise, ms) {
@@ -387,14 +384,31 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
   // 直接拖拽使用独立的 MOVE 语义：目标、累计位移都来自 SDK 的几何事实，
   // 不需要 LLM 解析自然语言。其余动作仍走旧别名归一化。
   const rawAction = String(entry.action || '').toUpperCase()
+  const isBatchMove = rawAction === 'BATCH_MOVE'
   const isMove = rawAction === 'MOVE'
   // 旧 localStorage 里的标注没有 action：按指令与几何判定即时推断。
   // 有 action 时统一归一化，旧 ADD / MODIFY 也在这里升级。
-  const action = isMove
-    ? 'MOVE'
-    : entry.action
-      ? normalizeAction(entry.action)
-      : inferAnnotationAction(entry.target, instruction, entry.geometryAction)
+  const action = isBatchMove
+    ? 'BATCH_MOVE'
+    : isMove
+      ? 'MOVE'
+      : entry.action
+        ? normalizeAction(entry.action)
+        : inferAnnotationAction(entry.target, instruction, entry.geometryAction)
+  // 批量布局：一个 Envelope 携带 N 条选择器 + 累计偏移，Coder 一次合并。
+  const moveBatch = isBatchMove
+    ? (entry.moveBatch ?? [])
+        .map((move) => ({
+          source: move.source || move.selector || '',
+          file: move.file || targetFile,
+          selector: move.selector || '',
+          label: move.label || '组件',
+          dx: Math.round(Number(move.dx) || 0),
+          dy: Math.round(Number(move.dy) || 0),
+          token: move.token ?? null,
+        }))
+        .filter((move) => move.selector)
+    : []
   // CREATE_NEW 的目标必须是“最近 data-source 父容器”，由 CanvasStage 在
   // 圈选时计算；只命中叶子时不能把新增 JSX 塞进 button / p / h1。
   // MODIFY_EXISTING 没有命中元素时才回退到默认 CTA，保持旧行为。
@@ -426,7 +440,14 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
     ? sourceLines.slice(startLine - 1, endLine).join('\n')
     : sourceText
   const moveOffset = isMove ? entry.moveOffset ?? null : null
-  const acceptance = isMove
+  const acceptance = isBatchMove
+    ? [
+        `按 payload.moves 一次调整 ${moveBatch.length} 个组件的累计偏移`,
+        '每个组件只允许追加 transform: translate3d(dx,dy,0)，禁止修改 width / height / left / top',
+        '必须合并为同一份全量文件补丁，禁止分多次写文件',
+        '其余布局、文案与交互保持不变',
+      ]
+    : isMove
     ? [
         `把${target?.label || '目标组件'}移动到累计偏移 (${Math.round(Number(moveOffset?.dx) || 0)}, ${Math.round(Number(moveOffset?.dy) || 0)}) px`,
         '只允许追加 transform: translate3d(dx,dy,0)，禁止修改 width / height / left / top',
@@ -451,7 +472,7 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
     annotationId: entry.id,
     // visual-draw = 精准点击选择；drag = 圈选 / 直接拖拽。后端都按 UI
     // 标注处理，保留 type 便于审计与后续差异化策略。
-    type: !isMove && precise ? 'visual-draw' : 'drag',
+    type: !isMove && !isBatchMove && precise ? 'visual-draw' : 'drag',
     action,
     worldTarget: {
       x: Number(rect.x.toFixed(6)),
@@ -528,7 +549,13 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
       // 直接拖拽：dx / dy 是相对组件原始位置的累计偏移（不是本次手势
       // 增量）。后端 _try_move_tool 直接读取它调用 move_component，
       // 不再让模型从自然语言里猜方向与距离。
-      ...(isMove && moveOffset
+      ...(isBatchMove && moveBatch.length
+        ? {
+            // 任务三协议：多个组件一次性提交；Coder 只生成一份合并补丁。
+            // 每项都带 selector（Tool 入参）与 source（审计标识）。
+            moves: moveBatch,
+          }
+        : isMove && moveOffset
         ? {
             // 顶层 dx / dy 是协议约定字段；move 子对象携带选择器与 token，
             // 方便后端确定性 Tool 与前端回滚精确定位。
@@ -1074,11 +1101,17 @@ export default function WorkspacePage() {
   const closedAnnotationsRef = useRef(new Map())
   // 按 projectId:annotationId 维度持有 AbortController，关闭浮层即中止。
   const annotationAbortRef = useRef(new Map())
-  // 直接拖拽：每个项目独立防抖队列 / 已提交累计位移 / 回滚与提交信号。
-  // pending: projectId -> Map<selector, {payload, base, next, token, ...}>
-  const dragPendingRef = useRef(new Map())
-  const dragTimersRef = useRef(new Map())
-  // 已成功写入代码的累计位移，下一次拖拽在此基础上叠加。
+  // 直接拖拽：松手只更新草稿，不自动发起模型调用。
+  // pendingLayoutChangesRef: projectId -> Map<selector, {
+  //   selector, source, dx, dy, next, token, payload, ...
+  // }>
+  // dx / dy 是相对组件原始位置的累计偏移；同一组件多次拖动会覆盖同一条。
+  const pendingLayoutChangesRef = useRef(new Map())
+  // 渲染层快照：projectId -> 草稿数组，悬浮操作条据此显示数量。
+  const [pendingLayoutChanges, setPendingLayoutChanges] = useState({})
+  // 防止【保存布局】在 React 下一次渲染前被双击触发两次 Run。
+  const layoutSaveInflightRef = useRef(new Set())
+  // 已成功写入代码的累计位移；保存成功前绝不更新，失败才能保留草稿。
   const dragCommittedRef = useRef(new Map())
   const dragSeqRef = useRef(0)
   const [dragRollbacks, setDragRollbacks] = useState({})
@@ -1137,10 +1170,8 @@ export default function WorkspacePage() {
       annotationAbortRef.current.clear()
       snapshotDiffAbortRef.current.forEach((controller) => controller.abort())
       snapshotDiffAbortRef.current.clear()
-      // 未触发的拖拽防抖必须取消，避免卸载后仍发起静默 Run。
-      dragTimersRef.current.forEach((timer) => window.clearTimeout(timer))
-      dragTimersRef.current.clear()
-      dragPendingRef.current.clear()
+      // 组件卸载后丢弃所有未保存的布局草稿。
+      pendingLayoutChangesRef.current.clear()
     }
   }, [])
 
@@ -3141,16 +3172,21 @@ export default function WorkspacePage() {
   }
 
   /**
-   * 直接拖拽的最终出口（业界标准的「直接操作 + 后台静默同步」）。
+   * 批量拖拽 = 「本地草稿 + 用户统一提交」。
    *
-   * SDK 只负责手势与临时 translate，这里负责：
-   *   1. 计算相对组件原始位置的累计偏移（同一组件多次拖拽可叠加）；
-   *   2. 立即 Toast 告知已接管，500ms 防抖只提交最后一次位置；
-   *   3. 以标准 AnnotationEnvelope（action=MOVE, payload.move）静默提交，
-   *      不占用聊天输入框，也不要求用户再点发送；
-   *   4. 终态失败 / 超时由 dragRollbacks 还原 iframe 内的临时位移。
+   * SDK 只负责手势与临时 translate；松手不再触发任何 API。用户连续
+   * 调整多个组件后点【保存布局】，前端把全部累计位移合并成一个
+   * action=BATCH_MOVE 的 AnnotationEnvelope：
+   *   - 后端只跑一次 Coder，生成一份合并补丁，避免多线程写同一文件；
+   *   - 失败 / 超时保留草稿，用户可以直接重试；
+   *   - 只有成功落盘后才清空草稿并更新已提交基线。
    */
-  const triggerDragRollback = (projectId, items, message) => {
+  const triggerDragRollback = (
+    projectId,
+    items,
+    message,
+    kind = 'error',
+  ) => {
     if (!items?.length) return
     setDragRollbacks((previous) => ({
       ...previous,
@@ -3159,7 +3195,22 @@ export default function WorkspacePage() {
         items,
       },
     }))
-    showToast('error', message || '代码同步失败，位置已还原')
+    showToast(kind, message || '代码同步失败，位置已还原')
+  }
+
+  /** 把 ref 中的草稿同步到 React state，供悬浮操作条计数。 */
+  const publishPendingLayoutChanges = (projectId) => {
+    if (!workspaceMountedRef.current) return
+    const pending = pendingLayoutChangesRef.current.get(projectId)
+    setPendingLayoutChanges((previous) => {
+      const next = { ...previous }
+      if (pending?.size) {
+        next[projectId] = [...pending.values()]
+      } else {
+        delete next[projectId]
+      }
+      return next
+    })
   }
 
   const moveOffsetText = (dx, dy) => {
@@ -3181,45 +3232,83 @@ export default function WorkspacePage() {
     }
   }
 
-  const buildMoveEntry = (project, item) => {
-    const source = item.payload.source || {}
-    const file = source.file || projectEntryFile(project)
-    const selector =
-      item.selector ||
-      (source.file
-        ? `[data-source="${source.file}:${source.line || 1}:${
-            source.column || 1
-          }"]`
-        : '')
-    const label = source.component || source.tag || '组件'
+  /** 根据 SDK 回传的 source 信息生成稳定选择器兜底。 */
+  const moveSelector = (payload) => {
+    const source = payload?.source || {}
+    if (source.file) {
+      return `[data-source="${source.file}:${source.line || 1}:${
+        source.column || 1
+      }"]`
+    }
+    return payload?.selector || ''
+  }
+
+  /**
+   * 把一组草稿打包成单个 BATCH_MOVE 标注。
+   *
+   * 后端只接收一个 AnnotationEnvelope，因此不受“一次最多 3 个标注”的
+   * 限制；payload.moves 中每条 record 都携带选择器与累计偏移，Coder
+   * 可以一次生成包含全部 CSS 规则的合并补丁。
+   */
+  const buildBatchMoveEntry = (project, items) => {
+    const first = items[0]
+    const firstSource = first.payload.source || {}
+    const file = firstSource.file || projectEntryFile(project)
+    const selector = first.selector || moveSelector(first.payload)
+    const label = firstSource.component || firstSource.tag || '组件'
+    const moves = items.map((item) => {
+      const source = item.payload.source || {}
+      const itemFile = source.file || file
+      const itemSelector = item.selector || moveSelector(item.payload)
+      return {
+        // source 是审计用的稳定标识；selector 才是 Tool 的真实入参。
+        source: source.file
+          ? `${source.file}:${source.line || 1}`
+          : itemSelector,
+        file: itemFile,
+        selector: itemSelector,
+        label: source.component || source.tag || '组件',
+        dx: Math.round(item.next.x),
+        dy: Math.round(item.next.y),
+        token: item.token,
+      }
+    })
     dragSeqRef.current += 1
     return {
-      id: `move_${Date.now().toString(36)}_${dragSeqRef.current}`,
-      action: 'MOVE',
+      id: `layout_${Date.now().toString(36)}_${dragSeqRef.current}`,
+      action: 'BATCH_MOVE',
       type: 'drag',
-      intent: `把「${label}」${moveOffsetText(
-        Math.round(item.next.x),
-        Math.round(item.next.y),
-      )}移动（只改位置，不要改宽高）`,
-      rect: dragRect(item.payload),
+      // 人类可读摘要仍保留，便于 Run 时间轴与聊天记录审计。
+      intent: `统一调整 ${moves.length} 个组件位置：${items
+        .map((item) => {
+          const source = item.payload.source || {}
+          const name = source.component || source.tag || '组件'
+          return `「${name}」${moveOffsetText(
+            Math.round(item.next.x),
+            Math.round(item.next.y),
+          )}`
+        })
+        .join('；')}（只改位置，不要改宽高）`,
+      rect: dragRect(first.payload),
       target: {
-        marker: source.marker || '',
+        marker: firstSource.marker || '',
         selector,
         label,
-        role: source.tag || 'element',
-        component: source.component || 'App',
-        tag: source.tag || 'div',
+        role: firstSource.tag || 'element',
+        component: firstSource.component || 'App',
+        tag: firstSource.tag || 'div',
       },
       inspectSource: {
         file,
-        line: Number(source.line) || 1,
-        column: Number(source.column) || 1,
-        component: source.component || 'App',
-        sourceKind: source.sourceKind || 'jsx',
-        marker: source.marker || '',
+        line: Number(firstSource.line) || 1,
+        column: Number(firstSource.column) || 1,
+        component: firstSource.component || 'App',
+        sourceKind: firstSource.sourceKind || 'jsx',
+        marker: firstSource.marker || '',
       },
-      moveOffset: { dx: Math.round(item.next.x), dy: Math.round(item.next.y) },
-      moveToken: item.token,
+      // buildAnnotation 会原样转成 payload.moves；不要塞进 payload.move，
+      // 那是单组件 MOVE 的旧协议。
+      moveBatch: moves,
       createdAt: new Date().toISOString(),
     }
   }
@@ -3252,108 +3341,150 @@ export default function WorkspacePage() {
     })
   }
 
-  const flushComponentDrags = async (projectId) => {
-    const pending = dragPendingRef.current.get(projectId)
-    dragPendingRef.current.delete(projectId)
-    if (!pending || pending.size === 0) return
+  /** 【撤销】清空草稿，并把所有组件的 DOM 内联位移恢复原位。 */
+  const handleUndoLayout = (projectId) => {
+    const pending = pendingLayoutChangesRef.current.get(projectId)
+    if (!pending?.size) return
+    if (dragSyncStates[projectId]) return
+    const items = [...pending.values()].map((item) => ({
+      token: item.token,
+      selector: item.selector,
+    }))
+    pendingLayoutChangesRef.current.delete(projectId)
+    publishPendingLayoutChanges(projectId)
+    triggerDragRollback(
+      projectId,
+      items,
+      `已撤销 ${items.length} 个组件的位置调整`,
+      'info',
+    )
+  }
+
+  /**
+   * 【保存布局】一次 Run 提交所有草稿。
+   *
+   * 只有后端成功（补丁已应用且构建通过）才清空 pending；超时 / 失败
+   * 一律保留草稿和内联视觉位置，用户可以直接重试。
+   */
+  const handleSaveLayout = async (projectId) => {
+    const pending = pendingLayoutChangesRef.current.get(projectId)
+    if (!pending?.size) return
+    if (layoutSaveInflightRef.current.has(projectId)) return
     const project = projects.find((item) => item.id === projectId)
+    const run = runStates[projectId] ?? EMPTY_RUN
     if (!project) return
-
-    const all = [...pending.values()]
-    // 一次 Run 最多 3 个标注；超出的旧拖拽没有提交，必须还原。
-    const overflow = all.slice(0, Math.max(0, all.length - MOVE_BATCH_LIMIT))
-    const batch = all.slice(-MOVE_BATCH_LIMIT)
-    overflow.forEach((item) => {
-      dragCommittedRef.current.set(
-        `${projectId}::${item.selector}`,
-        item.base,
-      )
-    })
-    if (overflow.length) {
-      triggerDragRollback(
-        projectId,
-        overflow.map((item) => ({
-          token: item.token,
-          selector: item.selector,
-        })),
-        '一次最多同步 3 个组件，其余位置已还原',
-      )
+    if (!run.result?.sandboxId) {
+      showToast('error', '当前页面尚未生成代码，布局草稿已保留')
+      return
     }
-    if (batch.length === 0) return
+    if (
+      run.submitting ||
+      run.clarification ||
+      run.approval ||
+      inflightRef.current.has(projectId) ||
+      gateIsActive(projectId)
+    ) {
+      showToast('info', '当前有任务执行中，布局草稿已保留，请稍后重试')
+      return
+    }
 
-    const entries = batch.map((item) => buildMoveEntry(project, item))
-    const message = entries.map((entry) => entry.intent).join(' / ')
+    const batch = [...pending.values()]
+    const entry = buildBatchMoveEntry(project, batch)
+    layoutSaveInflightRef.current.add(projectId)
     setDragSyncStates((previous) => ({
       ...previous,
       [projectId]: true,
     }))
-    const submission = submitViaSupervisor(projectId, {
-      message,
-      annotations: entries,
-      scopeHint: 'ui',
-      // 拖拽是确定性的几何事实，直接交给 UI Agent，不再经过意图猜测。
-      targetAgent: 'ui_graph',
-      // 静默同步不能让人工审批打断；失败由前端回滚。
-      requireManualApproval: false,
-      // 不抢焦点：用户还在画布上拖拽，不能被切到预览面板。
-      switchToPreview: false,
-    })
-    const outcome = await raceWithTimeout(submission, MOVE_SYNC_TIMEOUT_MS)
-    // 必须等 submitting=false 真正渲染后再解除，避免中间帧退出拖拽模式。
-    releaseDragSync(projectId)
-    const restore = () => {
-      batch.forEach((item) => {
-        dragCommittedRef.current.set(
-          `${projectId}::${item.selector}`,
-          item.base,
-        )
+    try {
+      const submission = submitViaSupervisor(projectId, {
+        message: entry.intent,
+        annotations: [entry],
+        scopeHint: 'ui',
+        // 拖拽是确定性的几何事实，直接交给 UI Agent，不再经过意图猜测。
+        targetAgent: 'ui_graph',
+        // 批量布局同步不能让人工审批打断；失败由前端保留草稿。
+        requireManualApproval: false,
+        // 不抢焦点：用户仍在画布上调整布局。
+        switchToPreview: false,
       })
-    }
-    const rollbackItems = batch.map((item) => ({
-      token: item.token,
-      selector: item.selector,
-    }))
+      const outcome = await raceWithTimeout(
+        submission,
+        LAYOUT_SYNC_TIMEOUT_MS,
+      )
+      // 成功路径等 submitting=false 真正渲染后再解除，避免中间帧退出拖拽模式。
+      releaseDragSync(projectId)
 
-    if (outcome?.timedOut) {
-      // 超时后 Run 可能仍在构建：尽力取消，避免稍后 HMR 把已回滚的位置
-      // 再次改掉。
-      const runId = runStatesRef.current?.[projectId]?.runId
-      if (runId) cancelRunSilently(runId)
-      restore()
-      triggerDragRollback(projectId, rollbackItems, '代码同步超时，位置已还原')
+      if (outcome?.timedOut) {
+        // 超时后后端 Run 可能仍在写代码：尽力取消，避免稍后 HMR 覆盖草稿。
+        const runId = runStatesRef.current?.[projectId]?.runId
+        if (runId) cancelRunSilently(runId)
+        clearDragSync(projectId)
+        showToast('error', '布局同步超时，草稿已保留，可稍后重试')
+        return
+      }
+
+      if (outcome?.ok) {
+        // 提交成功：更新已提交基线，后续拖拽在此基础上继续叠加。
+        batch.forEach((item) => {
+          dragCommittedRef.current.set(
+            `${projectId}::${item.selector}`,
+            item.next,
+          )
+        })
+        // 只移除本次快照里的条目；若保存期间又产生了新草稿（极端竞态），
+        // 保留它们，不能把用户刚拖的内容一起清掉。
+        const current = pendingLayoutChangesRef.current.get(projectId)
+        if (current) {
+          batch.forEach((item) => {
+            if (current.get(item.selector) === item) {
+              current.delete(item.selector)
+            }
+          })
+          if (current.size === 0) {
+            pendingLayoutChangesRef.current.delete(projectId)
+          }
+        }
+        publishPendingLayoutChanges(projectId)
+        setDragCommits((previous) => ({
+          ...previous,
+          [projectId]: {
+            nonce: (previous[projectId]?.nonce ?? 0) + 1,
+            // 同一 selector 多次拖动只保留最新 token；SDK 的 rollback /
+            // commit 记录本身也会按 selector 合并到最早基线。
+            items: batch.map((item) => ({
+              token: item.token,
+              selector: item.selector,
+            })),
+          },
+        }))
+        showToast('success', '布局已同步')
+        return
+      }
+
+      // 失败：不 rollback、不清空 pending，保留用户的全部拖拽草稿。
       clearDragSync(projectId)
-      return
+      showToast('error', '布局同步失败，草稿已保留，可稍后重试')
+    } finally {
+      layoutSaveInflightRef.current.delete(projectId)
     }
-    if (outcome?.ok) {
-      setDragCommits((previous) => ({
-        ...previous,
-        [projectId]: {
-          nonce: (previous[projectId]?.nonce ?? 0) + 1,
-          items: batch.map((item) => ({
-            token: item.token,
-            selector: item.selector,
-          })),
-        },
-      }))
-      showToast('success', '位置已同步到代码')
-      return
-    }
-    restore()
-    triggerDragRollback(projectId, rollbackItems)
-    clearDragSync(projectId)
   }
 
-  /** SDK 松手回调：先乐观记录，再 300ms 防抖提交最后一次位置。 */
+  /**
+   * SDK 松手回调：只更新本地草稿，不发任何请求。
+   *
+   * 同一组件再次拖动时，在 pending 的累计偏移上叠加；这样 SDK 的内联
+   * translate 与草稿中的 dx/dy 始终一致。已提交基线只在保存成功后更新。
+   */
   const handleComponentDragEnd = (projectId, payload) => {
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
     if (!project || !payload?.selector) return
-    // 没有沙盒就没有可写入的代码，直接还原并提示。
+    // 没有沙盒就没有可写入的代码，直接还原本次手势并提示。
     if (!run.result?.sandboxId) {
       triggerDragRollback(
         projectId,
         [{ token: payload.token, selector: payload.selector }],
-        '当前页面尚未生成代码，无法同步位置',
+        '当前页面尚未生成代码，无法调整布局',
       )
       return
     }
@@ -3367,38 +3498,56 @@ export default function WorkspacePage() {
       triggerDragRollback(
         projectId,
         [{ token: payload.token, selector: payload.selector }],
-        '当前有任务执行中，位置未同步',
+        '当前有任务执行中，本次拖拽已还原',
       )
       return
     }
     const dx = Math.round(Number(payload.dx) || 0)
     const dy = Math.round(Number(payload.dy) || 0)
-    if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return
+    // SDK 已用 4px 阈值过滤误触；这里不再二次丢弃，否则内联位移和
+    // 草稿偏移会出现 1~2px 的不一致。
 
     const selector = payload.selector
     const key = `${projectId}::${selector}`
-    const base = dragCommittedRef.current.get(key) || { x: 0, y: 0 }
-    const next = { x: base.x + dx, y: base.y + dy }
-    dragCommittedRef.current.set(key, next)
-
     const pending =
-      dragPendingRef.current.get(projectId) || new Map()
-    pending.set(selector, { payload, selector, base, next, token: payload.token })
-    dragPendingRef.current.set(projectId, pending)
-    showToast('info', '位置已更新，Agent 正在同步代码...')
-
-    const existing = dragTimersRef.current.get(projectId)
-    if (existing) window.clearTimeout(existing)
-    const timer = window.setTimeout(() => {
-      dragTimersRef.current.delete(projectId)
-      void flushComponentDrags(projectId)
-    }, MOVE_SYNC_DEBOUNCE_MS)
-    dragTimersRef.current.set(projectId, timer)
+      pendingLayoutChangesRef.current.get(projectId) || new Map()
+    const previous = pending.get(selector)
+    // 第一次拖动：已提交基线 + 本次手势；已有草稿：草稿累计 + 本次手势。
+    // 绝不能用 dragCommittedRef 直接叠加，否则同一组件第二次拖动会丢失
+    // 第一次草稿的位移。
+    const base =
+      previous?.next ??
+      dragCommittedRef.current.get(key) ?? { x: 0, y: 0 }
+    const next = {
+      x: Math.round(base.x + dx),
+      y: Math.round(base.y + dy),
+    }
+    const source = payload.source || {}
+    const item = {
+      selector,
+      source: source.file
+        ? `${source.file}:${source.line || 1}`
+        : selector,
+      label: source.component || source.tag || '组件',
+      dx: next.x,
+      dy: next.y,
+      base: previous?.base ?? dragCommittedRef.current.get(key) ?? { x: 0, y: 0 },
+      next,
+      token: payload.token,
+      payload,
+      updatedAt: Date.now(),
+    }
+    pending.set(selector, item)
+    pendingLayoutChangesRef.current.set(projectId, pending)
+    publishPendingLayoutChanges(projectId)
+    if (!previous) {
+      showToast('info', '布局调整已记录，完成后点击【保存布局】统一同步')
+    }
   }
 
-  /** 用户取消拖拽（pointercancel）：SDK 已自行还原，无需提交。 */
+  /** 用户取消拖拽（pointercancel）：SDK 已自行还原，不产生草稿。 */
   const handleComponentDragCancel = () => {
-    // 取消手势不产生代码变更；保留已排队的其他组件拖拽。
+    // 取消手势不产生代码变更；已记录的其他组件草稿保持不变。
   }
 
   const handleSubmit = async (projectId) => {
@@ -4024,6 +4173,15 @@ export default function WorkspacePage() {
       })
     closedAnnotationsRef.current.delete(projectId)
     runEpochRef.current.delete(projectId)
+    // 项目销毁后丢弃未保存的布局草稿，避免悬浮条残留在其他 Tab。
+    pendingLayoutChangesRef.current.delete(projectId)
+    layoutSaveInflightRef.current.delete(projectId)
+    setPendingLayoutChanges((previous) => {
+      if (!previous[projectId]) return previous
+      const next = { ...previous }
+      delete next[projectId]
+      return next
+    })
     void architect.dispose(projectId)
     // 项目被彻底销毁后，其虚拟快照标签也必须移除，避免指向已销毁的沙盒。
     const closingSnapshotTabs = snapshotTabs.filter(
@@ -4117,6 +4275,8 @@ export default function WorkspacePage() {
       handleAnnotationMove,
       handleComponentDragEnd,
       handleComponentDragCancel,
+      handleSaveLayout,
+      handleUndoLayout,
       handleClarificationAnswer,
       handleAnnotationRollback,
       handleClearAnnotations,
@@ -4166,6 +4326,8 @@ export default function WorkspacePage() {
           call('handleComponentDragEnd', payload),
         onComponentDragCancel: (payload) =>
           call('handleComponentDragCancel', payload),
+        onSaveLayout: () => call('handleSaveLayout'),
+        onUndoLayout: () => call('handleUndoLayout'),
         onClarificationAnswer: (
           annotationId,
           clarification,
@@ -4390,6 +4552,12 @@ export default function WorkspacePage() {
                 dragRollback={dragRollbacks[project.id] ?? null}
                 dragCommit={dragCommits[project.id] ?? null}
                 dragSyncActive={Boolean(dragSyncStates[project.id])}
+                layoutDraftCount={
+                  pendingLayoutChanges[project.id]?.length ?? 0
+                }
+                layoutSaving={
+                  Boolean(dragSyncStates[project.id]) || run.submitting
+                }
                 agentCatalog={agentCatalog}
                 agentToken={session?.token}
                 previewFocusNonce={previewFocus[project.id] ?? 0}

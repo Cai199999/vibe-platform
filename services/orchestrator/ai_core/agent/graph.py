@@ -161,10 +161,67 @@ def _explicit_move_offset(annotation: dict[str, Any]) -> tuple[float, float] | N
     return dx, dy
 
 
+def _explicit_batch_moves(
+    annotation: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    """解析 BATCH_MOVE 的 payload.moves。
+
+    前端把用户连续拖拽的多个组件合并成一个 Envelope；每条记录都必须
+    带选择器与有限、有界的累计偏移。任何一条非法都整体返回 None，
+    回退到原有 LLM 流程，绝不静默丢弃用户的布局草稿。
+    """
+    if str(annotation.get("action") or "").upper() != "BATCH_MOVE":
+        return None
+    payload = annotation.get("payload") or {}
+    if not isinstance(payload, dict):
+        return None
+    raw_moves = payload.get("moves")
+    if not isinstance(raw_moves, list) or not raw_moves:
+        return None
+    # 上限既保护 Prompt / 补丁体积，也避免异常客户端造成长循环。
+    if len(raw_moves) > 200:
+        return None
+
+    moves: list[dict[str, Any]] = []
+    for raw in raw_moves:
+        if not isinstance(raw, dict):
+            return None
+        selector = str(raw.get("selector") or "").strip()
+        if not selector:
+            return None
+        try:
+            dx = float(raw.get("dx"))
+            dy = float(raw.get("dy"))
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(dx) or not math.isfinite(dy):
+            return None
+        if abs(dx) > 2000 or abs(dy) > 2000:
+            return None
+        moves.append(
+            {
+                "selector": selector,
+                "dx": dx,
+                "dy": dy,
+                "source": str(raw.get("source") or "").strip(),
+                "file": str(raw.get("file") or "").strip(),
+                "label": str(raw.get("label") or "").strip(),
+            }
+        )
+    return moves
+
+
 def _is_explicit_move_batch(annotations: list[dict[str, Any]]) -> bool:
-    """所有标注都是带选择器的直接拖拽 MOVE 时，走完全确定性链路。"""
+    """所有标注都是确定性位移时，跳过 RAG / Planner LLM。
+
+    支持两种协议：
+      - 单个 BATCH_MOVE：payload.moves 包含多个组件的累计偏移；
+      - 一个或多个旧版 MOVE：每个标注各自带 payload.move。
+    """
     if not annotations:
         return False
+    if len(annotations) == 1 and _explicit_batch_moves(annotations[0]) is not None:
+        return True
     return all(
         _explicit_move_offset(annotation) is not None
         and bool(annotation_selector(annotation))
@@ -754,8 +811,9 @@ class AgentGraphRunner:
             # 重新解释成自然语言需求，也避免任何澄清中断打断静默同步。
             plan = PlanResult(
                 plan=(
-                    "调用 move_component Tool，按 payload.move 的累计 dx/dy "
-                    "写入 CSS transform；禁止修改宽高与布局。"
+                    "调用 move_component Tool，按 payload.move(s) 的累计 dx/dy "
+                    "一次性写入所有 CSS transform 规则，合并为单份补丁；"
+                    "禁止修改宽高与布局。"
                 ),
                 confidence_score=0.99,
                 decision_impact=MINOR,
@@ -909,11 +967,77 @@ class AgentGraphRunner:
         """
         if not annotations:
             return None
+        # BATCH_MOVE 必须是唯一的输入信封；混入其他标注说明客户端协议
+        # 异常，直接回退 LLM，避免只处理一部分组件造成布局错位。
+        if len(annotations) > 1 and any(
+            str(item.get("action") or "").upper() == "BATCH_MOVE"
+            for item in annotations
+        ):
+            return None
         target_files = list(state.get("target_files") or [])
         if not target_files:
             return None
+        tool = self._toolbox.get("move_component")
+        if tool is None:
+            return None
         rules: list[tuple[str, str, str]] = []
         for annotation in annotations:
+            batch_moves = _explicit_batch_moves(annotation)
+            if batch_moves is not None:
+                # 批量布局：所有组件共用一次 Tool 循环，最终只调用一次
+                # append_css_rule / 一次 _combined_diff，生成合并全量补丁。
+                fallback_path = annotation_target_file(
+                    annotation, current_files, target_files[0]
+                )
+                for move_index, move in enumerate(batch_moves):
+                    selector = move["selector"]
+                    offset = (move["dx"], move["dy"])
+                    candidate = move["file"]
+                    path = (
+                        candidate
+                        if candidate and candidate in current_files
+                        else fallback_path
+                    )
+                    if path not in current_files:
+                        return None
+                    try:
+                        raw = tool.invoke(
+                            {
+                                "element_id": selector,
+                                "x": offset[0],
+                                "y": offset[1],
+                            }
+                        )
+                        payload = json.loads(raw) if isinstance(raw, str) else raw
+                        rule = str(payload.get("rule") or "")
+                    except Exception as exc:  # noqa: BLE001 - 失败则回退 LLM
+                        logger.warning("move_component tool skipped: %s", exc)
+                        return None
+                    if not rule:
+                        return None
+                    rules.append((path, rule, selector))
+                    self._emit(
+                        "node.progress",
+                        {
+                            "node": "coder",
+                            "message": (
+                                f"批量布局 [{move_index + 1}/{len(batch_moves)}] "
+                                f"move_component({selector}, "
+                                f"{offset[0]:g}, {offset[1]:g})"
+                            ),
+                        },
+                        dedupe_key=(
+                            "node.progress:coder:batch-move:"
+                            f"{annotation.get('annotationId')}:"
+                            f"{move_index}:{retry_count}"
+                        ),
+                    )
+                continue
+            if str(annotation.get("action") or "").upper() == "BATCH_MOVE":
+                # 声明了 BATCH_MOVE 但 payload 非法：不猜测、不执行单个
+                # 移动，交给原有 LLM 流程处理。
+                return None
+
             selector = annotation_selector(annotation)
             # 直接拖拽：payload.move 是前端算好的累计偏移，直接使用；
             # 自然语言移动仍走原来的解析 + 纯移动指令校验。
@@ -927,9 +1051,6 @@ class AgentGraphRunner:
                 return None
             path = annotation_target_file(annotation, current_files, target_files[0])
             if path not in current_files:
-                return None
-            tool = self._toolbox.get("move_component")
-            if tool is None:
                 return None
             try:
                 raw = tool.invoke(

@@ -49,6 +49,11 @@ function ProjectWorkspaceInner({
   dragRollback = null,
   dragCommit = null,
   dragSyncActive = false,
+  // 批量拖拽草稿：数量 > 0 时显示悬浮操作条；保存中禁用全部按钮。
+  layoutDraftCount = 0,
+  layoutSaving = false,
+  onSaveLayout,
+  onUndoLayout,
   onClarificationAnswer,
   onAnnotationRollback,
   onPlacementConfirm,
@@ -106,17 +111,31 @@ function ProjectWorkspaceInner({
   // 画布最新滚动位置：即使当前是单屏模式也要记录，否则从单屏切换到
   // 双屏时预览只能从 0 开始，与用户已经滚到的位置脱节。
   const canvasScrollRef = useRef(null)
-  // 拖拽视觉同步：非双屏时只记录最新值，切到双屏后补发一次。
+  // 拖拽视觉同步：按 selector 保存所有未保存草稿的预览位移。
+  // 批量布局允许多个组件同时处于「已拖动、未保存」状态，只保留最新
+  // 一个会让右侧预览在拖第二个组件时把第一个弹回原位。
   const [dragFeedback, setDragFeedback] = useState(null)
-  const dragFeedbackRef = useRef(null)
+  const dragFeedbackRef = useRef(new Map())
   const dragNonceRef = useRef(0)
 
   const publishDragFeedback = (payload) => {
     if (!payload?.selector) return
+    // drag-start 不携带 inlineX/Y；已有草稿再次被拖动时沿用上一帧位置，
+    // 否则预览会先闪回原位。同一组件后续 move/end 会覆盖为最新值。
+    const previous = dragFeedbackRef.current.get(payload.selector)
+    const next = {
+      ...previous,
+      ...payload,
+      inlineX: payload.inlineX ?? previous?.inlineX ?? 0,
+      inlineY: payload.inlineY ?? previous?.inlineY ?? 0,
+    }
+    dragFeedbackRef.current.set(payload.selector, next)
+    if (viewMode !== 'dual') return
     dragNonceRef.current += 1
-    const next = { ...payload, nonce: dragNonceRef.current }
-    dragFeedbackRef.current = next
-    if (viewMode === 'dual') setDragFeedback(next)
+    setDragFeedback({
+      nonce: dragNonceRef.current,
+      items: [...dragFeedbackRef.current.values()],
+    })
   }
 
   const handleComponentDragStart = (payload) => {
@@ -138,12 +157,30 @@ function ProjectWorkspaceInner({
     onComponentDragCancel?.(payload)
   }
 
-  // 后端已完成（成功提交 / 失败回滚）后，清空本地拖拽快照：
-  // 预览 iframe 重载时不能再把旧位移叠加到已经更新的代码上。
+  // 后端已完成（成功提交 / 单次失败回滚）后，只清理对应 selector：
+  // 批量草稿里未被提交的其他组件必须继续保留预览位移。
   useEffect(() => {
-    if (!dragCommit?.nonce && !dragRollback?.nonce) return
-    dragFeedbackRef.current = null
-    setDragFeedback(null)
+    const commitNonce = dragCommit?.nonce
+    const rollbackNonce = dragRollback?.nonce
+    if (!commitNonce && !rollbackNonce) return
+    const settled = new Set(
+      [
+        ...(dragCommit?.items ?? []),
+        ...(dragRollback?.items ?? []),
+      ]
+        .map((item) => item?.selector)
+        .filter(Boolean),
+    )
+    settled.forEach((selector) => dragFeedbackRef.current.delete(selector))
+    const remaining = [...dragFeedbackRef.current.values()]
+    if (remaining.length === 0) {
+      setDragFeedback(null)
+      return
+    }
+    dragNonceRef.current += 1
+    setDragFeedback({ nonce: dragNonceRef.current, items: remaining })
+    // nonce 是唯一触发条件；items 内容从 ref 读取。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dragCommit?.nonce, dragRollback?.nonce])
 
   const publishScrollSync = (payload) => {
@@ -169,12 +206,12 @@ function ProjectWorkspaceInner({
   useEffect(() => {
     if (viewMode !== 'dual') return
     publishScrollSync(canvasScrollRef.current)
-    // 拖拽进行中切到双屏：预览需要立即追上当前位移。
-    if (dragFeedbackRef.current) {
+    // 已有未保存草稿时切到双屏：预览需要立即补齐全部组件的临时位移。
+    if (dragFeedbackRef.current.size > 0) {
       dragNonceRef.current += 1
       setDragFeedback({
-        ...dragFeedbackRef.current,
         nonce: dragNonceRef.current,
+        items: [...dragFeedbackRef.current.values()],
       })
     }
     // publishScrollSync 只依赖 ref 与 setState，不需要进入依赖。
@@ -865,7 +902,55 @@ function ProjectWorkspaceInner({
           </ErrorBoundary>
         </div>
 
-        {dragSyncActive && (
+        {/* 批量拖拽草稿条：松手只记草稿，保存时才触发一次 BATCH_MOVE。 */}
+        {layoutDraftCount > 0 && (
+          <div
+            className={`layout-draft-bar ${layoutSaving ? 'is-saving' : ''}`}
+            role="status"
+            aria-live="polite"
+            data-layout-draft-bar
+          >
+            <div className="layout-draft-copy">
+              {layoutSaving ? (
+                <span className="mini-spinner" aria-hidden="true" />
+              ) : (
+                <span className="layout-draft-dot" aria-hidden="true" />
+              )}
+              <span className="layout-draft-text">
+                <strong>
+                  {layoutSaving
+                    ? '正在同步布局...'
+                    : `已修改 ${layoutDraftCount} 个组件位置`}
+                </strong>
+                <span>
+                  {layoutSaving
+                    ? 'Agent 正在生成合并补丁，请稍候'
+                    : '保存后一次性写入代码，可继续拖动其他组件'}
+                </span>
+              </span>
+            </div>
+            <div className="layout-draft-actions">
+              <button
+                type="button"
+                className="layout-draft-undo"
+                onClick={onUndoLayout}
+                disabled={layoutSaving}
+              >
+                撤销
+              </button>
+              <button
+                type="button"
+                className="layout-draft-save"
+                onClick={onSaveLayout}
+                disabled={layoutSaving}
+              >
+                {layoutSaving ? '同步中…' : '保存布局'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {dragSyncActive && layoutDraftCount === 0 && (
           <div className="canvas-sync-hint" role="status" aria-live="polite">
             <span className="mini-spinner" aria-hidden="true" />
             代码同步中...
