@@ -28,7 +28,7 @@ from ai_core.config import get_settings
 from ai_core.context_memory import get_project_memory, refresh_global_memory
 from ai_core.adapters.sandbox import get_sandbox_provider
 from ai_core.ports.sandbox import SandboxError
-from ai_core.sandbox.importer import import_zip
+from ai_core.sandbox.importer import import_project_file
 from ai_core.sandbox.vision_import import import_image
 from ai_core.schemas import (
     ApplyPatchRequest,
@@ -50,7 +50,7 @@ router = APIRouter(prefix="/api/v1/internal/sandbox", tags=["sandbox"])
 logger = logging.getLogger(__name__)
 
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_ZIP_SUFFIXES = (".zip",)
+_ARCHIVE_SUFFIXES = (".zip", ".tar.gz", ".tgz")
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
 # 快照 Diff 体积上限：避免单个巨型提交把 BFF / 浏览器内存打满。
 _SNAPSHOT_DIFF_MAX_CHARS = 200_000
@@ -140,11 +140,13 @@ async def import_project(
     project_id: str = Form(min_length=1, max_length=64),
     file: UploadFile = File(...),
 ) -> ImportSandboxResponse:
-    """导入 zip / 图片并直接启动一个可预览沙盒。
+    """导入 zip / tar.gz / 图片并直接启动一个可预览沙盒。
 
     浏览器 -> Java BFF -> 本接口。所有安全校验（路径穿越、zip 炸弹、
     文件数量、体积、加密包、符号链接）都在服务端完成；上传内容绝不执行
     宿主机命令，只在隔离容器内解压、npm install 或起静态服务器。
+    平台导出的 tar.gz 若含 root package.json + server/，会按全栈项目
+    同时启动 Express 与 Vite，并自动注入 data-source 标记。
     """
     if not _PROJECT_ID_RE.fullmatch(project_id):
         raise HTTPException(
@@ -155,19 +157,21 @@ async def import_project(
     settings = get_settings()
     filename = Path(file.filename or "upload").name
     lowered = filename.lower()
-    is_zip = lowered.endswith(_ZIP_SUFFIXES)
+    is_archive = lowered.endswith(_ARCHIVE_SUFFIXES)
     is_image = lowered.endswith(_IMAGE_SUFFIXES)
-    if not is_zip and not is_image:
+    if not is_archive and not is_image:
         raise HTTPException(
             status_code=422,
             detail={
                 "code": "IMPORT_UNSUPPORTED_FILE",
-                "message": "只支持 .zip / .png / .jpg / .jpeg",
+                "message": "只支持 .zip / .tar.gz / .tgz / .png / .jpg / .jpeg",
             },
         )
 
     limit = (
-        settings.import_max_archive_bytes if is_zip else settings.import_max_image_bytes
+        settings.import_max_archive_bytes
+        if is_archive
+        else settings.import_max_image_bytes
     )
     # 多读 1 字节用于判断是否超限，避免把超大文件完整读进内存。
     data = await file.read(limit + 1)
@@ -187,8 +191,10 @@ async def import_project(
 
     provider = get_sandbox_provider()
     try:
-        if is_zip:
-            imported = await run_in_threadpool(import_zip, data, settings)
+        if is_archive:
+            imported = await run_in_threadpool(
+                import_project_file, data, filename, settings
+            )
         else:
             imported = await run_in_threadpool(
                 import_image,
@@ -222,6 +228,8 @@ async def import_project(
         file_count=imported.file_count,
         files=imported.text_files,
         warnings=imported.warnings,
+        services=imported.services,
+        data_source_count=imported.data_source_count,
         source_name=filename,
         created_at=datetime.now(timezone.utc),
     )

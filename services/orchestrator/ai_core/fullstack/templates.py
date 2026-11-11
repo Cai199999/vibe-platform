@@ -413,6 +413,7 @@ EXPRESS_SERVER_TEMPLATE = r"""// 由 BackendCoder 根据《全栈实施契约》
 // 生产环境由 DATABASE_URL 选择 MySQL / PostgreSQL；沙盒自动回退 SQLite。
 import express from 'express'
 __UPLOAD_IMPORTS__
+__AI_IMPORTS__
 import {
   ORM_ENABLED,
   RUNTIME,
@@ -483,6 +484,7 @@ const asyncHandler = (handler) => (request, response, next) =>
   Promise.resolve(handler(request, response, next)).catch(next)
 
 __UPLOAD_MIDDLEWARE__
+__AI_MIDDLEWARE__
 
 const listHandler = asyncHandler(async (request, response) => {
   const page = Math.max(1, Number(request.query.page || 1))
@@ -554,6 +556,9 @@ if (ITEM_PATH && ITEM_PATH !== COLLECTION_PATH) {
     response.json(await deleteRecord(request.params.id))
   }))
 }
+
+// ---- AI-Native 路由 ----
+__AI_ROUTES__
 
 // ---- 契约业务路由 ----
 // BackendCoder 为契约里的每个业务动作生成独立端点；通用 CRUD 只是基础能力，

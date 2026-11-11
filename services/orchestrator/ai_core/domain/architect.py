@@ -71,7 +71,7 @@ class ArchitectRunOptions(CamelModel):
 
     llm_provider: Literal["auto", "mock", "deepseek"] = "auto"
     confidence_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
-    max_clarification_rounds: int = Field(default=5, ge=1, le=8)
+    max_clarification_rounds: int = Field(default=10, ge=1, le=10)
     rag_provider: Literal["markdown", "chroma"] = "markdown"
     rag_top_k: int = Field(default=5, ge=1, le=10)
     max_source_bytes: int = Field(default=200_000, ge=1_000, le=2_000_000)
@@ -231,11 +231,14 @@ class ArchitectAnswer(CamelModel):
 class ArchitectAnswersRequest(CamelModel):
     answers: list[ArchitectAnswer] = Field(default_factory=list, max_length=10)
     comment: str | None = Field(default=None, max_length=2000)
+    # 只能由用户在前端显式点击“一键采用建议并跳过剩余提问”时置 true。
+    # 服务端不接受模型输出该字段，LLM 无权自行跳过必填问题。
+    adopt_suggestions: bool = False
 
     @model_validator(mode="after")
     def _has_answer(self) -> "ArchitectAnswersRequest":
-        if not self.answers and not self.comment:
-            raise ValueError("至少回答一个问题或提供补充说明")
+        if not self.answers and not self.comment and not self.adopt_suggestions:
+            raise ValueError("至少回答一个问题、提供补充说明或采用建议")
         return self
 
 
@@ -309,6 +312,9 @@ class ArchitectContract(CamelModel):
         default_factory=list
     )
     assumptions: list[str] = Field(default_factory=list)
+    # AI-Native 能力：为 true 时后端生成真实 OpenAI SDK 调用，
+    # 前端生成对话 / 上传 / 分析界面；默认 false，旧契约完全兼容。
+    include_ai_capability: bool = False
     # 抽象需求的空白骨架标记：FrontendCoder 只渲染 Header + Sidebar +
     # Main 与占位组件，不生成任何猜测出来的业务 UI。
     skeleton_mode: bool = False
@@ -420,7 +426,7 @@ class ArchitectSnapshotResponse(CamelModel):
     status: str
     app_shape: AppShape | None = None
     round: int = 0
-    max_rounds: int = 5
+    max_rounds: int = 10
     confidence_score: float = 0.0
     threshold: float = 0.85
     source_hash: str = ""

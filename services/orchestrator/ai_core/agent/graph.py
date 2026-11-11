@@ -52,8 +52,8 @@ from ai_core.agent.llm import (
 )
 from ai_core.agent.memory import IntentClassifier, compress_annotation_context
 from ai_core.agent.preferences import (
-    CORE_BUSINESS,
-    IMPLEMENTATION_DETAIL,
+    CRITICAL,
+    MINOR,
     build_clarification_options,
     extract_preference_observations,
     infer_decision_impact,
@@ -649,7 +649,7 @@ class AgentGraphRunner:
                     "写入 CSS transform；禁止修改宽高与布局。"
                 ),
                 confidence_score=0.99,
-                decision_impact=IMPLEMENTATION_DETAIL,
+                decision_impact=MINOR,
                 needs_clarification=False,
             )
         else:
@@ -669,7 +669,7 @@ class AgentGraphRunner:
             )
         threshold = float(state.get("confidence_threshold", 0.7))
         # 分级决策：模型未输出 decision_impact 时，用确定性关键词兜底。
-        # 只有 CORE_BUSINESS 才允许触发中断，IMPLEMENTATION_DETAIL 一律自主执行。
+        # 只有 CRITICAL 才允许触发中断，MINOR 一律自主执行。
         impact = normalize_decision_impact(
             getattr(plan, "decision_impact", None)
         ) or infer_decision_impact(annotations)
@@ -707,16 +707,13 @@ class AgentGraphRunner:
 
     def _clarify_gate(self, state: AgentState) -> dict[str, Any]:
         mode = state.get("clarification_mode", "auto")
-        impact = (
-            normalize_decision_impact(state.get("plan_decision_impact"))
-            or IMPLEMENTATION_DETAIL
-        )
+        impact = normalize_decision_impact(state.get("plan_decision_impact")) or MINOR
         # 双保险：即使旧 checkpoint 残留 plan_needs_clarification=True，
         # 只要影响面不是核心业务，也绝不能在实现细节上打断用户。
         needs = (
             bool(state.get("plan_needs_clarification"))
             and mode != "off"
-            and impact == CORE_BUSINESS
+            and impact == CRITICAL
         )
         if not needs:
             return {
@@ -1571,7 +1568,7 @@ def _build_clarification_payload(
         "reason": clarification.get("reason") or "core_business_decision",
         "decisionImpact": clarification.get("decisionImpact")
         or state.get("plan_decision_impact")
-        or CORE_BUSINESS,
+        or CRITICAL,
         "decisionSummary": clarification.get("decisionSummary") or "",
         "questions": clarification.get("questions") or [],
         # 前端一键决策按钮；questions[].options 作为兼容回退。
@@ -1666,7 +1663,7 @@ def _ensure_clarification_annotation(
 def _fallback_clarification(annotations: list[dict[str, Any]]) -> dict[str, Any]:
     """核心业务决策的兜底澄清模板。
 
-    只有 Planner 已判定 CORE_BUSINESS 且模型未返回结构化澄清时才会走到
+    只有 Planner 已判定 CRITICAL 且模型未返回结构化澄清时才会走到
     这里；实现细节层不会调用本函数。
     """
     annotation_id = None
@@ -1702,7 +1699,7 @@ def _fallback_clarification(annotations: list[dict[str, Any]]) -> dict[str, Any]
     ]
     return {
         "reason": "core_business_decision",
-        "decisionImpact": CORE_BUSINESS,
+        "decisionImpact": CRITICAL,
         "decisionSummary": _decision_summary(annotations),
         "annotationId": str(annotation_id) if annotation_id else None,
         "questions": questions,

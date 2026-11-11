@@ -120,6 +120,15 @@
       "rag_refs": [],
       "tools": ["read_file", "create_file", "apply_code_edit"],
       "metadata": {"stage": "production", "priority": 10, "mandatory": true}
+    },
+    {
+      "skill_id": "web.best_practices",
+      "name": "Web 开发规范与安全编码",
+      "description": "强制 RESTful 资源设计、统一错误码、ORM 参数化查询、Bcrypt 密码哈希、输入校验与密钥隔离；挂载自 config/skills/web_best_practices.skill.md。",
+      "prompt_ref": "web_best_practices.skill.md",
+      "rag_refs": [],
+      "tools": ["read_file", "create_file", "apply_code_edit"],
+      "metadata": {"stage": "production", "priority": 20, "mandatory": true}
     }
   ],
   "keywords": [

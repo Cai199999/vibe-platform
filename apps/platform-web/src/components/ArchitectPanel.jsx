@@ -113,6 +113,12 @@ function ClarificationForm({ clarification, submitting, onSubmit, onCancel }) {
     onSubmit(answers, comment)
   }
 
+  // 只有用户点击该按钮才允许跳过剩余问题；AI 无权自行跳过。
+  const adoptSuggestions = () => {
+    if (submitting) return
+    onSubmit([], '采用建议并跳过剩余提问', { adoptSuggestions: true })
+  }
+
   return (
     <form className="architect-clarification" onSubmit={submit}>
       <div className="architect-form-head">
@@ -219,6 +225,14 @@ function ClarificationForm({ clarification, submitting, onSubmit, onCancel }) {
           onClick={onCancel}
         >
           取消澄清
+        </button>
+        <button
+          className="ghost-button"
+          type="button"
+          disabled={submitting}
+          onClick={adoptSuggestions}
+        >
+          一键采用建议并跳过剩余提问
         </button>
         <button
           className="architect-primary"
@@ -1266,7 +1280,9 @@ export default function ArchitectPanel({
               key={clarification.clarificationId}
               clarification={clarification}
               submitting={Boolean(state.answerSubmitting)}
-              onSubmit={(answers, comment) => onAnswer(answers, comment)}
+              onSubmit={(answers, comment, options) =>
+                onAnswer(answers, comment, options)
+              }
               onCancel={onCancel}
             />
           )}

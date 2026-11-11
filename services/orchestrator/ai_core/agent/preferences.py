@@ -16,9 +16,15 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable
 
-CORE_BUSINESS = "CORE_BUSINESS"
-IMPLEMENTATION_DETAIL = "IMPLEMENTATION_DETAIL"
-DECISION_IMPACTS = {CORE_BUSINESS, IMPLEMENTATION_DETAIL}
+from ai_core.domain.state import DecisionImpact
+
+# 新枚举是唯一真源；旧常量保留为别名，避免历史调用方 / 检查点失效。
+CRITICAL = DecisionImpact.CRITICAL.value
+MAJOR = DecisionImpact.MAJOR.value
+MINOR = DecisionImpact.MINOR.value
+CORE_BUSINESS = CRITICAL
+IMPLEMENTATION_DETAIL = MINOR
+DECISION_IMPACTS = {CRITICAL, MAJOR, MINOR}
 
 # 会改变业务结果 / 系统契约 / 破坏性影响的关键词。
 # 注意：单独的“登录”不算核心决策——“加个登录框”只是 UI 实现；
@@ -104,16 +110,27 @@ _TEXT_COLOR_MARKERS = ("文字颜色", "字体颜色", "文本颜色", "字色")
 
 
 def normalize_decision_impact(raw: Any) -> str | None:
-    """把模型输出 / 旧字段收敛为枚举；无法识别时返回 None。"""
-    value = str(raw or "").strip().upper()
+    """把模型输出 / 旧字段收敛为 DecisionImpact；无法识别时返回 None。
+
+    兼容旧枚举是渐进升级的关键：历史检查点、旧提示词和已持久化事件
+    仍可能携带 ``CORE_BUSINESS`` / ``IMPLEMENTATION_DETAIL``。读取时统一
+    映射到新枚举，写回时只写 CRITICAL / MAJOR / MINOR。
+    """
+    value = str(getattr(raw, "value", raw) or "").strip().upper()
     aliases = {
-        "CORE": CORE_BUSINESS,
-        "BUSINESS": CORE_BUSINESS,
-        "CORE_BUSINESS_DECISION": CORE_BUSINESS,
-        "DETAIL": IMPLEMENTATION_DETAIL,
-        "IMPLEMENTATION": IMPLEMENTATION_DETAIL,
-        "STYLE": IMPLEMENTATION_DETAIL,
-        "UI_DETAIL": IMPLEMENTATION_DETAIL,
+        "CORE": CRITICAL,
+        "BUSINESS": CRITICAL,
+        "CORE_BUSINESS": CRITICAL,
+        "CORE_BUSINESS_DECISION": CRITICAL,
+        "CRITICAL": CRITICAL,
+        "MAJOR": MAJOR,
+        "IMPORTANT": MAJOR,
+        "DETAIL": MINOR,
+        "IMPLEMENTATION": MINOR,
+        "IMPLEMENTATION_DETAIL": MINOR,
+        "STYLE": MINOR,
+        "UI_DETAIL": MINOR,
+        "MINOR": MINOR,
     }
     value = aliases.get(value, value)
     return value if value in DECISION_IMPACTS else None
@@ -123,17 +140,17 @@ def infer_decision_impact(annotations: Iterable[dict[str, Any]]) -> str:
     """按确定性关键词判断决策影响面。
 
     这是 Planner 未输出 ``decision_impact`` 时的兜底，也用于 Mock 与测试。
-    只要命中一个核心业务 / 破坏性信号，就升级为 ``CORE_BUSINESS``；否则
-    默认 ``IMPLEMENTATION_DETAIL``，避免样式类需求被误中断。
+    只要命中一个核心业务 / 破坏性信号，就升级为 ``CRITICAL``；否则
+    默认 ``MINOR``，避免样式类需求被误中断。
     """
     text = "\n".join(_annotation_texts(annotations)).lower()
     if not text:
-        return IMPLEMENTATION_DETAIL
+        return MINOR
     if any(pattern.search(text) for pattern in _DESTRUCTIVE_PATTERNS):
-        return CORE_BUSINESS
+        return CRITICAL
     if any(keyword.lower() in text for keyword in _CORE_KEYWORDS):
-        return CORE_BUSINESS
-    return IMPLEMENTATION_DETAIL
+        return CRITICAL
+    return MINOR
 
 
 def should_interrupt(
@@ -146,15 +163,18 @@ def should_interrupt(
 ) -> bool:
     """分级决策的唯一中断判定。
 
-    - ``IMPLEMENTATION_DETAIL``：无论置信度多低都不中断；
-    - ``CORE_BUSINESS``：缺失关键信息 / 多种方案 / 低置信度时中断；
+    - ``CRITICAL``：缺失关键信息 / 多种方案 / 低置信度时中断；
+    - ``MAJOR``：默认自主执行，只有显式标记缺信息时才中断；
+    - ``MINOR``：无论置信度多低都不中断；
     - ``off`` 完全禁用；``always`` 只强制核心决策（用于调试）。
     """
-    impact = normalize_decision_impact(decision_impact) or IMPLEMENTATION_DETAIL
+    impact = normalize_decision_impact(decision_impact) or MINOR
     if mode == "off":
         return False
-    if impact != CORE_BUSINESS:
+    if impact == MINOR:
         return False
+    if impact == MAJOR:
+        return bool(needs_clarification)
     if mode == "always":
         return True
     return bool(needs_clarification) or float(confidence_score) < float(threshold)
@@ -325,7 +345,10 @@ def _single_annotation_text(annotation: dict[str, Any]) -> str:
 
 __all__ = [
     "CORE_BUSINESS",
+    "CRITICAL",
     "IMPLEMENTATION_DETAIL",
+    "MAJOR",
+    "MINOR",
     "build_clarification_options",
     "extract_preference_observations",
     "infer_decision_impact",

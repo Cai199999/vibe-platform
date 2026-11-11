@@ -185,7 +185,9 @@ export function useWorkspace() {
    * @param {string} payload.name        项目名（通常是上传文件名）
    * @param {object} payload.files       文本源码快照
    * @param {string} payload.entryFile   入口文件（src/App.jsx 或 index.html）
-   * @param {string} payload.kind        react / html
+   * @param {string} payload.kind        react / html / fullstack
+   * @param {string[]} [payload.services] 全栈导入时实际启动的服务
+   * @param {number} [payload.dataSourceCount] 重新注入的 data-source 节点数
    * @param {string} [payload.sourceName] 原始文件名
    * @returns {string} projectId
    */
@@ -195,13 +197,21 @@ export function useWorkspace() {
       if (previous.openTabs.length >= MAX_OPEN_TABS) {
         return previous
       }
+      const kind =
+        payload?.kind === 'html'
+          ? 'html'
+          : payload?.kind === 'fullstack'
+            ? 'fullstack'
+            : 'react'
       const project = {
         id: projectId,
         name: payload?.name || '导入项目',
-        template: payload?.kind === 'html' ? 'imported-html' : 'imported-react',
-        kind: payload?.kind === 'html' ? 'html' : 'react',
+        template: kind === 'html' ? 'imported-html' : `imported-${kind}`,
+        kind,
         entryFile: payload?.entryFile || TARGET_FILE,
         files: payload?.files || {},
+        services: Array.isArray(payload?.services) ? payload.services : [],
+        dataSourceCount: payload?.dataSourceCount || 0,
         sourceName: payload?.sourceName || '',
         imported: true,
         bootstrap: 'ready',

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 /**
  * 项目下拉栏：切换项目、新建项目、导入项目。
  *
- * 导入支持 zip（React / HTML 项目包）与 png / jpg 截图；真正的解压、
+ * 导入支持 zip（React / HTML 项目包）、平台导出的全栈 tar.gz 与 png / jpg 截图；真正的解压、
  * npm install 与沙盒启动全部由后端完成，前端只负责选择文件与展示结果。
  */
 export default function ProjectSwitcher({
@@ -112,7 +112,7 @@ export default function ProjectSwitcher({
               title={
                 limitReached
                   ? '最多只能同时打开 5 个项目，请关闭其他项目'
-                  : '上传 zip（React / HTML）或 png / jpg 截图导入项目'
+                  : '上传 zip / 全栈 tar.gz 或 png / jpg 截图导入项目'
               }
               onClick={() => fileInputRef.current?.click()}
             >
@@ -124,7 +124,7 @@ export default function ProjectSwitcher({
               ref={fileInputRef}
               className="project-import-input"
               type="file"
-              accept=".zip,.png,.jpg,.jpeg,application/zip,image/png,image/jpeg"
+              accept=".zip,.tar.gz,.tgz,.png,.jpg,.jpeg,application/zip,application/gzip,application/x-tar,image/png,image/jpeg"
               hidden
               onChange={(event) => {
                 const file = event.target.files?.[0]

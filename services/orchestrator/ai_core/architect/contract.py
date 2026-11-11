@@ -176,6 +176,7 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
         script_spec=script_spec,
         implementation_path=draft.implementation_path,
         assumptions=draft.assumptions,
+        include_ai_capability=draft.include_ai_capability,
         skeleton_mode=draft.skeleton_mode,
     )
     return ContractValidation(valid=not issues, issues=issues, draft=normalized)
@@ -201,6 +202,7 @@ def draft_to_dict(draft: ContractDraft) -> dict:
             item.model_dump(by_alias=True) for item in draft.implementation_path
         ],
         "assumptions": draft.assumptions,
+        "includeAiCapability": draft.include_ai_capability,
         "skeletonMode": draft.skeleton_mode,
     }
 
@@ -272,6 +274,9 @@ def draft_from_dict(payload: dict) -> ContractDraft:
         assumptions=[
             str(item) for item in payload.get("assumptions") or [] if str(item).strip()
         ],
+        include_ai_capability=bool(
+            payload.get("includeAiCapability") or payload.get("include_ai_capability")
+        ),
         skeleton_mode=bool(payload.get("skeletonMode") or payload.get("skeleton_mode")),
     )
 
@@ -332,6 +337,7 @@ def assemble_contract(
         script_spec=draft.script_spec,
         implementation_path=draft.implementation_path,
         assumptions=draft.assumptions,
+        include_ai_capability=draft.include_ai_capability,
         skeleton_mode=draft.skeleton_mode,
         citations=citations,
         created_at=datetime.now(timezone.utc),

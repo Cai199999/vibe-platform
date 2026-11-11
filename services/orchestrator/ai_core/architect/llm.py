@@ -91,6 +91,8 @@ class ContractDraft:
         default_factory=list
     )
     assumptions: list[str] = field(default_factory=list)
+    # AI-Native 应用：生成真实 openai SDK 调用与对话/上传界面。
+    include_ai_capability: bool = False
     # 用户只给出抽象目标时，契约只描述空白骨架；FrontendCoder 据此
     # 渲染欢迎页与占位组件，不得生成任何猜测出来的业务 UI。
     skeleton_mode: bool = False
@@ -220,6 +222,8 @@ class MockArchitectLLM(ArchitectLLM):
             script_spec=draft.script_spec,
             implementation_path=draft.implementation_path,
             assumptions=draft.assumptions,
+            include_ai_capability=draft.include_ai_capability,
+            skeleton_mode=draft.skeleton_mode,
         )
 
     # --------------------------------------------------------
@@ -519,6 +523,7 @@ class MockArchitectLLM(ArchitectLLM):
         flows = str(context.slots.get("business.key_flows") or "创建并查询业务记录")
         entities = str(context.slots.get("data.entities") or "业务记录")
         table = _table_name(entities)
+        ai_enabled = _wants_ai_capability(context)
         api_routes = [
             ArchitectApiRoute(
                 method="GET",
@@ -535,6 +540,25 @@ class MockArchitectLLM(ArchitectLLM):
                 description="创建业务记录",
             ),
         ]
+        if ai_enabled:
+            api_routes.extend(
+                [
+                    ArchitectApiRoute(
+                        method="POST",
+                        path="/api/v1/ai/chat",
+                        request="对话消息 messages",
+                        response="模型回复内容",
+                        description="AI 对话：调用 OpenAI 生成回复",
+                    ),
+                    ArchitectApiRoute(
+                        method="POST",
+                        path="/api/v1/ai/analyze",
+                        request="multipart/form-data：file + prompt",
+                        response="结构化分析结果",
+                        description="AI 分析：上传简历/文档并调用 OpenAI",
+                    ),
+                ]
+            )
         ddl = _mock_ddl(table, database)
         interactions = [
             ArchitectComponentInteraction(
@@ -550,6 +574,23 @@ class MockArchitectLLM(ArchitectLLM):
                 logic="校验表单、防重复提交、成功后刷新列表",
             ),
         ]
+        if ai_enabled:
+            interactions.extend(
+                [
+                    ArchitectComponentInteraction(
+                        component="AIChatPanel",
+                        event="submit",
+                        api_route="POST /api/v1/ai/chat",
+                        logic="发送消息时展示 Loading，成功追加回复，失败显示可重试错误",
+                    ),
+                    ArchitectComponentInteraction(
+                        component="AIUploadPanel",
+                        event="submit",
+                        api_route="POST /api/v1/ai/analyze",
+                        logic="上传文件后调用分析接口，展示结构化结果与错误状态",
+                    ),
+                ]
+            )
         ui_logic = [
             {
                 "component": "SubmitButton",
@@ -560,6 +601,13 @@ class MockArchitectLLM(ArchitectLLM):
         data_model = [
             {"name": "RecordsPage", "fields": ["items", "page", "total", "loading"]}
         ]
+        if ai_enabled:
+            data_model.append(
+                {
+                    "name": "AIWorkspace",
+                    "fields": ["messages", "analysis", "loading", "error"],
+                }
+            )
         markdown = f"""# 全栈系统实施契约
 
 ## 1. 项目目标
@@ -623,6 +671,15 @@ class MockArchitectLLM(ArchitectLLM):
 4. 联调错误码、幂等与分页；
 5. 执行端到端验收。
 """
+        if ai_enabled:
+            markdown += (
+                "\n## 8. AI 能力（AI-Native）\n\n"
+                "- 后端引入官方 `openai` SDK，`OPENAI_API_KEY` 只从环境变量读取；\n"
+                "- `POST /api/v1/ai/chat` 处理多轮对话，`POST /api/v1/ai/analyze` "
+                "接收上传文件并返回结构化分析；\n"
+                "- 缺少密钥时返回 503 `AI_NOT_CONFIGURED`，禁止伪造模型结果；\n"
+                "- 前端提供对话区、文件上传、加载态与失败重试。\n"
+            )
         return ContractDraft(
             contract_markdown=markdown,
             tech_stack={
@@ -677,6 +734,18 @@ class MockArchitectLLM(ArchitectLLM):
                     "section": "业务工作区",
                     "description": "展示数量、状态等关键指标",
                 },
+                *(
+                    [
+                        {
+                            "name": "AIWorkspace",
+                            "role": "ai",
+                            "section": "业务工作区",
+                            "description": "AI 对话与文件分析，含加载 / 错误 / 重试状态",
+                        }
+                    ]
+                    if ai_enabled
+                    else []
+                ),
             ],
             ui_logic=ui_logic,
             frontend_data_model=data_model,
@@ -698,7 +767,12 @@ class MockArchitectLLM(ArchitectLLM):
                     tasks=["API client", "页面状态", "错误提示", "验收"],
                 ),
             ],
-            assumptions=[],
+            assumptions=(
+                ["AI 能力使用 OpenAI API；未配置 OPENAI_API_KEY 时返回 503"]
+                if ai_enabled
+                else []
+            ),
+            include_ai_capability=ai_enabled,
         )
 
     @staticmethod
@@ -894,7 +968,8 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             '"section":"","description":"","is_placeholder":false}],'
             '"ui_logic":[{}],"frontend_data_model":[{}],"script_spec":{},'
             '"implementation_path":[{"phase":"","title":"","tasks":[]}],'
-            '"assumptions":[],"skeleton_mode":false}\n\n'
+            '"assumptions":[],"include_ai_capability":false,'
+            '"skeleton_mode":false}\n\n'
             "【防脑补铁律 · 最高优先级】\n"
             "- components 只能来自历史对话或 slots 中用户明确说出的业务名词与"
             "动作；禁止自行补出 LoginForm、ResumeUploader、JDdetail、数据表格等"
@@ -946,7 +1021,10 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "进度外，不要生成 /stream、/events 等 SSE 路由。前端数据面板只会"
             "请求集合根路径，后端也必须注册完全相同的路径，禁止一边写 "
             "/api/v1/tasks、另一边写 /api/v1/tasks/stream；\n"
-            "- 不要编造用户未提供的业务实体；不确定处写入 assumptions。"
+            "- 不要编造用户未提供的业务实体；不确定处写入 assumptions。\n"
+            "- 【AI-Native 判定】需求包含 AI 对话、内容生成、简历筛选/分析、"
+            "图片理解等能力时，include_ai_capability 必须为 true，并在契约中"
+            "明确 AI 输入、模型处理与输出结构；纯 CRUD / 展示型应用必须为 false。"
         )
         human = _contract_human(context)
         return self._generate_with_repair(
@@ -978,7 +1056,8 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "component_interactions 只能写用户已确认的交互；api_route 必须与 "
             "api_routes 中的 path 逐字符一致，纯前端交互留空；用户明确不要"
             "交互或区域待定时，组件必须 is_placeholder:true 且不写交互，"
-            "禁止编造 onClick 与请求。"
+            "禁止编造 onClick 与请求。include_ai_capability 必须与用户需求一致："
+            "AI 对话 / 生成 / 筛选分析为 true，纯 CRUD 为 false。"
         )
         human = (
             f"{_contract_human(context)}\n\n"
@@ -1377,6 +1456,11 @@ def _parse_contract_draft(payload: dict[str, Any]) -> ContractDraft:
             )
             if str(item).strip()
         ][:12],
+        include_ai_capability=bool(
+            payload.get("include_ai_capability")
+            if "include_ai_capability" in payload
+            else payload.get("includeAiCapability")
+        ),
         skeleton_mode=bool(payload.get("skeleton_mode") or payload.get("skeletonMode")),
     )
 
@@ -1400,6 +1484,7 @@ def _draft_to_payload(draft: ContractDraft) -> dict[str, Any]:
             item.model_dump(by_alias=True) for item in draft.implementation_path
         ],
         "assumptions": draft.assumptions,
+        "includeAiCapability": draft.include_ai_capability,
         "skeletonMode": draft.skeleton_mode,
     }
 
@@ -1412,6 +1497,33 @@ def _as_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, dict)]
+
+
+_AI_INTENT = re.compile(
+    r"(\bAI\b|人工智能|大模型|LLM|OpenAI|智能(?:筛选|分析|生成|问答)|"
+    r"简历(?:筛选|分析)|内容生成|对话(?:机器人|助手)|图片理解|OCR)",
+    re.IGNORECASE,
+)
+
+
+def _wants_ai_capability(context: ArchitectContext) -> bool:
+    """确定性判断需求是否需要真实 AI 能力。"""
+    if context.app_shape != "full_stack_system" and (
+        context.slots.get("app.shape") != "full_stack_system"
+    ):
+        return False
+    parts = [
+        context.project_name,
+        json.dumps(context.slots, ensure_ascii=False, default=str),
+        context.project_summary,
+        context.latest_changes,
+        "\n".join(
+            str(item.get("content") or "")
+            for item in context.ui_history
+            if isinstance(item, dict)
+        ),
+    ]
+    return bool(_AI_INTENT.search("\n".join(parts)))
 
 
 def _to_camel(name: str) -> str:

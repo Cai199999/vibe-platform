@@ -757,6 +757,90 @@ def _merge_routes(
     return merged
 
 
+_AUTH_INTENT = re.compile(
+    r"(登录|注册|密码|鉴权|认证|用户账号|password|bcrypt|login|signin|signup|register|auth)",
+    re.IGNORECASE,
+)
+
+_AUTH_COLUMN = re.compile(r"(password|passwd|password_hash|pwd)", re.IGNORECASE)
+
+WEB_BEST_PRACTICES_SKILL_ID = "web.best_practices"
+BCRYPT_VERSION = "^2.4.3"
+
+_SECURITY_MODULE = r"""// 由 BackendCoder 生成：Web 安全编码基线（Skill: web.best_practices）。
+// 密码只使用 Bcrypt 哈希；所有输入按白名单与长度上限收敛，
+// 禁止把用户输入直接拼接进 SQL 或文件路径。
+import bcrypt from 'bcryptjs'
+
+const BCRYPT_ROUNDS = 12
+
+export async function hashPassword(password) {
+  const value = String(password || '')
+  if (value.length < 8 || value.length > 128) {
+    throw new Error('PASSWORD_LENGTH_INVALID')
+  }
+  return bcrypt.hash(value, BCRYPT_ROUNDS)
+}
+
+export async function verifyPassword(password, passwordHash) {
+  if (!passwordHash) return false
+  return bcrypt.compare(String(password || ''), String(passwordHash))
+}
+
+export function sanitizeString(value, maxLength = 8000) {
+  return String(value ?? '').trim().slice(0, maxLength)
+}
+
+export function pickAllowed(body, allowedFields) {
+  const source = body && typeof body === 'object' ? body : {}
+  const result = {}
+  for (const field of allowedFields) {
+    if (Object.prototype.hasOwnProperty.call(source, field)) {
+      result[field] = source[field]
+    }
+  }
+  return result
+}
+
+export function safeSortField(value, allowedFields, fallback) {
+  const field = String(value || '')
+  return allowedFields.includes(field) ? field : fallback
+}
+"""
+
+
+def _contract_mentions_auth(contract: ArchitectContract) -> bool:
+    """判断契约是否涉及账号 / 密码 / 认证。
+
+    只有命中时才注入 Bcrypt 依赖与安全模块，避免普通 CRUD 多装无用包。
+    """
+    parts = [contract.contract_markdown or "", contract.database_ddl or ""]
+    for route in contract.api_routes or []:
+        parts.extend([str(route.path or ""), str(route.description or "")])
+    for interaction in contract.component_interactions or []:
+        parts.append(
+            json.dumps(interaction.model_dump(by_alias=True), ensure_ascii=False)
+        )
+    return bool(_AUTH_INTENT.search("\n".join(parts)))
+
+
+def build_security_support(contract: ArchitectContract) -> dict[str, Any]:
+    """按契约生成 Web 安全编码资产（Bcrypt + 输入白名单）。"""
+    if not _contract_mentions_auth(contract):
+        return {
+            "enabled": False,
+            "files": {},
+            "dependencies": {},
+            "skillId": WEB_BEST_PRACTICES_SKILL_ID,
+        }
+    return {
+        "enabled": True,
+        "files": {"server/security.js": _SECURITY_MODULE},
+        "dependencies": {"bcryptjs": BCRYPT_VERSION},
+        "skillId": WEB_BEST_PRACTICES_SKILL_ID,
+    }
+
+
 def _contract_mentions_upload(contract: ArchitectContract) -> bool:
     """判断契约是否真的要求文件上传 / 附件能力。
 
@@ -960,6 +1044,189 @@ def _business_route_code(
     )
 
 
+AI_CHAT_PATH = "/api/v1/ai/chat"
+AI_ANALYZE_PATH = "/api/v1/ai/analyze"
+OPENAI_VERSION = "^4.104.0"
+
+_AI_BACKEND_MIDDLEWARE = r"""// AI-Native：OpenAI SDK 真实调用。密钥只从环境变量读取，
+// 缺失时返回 503，绝不生成伪造的模型结果。
+const AI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini'
+let openaiClient = null
+const getOpenAIClient = () => {
+  const apiKey = String(process.env.OPENAI_API_KEY || '').trim()
+  if (!apiKey) return null
+  if (!openaiClient) openaiClient = new OpenAI({ apiKey })
+  return openaiClient
+}
+const aiNotConfigured = (response) =>
+  response.status(503).json({
+    code: 'AI_NOT_CONFIGURED',
+    message: 'AI 能力尚未配置，请设置 OPENAI_API_KEY 后重试',
+  })
+const aiUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_request, file, callback) => {
+    const mime = String(file.mimetype || '')
+    const allowed =
+      mime.startsWith('text/') ||
+      [
+        'application/pdf',
+        'application/json',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'image/png',
+        'image/jpeg',
+      ].includes(mime)
+    callback(allowed ? null : new Error('UNSUPPORTED_FILE_TYPE'), allowed)
+  },
+})
+"""
+
+_AI_BACKEND_ROUTES = r"""// POST /api/v1/ai/chat：多轮对话。请求体只接受受控的 role/content，
+// 长度与条数都有硬限制，避免把任意对象转发给模型。
+app.post('/api/v1/ai/chat', asyncHandler(async (request, response) => {
+  const client = getOpenAIClient()
+  if (!client) return aiNotConfigured(response)
+  const rawMessages = Array.isArray(request.body?.messages)
+    ? request.body.messages
+    : []
+  if (rawMessages.length === 0 || rawMessages.length > 50) {
+    return response.status(400).json({
+      code: 'INVALID_MESSAGES',
+      message: 'messages 必须为 1~50 条',
+    })
+  }
+  const messages = rawMessages
+    .map((item) => ({
+      role: ['system', 'user', 'assistant'].includes(item?.role)
+        ? item.role
+        : 'user',
+      content: String(item?.content || '').slice(0, 8000),
+    }))
+    .filter((item) => item.content.trim())
+  if (messages.length === 0) {
+    return response.status(400).json({
+      code: 'INVALID_MESSAGES',
+      message: 'messages 不能为空',
+    })
+  }
+  try {
+    const completion = await client.chat.completions.create({
+      model: AI_MODEL,
+      messages,
+      temperature: 0.3,
+    })
+    response.json({
+      success: true,
+      data: {
+        content: completion.choices?.[0]?.message?.content || '',
+        model: completion.model || AI_MODEL,
+      },
+    })
+  } catch (error) {
+    console.error('[fullstack-api] AI chat failed', error?.status || 'unknown')
+    response.status(502).json({
+      code: 'AI_UPSTREAM_ERROR',
+      message: 'AI 服务暂时不可用，请稍后重试',
+    })
+  }
+}))
+
+// POST /api/v1/ai/analyze：上传文件 + 提示词，调用 Responses API 做真实分析。
+// PDF / DOCX / 图片以 base64 交给模型；纯文本直接作为输入。
+app.post(
+  '/api/v1/ai/analyze',
+  aiUpload.single('file'),
+  asyncHandler(async (request, response) => {
+    const client = getOpenAIClient()
+    if (!client) return aiNotConfigured(response)
+    const prompt = String(
+      request.body?.prompt || '请分析上传内容，输出结构化结论与关键依据。',
+    ).slice(0, 4000)
+    const content = [{ type: 'input_text', text: prompt }]
+    if (request.file) {
+      content.push({
+        type: 'input_file',
+        filename: request.file.originalname || 'upload',
+        file_data: `data:${request.file.mimetype || 'application/octet-stream'};base64,${request.file.buffer.toString('base64')}`,
+      })
+    } else if (String(request.body?.text || '').trim()) {
+      content.push({
+        type: 'input_text',
+        text: String(request.body.text).slice(0, 20000),
+      })
+    } else {
+      return response.status(400).json({
+        code: 'AI_INPUT_REQUIRED',
+        message: '请上传文件或在 text 字段提供文本',
+      })
+    }
+    try {
+      const result = await client.responses.create({
+        model: AI_MODEL,
+        input: [{ role: 'user', content }],
+      })
+      response.json({
+        success: true,
+        data: {
+          analysis: result.output_text || '',
+          model: result.model || AI_MODEL,
+          filename: request.file?.originalname || null,
+        },
+      })
+    } catch (error) {
+      console.error('[fullstack-api] AI analyze failed', error?.status || 'unknown')
+      response.status(502).json({
+        code: 'AI_UPSTREAM_ERROR',
+        message: 'AI 服务暂时不可用，请稍后重试',
+      })
+    }
+  }),
+)
+"""
+
+
+def build_ai_support(
+    contract: ArchitectContract,
+    upload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """按契约生成 AI-Native 后端片段。
+
+    只有当 Architect 契约显式 ``includeAiCapability=true`` 时才注入
+    ``openai`` SDK 与真实网络调用；普通 CRUD 项目不会多装依赖。
+    ``multer`` 若上传能力已经引入则复用，避免重复 import。
+    """
+    enabled = bool(contract.include_ai_capability)
+    if not enabled:
+        return {
+            "enabled": False,
+            "imports": "",
+            "middleware": "",
+            "routes": "",
+            "dependencies": {},
+            "routes_registered": [],
+        }
+    upload_enabled = bool(upload and upload.get("enabled"))
+    imports = "import OpenAI from 'openai'\n"
+    if not upload_enabled:
+        imports += "import multer from 'multer'\n"
+    return {
+        "enabled": True,
+        "imports": imports,
+        "middleware": _AI_BACKEND_MIDDLEWARE,
+        "routes": _AI_BACKEND_ROUTES,
+        "dependencies": {
+            "openai": OPENAI_VERSION,
+            **({"multer": MULTER_VERSION} if not upload_enabled else {}),
+        },
+        "routes_registered": [
+            ("POST", AI_CHAT_PATH, "ai.chat"),
+            ("POST", AI_ANALYZE_PATH, "ai.analyze"),
+        ],
+    }
+
+
 def generate_backend_bundle(
     contract: ArchitectContract,
     *,
@@ -983,6 +1250,8 @@ def generate_backend_bundle(
     column_defs = extract_column_defs(contract.database_ddl)
     columns = [name for name, _ in column_defs]
     upload = build_upload_support(contract, columns)
+    ai = build_ai_support(contract, upload)
+    security = build_security_support(contract)
     engine = contract_database_engine(contract)
     engine_label = DATABASE_ENGINE_LABELS.get(engine, engine)
     # 集合路径只允许静态资源根路径；详情路径由同一资源派生。
@@ -1004,6 +1273,9 @@ def generate_backend_bundle(
         "__UPLOAD_BODY_PATCH__": upload["body_patch"],
         "__UPLOAD_RESPONSE_FIELDS__": upload["response_fields"],
         "__COLLECTION_POST_MIDDLEWARE__": upload["post_middleware"],
+        "__AI_IMPORTS__": ai["imports"],
+        "__AI_MIDDLEWARE__": ai["middleware"],
+        "__AI_ROUTES__": ai["routes"],
     }
     server_code = EXPRESS_SERVER_TEMPLATE
     for key, value in replacements.items():
@@ -1021,7 +1293,12 @@ def generate_backend_bundle(
     if detail and detail != express_base:
         for method in ("GET", "PUT", "PATCH", "DELETE"):
             registered.append((method, detail, "express.item"))
-    registered_keys = {(method, path) for method, path, _source in registered}
+    registered_keys = {(method, path) for method, path, _ in registered}
+    for method, path, source in ai["routes_registered"]:
+        key = (method, path)
+        if key not in registered_keys:
+            registered.append((method, path, source))
+            registered_keys.add(key)
 
     business_snippets: list[str] = []
     for route in routes:
@@ -1069,7 +1346,12 @@ def generate_backend_bundle(
         "DB_SSL=true\n"
         "PORT=3000\n"
         "CORS_ORIGINS='https://your-frontend.example.com'\n"
-        "```\n"
+        + (
+            "OPENAI_API_KEY='<仅在服务端注入>'\n" "OPENAI_MODEL=gpt-4o-mini\n"
+            if ai["enabled"]
+            else ""
+        )
+        + "```\n"
         "\n发布前必须执行迁移：\n\n"
         "```bash\ndocker run --rm --env-file .env <image> node server/migrate.mjs\n```\n"
     )
@@ -1077,6 +1359,7 @@ def generate_backend_bundle(
     files = {
         "server/index.js": server_code,
         "server/README.md": readme,
+        **security["files"],
         # 前后端联调的唯一事实来源：BuildVerifier / 前端生成都读取该清单，
         # 任何一端改路由都必须同时更新，避免路径漂移。
         "server/api-routes.json": json.dumps(
@@ -1110,6 +1393,8 @@ def generate_backend_bundle(
                 "dependencies": {
                     **SERVER_DEPENDENCIES,
                     **({"multer": upload["dependency"]} if upload["enabled"] else {}),
+                    **ai["dependencies"],
+                    **security["dependencies"],
                 },
                 "scripts": {
                     "start": "node index.js",
@@ -1127,6 +1412,7 @@ def generate_backend_bundle(
             f"生成 Express + Sequelize 后端（{engine_label}），"
             f"{len(routes) or 2} 条契约路由，"
             f"{len(business_snippets)} 条独立业务端点"
+            + ("，含 AI-Native OpenAI 路由" if ai["enabled"] else "")
         ),
         metadata={
             "table": table,
@@ -1152,6 +1438,19 @@ def generate_backend_bundle(
                 "enabled": bool(upload["enabled"]),
                 "dependency": upload["dependency"],
                 "fileColumns": upload["file_columns"],
+            },
+            "webBestPractices": {
+                "skillId": security["skillId"],
+                "bcrypt": bool(security["enabled"]),
+            },
+            "ai": {
+                "enabled": bool(ai["enabled"]),
+                "model": "gpt-4o-mini",
+                "env": ["OPENAI_API_KEY", "OPENAI_MODEL"],
+                "routes": [
+                    {"method": method, "path": path, "source": source}
+                    for method, path, source in ai["routes_registered"]
+                ],
             },
         },
     )
@@ -1327,6 +1626,193 @@ export function ApiErrorBanner() {
 }
 
 installFetchInterceptor()
+"""
+
+_FRONTEND_AI_WORKSPACE = r"""// 由 FrontendCoder 生成：AI-Native 对话与文件分析界面。
+// 只调用后端 /api/v1/ai/*，密钥永远不进入浏览器。
+import { useState } from 'react'
+
+const CHAT_ENDPOINT = '/api/v1/ai/chat'
+const ANALYZE_ENDPOINT = '/api/v1/ai/analyze'
+
+async function readError(response) {
+  try {
+    const payload = await response.json()
+    return payload?.message || payload?.code || `请求失败（${response.status}）`
+  } catch {
+    return `请求失败（${response.status}）`
+  }
+}
+
+export default function AIWorkspace() {
+  const [messages, setMessages] = useState([
+    { role: 'assistant', content: '你好，我可以帮你分析内容或回答问题。' },
+  ])
+  const [input, setInput] = useState('')
+  const [chatLoading, setChatLoading] = useState(false)
+  const [chatError, setChatError] = useState('')
+  const [file, setFile] = useState(null)
+  const [prompt, setPrompt] = useState('请分析这份简历与目标岗位的匹配度，输出结论与依据。')
+  const [analysis, setAnalysis] = useState('')
+  const [analyzeLoading, setAnalyzeLoading] = useState(false)
+  const [analyzeError, setAnalyzeError] = useState('')
+
+  const sendChat = async (event) => {
+    event.preventDefault()
+    const content = input.trim()
+    if (!content || chatLoading) return
+    const nextMessages = [...messages, { role: 'user', content }]
+    setMessages(nextMessages)
+    setInput('')
+    setChatError('')
+    setChatLoading(true)
+    try {
+      const response = await fetch(CHAT_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: nextMessages.map(({ role, content: text }) => ({ role, content: text })),
+        }),
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      const payload = await response.json()
+      setMessages((previous) => [
+        ...previous,
+        { role: 'assistant', content: payload?.data?.content || '模型未返回内容' },
+      ])
+    } catch (error) {
+      setChatError(error.message || 'AI 对话失败，请重试')
+    } finally {
+      setChatLoading(false)
+    }
+  }
+
+  const analyzeFile = async (event) => {
+    event.preventDefault()
+    if (!file || analyzeLoading) return
+    setAnalyzeError('')
+    setAnalysis('')
+    setAnalyzeLoading(true)
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      form.append('prompt', prompt)
+      const response = await fetch(ANALYZE_ENDPOINT, { method: 'POST', body: form })
+      if (!response.ok) throw new Error(await readError(response))
+      const payload = await response.json()
+      setAnalysis(payload?.data?.analysis || '模型未返回分析结果')
+    } catch (error) {
+      setAnalyzeError(error.message || 'AI 分析失败，请重试')
+    } finally {
+      setAnalyzeLoading(false)
+    }
+  }
+
+  return (
+    <section
+      data-source="ai-workspace"
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+        gap: 20,
+        padding: 24,
+        background: '#0f172a',
+        color: '#e2e8f0',
+      }}
+    >
+      <div data-source="ai-chat-panel" style={{ background: '#111c33', borderRadius: 14, padding: 18 }}>
+        <h2 style={{ margin: '0 0 4px', fontSize: 18 }}>AI 对话</h2>
+        <p style={{ margin: '0 0 12px', color: '#94a3b8', fontSize: 13 }}>
+          由后端调用 OpenAI 生成回复，密钥不会暴露给浏览器。
+        </p>
+        <div style={{ minHeight: 220, maxHeight: 320, overflowY: 'auto', display: 'grid', gap: 10 }}>
+          {messages.map((message, index) => (
+            <div
+              key={`${message.role}-${index}`}
+              style={{
+                justifySelf: message.role === 'user' ? 'end' : 'start',
+                maxWidth: '90%',
+                padding: '9px 12px',
+                borderRadius: 10,
+                background: message.role === 'user' ? '#2563eb' : '#1e293b',
+                whiteSpace: 'pre-wrap',
+                lineHeight: 1.5,
+              }}
+            >
+              {message.content}
+            </div>
+          ))}
+        </div>
+        {chatError && (
+          <p data-source="ai-chat-error" style={{ color: '#fca5a5', fontSize: 13 }}>
+            {chatError}
+          </p>
+        )}
+        <form onSubmit={sendChat} style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <input
+            data-source="ai-chat-input"
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            placeholder="输入你的问题…"
+            style={{ flex: 1, padding: '10px 12px', borderRadius: 8, border: '1px solid #334155', background: '#0b1220', color: '#e2e8f0' }}
+          />
+          <button
+            data-source="ai-chat-submit"
+            type="submit"
+            disabled={chatLoading || !input.trim()}
+            style={{ padding: '10px 16px', borderRadius: 8, border: 0, background: '#2563eb', color: '#fff', cursor: 'pointer' }}
+          >
+            {chatLoading ? '发送中…' : '发送'}
+          </button>
+        </form>
+      </div>
+
+      <div data-source="ai-upload-panel" style={{ background: '#111c33', borderRadius: 14, padding: 18 }}>
+        <h2 style={{ margin: '0 0 4px', fontSize: 18 }}>AI 文件分析</h2>
+        <p style={{ margin: '0 0 12px', color: '#94a3b8', fontSize: 13 }}>
+          支持 PDF / DOCX / 图片 / 文本，上传后由 OpenAI 返回结构化结论。
+        </p>
+        <form onSubmit={analyzeFile} style={{ display: 'grid', gap: 10 }}>
+          <input
+            data-source="ai-upload-input"
+            type="file"
+            accept=".pdf,.doc,.docx,.txt,.md,.json,.png,.jpg,.jpeg"
+            onChange={(event) => setFile(event.target.files?.[0] || null)}
+            style={{ color: '#cbd5e1' }}
+          />
+          <textarea
+            data-source="ai-upload-prompt"
+            rows={3}
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            style={{ padding: 10, borderRadius: 8, border: '1px solid #334155', background: '#0b1220', color: '#e2e8f0' }}
+          />
+          <button
+            data-source="ai-upload-submit"
+            type="submit"
+            disabled={analyzeLoading || !file}
+            style={{ padding: '10px 16px', borderRadius: 8, border: 0, background: '#0d9488', color: '#fff', cursor: 'pointer' }}
+          >
+            {analyzeLoading ? '分析中…' : '开始分析'}
+          </button>
+        </form>
+        {analyzeError && (
+          <p data-source="ai-upload-error" style={{ color: '#fca5a5', fontSize: 13 }}>
+            {analyzeError}
+          </p>
+        )}
+        {analysis && (
+          <pre
+            data-source="ai-analysis-result"
+            style={{ marginTop: 12, padding: 12, borderRadius: 10, background: '#0b1220', whiteSpace: 'pre-wrap', lineHeight: 1.55 }}
+          >
+            {analysis}
+          </pre>
+        )}
+      </div>
+    </section>
+  )
+}
 """
 
 _FRONTEND_PANEL = r"""// 由 FrontendCoder 根据契约 componentInteractions 生成。
@@ -2787,11 +3273,14 @@ def generate_frontend_bundle(
         .replace("__TABLE__", table)
         .replace("__PAYLOAD_KEY__", payload_key)
     )
+    ai_enabled = bool(contract.include_ai_capability)
     files: dict[str, str] = {
         "src/fullstack-api.jsx": panel,
         "src/api-client.jsx": _FRONTEND_API_CLIENT,
         "scripts/dev.mjs": DEV_SCRIPT_TEMPLATE,
     }
+    if ai_enabled:
+        files["src/ai-workspace.jsx"] = _FRONTEND_AI_WORKSPACE
 
     if not existing_main:
         raise ValueError(
@@ -2813,6 +3302,16 @@ def generate_frontend_bundle(
             "import FullstackDataPanel from './fullstack-api.jsx'\n"
             "import { ApiErrorBanner } from './api-client.jsx'\n" + patched_main
         )
+        files["src/main.jsx"] = patched_main
+
+    # AI-Native：把对话 / 上传工作区挂载到应用壳；组件内部已有
+    # Loading / Error / Success 三态与 data-source，生成后仍可圈选修改。
+    if ai_enabled and "AIWorkspace" not in files.get("src/main.jsx", existing_main):
+        base_main = files.get("src/main.jsx", existing_main)
+        if "<App />" not in base_main:
+            raise ValueError("src/main.jsx 中未找到 <App />，无法注入 AI 工作区")
+        patched_main = base_main.replace("<App />", "<App /><AIWorkspace />", 1)
+        patched_main = "import AIWorkspace from './ai-workspace.jsx'\n" + patched_main
         files["src/main.jsx"] = patched_main
 
     if existing_vite is None:
@@ -2851,8 +3350,16 @@ def generate_frontend_bundle(
 
     return GeneratedBundle(
         files=files,
-        summary=f"挂载 {entity} 数据面板，/api 代理到 {base}",
-        metadata={"collectionPath": base, "entity": entity, "table": table},
+        summary=(
+            f"挂载 {entity} 数据面板，/api 代理到 {base}"
+            + ("，含 AI 对话与文件分析界面" if ai_enabled else "")
+        ),
+        metadata={
+            "collectionPath": base,
+            "entity": entity,
+            "table": table,
+            "aiCapability": ai_enabled,
+        },
     )
 
 
@@ -2888,12 +3395,27 @@ def generate_infra_bundle(contract: ArchitectContract) -> GeneratedBundle:
             result = result.replace(key, value)
         return result
 
+    env_example = render(ENV_EXAMPLE_TEMPLATE)
+    deploy_guide = render(DEPLOY_GUIDE_TEMPLATE)
+    if contract.include_ai_capability:
+        env_example += (
+            "\n# ---- AI-Native（OpenAI）----\n"
+            "# 仅在后端服务端注入；禁止写入前端 / 提交到 Git。\n"
+            "OPENAI_API_KEY=\n"
+            "OPENAI_MODEL=gpt-4o-mini\n"
+        )
+        deploy_guide += (
+            "\n## AI 能力\n\n"
+            "1. 在平台密钥管理中配置 `OPENAI_API_KEY`，不要写进镜像或仓库；\n"
+            "2. `OPENAI_MODEL` 默认 `gpt-4o-mini`，可按成本与质量调整；\n"
+            "3. 未配置密钥时 `/api/v1/ai/*` 返回 503 `AI_NOT_CONFIGURED`。\n"
+        )
     files = {
         "Dockerfile": render(BACKEND_DOCKERFILE_TEMPLATE),
         ".dockerignore": DOCKERIGNORE_TEMPLATE,
         "render.yaml": render(RENDER_YAML_TEMPLATE),
-        ".env.example": render(ENV_EXAMPLE_TEMPLATE),
-        "DEPLOY.md": render(DEPLOY_GUIDE_TEMPLATE),
+        ".env.example": env_example,
+        "DEPLOY.md": deploy_guide,
     }
     return GeneratedBundle(
         files=files,
@@ -2907,6 +3429,7 @@ def generate_infra_bundle(contract: ArchitectContract) -> GeneratedBundle:
             "databaseEngine": engine,
             "serviceName": service_name,
             "targets": ["docker", "render", "vercel", "railway"],
+            "aiCapability": bool(contract.include_ai_capability),
         },
     )
 

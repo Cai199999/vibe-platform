@@ -332,7 +332,7 @@ class ProjectMemory:
         }
         lines = [
             "【已确认的实现偏好（只读参考，默认采用）】",
-            "这些偏好来自用户多次明确修改，属于 IMPLEMENTATION_DETAIL；"
+            "这些偏好来自用户多次明确修改，属于 MINOR；"
             "生成时直接采用，不要再次询问。用户本轮明确指定其它值时以本轮为准。",
         ]
         for key in sorted(stable):

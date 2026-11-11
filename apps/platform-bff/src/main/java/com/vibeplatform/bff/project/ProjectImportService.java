@@ -34,7 +34,7 @@ public class ProjectImportService {
     private static final Logger log = LoggerFactory.getLogger(ProjectImportService.class);
     private static final String IMPORT_PATH = "/api/v1/internal/sandbox/import";
     private static final long MAX_FILE_BYTES = 33_554_432L;
-    private static final Set<String> ALLOWED_SUFFIXES = Set.of(".zip", ".png", ".jpg", ".jpeg");
+    private static final Set<String> IMAGE_SUFFIXES = Set.of(".png", ".jpg", ".jpeg");
 
     private final RestClient aiCoreRunRestClient;
     private final ObjectMapper objectMapper;
@@ -59,12 +59,11 @@ public class ProjectImportService {
             return error(HttpStatus.BAD_REQUEST, "IMPORT_EMPTY_FILE", "上传文件为空");
         }
         String filename = sanitizeFilename(file.getOriginalFilename());
-        String suffix = suffixOf(filename);
-        if (!ALLOWED_SUFFIXES.contains(suffix)) {
+        if (!isAllowedFile(filename)) {
             return error(
                     HttpStatus.UNSUPPORTED_MEDIA_TYPE,
                     "IMPORT_UNSUPPORTED_FILE",
-                    "只支持 .zip / .png / .jpg / .jpeg"
+                    "只支持 .zip / .tar.gz / .tgz / .png / .jpg / .jpeg"
             );
         }
         if (file.getSize() > MAX_FILE_BYTES) {
@@ -145,9 +144,16 @@ public class ProjectImportService {
         return name.isBlank() ? "upload.bin" : name;
     }
 
-    private String suffixOf(String filename) {
-        int index = filename.lastIndexOf('.');
-        return index < 0 ? "" : filename.substring(index).toLowerCase(Locale.ROOT);
+    /**
+     * 压缩包支持平台导出的全栈 tar.gz；图片沿用原有截图导入。
+     * 复合后缀必须整体匹配，不能只取最后一个扩展名。
+     */
+    private boolean isAllowedFile(String filename) {
+        String lower = filename.toLowerCase(Locale.ROOT);
+        return lower.endsWith(".zip")
+                || lower.endsWith(".tar.gz")
+                || lower.endsWith(".tgz")
+                || IMAGE_SUFFIXES.stream().anyMatch(lower::endsWith);
     }
 
     private ResponseEntity<JsonNode> error(HttpStatus status, String code, String message) {

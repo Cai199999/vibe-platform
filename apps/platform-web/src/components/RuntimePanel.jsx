@@ -272,7 +272,7 @@ function PausedState({
       <div className="loading-copy timeline-head">
         <h3 className="loading-title">等待你确认</h3>
         <p className="muted">
-          {clarification?.decisionImpact === 'CORE_BUSINESS'
+          {['CRITICAL', 'CORE_BUSINESS'].includes(clarification?.decisionImpact)
             ? '这属于核心业务决策，Agent 已暂停执行，避免擅自改动架构或契约。'
             : 'Agent 已暂停执行，确认后继续。'}
         </p>

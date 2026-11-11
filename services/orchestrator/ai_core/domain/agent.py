@@ -311,9 +311,15 @@ class Clarification(CamelModel):
     max_rounds: int = Field(default=3, ge=1, le=3)
     status: Literal["PENDING", "ANSWERED", "EXPIRED"] = "PENDING"
     reason: str = "ambiguous_intent"
-    # 分级决策：只有 CORE_BUSINESS 可进入本模型；IMPLEMENTATION_DETAIL
-    # 不会触发 interrupt，此处默认值仅用于兼容旧 payload。
-    decision_impact: Literal["CORE_BUSINESS", "IMPLEMENTATION_DETAIL"] = "CORE_BUSINESS"
+    # 分级决策：只有 CRITICAL 可进入本模型；MAJOR / MINOR 不会触发
+    # interrupt。旧值仅用于兼容历史检查点与已持久化事件。
+    decision_impact: Literal[
+        "CRITICAL",
+        "MAJOR",
+        "MINOR",
+        "CORE_BUSINESS",
+        "IMPLEMENTATION_DETAIL",
+    ] = "CRITICAL"
     decision_summary: str = ""
     questions: list[ClarificationQuestion] = Field(default_factory=list)
     # 首轮一键决策按钮；为空时前端回退渲染 questions[].options。

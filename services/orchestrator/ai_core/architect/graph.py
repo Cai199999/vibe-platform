@@ -542,13 +542,17 @@ class ArchitectGraphRunner:
         return {}
 
     def _route_confidence(self, state: ArchitectState) -> str:
+        # 用户显式选择“采用建议并跳过剩余提问”：跳过后续澄清。
+        # 该标记只可能来自澄清 API 的 adoptSuggestions，模型无法写入。
+        if bool(state.get("adopt_suggestions")):
+            return "draft_contract"
         shape = state.get("app_shape") or ""
         missing = state.get("missing_slots") or []
         confidence = float(state.get("confidence_score") or 0.0)
         threshold = float(state.get("threshold") or 0.85)
         if shape and not missing and confidence >= threshold:
             return "draft_contract"
-        if int(state.get("round") or 0) >= int(state.get("max_rounds") or 5):
+        if int(state.get("round") or 0) >= int(state.get("max_rounds") or 10):
             return "confidence_exhausted"
         return "clarify_gate"
 
@@ -633,6 +637,7 @@ class ArchitectGraphRunner:
             "ui_history": history[-30:],
             "round": int(state.get("round") or 0) + 1,
             "questions": [],
+            "adopt_suggestions": bool(answers.get("adopt_suggestions")),
             "status": "ANALYZING",
         }
 
@@ -1069,7 +1074,7 @@ def _build_clarification(state: ArchitectState) -> ArchitectClarification:
         clarification_id=f"clr_{state.get('run_id')}_{round_no}",
         run_id=str(state.get("run_id") or ""),
         round=round_no,
-        max_rounds=int(state.get("max_rounds") or 5),
+        max_rounds=int(state.get("max_rounds") or 10),
         status="PENDING",
         app_shape=state.get("app_shape") or None,  # type: ignore[arg-type]
         confidence_score=float(state.get("confidence_score") or 0.0),
@@ -1088,17 +1093,26 @@ def _normalize_resume_answers(response: Any) -> dict[str, Any]:
     if isinstance(response, dict):
         raw_answers = response.get("answers") or []
         comment = response.get("comment")
+        adopt_suggestions = bool(
+            response.get("adopt_suggestions") or response.get("adoptSuggestions")
+        )
     elif isinstance(response, list):
         raw_answers = response
         comment = None
+        adopt_suggestions = False
     else:
         raw_answers = []
         comment = None
+        adopt_suggestions = False
     answers = []
     for item in raw_answers:
         if isinstance(item, dict):
             answers.append(item)
-    return {"answers": answers, "comment": comment}
+    return {
+        "answers": answers,
+        "comment": comment,
+        "adopt_suggestions": adopt_suggestions,
+    }
 
 
 def _answer_value(value: Any, text: Any) -> Any:

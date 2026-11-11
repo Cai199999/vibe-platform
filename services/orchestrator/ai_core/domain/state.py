@@ -8,7 +8,22 @@ messages 使用 ``operator.add``）属于状态结构本身，因此仍保留在
 from __future__ import annotations
 
 import operator
+from enum import Enum
 from typing import Annotated, Any, Literal, TypedDict
+
+
+class DecisionImpact(str, Enum):
+    """决策影响面分级。
+
+    Agent 只能对 ``CRITICAL`` 触发 HITL 中断：
+      - CRITICAL：数据库表结构、API 契约、系统架构、鉴权/支付等；
+      - MAJOR：跨模块交互、状态模型等，默认自主执行；
+      - MINOR：样式、文案、变量命名，必须静默生成。
+    """
+
+    CRITICAL = "CRITICAL"
+    MAJOR = "MAJOR"
+    MINOR = "MINOR"
 
 
 class VerifyState(TypedDict, total=False):
@@ -109,9 +124,9 @@ class AgentState(TypedDict, total=False):
     # 当前计划置信度与是否需要澄清；由 Planner 写入、clarify_gate 读取。
     plan_confidence: float
     plan_needs_clarification: bool
-    # 决策影响面：CORE_BUSINESS 才允许打断用户；IMPLEMENTATION_DETAIL
-    # 由 Agent 自主决定并按最佳实践生成。
-    plan_decision_impact: str
+    # 决策影响面：只有 CRITICAL 才允许打断用户；MAJOR / MINOR
+    # 由 Agent 自主决定并按最佳实践生成（兼容旧值 CORE_BUSINESS 等）。
+    plan_decision_impact: Literal["CRITICAL", "MAJOR", "MINOR"] | str
     # 结构化一键决策选项（A/B/C），与 questions 同时下发以兼容旧前端。
     clarification_options: list[dict[str, Any]]
     # 当前待回答的问题（暂停后由 checkpoint 保留）。
@@ -201,6 +216,8 @@ class ArchitectState(TypedDict, total=False):
     confidence_score: float
     missing_slots: list[str]
     questions: list[dict[str, Any]]
+    # 仅由用户在澄清 API 显式 adoptSuggestions=true 写入；AI 无权置位。
+    adopt_suggestions: bool
     analysis: dict[str, Any]
     retrieved_chunks: list[dict[str, Any]]
     clarification: dict[str, Any]
@@ -223,4 +240,4 @@ class ArchitectState(TypedDict, total=False):
     error_code: str
 
 
-__all__ = ["AgentState", "ArchitectState", "VerifyState"]
+__all__ = ["AgentState", "ArchitectState", "DecisionImpact", "VerifyState"]

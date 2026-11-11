@@ -119,7 +119,7 @@ export const EMPTY_ARCHITECT = {
   confidenceScore: 0,
   threshold: 0.85,
   round: 0,
-  maxRounds: 5,
+  maxRounds: 10,
   clarification: null,
   contract: null,
   citations: [],
@@ -983,7 +983,7 @@ export function useArchitect({ token } = {}) {
   )
 
   const answer = useCallback(
-    async (projectId, answers, comment = '') => {
+    async (projectId, answers, comment = '', options = {}) => {
       const current = statesRef.current[projectId]
       const clarification = current?.clarification
       if (!current?.runId || !clarification?.clarificationId) return
@@ -995,6 +995,7 @@ export function useArchitect({ token } = {}) {
           answers,
           comment,
           token,
+          Boolean(options.adoptSuggestions),
         )
         // 服务端已写入 clarification.answered，重放继续同一条时间轴。
         await connect(projectId, {

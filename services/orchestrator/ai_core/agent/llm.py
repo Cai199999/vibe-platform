@@ -24,8 +24,8 @@ from typing import Any, Callable, TypeVar
 from ai_core.adapters.model.deepseek import DeepSeekClient
 from ai_core.agent.memory import fallback_summary
 from ai_core.agent.preferences import (
-    CORE_BUSINESS,
-    IMPLEMENTATION_DETAIL,
+    CRITICAL,
+    MINOR,
     build_clarification_options,
     infer_decision_impact,
     normalize_decision_impact,
@@ -68,7 +68,7 @@ class PlanResult:
 
     plan: str
     confidence_score: float = 1.0
-    decision_impact: str = IMPLEMENTATION_DETAIL
+    decision_impact: str = MINOR
     needs_clarification: bool = False
     clarification: dict[str, Any] | None = None
 
@@ -244,8 +244,8 @@ class MockAgentLLM(AgentLLM):
             )
 
         # 分级决策：Mock 也必须遵守与 DeepSeek 相同的产品规则。
-        # IMPLEMENTATION_DETAIL（样式 / 基础 UI / 变量命名等）绝不中断；
-        # 只有 CORE_BUSINESS 且缺少拍板信息时才生成澄清。
+        # MINOR（样式 / 基础 UI / 变量命名等）绝不中断；
+        # 只有 CRITICAL 且缺少拍板信息时才生成澄清。
         decision_impact = infer_decision_impact(annotations)
         lines.insert(0, f"0. 决策影响面：{decision_impact}")
         clarification = (
@@ -258,7 +258,7 @@ class MockAgentLLM(AgentLLM):
             return PlanResult(
                 plan="\n".join(lines),
                 confidence_score=0.55,
-                decision_impact=CORE_BUSINESS,
+                decision_impact=CRITICAL,
                 needs_clarification=True,
                 clarification=clarification,
             )
@@ -487,10 +487,10 @@ class DeepSeekAgentLLM(AgentLLM):
             "JSON 格式：\n"
             '{"plan":"逐条说明每个标注要改什么、保持什么不变、如何验证",'
             '"confidence_score":0.0到1.0,'
-            '"decision_impact":"CORE_BUSINESS 或 IMPLEMENTATION_DETAIL",'
+            '"decision_impact":"CRITICAL / MAJOR / MINOR",'
             '"needs_clarification":false,'
             '"clarification":null或{"reason":"core_business_decision",'
-            '"decisionImpact":"CORE_BUSINESS","decisionSummary":"一句话说明'
+            '"decisionImpact":"CRITICAL","decisionSummary":"一句话说明'
             '需要拍板的业务问题","annotationId":"...",'
             '"questions":[{"questionId":"q1","type":"single_choice",'
             '"prompt":"...","required":true,"options":[{"value":"ui_only",'
@@ -532,17 +532,19 @@ class DeepSeekAgentLLM(AgentLLM):
             "- 明确指出多个标注之间是否可能冲突，以及最终以什么结果为准；\n"
             "- 只描述要改什么、保持什么不变、如何验证；不要输出代码。\n\n"
             "分级决策规则（最高优先级）：\n"
-            "- 必须先输出 decision_impact，且只能是 CORE_BUSINESS 或 "
-            "IMPLEMENTATION_DETAIL；\n"
-            "- CORE_BUSINESS：新增数据库表 / 依赖、修改 API 契约、核心业务分支"
-            "（发邮件还是扣库存、支付/退款/权限/库存）、破坏性删除。只有这类"
+            "- 必须先输出 decision_impact，且只能是 CRITICAL / MAJOR / "
+            "MINOR；\n"
+            "- CRITICAL：新增或修改数据库表结构、修改 API 契约、系统架构、"
+            "鉴权/支付/权限/库存等核心业务分支、破坏性删除。只有这类"
             "需求在信息缺失或存在多种合理方案时，才 needs_clarification=true；\n"
-            "- IMPLEMENTATION_DETAIL：样式微调（hex 颜色、圆角、内外边距）、"
+            "- MAJOR：跨模块交互、状态模型、路由结构变化。默认自主执行，"
+            "只有确实缺少无法推断的必填信息时才 needs_clarification=true；\n"
+            "- MINOR：样式微调（hex 颜色、圆角、内外边距）、"
             "基础代码实现（变量命名、日志格式、JSX 嵌套、组件拆分）、登录框等"
             "纯 UI 结构。必须自主按当前项目风格与最佳实践决定，"
             "**needs_clarification 必须为 false**，不得因为用户没指定具体样式"
             "而打断；\n"
-            "- 低置信度只对 CORE_BUSINESS 生效；IMPLEMENTATION_DETAIL 即使不"
+            "- 低置信度只对 CRITICAL 生效；MINOR 即使不"
             "完全确定，也要选择合理默认值继续执行，让用户通过沙盒预览事后圈选；\n"
             "- 核心决策每轮 1~3 个问题，优先提供 2~3 个可执行选项，并把推荐"
             "方案标记 recommended=true；必须同时输出 clarificationOptions，"
@@ -550,8 +552,8 @@ class DeepSeekAgentLLM(AgentLLM):
             "- 问题字段固定为 questionId/type/prompt/required/options/"
             "defaultValue；type 只允许 single_choice / multi_choice / free_text。\n\n"
             "全栈引导：\n"
-            "- 登录界面本身属于 IMPLEMENTATION_DETAIL；但密码校验放前端还是"
-            "后端接口、是否新增用户表 / 认证服务属于 CORE_BUSINESS；\n"
+            "- 登录界面本身属于 MINOR；但密码校验放前端还是"
+            "后端接口、是否新增用户表 / 认证服务属于 CRITICAL；\n"
             "- 缺少业务范围时 needs_clarification=true，问题必须引导用户确认："
             "本次先生成前端界面，还是同时生成后端接口和数据库？\n"
             "- 当前能力只有前端时，不得擅自承诺或生成后端 / 数据库代码；"
@@ -866,7 +868,7 @@ def _normalize_clarification(
     clarification: dict[str, Any],
     annotations: list[dict[str, Any]],
     *,
-    decision_impact: str = CORE_BUSINESS,
+    decision_impact: str = CRITICAL,
 ) -> dict[str, Any] | None:
     """把模型输出收敛为 API 契约；问题不合法时返回 None。"""
     questions: list[dict[str, Any]] = []
@@ -954,7 +956,7 @@ def _normalize_clarification(
             clarification.get("decisionImpact") or clarification.get("decision_impact")
         )
         or normalize_decision_impact(decision_impact)
-        or CORE_BUSINESS
+        or CRITICAL
     )
     summary = str(
         clarification.get("decisionSummary")
@@ -978,16 +980,16 @@ def _annotation_id(annotation: dict[str, Any]) -> str | None:
 
 def _mock_clarification(
     annotations: list[dict[str, Any]],
-    decision_impact: str = IMPLEMENTATION_DETAIL,
+    decision_impact: str = MINOR,
 ) -> dict[str, Any] | None:
     """Mock 的核心业务决策澄清。
 
-    与旧版“模糊形容词就打断”不同，这里只在 ``CORE_BUSINESS`` 时返回问题：
+    与旧版“模糊形容词就打断”不同，这里只在 ``CRITICAL`` 时返回问题：
     - 密码 / 登录校验：前端、后端接口、已有认证服务三选一；
     - 其它接口 / 数据 / 支付 / 库存 / 通知：前端先行、后端契约、已有服务；
     - 破坏性操作：确认执行或取消。
     """
-    if decision_impact != CORE_BUSINESS:
+    if decision_impact != CRITICAL:
         return None
     text = " ".join(_annotation_text(item) for item in annotations)
     annotation_id = _annotation_id(annotations[0]) if annotations else None
@@ -1036,7 +1038,7 @@ def _mock_clarification(
         }
     return {
         "reason": "core_business_decision",
-        "decisionImpact": CORE_BUSINESS,
+        "decisionImpact": CRITICAL,
         "decisionSummary": question["prompt"],
         "annotationId": annotation_id,
         "questions": [question],

@@ -1392,7 +1392,7 @@ export default function WorkspacePage() {
   }, [architectStates, updateProject])
 
   /**
-   * 导入项目：上传 zip / 截图 -> Python 解包并启动沙盒 -> 新建 Tab。
+   * 导入项目：上传 zip / tar.gz 全栈包 / 截图 -> Python 解包并启动沙盒 -> 新建 Tab。
    *
    * 导入完成后直接写入一个“已完成”的 Run 结果，使预览面板立刻显示沙盒，
    * 后续画布标注与增量修改复用同一个 sandboxId。
@@ -1404,7 +1404,7 @@ export default function WorkspacePage() {
       return
     }
     const projectId = newId('proj')
-    const baseName = file.name.replace(/\.(zip|png|jpe?g)$/i, '').trim()
+    const baseName = file.name.replace(/\.(tar\.gz|tgz|zip|png|jpe?g)$/i, '').trim()
     const projectName = baseName || '导入项目'
     setImporting(true)
     showToast('info', `正在导入 ${file.name}，首次 npm install 可能需要几分钟…`)
@@ -1420,6 +1420,8 @@ export default function WorkspacePage() {
         files: payload.files ?? {},
         entryFile: payload.entryFile || TARGET_FILE,
         kind: payload.kind,
+        services: payload.services,
+        dataSourceCount: payload.dataSourceCount,
         sourceName: payload.sourceName || file.name,
       })
       const result = {
@@ -1434,7 +1436,11 @@ export default function WorkspacePage() {
         turnCount: 0,
         commits: [],
         assistantMessage: `已导入 ${payload.sourceName || file.name}（${
-          payload.kind === 'html' ? 'HTML' : 'React'
+          payload.kind === 'html'
+            ? 'HTML'
+            : payload.kind === 'fullstack'
+              ? `全栈 · ${(payload.services || ['vite', 'express']).join(' + ')}`
+              : 'React'
         }），可以继续在画布上圈选修改。`,
         generatedPatch: '',
         verifyResult: null,
@@ -1919,7 +1925,7 @@ export default function WorkspacePage() {
         architect: {
           llmProvider: modelProvider,
           confidenceThreshold: 0.85,
-          maxClarificationRounds: 5,
+          maxClarificationRounds: 10,
           ragProvider: 'markdown',
           ragTopK: 5,
         },
@@ -4113,11 +4119,12 @@ export default function WorkspacePage() {
           call('handleFrontendBootstrap', { manual: true }),
         onArchitectClose: () =>
           workspaceActionsRef.current?.architectClose(projectId),
-        onArchitectAnswer: (answers, comment) =>
+        onArchitectAnswer: (answers, comment, options) =>
           workspaceActionsRef.current?.architectAnswer(
             projectId,
             answers,
             comment,
+            options,
           ),
         onArchitectDecide: (decision, comment) =>
           workspaceActionsRef.current?.architectDecide(

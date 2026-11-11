@@ -221,19 +221,22 @@ class SnapshotDiffResponse(CamelResponse):
 
 
 class ImportSandboxResponse(CamelResponse):
-    """导入 zip / 图片后返回的沙盒与源码摘要。
+    """导入压缩包 / 图片后返回的沙盒与源码摘要。
 
     ``files`` 只包含文本源码（有体积上限），用于前端画布定位与刷新恢复；
-    完整项目（含二进制资源）已经写入沙盒。
+    完整项目（含二进制资源）已经写入沙盒。全栈包额外返回 ``services``
+    （vite / express）与 ``data_source_count``（重新注入的可圈选节点数）。
     """
 
     sandbox_id: str
     preview_url: str
     project_id: str
-    kind: Literal["react", "html"]
+    kind: Literal["react", "html", "fullstack"]
     entry_file: str
     file_count: int
     files: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+    services: list[str] = Field(default_factory=list)
+    data_source_count: int = 0
     source_name: str = ""
     created_at: datetime

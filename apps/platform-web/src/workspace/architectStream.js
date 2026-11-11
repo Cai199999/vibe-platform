@@ -255,6 +255,7 @@ export async function fetchArchitectAnswers(
   answers,
   comment,
   token,
+  adoptSuggestions = false,
 ) {
   const response = await fetch(
     `/api/v1/architect/runs/${encodeURIComponent(runId)}/clarifications/${encodeURIComponent(clarificationId)}/answers`,
@@ -264,7 +265,11 @@ export async function fetchArchitectAnswers(
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token ?? ''}`,
       },
-      body: JSON.stringify({ answers, comment: comment || undefined }),
+      body: JSON.stringify({
+        answers,
+        comment: comment || undefined,
+        adoptSuggestions: adoptSuggestions || undefined,
+      }),
     },
   )
   if (!response.ok) {

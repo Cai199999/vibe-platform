@@ -219,7 +219,7 @@ class Settings(BaseSettings):
     # Architect（M2.5 全栈架构澄清与 Path 生成）
     # ------------------------------------------------------------
     architect_confidence_threshold: float = 0.85
-    architect_max_clarification_rounds: int = 5
+    architect_max_clarification_rounds: int = 10
     architect_contract_repair_limit: int = 1
     # JSON 结构化输出：DeepSeek JSON Output + Pydantic 校验失败回传重试。
     architect_structured_output: bool = True

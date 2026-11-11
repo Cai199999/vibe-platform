@@ -113,7 +113,7 @@ class ActiveArchitectRun:
     source_origin: str = "request"
     app_shape: str | None = None
     round: int = 0
-    max_rounds: int = 5
+    max_rounds: int = 10
     confidence_score: float = 0.0
     threshold: float = 0.85
     clarification: ArchitectClarification | None = None
@@ -361,8 +361,20 @@ class ArchitectService:
             ]
             if request.answers and not answers:
                 raise ArchitectAnswersRequiredError("提交的 questionId 不属于当前澄清")
-            if not answers and not (request.comment or "").strip():
+            if request.adopt_suggestions:
+                # 用户显式授权：按默认值 / 推荐选项 / 类型默认值补齐全部问题。
+                # 该路径只可能由 API 请求触发，模型输出不会携带该标记。
+                answers = _merge_adopted_answers(clarification.questions, answers)
+            if (
+                not answers
+                and not (request.comment or "").strip()
+                and not request.adopt_suggestions
+            ):
                 raise ArchitectAnswersRequiredError("至少回答一个问题或提供补充说明")
+
+            comment = (request.comment or "").strip()
+            if request.adopt_suggestions and not comment:
+                comment = "用户选择一键采用平台建议并跳过剩余提问"
 
             answered_at = datetime.now(timezone.utc)
             clarification.status = "ANSWERED"
@@ -377,7 +389,8 @@ class ArchitectService:
                 "clarificationId": clarification.clarification_id,
                 "round": clarification.round,
                 "answers": answers,
-                "comment": request.comment,
+                "comment": comment,
+                "adoptSuggestions": request.adopt_suggestions,
             },
             dedupe_key=(
                 f"architect.clarification.answered:" f"{clarification.clarification_id}"
@@ -389,7 +402,8 @@ class ArchitectService:
                 active,
                 {
                     "answers": answers,
-                    "comment": request.comment,
+                    "comment": comment,
+                    "adopt_suggestions": request.adopt_suggestions,
                 },
             ),
             name=f"architect-resume-{run_id}",
@@ -852,6 +866,56 @@ def _require_run(run_id: str) -> ActiveArchitectRun:
     return active
 
 
+def _merge_adopted_answers(
+    questions: list[Any],
+    answers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """用户显式“采用建议”时为未答问题生成确定性答案。
+
+    优先级：问题默认值 → 推荐选项 → 首个选项 → 按类型给出的安全默认值。
+    每个答案标记 ``source=USER_ADOPTED``，便于审计和契约生成时写入假设，
+    区别于用户逐题手填的答案。
+    """
+    merged = list(answers)
+    answered_ids = {
+        str(item.get("questionId") or item.get("question_id") or "") for item in answers
+    }
+    for question in questions:
+        question_id = str(getattr(question, "question_id", "") or "")
+        if not question_id or question_id in answered_ids:
+            continue
+        value = _adopted_value(question)
+        answer: dict[str, Any] = {
+            "questionId": question_id,
+            "value": value,
+            "source": "USER_ADOPTED",
+        }
+        if isinstance(value, str):
+            answer["text"] = value
+        merged.append(answer)
+    return merged
+
+
+def _adopted_value(question: Any) -> Any:
+    default = getattr(question, "default_value", None)
+    if default not in (None, "", [], {}):
+        return default
+    options = getattr(question, "options", None) or []
+    for option in options:
+        if isinstance(option, dict) and option.get("recommended"):
+            if option.get("value") not in (None, ""):
+                return option["value"]
+    for option in options:
+        if isinstance(option, dict) and option.get("value") not in (None, ""):
+            return option["value"]
+    question_type = str(getattr(question, "type", "") or "")
+    if question_type == "multi_choice":
+        return []
+    if question_type in {"entity_fields", "schema_fields"}:
+        return "由平台按业务目标设计实体、字段与关系"
+    return "由平台按行业最佳实践决定"
+
+
 def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
     request = active.request
     return {
@@ -880,6 +944,7 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         "slots": {},
         "confidence_score": 0.0,
         "missing_slots": [],
+        "adopt_suggestions": False,
         "questions": [],
         "analysis": {},
         "retrieved_chunks": [],
@@ -955,7 +1020,7 @@ def _clarification_from_interrupt(
         clarification_id=f"clr_{state.get('run_id')}_{round_no}",
         run_id=str(state.get("run_id") or ""),
         round=round_no,
-        max_rounds=int(state.get("max_rounds") or 5),
+        max_rounds=int(state.get("max_rounds") or 10),
         status="PENDING",
         app_shape=state.get("app_shape") or None,  # type: ignore[arg-type]
         confidence_score=float(state.get("confidence_score") or 0.0),
