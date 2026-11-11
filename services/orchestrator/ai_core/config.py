@@ -225,9 +225,24 @@ class Settings(BaseSettings):
     architect_structured_output: bool = True
     architect_json_retry_limit: int = 2
     architect_graph_recursion_limit: int = 80
-    architect_rag_provider: str = "markdown"
+    # 混合 RAG：BM25（硬性规范）+ Chroma 向量检索（企业长文档）。
+    architect_rag_provider: str = "hybrid"
     architect_rag_top_k: int = 5
     architect_knowledge_dir: str = "knowledge/fullstack"
+    # 企业长文档目录：单独使用 Chroma 时读取该目录。
+    enterprise_knowledge_dir: str = "knowledge/enterprise_docs"
+    # Hybrid 在同一语料上做 BM25 + 向量双路召回，避免跨语料 RRF 排名失真。
+    # knowledge/ 同时包含 fullstack 规范与 enterprise_docs 长文档。
+    rag_knowledge_root: str = "knowledge"
+    # 本地向量库持久化目录；容器内位于挂载的 /app/data 下。
+    chroma_persist_dir: str = "data/chroma"
+    chroma_collection_name: str = "enterprise_docs"
+    chroma_hybrid_collection_name: str = "knowledge_corpus"
+    # RRF 平滑常数与每路召回扩张倍数：candidate_k = top_k * multiplier。
+    rag_hybrid_rrf_k: int = 60
+    rag_hybrid_candidate_multiplier: int = 3
+    # Planner 的 RAG 召回数量；与 Architect 解耦，避免计划 Prompt 过长。
+    agent_rag_top_k: int = 3
     # 源码上下文预算：防止超大项目把 Prompt 撑爆。
     architect_source_max_bytes: int = 200_000
     architect_source_max_files: int = 80

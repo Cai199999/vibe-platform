@@ -16,6 +16,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
+# 混合 RAG：构建阶段预热本地 ONNX Embedding，运行期无需联网下载模型。
+# 模型体积约 80MB，缓存在 /app/.cache/chroma，运行时 app 用户可读。
+ENV HOME=/app
+RUN mkdir -p /app/.cache/chroma \
+    && python -c "from chromadb.utils.embedding_functions import DefaultEmbeddingFunction; DefaultEmbeddingFunction()(['warmup'])" \
+    && chown -R app:app /app/.cache
+
 COPY main.py .
 COPY ai_core ./ai_core
 # Architect RAG 知识库：Markdown + BM25，运行时可换 Chroma 而不改 Graph。

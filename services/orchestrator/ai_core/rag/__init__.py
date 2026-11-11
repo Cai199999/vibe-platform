@@ -2,6 +2,7 @@
 
 from ai_core.adapters.rag import (
     ChromaRAGProvider,
+    HybridRAGProvider,
     MarkdownRAGProvider,
     RAGProvider,
     RAGProviderError,
@@ -16,6 +17,7 @@ __all__ = [
     "RetrievedChunk",
     "MarkdownRAGProvider",
     "ChromaRAGProvider",
+    "HybridRAGProvider",
     "get_rag_provider",
     "reset_rag_provider",
 ]

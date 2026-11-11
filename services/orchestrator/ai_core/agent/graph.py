@@ -33,7 +33,9 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, interrupt
 
 from ai_core.adapters.checkpoint import get_checkpointer_provider
+from ai_core.adapters.rag import get_rag_provider
 from ai_core.ports.checkpoint import CheckpointerProvider
+from ai_core.ports.rag import RAGProvider, RAGProviderError
 from ai_core.agent.error_context import (
     error_file_hint,
     extract_error_context,
@@ -160,6 +162,7 @@ class AgentGraphRunner:
         event_sink: EventSink | None = None,
         checkpointer_provider: CheckpointerProvider | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        rag_provider_factory: Callable[[str | None], RAGProvider] | None = None,
     ) -> None:
         # 硬限制：无论调用方传入什么，最多 3 次修复。
         self._max_retries = min(max(0, max_retries), 3)
@@ -185,6 +188,8 @@ class AgentGraphRunner:
         # MCP 配置只来自服务端 settings.mcp_servers，绝不接受浏览器输入；
         # 工具适配层见 ai_core/mcp/tools.py（stdio 子进程 + 白名单）。
         self._settings = get_settings()
+        # Planner 的企业知识检索入口；测试可注入确定性 Provider。
+        self._rag_provider_factory = rag_provider_factory or get_rag_provider
         self._toolbox: ToolRegistry = build_default_toolbox(self._settings)
         self._tool_node = ToolNode(self._toolbox.list_tools())
         self._graph = self._build()
@@ -622,6 +627,55 @@ class AgentGraphRunner:
             ],
         }
 
+    def _retrieve_planner_knowledge(
+        self,
+        state: AgentState,
+        annotations: list[dict[str, Any]],
+    ) -> tuple[str, str, list[dict[str, Any]]]:
+        """Planner 侧的企业知识检索。
+
+        与 Architect 共用 ``HybridRAGProvider``（BM25 + Chroma + RRF），
+        但召回数量更小，避免把长文档塞满计划 Prompt。RAG 失败只降级为
+        无知识增强，绝不让一次代码修改整体失败。
+        """
+        provider_name = str(state.get("rag_provider") or "").strip()
+        if not provider_name:
+            return "", "", []
+        query = _planner_rag_query(annotations, state.get("current_files") or {})
+        if not query:
+            return "", "", []
+        top_k = max(
+            1,
+            int(state.get("rag_top_k") or self._settings.agent_rag_top_k),
+        )
+        try:
+            provider = self._rag_provider_factory(provider_name)
+            chunks = provider.retrieve(query[:800], top_k=top_k)
+        except Exception as exc:  # noqa: BLE001 - RAG 是增强能力，必须降级
+            logger.warning("planner rag retrieve failed: %s", exc)
+            return query, "", []
+
+        blocks: list[str] = []
+        citations: list[dict[str, Any]] = []
+        used_chars = 0
+        for index, chunk in enumerate(chunks, start=1):
+            content = chunk.content.strip()[:1200]
+            if not content:
+                continue
+            if used_chars + len(content) > 3600:
+                break
+            used_chars += len(content)
+            blocks.append(
+                f"[{index}] 《{chunk.title}》 / {chunk.section}"
+                f"（{chunk.path}，score={chunk.score:.4f}）\n{content}"
+            )
+            citation = chunk.to_citation()
+            citation["retrievalSources"] = list(
+                chunk.metadata.get("retrievalSources") or []
+            )
+            citations.append(citation)
+        return query, "\n\n".join(blocks), citations
+
     def _planner(self, state: AgentState) -> dict[str, Any]:
         context = state["annotation_context"]
         answers = list(state.get("clarification_answers") or [])
@@ -640,6 +694,15 @@ class AgentGraphRunner:
         annotations = [item["annotation"] for item in context["annotations"]]
         # 只注入精准截断后的错误上下文，避免把完整构建日志塞回 Planner。
         previous_errors = _repair_feedback(state.get("verify_result") or {})
+        # 内部知识库检索：Architect / Planner 统一走 HybridRAGProvider。
+        # 纯拖拽是确定性几何操作，跳过 RAG，避免无意义的模型/索引延迟。
+        rag_query = ""
+        knowledge_context = ""
+        rag_citations: list[dict[str, Any]] = []
+        if not _is_explicit_move_batch(annotations):
+            rag_query, knowledge_context, rag_citations = (
+                self._retrieve_planner_knowledge(state, annotations)
+            )
         if _is_explicit_move_batch(annotations):
             # 直接拖拽是确定性几何输入：不调用规划模型，避免把“拖了 12px”
             # 重新解释成自然语言需求，也避免任何澄清中断打断静默同步。
@@ -658,6 +721,7 @@ class AgentGraphRunner:
                 current_files=state["current_files"],
                 previous_errors=previous_errors,
                 clarification_answers=answers or None,
+                knowledge_context=knowledge_context or None,
             )
         # 把 research 节点的外部检索结果并入计划，Coder 会从 state["plan"]
         # 读到它；要求模型引用时保留 URL，便于用户核查事实来源。
@@ -666,6 +730,13 @@ class AgentGraphRunner:
         if research:
             plan_text = (
                 f"{plan_text}\n\n外部检索资料（引用时注明来源 URL）：\n{research}"
+            )
+        if knowledge_context:
+            # 内部知识库来自企业文档，优先级高于模型常识；Coder 从 plan
+            # 读取并以引用编号为准，不允许改写来源路径。
+            plan_text = (
+                f"{plan_text}\n\n内部知识库检索结果（Hybrid RAG，按相关度排序）：\n"
+                f"{knowledge_context}"
             )
         threshold = float(state.get("confidence_threshold", 0.7))
         # 分级决策：模型未输出 decision_impact 时，用确定性关键词兜底。
@@ -701,6 +772,9 @@ class AgentGraphRunner:
             "clarification_options": options,
             "clarification": clarification,
             "annotation_context": context,
+            "rag_query": rag_query,
+            "rag_context": knowledge_context,
+            "rag_citations": rag_citations,
             "status": "PLANNING",
             "messages": [_message("planner", plan_text)],
         }
@@ -1788,6 +1862,29 @@ def _duration_ms(started: float) -> int:
 # ------------------------------------------------------------
 # 通用工具函数
 # ------------------------------------------------------------
+def _planner_rag_query(
+    annotations: list[dict[str, Any]],
+    current_files: dict[str, str],
+) -> str:
+    """把画布标注压缩成一条检索查询。
+
+    只取用户诉求与元素定位信息，不拼接完整源码，避免无关 token 稀释
+    向量相似度；检索词上限由调用方再次截断。
+    """
+    parts: list[str] = []
+    for annotation in annotations:
+        text = annotation_text(annotation).strip()
+        if text:
+            parts.append(text)
+        selector = annotation_selector(annotation).strip()
+        if selector:
+            parts.append(f"元素 {selector}")
+        target = annotation_target_file(annotation, current_files, "")
+        if target:
+            parts.append(f"文件 {target}")
+    return "；".join(dict.fromkeys(parts))
+
+
 def _message(node: str, content: str, error: bool = False) -> dict[str, Any]:
     return {
         "role": "assistant",

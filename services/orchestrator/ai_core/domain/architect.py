@@ -72,7 +72,7 @@ class ArchitectRunOptions(CamelModel):
     llm_provider: Literal["auto", "mock", "deepseek"] = "auto"
     confidence_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
     max_clarification_rounds: int = Field(default=10, ge=1, le=10)
-    rag_provider: Literal["markdown", "chroma"] = "markdown"
+    rag_provider: Literal["hybrid", "markdown", "chroma"] = "hybrid"
     rag_top_k: int = Field(default=5, ge=1, le=10)
     max_source_bytes: int = Field(default=200_000, ge=1_000, le=2_000_000)
     contract_repair_limit: int = Field(default=1, ge=0, le=2)

@@ -9,12 +9,14 @@ from __future__ import annotations
 from functools import lru_cache
 
 from ai_core.adapters.rag.chroma import ChromaRAGProvider
+from ai_core.adapters.rag.hybrid import HybridRAGProvider
 from ai_core.adapters.rag.markdown import MarkdownRAG, MarkdownRAGProvider
 from ai_core.config import get_settings
 from ai_core.ports.rag import RAGProvider, RAGProviderError
 
 __all__ = [
     "ChromaRAGProvider",
+    "HybridRAGProvider",
     "MarkdownRAG",
     "MarkdownRAGProvider",
     "RAGProvider",
@@ -28,6 +30,8 @@ __all__ = [
 def get_rag_provider(name: str | None = None) -> RAGProvider:
     """按配置或调用方指定名称返回进程级 RAG Provider。"""
     provider = (name or get_settings().architect_rag_provider).strip().lower()
+    if provider == "hybrid":
+        return HybridRAGProvider()
     if provider == "chroma":
         return ChromaRAGProvider()
     if provider not in {"", "markdown"}:

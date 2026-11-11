@@ -129,6 +129,7 @@ class AgentLLM:
         current_files: dict[str, str],
         previous_errors: str | None = None,
         clarification_answers: list[dict[str, Any]] | None = None,
+        knowledge_context: str | None = None,
     ) -> PlanResult:
         raise NotImplementedError
 
@@ -207,6 +208,7 @@ class MockAgentLLM(AgentLLM):
         current_files: dict[str, str],
         previous_errors: str | None = None,
         clarification_answers: list[dict[str, Any]] | None = None,
+        knowledge_context: str | None = None,
     ) -> PlanResult:
         lines = [
             f"1. 读取目标文件，综合分析 {len(annotations)} 个标注需求：",
@@ -479,10 +481,13 @@ class DeepSeekAgentLLM(AgentLLM):
         current_files: dict[str, str],
         previous_errors: str | None = None,
         clarification_answers: list[dict[str, Any]] | None = None,
+        knowledge_context: str | None = None,
     ) -> PlanResult:
         system = (
             "你是资深前端架构师。一次请求包含 1~3 个画布标注，你必须综合分析"
             "全部标注，输出一份统一、可执行的修改计划。\n"
+            "若提供【内部知识库检索结果】，其中的企业规范与既有约定优先级高于"
+            "通用常识；引用时写明文档标题与章节，不得编造未出现的条款。\n"
             "只输出一个 JSON 对象，不要输出 Markdown 代码围栏或解释文字。\n"
             "JSON 格式：\n"
             '{"plan":"逐条说明每个标注要改什么、保持什么不变、如何验证",'
@@ -569,11 +574,17 @@ class DeepSeekAgentLLM(AgentLLM):
             if clarification_answers
             else "无"
         )
+        knowledge_block = (
+            _truncate(knowledge_context.strip(), 3600)
+            if knowledge_context and knowledge_context.strip()
+            else "无"
+        )
         human = (
             f"画布标注（AnnotationEnvelope[]）:\n"
             f"{json.dumps(annotations, ensure_ascii=False, default=str)}\n\n"
             f"目标文件当前内容:\n{files_block}\n\n"
             f"用户已澄清的回答:\n{answers_block}\n\n"
+            f"内部知识库检索结果（Hybrid RAG）:\n{knowledge_block}\n\n"
             f"上一轮错误（如有）:\n{_truncate(previous_errors or '无', 4000)}"
         )
         # 真实模型偶发输出 Markdown 围栏或截断 JSON。先按严格 JSON 解析，

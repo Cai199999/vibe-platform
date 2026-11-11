@@ -91,7 +91,16 @@ def _parse_markdown(path: Path, root: Path, max_chars: int) -> list[_KnowledgeCh
     def flush() -> None:
         nonlocal current_lines
         content = "\n".join(current_lines).strip()
-        if not content:
+        # 只有标题 / 文档元信息（引用块）的片段不单独成块：
+        #  - h1 后立刻跟 h2 时，标题语义已由 heading_stack 继承；
+        #  - 开头 > 文档编号 / 生效日期 等元信息不构成可检索知识。
+        body_lines = [
+            line.strip()
+            for line in current_lines
+            if line.strip() and not _HEADING_RE.match(line.strip())
+        ]
+        has_body = any(not line.startswith(">") for line in body_lines)
+        if not content or not has_body:
             current_lines = []
             return
         section = " / ".join(item[1] for item in heading_stack) or title
@@ -128,6 +137,20 @@ def _parse_markdown(path: Path, root: Path, max_chars: int) -> list[_KnowledgeCh
 
     flush()
     return chunks
+
+
+def parse_markdown(
+    path: Path,
+    root: Path,
+    max_chars: int = 2400,
+) -> list[_KnowledgeChunk]:
+    """公开的 Markdown 切块入口。
+
+    Chroma Provider 与 BM25 Provider 必须使用完全一致的切块规则，
+    否则 RRF 融合时同一个语义单元会被当成两个不同 Chunk。因此这里
+    只暴露函数，不复制实现。
+    """
+    return _parse_markdown(path, root, max_chars)
 
 
 class _BM25Index:

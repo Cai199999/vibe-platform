@@ -112,6 +112,14 @@ class AgentState(TypedDict, total=False):
     # planner 会把它追加到计划中，coder 据此引用外部事实。
     research_query: str
     research_context: str
+    # 内部知识库（Hybrid RAG）检索结果：planner 写入，coder 从 plan 读取。
+    # rag_context 是拼接后的可读文本；rag_citations 只保留引用元数据，
+    # 避免 UI State 混入 Architect 契约字段。
+    rag_provider: str
+    rag_top_k: int
+    rag_query: str
+    rag_context: str
+    rag_citations: list[dict[str, Any]]
 
     # ---- 生成结果 ----
     plan: str

@@ -887,6 +887,12 @@ class RunExecutionService:
                 "history_tokens_before": 0,
                 "history_tokens_after": 0,
                 "last_repair_error_fingerprint": "",
+                # 企业知识检索：与 Architect 共用 Hybrid（BM25 + Chroma + RRF）。
+                "rag_provider": self._settings.architect_rag_provider,
+                "rag_top_k": self._settings.agent_rag_top_k,
+                "rag_query": "",
+                "rag_context": "",
+                "rag_citations": [],
                 # HITL
                 "clarification_mode": request.options.clarification_mode,
                 "max_clarification_rounds": request.options.max_clarification_rounds,

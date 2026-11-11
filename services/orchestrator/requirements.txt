@@ -18,5 +18,9 @@ tiktoken==0.8.0
 # 内部 HTTP 调用（后续调用 Sandbox / 模型网关）
 httpx==0.28.1
 
+# 混合 RAG：本地 PersistentClient + 内置 ONNX MiniLM Embedding。
+# 不引入独立向量数据库服务；首次检索自动建库，模型在镜像构建阶段预热。
+chromadb==1.0.15
+
 # Docker SDK：通过挂载的 /var/run/docker.sock 管理沙盒容器
 docker==7.1.0

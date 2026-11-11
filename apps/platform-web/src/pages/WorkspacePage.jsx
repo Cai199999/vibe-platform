@@ -1926,7 +1926,7 @@ export default function WorkspacePage() {
           llmProvider: modelProvider,
           confidenceThreshold: 0.85,
           maxClarificationRounds: 10,
-          ragProvider: 'markdown',
+          ragProvider: 'hybrid',
           ragTopK: 5,
         },
       },
