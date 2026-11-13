@@ -1320,6 +1320,8 @@ function CanvasStage({
   const stageDragRef = useRef(null)
   const stageGhostRef = useRef(null)
   const stageHitSeqRef = useRef(0)
+  // 拖拽会话代号：落点请求返回时若代号已变（取消 / 新拖拽），结果作废。
+  const stageDragSeqRef = useRef(0)
   const pendingStageHitRef = useRef(new Map())
   const stageHitRafRef = useRef(0)
   const stageNoticeTimerRef = useRef(null)
@@ -1571,6 +1573,8 @@ function CanvasStage({
         pendingStageHitRef.current.forEach((resolve) => resolve(null))
         pendingStageHitRef.current.clear()
         if (stageDragRef.current) {
+          // 会话代号前移：任何在途的落点请求返回后都不得再写 placement。
+          stageDragSeqRef.current += 1
           stageDragRef.current = null
           setStageDrag(null)
           setStageTarget(null)
@@ -1631,6 +1635,8 @@ function CanvasStage({
         pendingStageHitRef.current.forEach((resolve) => resolve(null))
         pendingStageHitRef.current.clear()
         if (stageDragRef.current) {
+          // 会话代号前移：任何在途的落点请求返回后都不得再写 placement。
+          stageDragSeqRef.current += 1
           stageDragRef.current = null
           setStageDrag(null)
           setStageTarget(null)
@@ -1969,7 +1975,10 @@ function CanvasStage({
   }
 
   const cancelStagedDrag = (notice = '') => {
-    if (!stageDragRef.current) return
+    // 落点命中等待期间 stageDragRef 已清空，但视觉 ghost 还在；
+    // 此时 Esc / pointercancel 仍必须把卡片收回去。
+    if (!stageDragRef.current && !stageDrag) return
+    stageDragSeqRef.current += 1
     stageDragRef.current = null
     setStageDrag(null)
     setStageTarget(null)
@@ -1984,7 +1993,9 @@ function CanvasStage({
     event.preventDefault()
     event.stopPropagation()
     const rect = resolveStagedGhostRect(item)
+    stageDragSeqRef.current += 1
     stageDragRef.current = {
+      seq: stageDragSeqRef.current,
       annotationId: item.annotationId,
       pointerId: event.pointerId,
       rect,
@@ -2052,20 +2063,22 @@ function CanvasStage({
     } catch {
       // 捕获可能已被浏览器释放，忽略。
     }
-    // 先解除本地会话，后续异步响应不再写 UI。
+    // 先解除本地会话，后续异步响应不再写 UI；视觉 ghost 保留到命中
+    // 返回后再撤，避免卡片先跳回原位再跳到新位置的闪烁。
     stageDragRef.current = null
-    setStageDrag(null)
     setStageTarget(null)
 
     const point = stagePointFromClient(event.clientX, event.clientY)
     if (!point?.inside) {
+      setStageDrag(null)
       showStageNotice('已取消：暂存组件必须放在网页视口内')
       return
     }
     // 松手必须拿“最后一帧”的命中，不能复用拖动过程中的旧容器。
     const finalHit = await requestStageHit(event.clientX, event.clientY, 320)
-    // 等待命中期间用户又开始了下一次拖拽：旧结果必须丢弃。
-    if (stageDragRef.current) return
+    // 等待期间取消 / 新拖拽：旧结果必须丢弃。
+    if (stageDragRef.current || stageDragSeqRef.current !== drag.seq) return
+    setStageDrag(null)
     if (!finalHit?.ok) {
       showStageNotice('未能定位父容器，已恢复原位置')
       return
