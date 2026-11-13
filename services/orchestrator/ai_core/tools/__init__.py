@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+from ai_core.tools.ast_edit_tool import (
+    AstEditContext,
+    bind_ast_edit_context,
+    build_apply_ast_edit_tool,
+    execute_ast_edit,
+    register_apply_ast_edit_tool,
+    reset_ast_edit_context,
+)
 from ai_core.tools.base import (
     ToolDescriptor,
     ToolRegistry,
@@ -18,6 +26,12 @@ __all__ = [
     "ToolDescriptor",
     "ToolRegistry",
     "ToolRegistryError",
+    "AstEditContext",
+    "bind_ast_edit_context",
+    "build_apply_ast_edit_tool",
+    "execute_ast_edit",
+    "register_apply_ast_edit_tool",
+    "reset_ast_edit_context",
     "MoveComponentError",
     "build_move_rule",
     "register_move_component_tool",

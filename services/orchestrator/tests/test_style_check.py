@@ -217,9 +217,10 @@ class StyleCheckNodeTest(unittest.TestCase):
             runner._route_after_style_check({"style_check_outcome": "exhausted"}),
             "failed",
         )
+        # Phase 1：判重 / 样式澄清通过后先做确定性锚点解析，再进 Coder。
         self.assertEqual(
             runner._route_after_style_check({"style_check_outcome": "proceed"}),
-            "coder",
+            "resolver",
         )
         self.assertEqual(runner._route_after_clarify({}), "style_check")
 

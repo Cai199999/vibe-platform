@@ -129,12 +129,25 @@ class AgentState(TypedDict, total=False):
     rag_context: str
     rag_citations: list[dict[str, Any]]
 
+    # ---- Phase 1：确定性目标解析 ----
+    # Resolver 输出的 TargetResolution（纯 JSON）。Coder 只能依据其中的
+    # anchorId / range / allowedFiles 调用 apply_ast_edit，不能自造目标。
+    target_resolution: dict[str, Any]
+    # resolved（全部定位成功）/ ambiguous（触发前端选择）/ skipped
+    # （Provider 不支持）/ unresolved（未找到，降级旧路径）/ exhausted。
+    resolver_outcome: Literal[
+        "resolved", "ambiguous", "skipped", "unresolved", "exhausted"
+    ]
+    resolver_round: int
+
     # ---- 生成结果 ----
     plan: str
     generated_patch: str
     generated_files: dict[str, str]
     # 一次生成对应的补丁 ID，patch.proposed / patch.applied 共用。
     patch_id: str
+    # 本轮 Coder 提交的结构化编辑调用（审计 + 前端展示），不含完整文件。
+    ast_edit_calls: list[dict[str, Any]]
 
     # ---- HITL 澄清 ----
     # 当前计划置信度与是否需要澄清；由 Planner 写入、clarify_gate 读取。

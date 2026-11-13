@@ -44,6 +44,10 @@ from ai_core.domain.actions import (
     is_create_action,
 )
 from ai_core.domain.agent import ExecuteRunRequest, RunOptions
+from ai_core.domain.resolution import (
+    RESOLVED,
+    anchor_prompt_view,
+)
 from ai_core.ports.model import ModelClient, ModelClientError
 from ai_core.skill_loader import skill_prompts_to_system
 from ai_core.tools.move_component_tool import build_move_rule
@@ -82,11 +86,18 @@ class PlanResult:
 
 @dataclass(frozen=True)
 class CodeResult:
-    """代码生成结果：full files 与 unified diff 二选一。"""
+    """Coder 输出。
+
+    Phase 1 起新增 ``edits``：Coder 不再直接给 diff / 全量文件，而是提交
+    ``apply_ast_edit`` 工具调用参数。``files`` / ``patch`` 仅为旧调用方
+    （Mock / 未启用 Resolver 的 Provider）保留的兼容字段。
+    """
 
     summary: str
     files: dict[str, str] = field(default_factory=dict)
     patch: str | None = None
+    # 每一项 = {"name": "apply_ast_edit", "arguments": {...}}
+    edits: list[dict[str, Any]] = field(default_factory=list)
 
 
 class AgentLLM:
@@ -152,12 +163,15 @@ class AgentLLM:
         compact: bool = False,
         prefer_fast: bool = False,
         design_system: dict[str, Any] | None = None,
+        target_resolution: dict[str, Any] | None = None,
     ) -> CodeResult:
         """生成代码修改。
 
         ``compact``：超时后的降级重试，进一步压缩上下文并强制局部 Diff；
         ``prefer_fast``：切换到低延迟模型，优先尽快返回可构建结果；
-        ``design_system``：沙盒项目提取的主题色 / 语义类名，用于约束新组件。
+        ``design_system``：沙盒项目提取的主题色 / 语义类名，用于约束新组件；
+        ``target_resolution``：Resolver 的解析结果。提供时 Coder 进入
+        “只输出 apply_ast_edit 工具调用”的协议模式，禁止 diff / 全量文件。
         """
         raise NotImplementedError
 
@@ -309,10 +323,12 @@ class MockAgentLLM(AgentLLM):
         compact: bool = False,
         prefer_fast: bool = False,
         design_system: dict[str, Any] | None = None,
+        target_resolution: dict[str, Any] | None = None,
     ) -> CodeResult:
-        # Mock 不消费设计系统；保留参数以匹配 AgentLLM 契约，避免
-        # Runner 传入 design_system 时触发 TypeError。
-        del design_system
+        # Mock 不消费设计系统 / 解析锚点；保留参数以匹配 AgentLLM 契约，
+        # 避免 Runner 传入新参数时触发 TypeError。Mock 继续走确定性文件
+        # 生成，用于离线 E2E 验证 Graph 编排。
+        del design_system, target_resolution
         primary_file = (
             target_files[0]
             if target_files
@@ -664,16 +680,28 @@ class DeepSeekAgentLLM(AgentLLM):
         compact: bool = False,
         prefer_fast: bool = False,
         design_system: dict[str, Any] | None = None,
+        target_resolution: dict[str, Any] | None = None,
     ) -> CodeResult:
         """只生成 React UI 与样式修改。
 
-        职责解耦：UI Coder 不设计业务接口、数据库或路由。上下文只包含
-        目标组件附近的 JSX 窗口；当窗口被裁剪或超出 Token 预算时，强制
-        输出局部 unified diff，避免大模型整文件重写造成超时。
+        Phase 1：Resolver 提供 RESOLVED 锚点时，走 ``_generate_edits``，
+        模型只能输出 ``apply_ast_edit`` 工具调用，彻底失去 diff / 全量
+        文件能力。没有锚点时保留旧路径，兼容未升级 Provider 与既有测试。
 
         ``design_system`` 由 Service 从沙盒 tailwind.config / 全局 CSS
         提取；有主色定义时强制优先使用 bg-primary 等语义类名。
         """
+        if _resolved_anchors(target_resolution):
+            return self._generate_edits(
+                annotations=annotations,
+                plan=plan,
+                target_resolution=target_resolution or {},
+                verify_result=verify_result,
+                retry_count=retry_count,
+                design_system=design_system,
+                compact=compact,
+                prefer_fast=prefer_fast,
+            )
         budget = 2600 if compact else UI_CONTEXT_TOKEN_BUDGET
         full_file_limit = 900 if compact else UI_FULL_FILE_TOKEN_LIMIT
         diff_threshold = 1800 if compact else UI_DIFF_TOKEN_THRESHOLD
@@ -828,6 +856,101 @@ class DeepSeekAgentLLM(AgentLLM):
             label="代码修改",
         )
 
+    def _generate_edits(
+        self,
+        *,
+        annotations: list[dict[str, Any]],
+        plan: str,
+        target_resolution: dict[str, Any],
+        verify_result: dict[str, Any],
+        retry_count: int,
+        design_system: dict[str, Any] | None,
+        compact: bool,
+        prefer_fast: bool,
+    ) -> CodeResult:
+        """工具协议模式：模型只能输出 apply_ast_edit 调用。
+
+        与旧 ``generate`` 的关键差异：
+          - Prompt 中不再出现 mode=diff / mode=files；
+          - 目标节点由 Resolver 给定，模型只负责填写 JSX 片段；
+          - 输出解析只接受 tool_calls，任何自由代码块都会被拒绝。
+        """
+        anchors = _resolved_anchors(target_resolution)
+        anchor_views = [anchor_prompt_view(anchor) for anchor in anchors]
+        instructions = {
+            str(anchor.get("annotationId") or ""): _instruction_for_anchor(
+                anchor, annotations
+            )
+            for anchor in anchors
+        }
+        create_markers = set(_required_create_markers(annotations, []))
+        design_text = render_design_system(design_system)
+        verify_text = json.dumps(
+            _compact_verify_result(verify_result),
+            ensure_ascii=False,
+            default=str,
+        )
+        plan_text = _truncate(str(plan or "").strip(), 1200 if compact else 2000)
+
+        system = (
+            "你是 FrontendCoder（AST 编辑指令生成器）。\n"
+            "**最高优先级：你没有任何直接写文件的能力。** 你不能输出 diff、"
+            "不能输出整文件、不能修改任何未在解析锚点中列出的文件。你唯一"
+            "可用的写操作是调用工具 `apply_ast_edit`。\n"
+            "你必须依据下方【解析锚点】提供的 anchorId、range、allowedFiles、"
+            "allowedOperations 构造工具调用；禁止自造锚点、禁止扩大范围、"
+            "禁止猜测目标。\n"
+            "**输出格式**：只输出一个 JSON 对象，不要 Markdown 围栏、不要解释、"
+            "不要输出任何代码块。`jsx_code` 是工具参数字符串，不是文件内容：\n"
+            '{"summary":"一句话说明", "tool_calls":[{"name":"apply_ast_edit",'
+            '"arguments":{"anchor_id":"anc_xxx","operation":"modify",'
+            '"target_range":{"startOffset":123,"endOffset":456},'
+            '"jsx_code":"<button ...>保存</button>"}}]}\n'
+            "**操作规则**：\n"
+            "- modify：target_range 必须与锚点完全一致；jsx_code 返回完整的"
+            "新节点（包含原有 className / 事件 / 子节点），只改需要改的部分。\n"
+            "- insert：target_range 可省略；默认插在锚点之后，可用 "
+            'insert_position="before" 插在前面；jsx_code 为完整兄弟节点。\n'
+            "- delete：target_range 必须与锚点完全一致，不需要 jsx_code。\n"
+            "- 每个标注至少一个 tool_call；多个标注可一次提交多个调用。\n"
+            "**内容规则**：\n"
+            "- 只做 React UI / Tailwind / CSS 视觉修改；不设计 API、数据库、"
+            "鉴权与路由。用户未给业务逻辑时，点击行为写占位注释。\n"
+            "- 复用已有语义类名（bg-primary / text-secondary 等），禁止写死 "
+            "#hex；不得使用 position:absolute 模拟布局。\n"
+            "- isShared=true / protected=true 的锚点**禁止修改**；必须返回零"
+            "个针对该锚点的调用，并在 summary 中说明“公共组件需在调用点修改”。"
+            "工具会对公共组件定义直接返回 PROTECTED_COMPONENT。\n"
+            '- CREATE_NEW 标注的新节点必须包含 `data-vibe-created="<annotationId>"`。\n'
+            "- 历史里被否定过的旧方案不得复活；只实现 finalIntent。\n"
+            f"{self._skill_system}"
+            f"{self._memory_block()}"
+            f"{self._preference_block()}"
+        )
+        if design_text:
+            system += f"\n**设计系统**：新增组件优先使用语义类名：{design_text}"
+        human = (
+            "【解析锚点】\n"
+            f"{json.dumps(anchor_views, ensure_ascii=False, default=str)}\n\n"
+            "【标注意图】\n"
+            f"{json.dumps(instructions, ensure_ascii=False, default=str)}\n\n"
+            f"【视觉修改计划】\n{plan_text or '按锚点做最小视觉修改'}\n\n"
+            f"【上一轮验证结果】\n{verify_text}\n\n"
+            f"当前重试次数: {retry_count}"
+        )
+        task = "coder_fast" if prefer_fast else "coder"
+        return self._generate_with_repair(
+            task=task,
+            system=system,
+            human=human,
+            parse=lambda raw: _parse_edit_result(
+                raw,
+                anchors,
+                required_markers=create_markers,
+            ),
+            label="AST 编辑工具调用",
+        )
+
     def summarize_history(self, text: str, max_chars: int = 200) -> str:
         """用 FAST 模型把历史对话压缩为最多 max_chars 个字符。"""
         system = (
@@ -972,6 +1095,164 @@ class DeepSeekAgentLLM(AgentLLM):
             return CodeResult(summary=summary, files=normalized)
 
         raise AgentLLMError("模型输出既不含 diff 也不含 files")
+
+
+# ------------------------------------------------------------
+# Phase 1：工具协议解析
+# ------------------------------------------------------------
+def _resolved_anchors(
+    target_resolution: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """取出可用锚点；空结果表示调用方应回退旧 Coder 路径。"""
+    if not isinstance(target_resolution, dict):
+        return []
+    anchors = target_resolution.get("anchors")
+    if not isinstance(anchors, list):
+        return []
+    return [
+        anchor
+        for anchor in anchors
+        if isinstance(anchor, dict)
+        and str(anchor.get("status") or "") == RESOLVED
+        and anchor.get("anchorId")
+    ]
+
+
+def _instruction_for_anchor(
+    anchor: dict[str, Any],
+    annotations: list[dict[str, Any]],
+) -> str:
+    """把锚点对应的标注压缩成一句可执行指令。"""
+    annotation_id = str(anchor.get("annotationId") or "")
+    for annotation in annotations:
+        if _annotation_id(annotation) == annotation_id:
+            return _annotation_text(annotation)
+    return ""
+
+
+def _parse_edit_result(
+    raw: str,
+    anchors: list[dict[str, Any]],
+    *,
+    required_markers: set[str] | None = None,
+) -> CodeResult:
+    """解析工具协议输出，返回 ``CodeResult.edits``。
+
+    只接受 ``tool_calls``；出现 files / patch / 自由代码块一律视为违约。
+    每个调用都要通过锚点与范围校验，错误信息尽量精确，便于模型自修复。
+    """
+    payload = _extract_json(raw)
+    if not isinstance(payload, dict):
+        raise AgentLLMError("模型输出必须是 JSON 对象")
+    if payload.get("files") or payload.get("patch") or payload.get("mode"):
+        raise AgentLLMError(
+            "禁止输出 diff / 全量文件；只能输出 apply_ast_edit 工具调用"
+        )
+
+    calls = (
+        payload.get("tool_calls") or payload.get("toolCalls") or payload.get("edits")
+    )
+    if not isinstance(calls, list) or not calls:
+        raise AgentLLMError("未调用 apply_ast_edit：tool_calls 不能为空")
+
+    allowed = {
+        str(anchor.get("anchorId")): anchor
+        for anchor in anchors
+        if anchor.get("anchorId")
+    }
+    edits: list[dict[str, Any]] = []
+    created_text: list[str] = []
+    for index, call in enumerate(calls, start=1):
+        if not isinstance(call, dict):
+            raise AgentLLMError(f"第 {index} 个 tool_call 不是对象")
+        name = str(
+            call.get("name") or call.get("tool") or call.get("function") or ""
+        ).strip()
+        if name not in {"apply_ast_edit", "applyAstEdit"}:
+            raise AgentLLMError(
+                f"第 {index} 个工具调用不在白名单: {name or '(空)'}；"
+                "唯一允许的工具是 apply_ast_edit"
+            )
+        arguments = call.get("arguments")
+        if arguments is None:
+            arguments = call.get("args")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError as exc:
+                raise AgentLLMError(
+                    f"第 {index} 个 tool_call.arguments 不是合法 JSON: {exc}"
+                ) from exc
+        if not isinstance(arguments, dict):
+            raise AgentLLMError(f"第 {index} 个 tool_call 缺少 arguments 对象")
+
+        anchor_id = str(
+            arguments.get("anchor_id") or arguments.get("anchorId") or ""
+        ).strip()
+        anchor = allowed.get(anchor_id)
+        if anchor is None:
+            raise AgentLLMError(
+                f"未知 anchorId: {anchor_id or '(空)'}；" f"可用锚点: {sorted(allowed)}"
+            )
+        operation = str(arguments.get("operation") or "").lower().strip()
+        if operation not in {"insert", "delete", "modify"}:
+            raise AgentLLMError(
+                f"第 {index} 个调用 operation 非法: {operation or '(空)'}"
+            )
+        if operation not in (anchor.get("allowedOperations") or []):
+            raise AgentLLMError(
+                f"锚点 {anchor_id} 不允许 {operation}；"
+                f"允许: {anchor.get('allowedOperations')}"
+            )
+        jsx_code = str(arguments.get("jsx_code") or arguments.get("jsxCode") or "")
+        if operation in {"insert", "modify"} and not jsx_code.strip():
+            raise AgentLLMError(f"第 {index} 个调用缺少 jsx_code")
+
+        target_range = arguments.get("target_range") or arguments.get("targetRange")
+        anchor_range = anchor.get("range") or {}
+        if operation in {"modify", "delete"}:
+            if not isinstance(target_range, dict):
+                raise AgentLLMError(
+                    f"第 {index} 个调用缺少 target_range；必须与锚点一致"
+                )
+            if target_range.get("startOffset") != anchor_range.get(
+                "startOffset"
+            ) or target_range.get("endOffset") != anchor_range.get("endOffset"):
+                raise AgentLLMError(
+                    f"第 {index} 个调用 target_range 与锚点不一致；"
+                    f"锚点范围: {anchor_range}"
+                )
+        created_text.append(jsx_code)
+        edits.append(
+            {
+                "name": "apply_ast_edit",
+                "arguments": {
+                    "anchor_id": anchor_id,
+                    "operation": operation,
+                    "target_range": target_range or anchor_range,
+                    "jsx_code": jsx_code,
+                    "insert_position": str(
+                        arguments.get("insert_position")
+                        or arguments.get("insertPosition")
+                        or "after"
+                    ),
+                },
+            }
+        )
+
+    missing = [
+        marker
+        for marker in (required_markers or set())
+        if not _has_created_marker("\n".join(created_text), marker)
+    ]
+    if missing:
+        raise AgentLLMError(
+            "新增组件未落地：jsx_code 缺少 data-vibe-created 标记 "
+            f"{missing}；请把标记写入新增节点的属性"
+        )
+
+    summary = str(payload.get("summary") or "已生成 AST 编辑指令")
+    return CodeResult(summary=summary, edits=edits)
 
 
 # ------------------------------------------------------------

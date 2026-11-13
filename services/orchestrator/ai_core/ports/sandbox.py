@@ -243,6 +243,38 @@ class SandboxProvider(ABC):
         """
         return []
 
+    # --------------------------------------------------------
+    # Phase 1：确定性目标解析 + 唯一写工具
+    # --------------------------------------------------------
+    def resolve_targets(
+        self,
+        sandbox_id: str,
+        anchors: list[dict],
+        draft_id: str | None = None,
+    ) -> list[dict] | None:
+        """用沙盒内 Babel 把 AnnotationEnvelope 解析为精确 AST 锚点。
+
+        返回 ``None`` 表示当前 Provider 不支持确定性解析，调用方必须
+        降级为旧 Coder 路径（测试替身 / 未升级 Provider）。
+        返回列表时，每项至少包含 ``anchorId`` / ``status`` / ``file`` /
+        ``range``；歧义项包含 ``candidates``。
+        """
+        return None
+
+    def apply_ast_edit(
+        self,
+        sandbox_id: str,
+        edit: dict,
+        draft_id: str | None = None,
+    ) -> dict | None:
+        """执行一次 Babel 精确切片编辑，返回新文件内容。
+
+        只计算不落盘：调用方（Tool / Applier）负责把 ``content`` 写回
+        草稿工作树，从而复用实例作用域门禁与审批隔离。
+        返回 ``None`` 表示 Provider 不支持，工具层必须 fail-closed。
+        """
+        return None
+
     @abstractmethod
     def verify(
         self,

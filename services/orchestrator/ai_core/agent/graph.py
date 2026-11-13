@@ -72,6 +72,15 @@ from ai_core.agent.preferences import (
 )
 from ai_core.context_memory import get_project_memory
 from ai_core.domain.actions import is_create_action
+from ai_core.domain.resolution import (
+    RESOLVED,
+    SKIPPED,
+    TARGET_AMBIGUOUS,
+    TARGET_NOT_FOUND,
+    anchor_id_for,
+    find_anchor,
+    resolution_from_payload,
+)
 from ai_core.domain.state import AgentState
 from ai_core.config import get_settings
 from ai_core.observability.streaming import (
@@ -86,6 +95,10 @@ from ai_core.editor import (
 )
 from ai_core.ports.sandbox import SandboxError, SandboxProvider
 from ai_core.tools import ToolRegistry, build_default_toolbox
+from ai_core.tools.ast_edit_tool import (
+    AstEditContext,
+    execute_ast_edit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +108,7 @@ NODE_LABELS = {
     "planner": "理解修改意图",
     "clarify_gate": "检查信息完整性",
     "style_check": "确认视觉样式",
+    "resolver": "解析修改锚点",
     "coder": "生成修改方案",
     "applier": "写入沙盒",
     "verifier": "构建与校验",
@@ -463,6 +477,10 @@ class AgentGraphRunner:
             ),
         )
         builder.add_node(
+            "resolver",
+            self._instrument("resolver", NODE_LABELS["resolver"], self._resolver),
+        )
+        builder.add_node(
             "coder", self._instrument("coder", NODE_LABELS["coder"], self._coder)
         )
         builder.add_node(
@@ -507,6 +525,11 @@ class AgentGraphRunner:
         builder.add_conditional_edges(
             "style_check",
             self._route_after_style_check,
+            {"resolver": "resolver", "failed": "failed"},
+        )
+        builder.add_conditional_edges(
+            "resolver",
+            self._route_after_resolver,
             {"coder": "coder", "failed": "failed"},
         )
         builder.add_conditional_edges(
@@ -1159,6 +1182,212 @@ class AgentGraphRunner:
             ],
         }
 
+    # --------------------------------------------------------
+    # Phase 1：确定性目标解析（Resolver）
+    # --------------------------------------------------------
+    def _resolver(self, state: AgentState) -> dict[str, Any]:
+        """把 AnnotationEnvelope 解析为精确 AST 锚点。
+
+        该节点不调用大模型：
+          1. 从标注中提取 file / line / column / selector / 实例信息；
+          2. 交给沙盒内 Babel 定位最内层 JSX 节点；
+          3. 发现多个疑似节点时通过 ``interrupt`` 让用户选择；
+          4. 输出 TargetResolution，Coder 只能引用其中的 anchorId。
+
+        Provider 不具备解析能力（测试替身 / 旧 Provider）时返回 SKIPPED，
+        保持旧 Coder 路径可用；解析器异常同样降级，避免把整次 Run 判死。
+        """
+        context = state.get("annotation_context") or {}
+        annotations = [
+            item.get("annotation")
+            for item in context.get("annotations") or []
+            if isinstance(item, dict) and isinstance(item.get("annotation"), dict)
+        ]
+        requests = _resolution_requests(state, annotations)  # type: ignore[arg-type]
+        if not requests:
+            self._emit(
+                "node.progress",
+                {"node": "resolver", "message": "没有可解析的源码目标，跳过锚点解析"},
+                dedupe_key=f"node.progress:resolver:skip:{state.get('retry_count', 0)}",
+            )
+            return {
+                "target_resolution": resolution_from_payload(
+                    {
+                        "status": SKIPPED,
+                        "reason": "标注缺少源码定位信息",
+                        "anchors": [],
+                    }
+                ),
+                "resolver_outcome": "skipped",
+                "resolver_round": int(state.get("resolver_round", 0)),
+                "status": "PLANNING",
+            }
+
+        draft_id = state.get("draft_id") or None
+        try:
+            results = self._sandbox.resolve_targets(
+                state["sandbox_id"], requests, draft_id=draft_id
+            )
+        except SandboxError as exc:
+            logger.warning("resolver unavailable: %s", exc)
+            self._emit(
+                "node.progress",
+                {"node": "resolver", "message": f"目标解析不可用，降级旧路径: {exc}"},
+                dedupe_key=f"node.progress:resolver:error:{state.get('retry_count', 0)}",
+            )
+            return {
+                "target_resolution": resolution_from_payload(
+                    {
+                        "status": SKIPPED,
+                        "reason": f"目标解析不可用: {exc}",
+                        "anchors": [],
+                    }
+                ),
+                "resolver_outcome": "skipped",
+                "resolver_round": int(state.get("resolver_round", 0)),
+                "status": "PLANNING",
+            }
+        if results is None:
+            return {
+                "target_resolution": resolution_from_payload(
+                    {
+                        "status": SKIPPED,
+                        "reason": "当前 SandboxProvider 不支持确定性解析",
+                        "anchors": [],
+                    }
+                ),
+                "resolver_outcome": "skipped",
+                "resolver_round": int(state.get("resolver_round", 0)),
+                "status": "PLANNING",
+            }
+
+        anchors = [item for item in results if isinstance(item, dict)]
+        ambiguous = [
+            item
+            for item in anchors
+            if item.get("status") == TARGET_AMBIGUOUS and item.get("candidates")
+        ]
+        round_no = int(state.get("resolver_round", 0))
+        mode = str(state.get("clarification_mode", "auto"))
+        max_rounds = int(state.get("max_clarification_rounds", 3))
+
+        if ambiguous and mode != "off" and round_no < max_rounds:
+            next_round = round_no + 1
+            payload = _build_resolution_clarification_payload(
+                state, ambiguous, next_round
+            )
+            # 与 clarify_gate 一样：暂停帧必须先于 clarification.required，
+            # 保证带 afterSeq 重连的客户端能拿到终态标记。
+            self._emit(
+                "node.finished",
+                {
+                    "node": "resolver",
+                    "status": "paused",
+                    "durationMs": 0,
+                    "summary": "等待用户选择目标节点",
+                },
+                dedupe_key=f"node.finished:resolver:{round_no}:paused",
+            )
+            self._emit(
+                "clarification.required",
+                payload,
+                dedupe_key=f"clarification.required:{payload['clarificationId']}",
+            )
+            answers = interrupt(payload)
+            selections = _resolution_selections(_normalize_answers(answers))
+            round_no = next_round
+            if selections:
+                selected_requests = _apply_resolution_selections(
+                    requests, ambiguous, selections
+                )
+                try:
+                    retry_results = self._sandbox.resolve_targets(
+                        state["sandbox_id"], selected_requests, draft_id=draft_id
+                    )
+                except SandboxError as exc:
+                    logger.warning("resolver retry failed: %s", exc)
+                    retry_results = None
+                if retry_results is not None:
+                    anchors = [item for item in retry_results if isinstance(item, dict)]
+                    ambiguous = [
+                        item
+                        for item in anchors
+                        if item.get("status") == TARGET_AMBIGUOUS
+                        and item.get("candidates")
+                    ]
+
+        if ambiguous:
+            if mode != "off" and round_no >= max_rounds:
+                error = f"连续 {max_rounds} 轮后目标仍存在歧义"
+                return {
+                    "target_resolution": resolution_from_payload(
+                        {
+                            "status": TARGET_AMBIGUOUS,
+                            "reason": error,
+                            "anchors": anchors,
+                        }
+                    ),
+                    "resolver_outcome": "exhausted",
+                    "resolver_round": round_no,
+                    "status": "FAILED",
+                    "error_code": "RESOLUTION_LIMIT",
+                    "error": error,
+                    "messages": [_message("resolver", error, error=True)],
+                }
+            # 澄清关闭或用户未选择：绝不猜测，交回旧路径并用现有 P0 门禁兜底。
+            reason = "目标存在歧义且未获得用户选择"
+            return {
+                "target_resolution": resolution_from_payload(
+                    {"status": TARGET_AMBIGUOUS, "reason": reason, "anchors": anchors}
+                ),
+                "resolver_outcome": "unresolved",
+                "resolver_round": round_no,
+                "status": "PLANNING",
+                "messages": [_message("resolver", f"{reason}，降级旧 Coder 路径")],
+            }
+
+        resolved = [item for item in anchors if item.get("status") == RESOLVED]
+        all_resolved = bool(anchors) and len(resolved) == len(anchors)
+        resolution = resolution_from_payload(
+            {
+                "status": RESOLVED if resolved else TARGET_NOT_FOUND,
+                "reason": (
+                    ""
+                    if all_resolved
+                    else f"{len(resolved)}/{len(anchors)} 个目标定位成功"
+                ),
+                "anchors": anchors,
+                "evidence": {
+                    "requested": len(requests),
+                    "resolved": len(resolved),
+                },
+            }
+        )
+        self._emit(
+            "node.progress",
+            {
+                "node": "resolver",
+                "message": (
+                    f"解析 {len(requests)} 个标注："
+                    f"{len(resolved)} 个锚点可用，"
+                    f"{len(anchors) - len(resolved)} 个未定位"
+                ),
+            },
+            dedupe_key=f"node.progress:resolver:{state.get('retry_count', 0)}",
+        )
+        return {
+            "target_resolution": resolution,
+            "resolver_outcome": "resolved" if all_resolved else "unresolved",
+            "resolver_round": round_no,
+            "status": "PLANNING",
+            "messages": [
+                _message(
+                    "resolver",
+                    f"目标解析完成：{len(resolved)}/{len(anchors)} 个锚点可用",
+                )
+            ],
+        }
+
     def _try_move_tool(
         self,
         state: AgentState,
@@ -1657,6 +1886,12 @@ class AgentGraphRunner:
             "retry_count": retry_count,
             "design_system": state.get("design_system") or {},
         }
+        # Phase 1：只有解析器给出“全部锚点可用”时才切换到工具协议。
+        # 部分解析 / 不可用时保留旧路径，避免遗漏用户标注。
+        if state.get("resolver_outcome") == "resolved" and state.get(
+            "target_resolution"
+        ):
+            generate_kwargs["target_resolution"] = state.get("target_resolution")
         fallback_used = False
         try:
             result = self._generate_with_coder_timeout(
@@ -1725,14 +1960,26 @@ class AgentGraphRunner:
                 message=f"Coder 生成失败: {exc}",
             )
 
-        # files 模式必须经过 FileCreator 落地：已有文件 REWRITE_FILE，
-        # 新文件 CREATE_FILE。路径校验 / 覆盖保护由 CodeEditor 负责。
-        generated_files = _materialize_generated_files(current_files, result.files)
-
-        # files 模式：用修改前后的完整内容合成展示用 diff（一次性展示全部改动）。
-        patch = result.patch or ""
-        if not patch and generated_files:
+        ast_edit_calls: list[dict[str, Any]] = []
+        if result.edits:
+            # Phase 1 唯一写路径：只执行 apply_ast_edit，文件内容由工具返回，
+            # 模型从未直接给出 diff / 全量文件。
+            edit_outcome = self._apply_ast_edit_calls(
+                state, result.edits, current_files
+            )
+            if edit_outcome.get("failure") is not None:
+                return edit_outcome["failure"]
+            generated_files = edit_outcome.get("files") or {}
+            ast_edit_calls = list(edit_outcome.get("calls") or [])
             patch = _combined_diff(current_files, generated_files)
+        else:
+            # 兼容旧路径（Mock / Provider 不支持解析）：files 模式必须经过
+            # FileCreator 落地，已有文件 REWRITE_FILE，新文件 CREATE_FILE。
+            generated_files = _materialize_generated_files(current_files, result.files)
+            # files 模式：用修改前后的完整内容合成展示用 diff。
+            patch = result.patch or ""
+            if not patch and generated_files:
+                patch = _combined_diff(current_files, generated_files)
 
         changed_files = sorted(generated_files) or _diff_paths(patch)
         round_no = int(state.get("clarification_round", 0))
@@ -1760,14 +2007,159 @@ class AgentGraphRunner:
             "coder_fallback_used": fallback_used,
             "background_available": False,
             "error_code": None,
+            "ast_edit_calls": ast_edit_calls,
             "messages": [
                 _message(
                     "coder",
                     f"{result.summary}\n"
-                    f"mode={'diff' if result.patch else 'files'} "
+                    f"mode={'ast_edit' if ast_edit_calls else ('diff' if result.patch else 'files')} "
                     f"annotations={len(annotations)} changed={changed_files}",
                 )
             ],
+        }
+
+    def _apply_ast_edit_calls(
+        self,
+        state: AgentState,
+        edits: list[dict[str, Any]],
+        current_files: dict[str, str],
+    ) -> dict[str, Any]:
+        """执行 Coder 提交的 apply_ast_edit 调用。
+
+        同文件多条编辑按锚点 offset 降序执行：后一条编辑不会改变前一条
+        尚未处理的区间，因此原始锚点始终有效；已编辑内容通过服务端
+        ``content_override`` 传给下一条，模型无权提供该字段。
+
+        任何工具错误都转成 ``apply_failed``，由 evaluator 走现有修复预算
+        并携带明确错误码，禁止 Coder 无反馈地盲目重试。
+        """
+        tool = self._toolbox.get("apply_ast_edit")
+        if tool is None:
+            return {
+                "failure": self._ast_edit_failure(
+                    "AST_EDIT_FAILED", "apply_ast_edit 工具未注册", {}
+                )
+            }
+        resolution = state.get("target_resolution") or {}
+        context = AstEditContext(
+            sandbox=self._sandbox,
+            sandbox_id=state["sandbox_id"],
+            draft_id=state.get("draft_id") or None,
+            resolution=resolution,
+        )
+        # 先按 anchorId 找到锚点，再按源码起点降序排列。
+        ordered: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+        for edit in edits:
+            if not isinstance(edit, dict):
+                continue
+            arguments = edit.get("arguments")
+            if not isinstance(arguments, dict):
+                continue
+            anchor = find_anchor(resolution, str(arguments.get("anchor_id") or ""))
+            if anchor is None:
+                return {
+                    "failure": self._ast_edit_failure(
+                        "ANCHOR_NOT_FOUND",
+                        f"锚点不存在: {arguments.get('anchor_id')}",
+                        {"anchorId": arguments.get("anchor_id")},
+                    )
+                }
+            anchor_range = anchor.get("range") or {}
+            start = int(anchor_range.get("startOffset") or 0)
+            ordered.append((start, dict(arguments), anchor))
+        ordered.sort(key=lambda item: item[0], reverse=True)
+
+        files = dict(current_files)
+        edited_files: set[str] = set()
+        calls: list[dict[str, Any]] = []
+        for _, arguments, anchor in ordered:
+            file = str(anchor.get("file") or "")
+            if file in edited_files:
+                # 前序编辑已经改变该文件内容，后续锚点基于最新内容计算。
+                arguments["content_override"] = files[file]
+            payload = execute_ast_edit(arguments, context)
+            if not isinstance(payload, dict) or payload.get("status") != "OK":
+                payload = payload if isinstance(payload, dict) else {}
+                return {
+                    "failure": self._ast_edit_failure(
+                        str(payload.get("code") or "AST_EDIT_FAILED"),
+                        str(payload.get("message") or "AST 编辑被拒绝"),
+                        payload.get("details") or {},
+                    )
+                }
+            target_file = str(payload.get("file") or file)
+            content = payload.get("content")
+            if target_file not in files or not isinstance(content, str):
+                return {
+                    "failure": self._ast_edit_failure(
+                        "AST_EDIT_FAILED",
+                        "工具返回了未知文件或空内容",
+                        {"file": target_file},
+                    )
+                }
+            files[target_file] = content
+            edited_files.add(target_file)
+            calls.append(
+                {
+                    "anchorId": arguments.get("anchor_id"),
+                    "operation": arguments.get("operation"),
+                    "file": target_file,
+                    "annotations": [
+                        str(item) for item in (anchor.get("annotationId"),) if item
+                    ],
+                }
+            )
+            self._emit(
+                "node.progress",
+                {
+                    "node": "coder",
+                    "message": (
+                        f"apply_ast_edit {arguments.get('operation')} {target_file}"
+                    ),
+                },
+                dedupe_key=(
+                    f"node.progress:coder:ast-edit:{len(calls)}:"
+                    f"{state.get('retry_count', 0)}"
+                ),
+            )
+        if not calls:
+            return {
+                "failure": self._ast_edit_failure(
+                    "AST_EDIT_FAILED", "没有可执行的 AST 编辑调用", {}
+                )
+            }
+        return {"files": files, "calls": calls}
+
+    @staticmethod
+    def _ast_edit_failure(
+        code: str,
+        message: str,
+        details: dict[str, Any],
+    ) -> dict[str, Any]:
+        """把工具错误转成 evaluator 可消费的失败增量。
+
+        ``error_fingerprint`` 复用现有“同错连续出现即终止”机制：
+        Coder 连续两次提交同样的非法参数会被直接判 FAILED。
+        """
+        detail_text = json.dumps(details, ensure_ascii=False, default=str)
+        error_text = f"{code}: {message}"
+        if detail_text and detail_text != "{}":
+            error_text = f"{error_text}\n{detail_text[:1500]}"
+        return {
+            "generated_patch": "",
+            "generated_files": {},
+            "apply_failed": True,
+            "status": "CODING",
+            "error_code": code,
+            "error": message,
+            "verify_result": {
+                "success": False,
+                "exit_code": 1,
+                "error_logs": error_text,
+                "error_context": error_text,
+                "error_fingerprint": f"ast_edit:{code}",
+            },
+            "messages": [_message("coder", f"{error_text}", error=True)],
         }
 
     def _applier(self, state: AgentState) -> dict[str, Any]:
@@ -2329,6 +2721,13 @@ class AgentGraphRunner:
     def _route_after_style_check(self, state: AgentState) -> str:
         if state.get("style_check_outcome") == "exhausted":
             return "failed"
+        # 先做确定性目标解析，再由 Coder 依据锚点输出工具调用。
+        return "resolver"
+
+    def _route_after_resolver(self, state: AgentState) -> str:
+        if state.get("resolver_outcome") == "exhausted":
+            return "failed"
+        # ambiguous 已在节点内通过 interrupt 完成多轮选择；恢复后继续。
         return "coder"
 
     def _route_after_coder(self, state: AgentState) -> str:
@@ -2893,6 +3292,207 @@ def _build_style_clarification_payload(
         },
         round_no,
     )
+
+
+def _resolution_requests(
+    state: AgentState,
+    annotations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """从 AnnotationEnvelope 提取 Resolver 所需的纯定位字段。
+
+    业务字段一律不进入解析器：它只关心“在哪个文件的哪个节点”。
+    缺少文件 / 选择器 / 行列的标注直接跳过，交给 Coder 的旧路径处理。
+    """
+    target_files = list(state.get("target_files") or [])
+    fallback_file = target_files[0] if target_files else ""
+    requests: list[dict[str, Any]] = []
+    for annotation in annotations:
+        if not isinstance(annotation, dict):
+            continue
+        annotation_id = str(
+            annotation.get("annotationId") or annotation.get("annotation_id") or ""
+        ).strip()
+        if not annotation_id:
+            continue
+        target = (
+            annotation.get("target")
+            if isinstance(annotation.get("target"), dict)
+            else {}
+        )
+        source = (
+            target.get("source")
+            if isinstance(target.get("source"), dict)
+            else (
+                annotation.get("source")
+                if isinstance(annotation.get("source"), dict)
+                else {}
+            )
+        )
+        file = str(
+            source.get("file")
+            or annotation.get("target_file")
+            or annotation.get("targetFile")
+            or fallback_file
+        ).strip()
+        if not file:
+            continue
+        selector = str(
+            target.get("selector") or annotation.get("selector") or ""
+        ).strip()
+        call_site = (
+            source.get("callSite") if isinstance(source.get("callSite"), dict) else {}
+        )
+        requests.append(
+            {
+                "anchorId": anchor_id_for(annotation_id),
+                "annotationId": annotation_id,
+                "file": file,
+                "line": source.get("line"),
+                "column": source.get("column"),
+                "selector": selector,
+                "component": str(
+                    source.get("component") or annotation.get("component") or ""
+                ),
+                "instance": source.get("instance"),
+                "instanceCount": source.get("instanceCount"),
+                "callSiteFile": str(
+                    call_site.get("file") or source.get("callSiteFile") or ""
+                ),
+                "action": annotation.get("action")
+                or annotation.get("intentAction")
+                or "",
+            }
+        )
+    return requests
+
+
+def _resolution_selections(answers: list[dict[str, Any]]) -> dict[str, str]:
+    """把澄清回答解析为 ``anchorId -> candidateId``。"""
+    selections: dict[str, str] = {}
+    for answer in answers:
+        question_id = str(answer.get("questionId") or "")
+        if not question_id.startswith("resolution_"):
+            continue
+        anchor_id = question_id[len("resolution_") :]
+        value = answer.get("value")
+        if value in (None, ""):
+            value = answer.get("text")
+        if value in (None, ""):
+            continue
+        selections[anchor_id] = str(value)
+    return selections
+
+
+def _apply_resolution_selections(
+    requests: list[dict[str, Any]],
+    ambiguous: list[dict[str, Any]],
+    selections: dict[str, str],
+) -> list[dict[str, Any]]:
+    """把用户选择的候选区间写回请求，让 Resolver 精确重解析。"""
+    by_anchor = {
+        str(item.get("anchorId")): item for item in ambiguous if item.get("anchorId")
+    }
+    updated: list[dict[str, Any]] = []
+    for request in requests:
+        anchor_id = str(request.get("anchorId") or "")
+        anchor = by_anchor.get(anchor_id)
+        selected = selections.get(anchor_id) or ""
+        if anchor and selected:
+            candidate = next(
+                (
+                    item
+                    for item in anchor.get("candidates") or []
+                    if str(item.get("candidateId")) == selected
+                ),
+                None,
+            )
+            if candidate is not None:
+                request = dict(request)
+                request["selectedRange"] = candidate.get("range")
+        updated.append(request)
+    return updated
+
+
+def _thread_id_for_annotation(
+    state: AgentState, annotation_id: str | None
+) -> str | None:
+    """按 annotationId 找到前端迷你聊天框的 threadId。"""
+    for item in (state.get("annotation_context") or {}).get("annotations", []):
+        annotation = item.get("annotation") or {}
+        if annotation_id and (
+            annotation.get("annotationId") == annotation_id
+            or item.get("annotation_id") == annotation_id
+        ):
+            return annotation.get("threadId") or annotation.get("thread_id")
+    return None
+
+
+def _build_resolution_clarification_payload(
+    state: AgentState,
+    ambiguous: list[dict[str, Any]],
+    round_no: int,
+) -> dict[str, Any]:
+    """目标歧义时的多轮选择载荷，复用现有 Clarification 协议。
+
+    每个歧义标注生成一个 single_choice 问题；选项值是服务端生成的
+    candidateId，前端只回传 ID，不能自造源码范围。
+    """
+    questions: list[dict[str, Any]] = []
+    for anchor in ambiguous[:3]:
+        options = []
+        for candidate in anchor.get("candidates") or []:
+            range_view = candidate.get("range") or {}
+            label = (
+                f"第 {range_view.get('startLine')} 行 · "
+                f"{candidate.get('nodeType') or 'JSX'} · "
+                f"{candidate.get('component') or '未知组件'}"
+            )
+            options.append(
+                {
+                    "value": candidate.get("candidateId"),
+                    "label": label,
+                    "description": str(candidate.get("preview") or "")[:200],
+                }
+            )
+        questions.append(
+            {
+                "questionId": f"resolution_{anchor.get('anchorId')}",
+                "type": "single_choice",
+                "prompt": "目标元素存在多个疑似节点，请选择要修改的那一个",
+                "required": True,
+                "options": options,
+            }
+        )
+    first = ambiguous[0] if ambiguous else {}
+    annotation_id = first.get("annotationId")
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        hours=int(state.get("clarification_ttl_hours", 24))
+    )
+    return {
+        "kind": "clarification",
+        "clarificationId": f"clr_{state.get('run_id')}_{round_no}_resolver",
+        "runId": state.get("run_id"),
+        "annotationId": annotation_id,
+        "threadId": _thread_id_for_annotation(state, annotation_id),
+        "round": round_no,
+        "maxRounds": int(state.get("max_clarification_rounds", 3)),
+        "reason": "target_ambiguous",
+        "decisionImpact": "CRITICAL",
+        "decisionSummary": "目标解析到多个疑似节点，必须由用户确认",
+        "questions": questions,
+        "clarificationOptions": [
+            {
+                "optionId": option["value"],
+                "label": option["label"],
+                "description": option["description"],
+                "questionId": question["questionId"],
+                "value": option["value"],
+            }
+            for question in questions
+            for option in question["options"]
+        ],
+        "expiresAt": expires_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
 
 
 def _build_clarification_payload(

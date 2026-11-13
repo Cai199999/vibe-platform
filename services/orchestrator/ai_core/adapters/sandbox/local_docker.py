@@ -97,6 +97,11 @@ AST_STAGE_PATCH = "/tmp/vibe-ast-stage.patch"
 AST_SCOPE_SCRIPT = "/opt/vibe-ast-scope-check.mjs"
 AST_SCOPE_STAGE_DIR = "/tmp/vibe-scope-stage"
 AST_SCOPE_STAGE_PATCH = "/tmp/vibe-scope-stage.patch"
+# Phase 1：确定性目标解析器 + 唯一写工具执行器。两者共用独立 stage，
+# 避免与语法 / 实例门禁的 spec.json 互相覆盖。
+AST_RESOLVE_SCRIPT = "/opt/vibe-resolve-target.mjs"
+AST_EDIT_SCRIPT = "/opt/vibe-ast-edit.mjs"
+AST_TOOL_STAGE_DIR = "/tmp/vibe-ast-tool-stage"
 SCRIPT_SUFFIXES = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx")
 # unified diff 的 ``+++`` 目标行：兼容 ``b/path``、带引号路径与 /dev/null。
 PATCH_TARGET_RE = re.compile(r"^\+\+\+\s+(?P<path>.+?)\s*$", re.MULTILINE)
@@ -1727,6 +1732,180 @@ class LocalDockerSandbox(SandboxProvider):
                 )
             except DockerException:  # pragma: no cover - 容器已经消失
                 pass
+
+    # --------------------------------------------------------
+    # Phase 1：确定性目标解析 / 唯一写工具
+    # --------------------------------------------------------
+    def resolve_targets(
+        self,
+        sandbox_id: str,
+        anchors: list[dict],
+        draft_id: str | None = None,
+    ) -> list[dict] | None:
+        """调用沙盒内 Babel 解析器，把标注解析为精确 AST 锚点。
+
+        Babel 只能在容器内运行（依赖来自沙盒 node_modules），因此这里
+        沿用 AST 门禁的脚本注入 + 临时 stage 模式。脚本异常直接抛出，
+        由 Resolver 节点决定降级或 fail-closed。
+        """
+        items = [item for item in anchors or [] if isinstance(item, dict)]
+        if not items:
+            return []
+        container = self._get_container(sandbox_id)
+        if not self._ensure_ast_script(
+            container,
+            "resolve_target.mjs",
+            AST_RESOLVE_SCRIPT,
+            "target resolver",
+        ):
+            raise SandboxError("目标解析器缺失，拒绝让模型猜测目标节点")
+        workdir = self._resolve_workdir(sandbox_id, draft_id)
+        payload = self._run_ast_tool(
+            container,
+            script=AST_RESOLVE_SCRIPT,
+            spec={"workdir": workdir, "anchors": items},
+            label="目标解析",
+        )
+        anchors_out = payload.get("anchors")
+        if not isinstance(anchors_out, list):
+            raise SandboxError("目标解析器返回格式非法: anchors 缺失")
+        return [item for item in anchors_out if isinstance(item, dict)]
+
+    def apply_ast_edit(
+        self,
+        sandbox_id: str,
+        edit: dict,
+        draft_id: str | None = None,
+    ) -> dict | None:
+        """执行一次 Babel 精确切片编辑，返回 ``{"status": ..., "content": ...}``。
+
+        注意：本方法只计算不落盘。新增 / 修改 / 删除后的完整文件内容由
+        Tool 返回给 Graph，再经 Applier 统一写入草稿，继续复用实例作用域
+        门禁与审批隔离。
+        """
+        if not isinstance(edit, dict):
+            raise SandboxError("AST 编辑请求必须是对象")
+        try:
+            file = self._normalize_path(str(edit.get("file") or ""))
+        except SandboxValidationError as exc:
+            raise SandboxError(f"AST 编辑目标文件非法: {exc}") from exc
+        operation = str(edit.get("operation") or "").lower()
+        if operation not in {"insert", "delete", "modify"}:
+            raise SandboxError(f"不支持的 AST 编辑操作: {operation or '(空)'}")
+
+        container = self._get_container(sandbox_id)
+        if not self._ensure_ast_script(
+            container,
+            "apply_ast_edit.mjs",
+            AST_EDIT_SCRIPT,
+            "ast edit tool",
+        ):
+            raise SandboxError("AST 编辑工具缺失，拒绝写入")
+        workdir = self._resolve_workdir(sandbox_id, draft_id)
+        spec = {
+            "workdir": workdir,
+            "file": file,
+            "operation": operation,
+            "anchorRange": edit.get("anchorRange") or {},
+            "targetRange": edit.get("targetRange") or {},
+            "insertPosition": edit.get("insertPosition") or "after",
+            "jsxCode": str(edit.get("jsxCode") or ""),
+        }
+        # 同文件多编辑：服务端把前一条结果作为下一条输入，绝不接受模型传入。
+        override = edit.get("contentOverride")
+        if isinstance(override, str):
+            spec["contentOverride"] = override
+        return self._run_ast_tool(
+            container,
+            script=AST_EDIT_SCRIPT,
+            spec=spec,
+            label="AST 编辑",
+        )
+
+    def _run_ast_tool(
+        self,
+        container: Any,
+        *,
+        script: str,
+        spec: dict[str, Any],
+        label: str,
+    ) -> dict[str, Any]:
+        """把 spec.json 推入容器并执行 Node 脚本，返回解析后的 JSON。
+
+        错误约定与 AST 门禁一致：退出码 2 = 脚本异常（调用方 fail-closed）；
+        其它非 0/2 视为未知错误。业务层错误放在 JSON 的 ``status`` 字段。
+        """
+        stage = AST_TOOL_STAGE_DIR
+        try:
+            code, output = self._exec(
+                container,
+                [
+                    "sh",
+                    "-lc",
+                    f"rm -rf {shlex.quote(stage)} && mkdir -p {shlex.quote(stage)}",
+                ],
+            )
+            if code != 0:
+                raise SandboxError(f"{label}临时目录创建失败: {self._decode(output)}")
+            container.put_archive(
+                stage,
+                self._build_tar(
+                    {"spec.json": json.dumps(spec, ensure_ascii=False, default=str)}
+                ),
+            )
+            code, output = self._exec(container, ["node", script, f"{stage}/spec.json"])
+            logs = self._decode(output).strip()
+            if code == 2:
+                raise SandboxError(f"{label}执行器异常: {logs[:1000]}")
+            if code != 0:
+                raise SandboxError(f"{label}执行器返回未知状态 {code}: {logs[:1000]}")
+            try:
+                payload = json.loads(logs)
+            except json.JSONDecodeError as exc:
+                raise SandboxError(f"{label}输出不是 JSON: {logs[:1000]}") from exc
+            if not isinstance(payload, dict):
+                raise SandboxError(f"{label}输出结构非法")
+            return payload
+        finally:
+            try:
+                self._exec(
+                    container,
+                    ["sh", "-lc", f"rm -rf {shlex.quote(stage)}"],
+                )
+            except DockerException:  # pragma: no cover - 容器已经消失
+                pass
+
+    def _ensure_ast_script(
+        self,
+        container: Any,
+        filename: str,
+        target: str,
+        label: str,
+    ) -> bool:
+        """把 sandbox_template 下的 Node 脚本注入容器 /opt。
+
+        镜像可能早于脚本发布（升级前创建的沙盒），因此每次调用都重新
+        推送；put_archive 覆盖同名文件是幂等的。
+        """
+        candidates = [
+            Path(self.settings.sandbox_template_dir) / filename,
+            Path(__file__).resolve().parents[3] / "sandbox_template" / filename,
+        ]
+        source = next((path for path in candidates if path.is_file()), None)
+        if source is None:
+            logger.warning("%s script not found: %s", label, filename)
+            return False
+        try:
+            container.put_archive(
+                "/opt",
+                self._build_tar(
+                    {Path(target).name: source.read_text(encoding="utf-8")}
+                ),
+            )
+        except DockerException:
+            logger.warning("failed to inject %s", label, exc_info=True)
+            return False
+        return True
 
     def _ensure_ast_scope_checker(self, container: Any) -> bool:
         """把实例作用域检查器推送到容器 /opt，兼容旧沙盒。"""
