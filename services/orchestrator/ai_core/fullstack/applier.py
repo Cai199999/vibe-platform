@@ -18,6 +18,7 @@ from typing import Mapping
 
 from ai_core.domain.architect import ArchitectContract
 from ai_core.fullstack.diagnostics import OrmSyntaxReport, check_orm_syntax
+from ai_core.fullstack.quality import quality_policy
 from ai_core.observability.fullstack_metrics import FULLSTACK_METRICS
 from ai_core.ports.sandbox import SandboxProvider
 
@@ -85,7 +86,21 @@ class Applier:
         *,
         mode: str = "fullstack",
     ) -> list[str]:
-        """门禁通过后才写入；失败时异常向上抛，不触碰沙盒。"""
+        """门禁通过后才写入；失败时异常向上抛，不触碰沙盒。
+
+        L1 敏捷模式显式跳过 AST 门禁：用户已选择 Demo 级质量，允许
+        字段模糊匹配与未绑定表达式的风险，优先保证“能尽快看到产物”。
+        L2 / L3 仍走同一套绝对门禁，不存在其它绕过开关。
+        """
+        policy = quality_policy(self._contract)
+        if not policy.ast_gate:
+            logger.info(
+                "Applier 跳过 AST 门禁（%s）mode=%s files=%d",
+                policy.tier,
+                mode,
+                len(files),
+            )
+            return self._sandbox.apply_patch(sandbox_id, files=dict(files))
         if not self._touches_server(files):
             return self._sandbox.apply_patch(sandbox_id, files=dict(files))
         merged = self._merged_files(sandbox_id, files)

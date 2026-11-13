@@ -1,38 +1,22 @@
 # vibe-platform · 当前状态简报
 
-> 2026-11-11 · 详细历史见 `docs/memory/`（旧版全文：`2026-11-11_context_archive.md`）
+> 2026-11-13 · 历史细节见 `docs/memory/`
 
-## 架构底座
+## 架构
 
 React + Vite → Java 21 BFF → Python 3.12 FastAPI/LangGraph → Docker 沙盒；中间件复用 `~/Workspace/infra`；AI Core 六边形分层。
 
 ## 已闭环能力
 
 - 画布圈选 / ADD / Inspect / 批量拖拽、多标注、双屏同步、HITL 澄清、Diff 审批、取消、Git 快照回滚。
-- 全栈生成：Architect 契约、Frontend/Backend/DBA/Infra 多 Agent、语义路由自愈、SQLite/MySQL 验收、生产级产物导出与导入。
-- 混合 RAG（BM25 + Chroma MiniLM + RRF）、分级决策、Reflection、Token 成本采集、骨架防脑补、Agent 管理与知识库上传。
-- **UI Coder 解耦**：只生成 UI/Tailwind；大文件仅发送目标 JSX 窗口；超时降级 `coder_fast`；业务/API/DDL 不进入上下文。
+- 全栈生成：Architect 契约、Frontend/Backend/DBA/Infra 多 Agent、语义路由自愈、SQLite/MySQL 验收、产物导出导入。
+- 混合 RAG、分级决策、Reflection、Token 成本、骨架防脑补、Agent 管理与知识库上传。
+- AST/ORM/DDL 门禁、Applier 责任隔离、契约审计、契约缺陷 vs 代码缺陷归因。
+- **风险自适应门禁**：契约确认前必选 L1/L2/L3；L1 跳过 AST/ORM/MySQL 且失败不阻塞；L2 保留 AST+ORM+SQLite；L3 追加真实 MySQL 迁移验收与缺陷重试。
 
-## 最新里程碑（2026-11-11）
+## 最新验证
 
-- **白屏事故止血 + AST 门禁**：沙盒已回滚基线；`ast_check.mjs` 用 Babel 检查语法与未绑定 JSX 组件，`_preflight_code_check` 在 `/tmp` 副本上预检，失败直接拦截、不触碰 `/app`、不触发 HMR。
-- **画布视觉暂存**：CREATE_NEW 不再边画边写代码；前端 `pendingAdditions` + 半透明幽灵预览 + 右下角「未保存变更」浮窗，怎么画都不会白屏。
-- **BATCH_LAYOUT 统一提交**：保存布局 / 进入架构澄清 / 全栈生成时，位移与新增组件打包一次提交；Coder 一次生成新增 JSX，Python 合并 diff 后追加确定性 transform，只产出一份补丁与一次 HMR；Verifier 穿透校验每个 `data-vibe-created`。
-- **Architect 上下文**：进入澄清前自动 flush 画布草稿，并以 `system` 消息注入未保存变更摘要。
-- **样式澄清 + 迷你多轮对话**：Graph 新增 `clarify_gate → style_check → coder`；新增组件未说明颜色/大小/主次时 `interrupt()` 追问，回答（如“和登录按钮一样”）写回标注与 Plan。悬浮框澄清期间切换为 Chatbox，问题/回答进入 `chatHistory`，主输入可直接作答。
-- **重复按钮 / 全局污染修复**：SSE `run.succeeded` 与 Vite HMR 到达时立即撤掉 `pendingAdditions` 幽灵节点，澄清回答按 `annotationId` 原地更新；后端 `finalIntent` 覆盖历史颜色/方案，Coder 剥离 chatHistory；SDK 回传 `instance/instanceCount/instanceId/callSite`，Applier 新增 `INSTANCE_SCOPE_VIOLATION` 守卫，改基础组件直接打回 Coder。
-- **实例解耦**：SDK 从 React fiber 提取 `instanceKey` / `instanceProps`（item.id 等），全链路进入 Coder；Applier 新增 `INSTANCE_GUARD_MISSING`，多实例补丁必须在 callSite 或根组件源码写入真实身份比较（或 `index === instance-1`），禁止无条件写进 map 返回体；diff 模式同样校验 `+` 行。
-- **可视化选型（禁止脑补样式）**：澄清回答命中“和登录按钮一样”时不再直接提交文本，画布 / 预览进入 Inspect 取色；SDK 回传 `tailwindClasses` + computed CSS，后端生成 `reference_styles`，Coder 被强约束逐字复用。新增 `design_system` 静态提取 Tailwind 主题色 / CSS 变量，新组件优先 `bg-primary` 等语义类名。
-- **Unknown column 三层门禁**：多表 DDL 按集合路由选核心业务表，禁止 `users`/`name` 兜底；DBA 产出 `schema.core.json`，Backend 强制绑定并在生成期断言；ConsistencyVerifier 新增 ORM↔迁移字段比对，错位自动回退 DBACoder（≤2 次）；验收脚本增加静态 ORM/DDL 对比与运行时“核心表 GET/POST 不因缺字段 500”断言。
-- **ORM 门禁 AST 化**：`schema_ast_check.mjs` 用 Babel 解析 `server/db.js` / `server/index.js`，静态求值常量 / 拼接 / `JSON.parse`，并阻断 `COLUMN_DEFS.push` 等运行期变更；`schema_ast.py` 封装为 `SchemaAstUnavailable` 硬失败（禁止回退正则，环境问题不触发模型自愈）；生成期、ConsistencyVerifier、验收脚本共用同一引擎；镜像补 `nodejs`。
-- **主从表契约**：`relations` 显式声明或从 `<parent>_id` 推导；DBA 生成 `RELATED_MODELS`/`RELATIONS`，Backend 生成 `hasMany`/`belongsTo`、`include + separate` 预加载与嵌套子资源路由；AST 门禁校验关系两端与外键，关联系统表敏感列剥离。
-- **契约缺陷 vs 代码缺陷**：`contract_audit.py` 确定性审计（缺 DDL/核心表、集合无表、非法关系、嵌套路由缺表/缺 JOIN、未声明交互路由）；统一错误码 `CONTRACT_REVISION_REQUIRED`，载荷带 `failureKind=CONTRACT` / `defectKind=CONTRACT_DEFECT` / `needsClarification` / `clarification`；前端回传 `REVISE`。
-- **责任隔离 + Applier 门禁**：BackendCoder 只消费 `schema.core.json` 且不再自检；ConsistencyVerifier 只做 AST 诊断；所有 `server/` 落盘经 `Applier` 无条件 Babel 门禁，拦截后由 `audit_contract` 判 `CODE_DEFECT`（重试 ≤2）或 `CONTRACT_DEFECT`（立即退回契约）；Architect 确认前调用同一 `validate_contract` 自检。
-- **核心指标**：`Applier_Block_Rate` / `Contract_Misretry_Count` / `MultiTable_AST_Pass_Rate` / `Contract_Revision_Rate`，经 SSE 终态事件与 `GET /api/v1/internal/fullstack/metrics` 输出。
-- **LLM BackendCoder 自愈**：模板仍是默认路径；仅 Applier 判 `CODE_DEFECT` 或一致性要求重建 JOIN 时，把完整 `server/index.js` + 明确诊断交给 LLM，只允许改该文件，产物仍过 Applier；失败自动回退模板。开关 `FULLSTACK_LLM_REPAIR_ENABLED`，事件 `fullstack.applier.llm_repair`。
-- **监控闭环前端化**：BFF 新增 `GET /api/v1/admin/fullstack/metrics` 透传 AI Core；Admin 新增“系统健康与缺陷拦截”卡片（拦截率进度条、契约误重试计数、多表通过率、JOIN/ORM 明细）；上游故障显式 502，不伪造成全零健康数据。
-- **子资源契约铁律**：Architect 起草与修订 Prompt 均要求嵌套路由必须显式建子表并在 `relations` 声明外键，禁止 Coder 隐式推断。
-- 验证：全量 Python 单测 440 项通过（仅排除历史 `test_eval_suite`）；Java BFF 9 项测试通过；前端 `vite build` 通过；live 验证 admin 指标 200 / 匿名 403。
+Python 447 项测试通过（排除历史 `test_eval_suite`）；Vite build 通过；三轮浏览器 E2E 通过：L1 黄色告警徽标、L2 无徽标、L3 绿色徽标 + information_schema 验收通过。
 
 ## 真假边界
 

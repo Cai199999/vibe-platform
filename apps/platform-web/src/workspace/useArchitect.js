@@ -53,6 +53,12 @@ export const EMPTY_FULLSTACK = {
   failureKind: null,
   needsClarification: false,
   clarification: null,
+  // 风险自适应门禁：L1 黄色告警 / L3 绿色通过徽标。
+  qualityTier: null,
+  qualityLabel: null,
+  qualityBadge: null,
+  warnings: [],
+  mysqlCheck: null,
   starting: false,
   updatedAt: null,
 }
@@ -525,6 +531,9 @@ function reduceFullstack(state, event) {
         starting: false,
         sandboxId: payload.sandboxId ?? current.sandboxId,
         previewUrl: payload.previewUrl ?? current.previewUrl,
+        qualityTier: payload.qualityTier ?? current.qualityTier ?? null,
+        warnings: [],
+        qualityBadge: null,
         steps: createFullstackSteps(
           Array.isArray(payload.nodes) && payload.nodes.length > 0
             ? payload.nodes
@@ -588,6 +597,14 @@ function reduceFullstack(state, event) {
           bytes: 0,
         }),
       }
+    case 'fullstack.quality.warning':
+      // L1 非阻塞告警：不改变运行状态，只累积到结果面板。
+      return {
+        ...base,
+        warnings: Array.isArray(current.warnings)
+          ? Array.from(new Set([...current.warnings, payload.message]))
+          : [payload.message].filter(Boolean),
+      }
     case 'fullstack.node.failed':
       return {
         ...base,
@@ -626,6 +643,11 @@ function reduceFullstack(state, event) {
         sandboxId: payload.sandboxId ?? current.sandboxId,
         previewUrl: payload.previewUrl ?? current.previewUrl,
         result: payload,
+        qualityTier: payload.qualityTier ?? current.qualityTier ?? null,
+        qualityLabel: payload.qualityLabel ?? current.qualityLabel ?? null,
+        qualityBadge: payload.qualityBadge ?? null,
+        warnings: Array.isArray(payload.warnings) ? payload.warnings : current.warnings,
+        mysqlCheck: payload.mysqlCheck ?? current.mysqlCheck ?? null,
         // 成功后把仍在 RUNNING 的节点收口，避免 UI 永远转圈。
         steps: current.steps.map((step) =>
           step.status === 'RUNNING'
@@ -654,6 +676,8 @@ function reduceFullstack(state, event) {
         error: payload.error || '全栈代码生成失败',
         errorCode: payload.errorCode ?? null,
         failureKind: payload.failureKind ?? null,
+        qualityTier: payload.qualityTier ?? current.qualityTier ?? null,
+        warnings: Array.isArray(payload.warnings) ? payload.warnings : current.warnings,
         needsClarification: Boolean(payload.needsClarification),
         clarification: payload.clarification ?? null,
       }
@@ -1091,7 +1115,7 @@ export function useArchitect({ token } = {}) {
   )
 
   const decide = useCallback(
-    async (projectId, decision, comment = '') => {
+    async (projectId, decision, comment = '', qualityTier = '') => {
       const current = statesRef.current[projectId]
       const contract = current?.contract
       if (!current?.runId || !contract?.contractId) return
@@ -1102,6 +1126,7 @@ export function useArchitect({ token } = {}) {
           contract.contractId,
           decision,
           comment,
+          qualityTier || undefined,
           token,
         )
         await connect(projectId, {

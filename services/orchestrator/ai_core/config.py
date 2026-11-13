@@ -229,6 +229,19 @@ class Settings(BaseSettings):
     schema_mcp_strict: bool = True
 
     # ------------------------------------------------------------
+    # L3 生产级：真实 MySQL 迁移验收
+    # ------------------------------------------------------------
+    # 复用 ~/Workspace/infra 的 MySQL；只在一次性临时库中执行迁移，
+    # 绝不触碰 MYSQL_DATABASE 业务库。容器内 host 使用 host.docker.internal。
+    mysql_host: str = "host.docker.internal"
+    mysql_port: int = 3306
+    mysql_database: str = "geo_ai_db"
+    mysql_user: str = "root"
+    mysql_password: str = "root"
+    quality_mysql_verify_enabled: bool = True
+    quality_mysql_timeout_seconds: float = 8.0
+
+    # ------------------------------------------------------------
     # BackendCoder LLM 自愈
     # ------------------------------------------------------------
     # 模板默认生成；仅当 Applier 判为 CODE_DEFECT / 一致性要求重建 JOIN

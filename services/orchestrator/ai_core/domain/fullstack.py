@@ -133,6 +133,11 @@ class FullstackRunSnapshot(CamelModel):
     defect_kind: str | None = None
     needs_clarification: bool = False
     clarification: dict[str, Any] = Field(default_factory=dict)
+    # 风险自适应门禁：L1 非阻塞告警 / L3 真实 MySQL 验收结论。
+    quality_tier: str = "L2_STANDARD"
+    quality_badge: dict[str, str] | None = None
+    warnings: list[str] = Field(default_factory=list)
+    mysql_check: dict[str, Any] = Field(default_factory=dict)
     last_seq: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None

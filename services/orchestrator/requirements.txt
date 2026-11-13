@@ -24,3 +24,6 @@ chromadb==1.0.15
 
 # Docker SDK：通过挂载的 /var/run/docker.sock 管理沙盒容器
 docker==7.1.0
+
+# L3 生产级门禁：真实 MySQL 迁移验收（临时库执行 DDL + information_schema）。
+PyMySQL==1.1.1

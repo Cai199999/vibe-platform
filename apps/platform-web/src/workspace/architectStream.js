@@ -184,6 +184,7 @@ export async function fetchArchitectDecision(
   contractId,
   decision,
   comment,
+  qualityTier,
   token,
 ) {
   const response = await fetch(
@@ -194,7 +195,12 @@ export async function fetchArchitectDecision(
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token ?? ''}`,
       },
-      body: JSON.stringify({ contractId, decision, comment: comment || undefined }),
+      body: JSON.stringify({
+        contractId,
+        decision,
+        comment: comment || undefined,
+        qualityTier: qualityTier || undefined,
+      }),
     },
   )
   if (!response.ok) {

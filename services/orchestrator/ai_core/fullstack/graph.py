@@ -64,6 +64,12 @@ from ai_core.fullstack.llm_backend import (
     LLMBackendCoder,
     LLMBackendRepairUnavailable,
 )
+from ai_core.fullstack.mysql_schema import verify_mysql_migration
+from ai_core.fullstack.quality import (
+    L1_WARNING_TEXT,
+    QualityPolicy,
+    quality_policy,
+)
 from ai_core.fullstack.schema_mcp import verify_schema_with_mcp
 from ai_core.observability.fullstack_metrics import FULLSTACK_METRICS
 from ai_core.ports.sandbox import SandboxProvider
@@ -153,6 +159,17 @@ class FullstackConsistencyError(FullstackGenerationError):
         self.report = report
 
 
+class FullstackQualityEnvironmentError(FullstackGenerationError):
+    """L3 真实 MySQL 验收不可用：属于环境问题，不能误判为代码缺陷。"""
+
+    code = "FULLSTACK_L3_MYSQL_UNAVAILABLE"
+    failure_kind = "ENVIRONMENT"
+    defect_kind = None
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, node="ConsistencyVerifier")
+
+
 class FullstackContractContradictionError(FullstackGenerationError):
     """契约自相矛盾：停止重试，要求用户回到 Architect 修改契约。"""
 
@@ -202,6 +219,13 @@ class FullstackState(TypedDict, total=False):
     applier_feedback: list[str]
     applier_feedback_attempt: int
     llm_repair_count: int
+    # ---- 风险自适应门禁 ----
+    quality_tier: str
+    # L1 不阻塞的校验结论：随 fullstack.completed 返回给前端展示风险徽标。
+    warnings: list[str]
+    build_retry_count: int
+    # L3 真实 MySQL 迁移验收结果（MysqlMigrationCheck.to_dict）。
+    mysql_check: dict[str, Any]
 
 
 class FullstackGraphRunner:
@@ -245,6 +269,28 @@ class FullstackGraphRunner:
             result.get("preview_url"),
         )
         return dict(result)  # type: ignore[return-value]
+
+    def _warn(self, state: FullstackState, message: str) -> list[str]:
+        """记录 L1 非阻塞告警，并推送独立事件供前端即时展示。"""
+        warnings = list(state.get("warnings") or [])
+        if message not in warnings:
+            warnings.append(message)
+            self._emit(
+                "fullstack.quality.warning",
+                {
+                    "runId": state.get("run_id"),
+                    "tier": quality_policy(state.get("contract")).tier,
+                    "message": message,
+                },
+            )
+        # 同一节点内可能连续调用多次；同步写回状态，后续 _warn 才能在
+        # 前一条告警基础上追加，而不是互相覆盖。
+        state["warnings"] = warnings
+        return warnings
+
+    @staticmethod
+    def _quality(state: FullstackState) -> QualityPolicy:
+        return quality_policy(state.get("contract"))
 
     # --------------------------------------------------------
     # 图构建
@@ -743,24 +789,33 @@ class FullstackGraphRunner:
         sandbox_id = state["sandbox_id"]
         started = time.monotonic()
         self._node_started("ConsistencyVerifier", state)
+        policy = self._quality(state)
+        warnings = list(state.get("warnings") or [])
         # 契约审计先于任何修复：契约自相矛盾时，重试模板只会得到同一个
         # 错误。这里立即终止并把归因交给前端，引导用户重新澄清。
+        # L1 已由用户显式选择 Demo 级质量：审计问题降级为告警，不阻塞。
         options = state.get("options") or FullstackRunOptions()
         contract_audit = audit_contract(contract, mode=options.mode)
         if not contract_audit.ok:
-            if self._has_retried(state):
-                # 已经跑过至少一次自愈仍暴露出契约问题：这是一次“本可
-                # 避免的误重试”，计入 Contract_Misretry_Count。
-                FULLSTACK_METRICS.record_contract_misretry()
-            logger.warning(
-                "ConsistencyVerifier 契约自相矛盾，停止重试 run_id=%s problems=%s",
-                state.get("run_id"),
-                [problem.code for problem in contract_audit.problems],
-            )
-            self._node_failed(
-                "ConsistencyVerifier", state, RuntimeError(contract_audit.summary())
-            )
-            raise FullstackContractContradictionError(contract_audit)
+            if not policy.blocking:
+                warnings = self._warn(
+                    state,
+                    f"L1 敏捷模式跳过契约审计阻断：{contract_audit.summary()}",
+                )
+            else:
+                if self._has_retried(state):
+                    # 已经跑过至少一次自愈仍暴露出契约问题：这是一次“本可
+                    # 避免的误重试”，计入 Contract_Misretry_Count。
+                    FULLSTACK_METRICS.record_contract_misretry()
+                logger.warning(
+                    "ConsistencyVerifier 契约自相矛盾，停止重试 run_id=%s problems=%s",
+                    state.get("run_id"),
+                    [problem.code for problem in contract_audit.problems],
+                )
+                self._node_failed(
+                    "ConsistencyVerifier", state, RuntimeError(contract_audit.summary())
+                )
+                raise FullstackContractContradictionError(contract_audit)
 
         snapshot: dict[str, str] = {}
         for path in (
@@ -779,38 +834,73 @@ class FullstackGraphRunner:
 
         try:
             report = verify_consistency(snapshot, contract)
+            checked_files = set(report.checked_files)
             # 维度二：静态路由比对之外，再通过内置 SQLite MCP 把生成的
             # DDL 真正执行到临时数据库，查询 table / columns 是否存在。
             # 这一步能抓住“路由齐全但表根本建不起来”的产物。
-            schema_check = verify_schema_with_mcp(snapshot, contract)
-            checked_files = set(report.checked_files)
-            if not schema_check.source.startswith("generated:"):
-                checked_files.add(schema_check.source)
-            report = replace(
-                report,
-                schema=schema_check.to_dict(),
-                checked_files=tuple(sorted(checked_files)),
-            )
-            if not schema_check.ok and get_settings().schema_mcp_strict:
+            # L1 跳过；L2 / L3 保留。
+            if policy.sqlite_schema_check:
+                schema_check = verify_schema_with_mcp(snapshot, contract)
+                if not schema_check.source.startswith("generated:"):
+                    checked_files.add(schema_check.source)
                 report = replace(
                     report,
-                    issues=report.issues
-                    + (
-                        ConsistencyIssue(
-                            kind="schema",
-                            component="DBACoder",
-                            method="",
-                            path="",
-                            message=schema_check.summary(),
-                            suggestion=(
-                                "修正契约 DDL 或 DBACoder 生成的迁移文件，"
-                                "确保目标表与全部字段可真实创建；"
-                                "禁止绕过迁移直接上线"
-                            ),
-                            fix_action="FIX_SCHEMA",
-                        ),
-                    ),
+                    schema=schema_check.to_dict(),
+                    checked_files=tuple(sorted(checked_files)),
                 )
+                if not schema_check.ok and get_settings().schema_mcp_strict:
+                    report = replace(
+                        report,
+                        issues=report.issues
+                        + (
+                            ConsistencyIssue(
+                                kind="schema",
+                                component="DBACoder",
+                                method="",
+                                path="",
+                                message=schema_check.summary(),
+                                suggestion=(
+                                    "修正契约 DDL 或 DBACoder 生成的迁移文件，"
+                                    "确保目标表与全部字段可真实创建；"
+                                    "禁止绕过迁移直接上线"
+                                ),
+                                fix_action="FIX_SCHEMA",
+                            ),
+                        ),
+                    )
+            # 维度三（仅 L3）：把迁移文件真实执行到临时 MySQL 库，并用
+            # information_schema 核对核心表字段；连接失败是环境问题，
+            # DDL / 字段问题则回退 DBACoder 重写迁移。
+            if policy.mysql_migration_check:
+                mysql_check = verify_mysql_migration(snapshot, contract)
+                report = replace(report, mysql=mysql_check.to_dict())
+                if mysql_check.environment_error:
+                    raise FullstackQualityEnvironmentError(mysql_check.summary())
+                if not mysql_check.ok:
+                    report = replace(
+                        report,
+                        issues=report.issues
+                        + (
+                            ConsistencyIssue(
+                                kind="mysql_migration",
+                                component="DBACoder",
+                                method="",
+                                path="server/migrations/001_init.sql",
+                                message=mysql_check.summary(),
+                                suggestion=(
+                                    "由 DBACoder 按契约 DDL 重写迁移文件，确保"
+                                    "真实 MySQL 可执行且核心表字段完整；"
+                                    "禁止跳过迁移验收直接交付"
+                                ),
+                                fix_action="REGENERATE_ORM",
+                            ),
+                        ),
+                    )
+        except FullstackQualityEnvironmentError as exc:
+            # 环境问题必须原样上抛，保留 failureKind=ENVIRONMENT，避免
+            # 被下面的通用包装误判成代码缺陷。
+            self._node_failed("ConsistencyVerifier", state, exc)
+            raise
         except Exception as exc:
             self._node_failed("ConsistencyVerifier", state, exc)
             raise FullstackGenerationError(
@@ -822,6 +912,30 @@ class FullstackGraphRunner:
             "fullstack.consistency.report",
             {"runId": state["run_id"], **report.to_dict()},
         )
+        # L1：任何一致性问题都降级为告警，直接进入构建，不触发修复重试。
+        if not policy.blocking and not report.ok:
+            for issue in report.issues:
+                warnings = self._warn(
+                    state,
+                    f"L1 一致性告警 [{issue.kind}] "
+                    f"{issue.component} {issue.method} {issue.path}：{issue.message}",
+                )
+            warnings = self._warn(state, L1_WARNING_TEXT)
+            self._node_completed(
+                "ConsistencyVerifier",
+                state,
+                f"L1 敏捷模式：{len(report.issues)} 处一致性问题已降级为告警",
+                [],
+                started,
+            )
+            return {
+                "consistency_ok": True,
+                "needs_backend_repair": False,
+                "needs_dba_repair": False,
+                "warnings": warnings,
+                "quality_tier": policy.tier,
+                "mysql_check": report.mysql or {},
+            }
         if report.ok:
             self._node_completed(
                 "ConsistencyVerifier",
@@ -834,6 +948,9 @@ class FullstackGraphRunner:
                 "consistency_ok": True,
                 "needs_backend_repair": False,
                 "needs_dba_repair": False,
+                "warnings": warnings,
+                "quality_tier": policy.tier,
+                "mysql_check": report.mysql or {},
             }
 
         # 优先处理 ORM ↔ DDL 字段错位：这类问题会让所有 CRUD 直接 500，
@@ -879,6 +996,8 @@ class FullstackGraphRunner:
                 "needs_dba_repair": True,
                 "consistency_dba_repair_count": next_count,
                 "consistency_fix_routes": [],
+                "warnings": warnings,
+                "quality_tier": policy.tier,
             }
 
         # JOIN 别名 / include 关系错误：契约有 relations，但 BackendCoder
@@ -933,6 +1052,8 @@ class FullstackGraphRunner:
                 # 把诊断交给下一轮 LLM BackendCoder。
                 "applier_feedback": join_messages,
                 "applier_feedback_attempt": next_count,
+                "warnings": warnings,
+                "quality_tier": policy.tier,
             }
 
         repair_count = int(state.get("consistency_repair_count") or 0)
@@ -975,6 +1096,8 @@ class FullstackGraphRunner:
                 "needs_dba_repair": False,
                 "consistency_fix_routes": missing_routes,
                 "consistency_repair_count": next_count,
+                "warnings": warnings,
+                "quality_tier": policy.tier,
             }
 
         # 重试耗尽，或差异无法通过补齐路由解决（如 Payload 字段冲突）。
@@ -1016,49 +1139,111 @@ class FullstackGraphRunner:
                 started,
             )
             return {}
-        # 后端依赖可能随契约变化（例如上传需要 multer）。构建前先安装，
-        # 否则沙盒重启时 server/index.js 会因缺少模块直接退出。
-        if options.mode != "frontend":
-            install = self._sandbox.verify(state["sandbox_id"], "install")
-            if not install.success:
-                logs = install.logs or "依赖安装失败且没有日志"
+        policy = self._quality(state)
+        warnings = list(state.get("warnings") or [])
+        # L1 允许在失败后重试 1 次；L2 / L3 维持一次失败即终止的严格语义。
+        max_attempts = 1 + policy.build_retry_limit
+
+        def _run(kind: str, label: str):
+            last = None
+            for attempt in range(1, max_attempts + 1):
+                result = self._sandbox.verify(state["sandbox_id"], kind)
+                if result.success:
+                    return result, attempt
+                last = result
+                logs = result.logs or f"{label}失败且没有日志"
                 self._emit(
                     "fullstack.node.output",
                     {
                         "runId": state["run_id"],
                         "node": "BuildVerifier",
-                        "path": "npm install",
+                        "path": label,
                         "language": "text",
                         "content": logs[-4000:],
-                        "truncated": install.logs_truncated,
+                        "truncated": result.logs_truncated,
                     },
                 )
+                if attempt < max_attempts:
+                    self._emit(
+                        "fullstack.build.retry",
+                        {
+                            "runId": state["run_id"],
+                            "node": "BuildVerifier",
+                            "command": label,
+                            "attempt": attempt,
+                            "maxAttempts": max_attempts,
+                            "exitCode": result.exit_code,
+                        },
+                    )
+                    logger.warning(
+                        "BuildVerifier %s 失败，重试 [%d/%d] run_id=%s",
+                        label,
+                        attempt,
+                        max_attempts,
+                        state.get("run_id"),
+                    )
+            return last, max_attempts
+
+        # 后端依赖可能随契约变化（例如上传需要 multer）。构建前先安装，
+        # 否则沙盒重启时 server/index.js 会因缺少模块直接退出。
+        if options.mode != "frontend":
+            install, install_attempts = _run("install", "npm install")
+            if not install.success:
+                logs = install.logs or "依赖安装失败且没有日志"
+                if policy.blocking:
+                    self._node_failed(
+                        "BuildVerifier",
+                        state,
+                        FullstackBuildError(f"npm install 退出码 {install.exit_code}"),
+                    )
+                    raise FullstackBuildError("生成代码依赖安装失败：\n" + logs)
+                warnings = self._warn(
+                    state,
+                    f"{L1_WARNING_TEXT} 依赖安装失败（已重试 "
+                    f"{install_attempts - 1} 次），继续启动沙盒："
+                    f"{logs[-500:]}",
+                )
+                self._node_completed(
+                    "BuildVerifier",
+                    state,
+                    "L1 敏捷模式：依赖安装失败已降级为告警",
+                    [],
+                    started,
+                )
+                return {
+                    "warnings": warnings,
+                    "build_retry_count": install_attempts - 1,
+                    "quality_tier": policy.tier,
+                }
+        result, build_attempts = _run("build", "npm run build")
+        if not result.success:
+            logs = result.logs or "构建失败且没有日志"
+            if policy.blocking:
                 self._node_failed(
                     "BuildVerifier",
                     state,
-                    FullstackBuildError(f"npm install 退出码 {install.exit_code}"),
+                    FullstackBuildError(f"npm run build 退出码 {result.exit_code}"),
                 )
-                raise FullstackBuildError("生成代码依赖安装失败：\n" + logs)
-        result = self._sandbox.verify(state["sandbox_id"], "build")
-        if not result.success:
-            logs = result.logs or "构建失败且没有日志"
-            self._emit(
-                "fullstack.node.output",
-                {
-                    "runId": state["run_id"],
-                    "node": "BuildVerifier",
-                    "path": "npm run build",
-                    "language": "text",
-                    "content": logs[-4000:],
-                    "truncated": result.logs_truncated,
-                },
+                raise FullstackBuildError(
+                    "生成代码未通过 npm run build：\n" + logs[-4000:]
+                )
+            warnings = self._warn(
+                state,
+                f"{L1_WARNING_TEXT} 构建失败（已重试 {build_attempts - 1} 次），"
+                f"继续启动沙盒：{logs[-500:]}",
             )
-            self._node_failed(
+            self._node_completed(
                 "BuildVerifier",
                 state,
-                FullstackBuildError(f"npm run build 退出码 {result.exit_code}"),
+                "L1 敏捷模式：构建失败已降级为告警",
+                [],
+                started,
             )
-            raise FullstackBuildError("生成代码未通过 npm run build：\n" + logs[-4000:])
+            return {
+                "warnings": warnings,
+                "build_retry_count": build_attempts - 1,
+                "quality_tier": policy.tier,
+            }
         self._node_completed(
             "BuildVerifier",
             state,
@@ -1066,7 +1251,11 @@ class FullstackGraphRunner:
             [],
             started,
         )
-        return {}
+        return {
+            "warnings": warnings,
+            "build_retry_count": build_attempts - 1,
+            "quality_tier": policy.tier,
+        }
 
     # --------------------------------------------------------
     # 节点：SandboxRestart
@@ -1096,10 +1285,26 @@ class FullstackGraphRunner:
                 "healthPath": ready_path,
             },
         )
+        policy = self._quality(state)
         try:
             self._sandbox.restart(sandbox_id, ready_path=ready_path)
             handle = self._sandbox.get(sandbox_id)
         except Exception as exc:
+            if not policy.blocking:
+                # L1：沙盒启动失败也返回告警而非失败，前端仍可展示已生成
+                # 的文件与后续修复入口。
+                warnings = self._warn(
+                    state,
+                    f"{L1_WARNING_TEXT} 沙盒启动失败：{exc}",
+                )
+                self._node_completed(
+                    "SandboxRestart",
+                    state,
+                    "L1 敏捷模式：沙盒启动失败已降级为告警",
+                    [],
+                    started,
+                )
+                return {"warnings": warnings, "quality_tier": policy.tier}
             self._node_failed("SandboxRestart", state, exc)
             raise FullstackGenerationError(
                 f"沙盒重启失败: {exc}", node="SandboxRestart"
@@ -1266,6 +1471,7 @@ __all__ = [
     "FullstackBuildError",
     "FullstackConsistencyError",
     "FullstackGenerationError",
+    "FullstackQualityEnvironmentError",
     "FullstackGraphRunner",
     "FullstackState",
     "NODE_LABELS",

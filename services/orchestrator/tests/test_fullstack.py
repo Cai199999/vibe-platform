@@ -45,10 +45,20 @@ from ai_core.fullstack.coders import (
     item_path,
     parse_ddl_tables,
 )
+from ai_core.fullstack.applier import Applier, ApplierSafetyBlock
+from ai_core.fullstack.consistency import verify_consistency
 from ai_core.fullstack.graph import (
     FullstackConsistencyError,
     FullstackContractContradictionError,
     FullstackGraphRunner,
+)
+from ai_core.fullstack.mysql_schema import MysqlMigrationCheck
+from ai_core.fullstack.quality import (
+    L1_WARNING_TEXT,
+    L1_PROTOTYPE,
+    L2_STANDARD,
+    L3_PRODUCTION,
+    quality_policy,
 )
 from ai_core.fullstack.schema_mcp import verify_schema_with_mcp
 from ai_core.fullstack.service import FullstackService
@@ -337,6 +347,34 @@ class _MemorySandbox(SandboxProvider):
 
     def destroy(self, sandbox_id: str) -> None:
         return None
+
+
+class _FlakySandbox(_MemorySandbox):
+    """按检查类型注入失败的沙盒；用于验证 L1 构建重试与降级。"""
+
+    def __init__(self, fail_checks: tuple[str, ...] = ("build",)) -> None:
+        super().__init__()
+        self.fail_checks = set(fail_checks)
+
+    def verify(self, sandbox_id: str, check: str = "build") -> VerifyResult:
+        self.verified.append((sandbox_id, check))
+        if check in self.fail_checks:
+            return VerifyResult(
+                success=False,
+                exit_code=1,
+                timed_out=False,
+                duration_ms=8,
+                logs=f"{check} failed: mock failure",
+                logs_truncated=False,
+            )
+        return VerifyResult(
+            success=True,
+            exit_code=0,
+            timed_out=False,
+            duration_ms=8,
+            logs=f"{check} ok",
+            logs_truncated=False,
+        )
 
 
 class CoderTests(unittest.TestCase):
@@ -2138,6 +2176,201 @@ class GraphTests(unittest.TestCase):
         self.assertGreaterEqual(pass_rate["denominator"], 3)
 
 
+class RiskAdaptiveGuardrailTests(unittest.TestCase):
+    """L1 / L2 / L3 三种质量分级的门禁行为差异。"""
+
+    @staticmethod
+    def _state(sandbox: _MemorySandbox, contract: ArchitectContract) -> dict:
+        return {
+            "run_id": f"fsk_quality_{uuid.uuid4().hex[:6]}",
+            "project_id": "proj_fullstack",
+            "sandbox_id": sandbox.handle.sandbox_id,
+            "preview_url": sandbox.handle.preview_url,
+            "contract": contract,
+            "files": [],
+            "quality_tier": contract.quality_tier,
+            "warnings": [],
+            "build_retry_count": 0,
+        }
+
+    def test_l1_applier_skips_ast_gate_l2_still_blocks(self) -> None:
+        """L1 允许带语法缺陷的 Demo 产物落盘；L2 必须继续拦截。"""
+        bad_files = {"server/db.js": "const broken = ;"}
+
+        l1_sandbox = _MemorySandbox()
+        Applier(l1_sandbox, _contract(qualityTier=L1_PROTOTYPE)).apply(
+            l1_sandbox.handle.sandbox_id,
+            bad_files,
+        )
+        self.assertIn("server/db.js", l1_sandbox.files)
+
+        l2_sandbox = _MemorySandbox()
+        with self.assertRaises(ApplierSafetyBlock):
+            Applier(l2_sandbox, _contract(qualityTier=L2_STANDARD)).apply(
+                l2_sandbox.handle.sandbox_id,
+                bad_files,
+            )
+        self.assertNotIn("server/db.js", l2_sandbox.files)
+
+    def test_l1_skips_orm_schema_dimension(self) -> None:
+        """L1 不执行 check_orm_schema，允许 ORM 字段模糊匹配。"""
+        contract = _contract(qualityTier=L1_PROTOTYPE)
+        called: list[bool] = []
+        original = sys.modules["ai_core.fullstack.consistency"].check_orm_syntax
+
+        def _spy(*_args, **_kwargs):
+            called.append(True)
+            return original(*_args, **_kwargs)
+
+        sys.modules["ai_core.fullstack.consistency"].check_orm_syntax = _spy
+        try:
+            verify_consistency({}, contract)
+        finally:
+            sys.modules["ai_core.fullstack.consistency"].check_orm_syntax = original
+        self.assertEqual(called, [])
+
+        l2_called: list[bool] = []
+        l2_contract = _contract(qualityTier=L2_STANDARD)
+        sys.modules["ai_core.fullstack.consistency"].check_orm_syntax = (
+            lambda *args, **kwargs: (
+                l2_called.append(True) or original(*args, **kwargs)
+            )
+        )
+        try:
+            verify_consistency({}, l2_contract)
+        finally:
+            sys.modules["ai_core.fullstack.consistency"].check_orm_syntax = original
+        self.assertEqual(l2_called, [True])
+
+    def test_l1_build_failure_retries_once_then_warns(self) -> None:
+        """L1 构建失败最多重试 1 次；仍失败则告警并继续重启沙盒。"""
+        sandbox = _FlakySandbox(fail_checks=("build",))
+        sandbox.files = _base_files()
+        buffer = RunEventBuffer("fsk_l1_build_retry")
+        runner = FullstackGraphRunner(sandbox, event_sink=buffer)
+        contract = _contract(qualityTier=L1_PROTOTYPE)
+
+        outcome = runner.run(self._state(sandbox, contract))
+
+        build_calls = [item for item in sandbox.verified if item[1] == "build"]
+        self.assertEqual(len(build_calls), 2)  # 首次 + 1 次重试
+        self.assertEqual(outcome.get("build_retry_count"), 1)
+        self.assertTrue(
+            any(L1_WARNING_TEXT in item for item in outcome.get("warnings") or [])
+        )
+        self.assertEqual(len(sandbox.restarts), 1)
+        event_types = [event.type for event in buffer.snapshot()]
+        self.assertIn("fullstack.build.retry", event_types)
+        self.assertIn("fullstack.quality.warning", event_types)
+
+    def test_l1_consistency_issues_are_warnings_not_blocking(self) -> None:
+        """L1 一致性问题降级为告警，不再触发 BackendCoder 自愈重试。"""
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        buffer = RunEventBuffer("fsk_l1_consistency")
+        runner = FullstackGraphRunner(sandbox, event_sink=buffer)
+        contract = _contract(qualityTier=L1_PROTOTYPE)
+
+        from ai_core.fullstack import graph as graph_module
+        from ai_core.fullstack.consistency import (
+            BackendRoute,
+            ConsistencyIssue,
+            ConsistencyReport,
+        )
+
+        failing = ConsistencyReport(
+            calls_checked=1,
+            backend_routes=(BackendRoute("GET", "/api/v1/todos"),),
+            issues=(
+                ConsistencyIssue(
+                    kind="path",
+                    component="TaskStream",
+                    method="GET",
+                    path="/api/v1/tasks/stream",
+                    message="后端未注册该路径",
+                    suggestion="由 BackendCoder 补齐",
+                    fix_action="ADD_BACKEND_ROUTE",
+                ),
+            ),
+        )
+        original = graph_module.verify_consistency
+        graph_module.verify_consistency = lambda *_args, **_kwargs: failing
+        try:
+            outcome = runner.run(self._state(sandbox, contract))
+        finally:
+            graph_module.verify_consistency = original
+
+        started = [
+            event.payload["node"]
+            for event in buffer.snapshot()
+            if event.type == "fullstack.node.started"
+        ]
+        # 只跑一轮 BackendCoder，没有触发一致性自愈循环。
+        self.assertEqual(started.count("BackendCoder"), 1)
+        self.assertTrue(outcome.get("consistency_ok"))
+        self.assertTrue(
+            any("L1 一致性告警" in item for item in outcome.get("warnings") or [])
+        )
+
+    def test_l3_runs_real_mysql_check_and_l2_does_not(self) -> None:
+        """L3 必须调用真实 MySQL 验收；L2 明确跳过。"""
+        from ai_core.fullstack import graph as graph_module
+
+        successful = MysqlMigrationCheck(
+            enabled=True,
+            ok=True,
+            database="vibe_l3_verify_test",
+            table="todos",
+            expected_columns=("id", "name"),
+            actual_columns=("id", "name"),
+            statements=1,
+        )
+        calls: list[str] = []
+
+        def _fake_mysql(_files, contract, **_kwargs):
+            calls.append(contract.quality_tier)
+            return successful
+
+        original = graph_module.verify_mysql_migration
+        graph_module.verify_mysql_migration = _fake_mysql
+        try:
+            l3_sandbox = _MemorySandbox()
+            l3_sandbox.files = _base_files()
+            l3_outcome = FullstackGraphRunner(l3_sandbox).run(
+                self._state(l3_sandbox, _contract(qualityTier=L3_PRODUCTION))
+            )
+            self.assertEqual(calls, [L3_PRODUCTION])
+            self.assertTrue(l3_outcome.get("mysql_check", {}).get("ok"))
+
+            calls.clear()
+            l2_sandbox = _MemorySandbox()
+            l2_sandbox.files = _base_files()
+            FullstackGraphRunner(l2_sandbox).run(
+                self._state(l2_sandbox, _contract(qualityTier=L2_STANDARD))
+            )
+            self.assertEqual(calls, [])
+        finally:
+            graph_module.verify_mysql_migration = original
+
+    def test_quality_policies_match_requested_levels(self) -> None:
+        l1 = quality_policy(L1_PROTOTYPE)
+        self.assertFalse(l1.ast_gate)
+        self.assertFalse(l1.orm_schema_check)
+        self.assertFalse(l1.blocking)
+        self.assertEqual(l1.build_retry_limit, 1)
+
+        l2 = quality_policy(L2_STANDARD)
+        self.assertTrue(l2.ast_gate)
+        self.assertTrue(l2.sqlite_schema_check)
+        self.assertFalse(l2.mysql_migration_check)
+        self.assertTrue(l2.blocking)
+
+        l3 = quality_policy(L3_PRODUCTION)
+        self.assertTrue(l3.orm_schema_check)
+        self.assertTrue(l3.mysql_migration_check)
+        self.assertTrue(l3.blocking)
+
+
 class ServiceTests(unittest.TestCase):
     """契约校验、请求解析与后台 Run 的终态事件。"""
 
@@ -2404,6 +2637,9 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(completed.payload["orm"], "sequelize")
         self.assertTrue(completed.payload["previewUrl"].startswith("http://127.0.0.1"))
         self.assertEqual(sandbox.restarts[-1][1], "/api/health")
+        # L2 不做真实 MySQL 迁移验收，事件里必须是 null 而不是空对象，
+        # 否则前端会把 {} 误渲染成“验收失败”。
+        self.assertIsNone(completed.payload["mysqlCheck"])
 
 
 def _base_files() -> dict[str, str]:

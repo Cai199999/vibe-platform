@@ -73,10 +73,13 @@ from ai_core.architect.skeleton import (
 from ai_core.architect.slots import merge_inferred_slots
 from ai_core.domain.architect import (
     APP_SHAPE_LABELS,
+    QUALITY_TIER_OPTIONS,
+    QUALITY_TIER_PROMPT,
     ArchitectCitation,
     ArchitectClarification,
     ArchitectContract,
     ArchitectQuestion,
+    normalize_quality_tier,
 )
 from ai_core.domain.state import ArchitectState
 from ai_core.config import get_settings
@@ -874,6 +877,14 @@ class ArchitectGraphRunner:
         self._check_cancelled()
         raw = state.get("contract_draft") or {}
         draft = draft_from_dict(raw)
+        # 质量分级在契约确认时写入；修订重算契约时必须沿用用户已选分级，
+        # 不能被重新装配悄悄重置回默认 L2。
+        existing = state.get("contract") or {}
+        quality_tier = (
+            normalize_quality_tier(state.get("quality_tier"))
+            or normalize_quality_tier(existing.get("qualityTier"))
+            or "L2_STANDARD"
+        )
         contract = assemble_contract(
             contract_id=str(state.get("contract_id") or ""),
             run_id=str(state.get("run_id") or ""),
@@ -883,6 +894,7 @@ class ArchitectGraphRunner:
             source_hash=str(state.get("source_hash") or ""),
             draft=draft,
             citations=_citations(state),
+            quality_tier=quality_tier,
         )
         contract_payload = contract.model_dump(mode="json", by_alias=True)
         self._emit(
@@ -900,6 +912,7 @@ class ArchitectGraphRunner:
         )
         return {
             "contract": contract_payload,
+            "quality_tier": quality_tier,
             "status": "AWAITING_CONTRACT_CONFIRMATION",
         }
 
@@ -915,12 +928,37 @@ class ArchitectGraphRunner:
             "threshold": float(state.get("threshold") or 0.85),
             "contract": contract,
             "decisions": ["CONFIRM", "REVISE", "CANCEL"],
+            # 风险自适应门禁：契约确认前必须由用户显式选择质量分级。
+            # 该问题不可跳过；前端在未选择时禁用 CONFIRM 按钮，
+            # 旧客户端未传时后端按 L2 兜底以保持协议向后兼容。
+            "qualityTierRequired": True,
+            "qualityTierPrompt": QUALITY_TIER_PROMPT,
+            "qualityTierOptions": QUALITY_TIER_OPTIONS,
+            "qualityTier": contract.get("qualityTier")
+            or state.get("quality_tier")
+            or "L2_STANDARD",
         }
         response = interrupt(payload)
         decision = _normalize_decision(response)
         comment = ""
+        selected_tier = ""
         if isinstance(response, dict):
             comment = str(response.get("comment") or "").strip()
+            selected_tier = normalize_quality_tier(
+                response.get("qualityTier") or response.get("quality_tier")
+            )
+        # 未显式选择时沿用已知分级；首次确认且旧客户端未传则落 L2。
+        quality_tier = (
+            selected_tier
+            or normalize_quality_tier(contract.get("qualityTier"))
+            or normalize_quality_tier(state.get("quality_tier"))
+            or "L2_STANDARD"
+        )
+        if selected_tier:
+            # 把用户选择写回契约快照，_confirmed / 前端事件 / 后续
+            # FullstackGraph 都读取同一份 contract.qualityTier。
+            contract = dict(contract)
+            contract["qualityTier"] = selected_tier
 
         if decision == "REVISE":
             revision_count = int(state.get("contract_revision_count") or 0)
@@ -943,6 +981,8 @@ class ArchitectGraphRunner:
                 ),
             )
             return {
+                "contract": contract,
+                "quality_tier": quality_tier,
                 "contract_decision": "REVISE",
                 "contract_feedback": comment,
                 "contract_revision_count": revision_count + 1,
@@ -950,6 +990,8 @@ class ArchitectGraphRunner:
                 "status": "REVISING_CONTRACT",
             }
         return {
+            "contract": contract,
+            "quality_tier": quality_tier,
             "contract_decision": decision,
             "contract_feedback": comment,
             "status": (
@@ -985,6 +1027,11 @@ class ArchitectGraphRunner:
     def _confirmed(self, state: ArchitectState) -> dict[str, Any]:
         contract = _contract_from_state(state)
         if contract is not None:
+            # 双保险：用户选择的质量分级以 state 为准，避免旧 checkpoint
+            # 里的 contract 快照缺字段时回退 L2。
+            tier = normalize_quality_tier(state.get("quality_tier"))
+            if tier:
+                contract.quality_tier = tier  # type: ignore[assignment]
             contract.status = "CONFIRMED"
             contract.decided_at = datetime.now(timezone.utc)
             payload = contract.model_dump(mode="json", by_alias=True)

@@ -69,6 +69,14 @@ services:
       LLM_COST_CURRENCY: ${LLM_COST_CURRENCY:-CNY}
       REDIS_HOST: ${REDIS_HOST:-host.docker.internal}
       REDIS_PORT: ${REDIS_PORT:-6379}
+      # L3 生产级门禁：复用宿主 MySQL 做临时库迁移验收。
+      MYSQL_HOST: ${MYSQL_HOST:-host.docker.internal}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-geo_ai_db}
+      MYSQL_USER: ${MYSQL_USER:-root}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-root}
+      QUALITY_MYSQL_VERIFY_ENABLED: ${QUALITY_MYSQL_VERIFY_ENABLED:-true}
+      QUALITY_MYSQL_TIMEOUT_SECONDS: ${QUALITY_MYSQL_TIMEOUT_SECONDS:-8}
       # Sandbox：通过挂载的 Docker Socket 在宿主机创建隔离容器。
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:-vibe-platform/sandbox-react:dev}
       SANDBOX_PREVIEW_HOST: ${SANDBOX_PREVIEW_HOST:-127.0.0.1}

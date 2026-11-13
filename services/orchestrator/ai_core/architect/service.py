@@ -548,6 +548,7 @@ class ArchitectService:
                 "contractId": contract.contract_id,
                 "decision": decision,
                 "comment": request.comment,
+                "qualityTier": request.quality_tier,
             },
             dedupe_key=(
                 f"architect.contract.decision:"
@@ -572,6 +573,9 @@ class ArchitectService:
                 "repair_count": 0,
                 "status": "REVISING_CONTRACT",
             }
+            # 追加需求时若重新选了质量分级，以最新选择为准；未传则沿用。
+            if request.quality_tier:
+                revision_state["quality_tier"] = request.quality_tier
             active.state = revision_state
             active.buffer.emit(
                 "architect.contract.revision_requested",
@@ -600,6 +604,7 @@ class ArchitectService:
                 {
                     "decision": decision,
                     "comment": request.comment,
+                    "qualityTier": request.quality_tier,
                 },
             ),
             name=f"architect-decision-{run_id}",
@@ -967,6 +972,9 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         "round": 0,
         "status": "INGESTING",
         "app_shape": "",
+        # 质量分级只在契约确认阶段由用户写入；初值留空，避免把默认值
+        # 误当成“用户已选择”。
+        "quality_tier": "",
         "skeleton_mode": False,
         "slots": {},
         "confidence_score": 0.0,

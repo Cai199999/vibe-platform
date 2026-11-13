@@ -966,7 +966,17 @@ class DeepSeekArchitectLLM(ArchitectLLM):
     def draft_contract(self, context: ArchitectContext) -> ContractDraft:
         system = (
             "你是软件交付架构师。根据已确认的应用形态生成“分级实施契约”，"
-            "只输出该形态真正需要的章节，禁止过度设计。\n"
+            "只输出该形态真正需要的章节，禁止过度设计。\n\n"
+            "【质量分级铁律 · 最高优先级】契约确认前，平台必须向用户抛出"
+            "不可跳过的单选问题，由用户决定本次生成的质量要求：\n"
+            "请选择您对本次生成的质量要求：\n"
+            "- A. L1 敏捷模式（极速生成，跳过严格校验，适合做 Demo）\n"
+            "- B. L2 标准模式（带 AST 代码校验与基础数据库，适合内部工具）\n"
+            "- C. L3 生产级（全量一致性校验与真实数据库迁移验证，适合上线交付）\n"
+            "该选择由平台 UI 收集并写入契约 quality_tier，你绝对不能替用户"
+            "猜测或在契约 JSON 中输出该字段；但契约内容必须与用户选择的质量"
+            "等级相称：L1 允许最小可用结构，L3 必须给出完整 API、DDL、关系与"
+            "可验证验收标准。\n\n"
             "只输出一个 JSON 对象，不要 Markdown 围栏。格式：\n"
             '{"contract_markdown":"完整 Markdown 契约","tech_stack":{},'
             '"api_routes":[{"method":"GET","path":"/api/v1/...",'
@@ -1073,6 +1083,8 @@ class DeepSeekArchitectLLM(ArchitectLLM):
         system = (
             "你是软件交付架构师。上一版实施契约未通过确定性校验。"
             "请严格根据校验反馈修复，不要扩写无关内容；仍然只输出契约 JSON。\n"
+            "质量分级 quality_tier 由用户在契约确认时显式选择，你不得在 JSON "
+            "中输出或修改；修订时保持与用户所选等级相称的契约完整度。\n"
             "必须遵守应用形态分级规则：lightweight_web 不含 API/DDL；"
             "script_automation 不含 UI/API/DDL；full_stack_system 必须包含 "
             "API/DDL/交互。\n"

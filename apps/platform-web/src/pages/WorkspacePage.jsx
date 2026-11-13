@@ -5434,11 +5434,12 @@ export default function WorkspacePage() {
             comment,
             options,
           ),
-        onArchitectDecide: (decision, comment) =>
+        onArchitectDecide: (decision, comment, qualityTier) =>
           workspaceActionsRef.current?.architectDecide(
             projectId,
             decision,
             comment,
+            qualityTier,
           ),
         onArchitectAskHelper: (question) =>
           workspaceActionsRef.current?.architectAskHelper(projectId, question),

@@ -6872,6 +6872,84 @@ body.is-viewport-panning * {
   flex-wrap: wrap;
 }
 
+/* 风险自适应门禁：契约确认前的必选质量分级。 */
+.architect-quality-tier {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid rgba(251, 191, 36, 0.32);
+  border-radius: 12px;
+  background: rgba(120, 53, 15, 0.16);
+}
+
+.architect-quality-tier legend {
+  padding: 0 4px;
+  color: #fde68a;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.architect-quality-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: #e5e7eb;
+  font-size: 10.5px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.architect-quality-option input {
+  margin-top: 2px;
+  accent-color: #f59e0b;
+}
+
+.architect-quality-hint {
+  margin: 2px 0 0;
+  color: #fbbf24;
+  font-size: 9.5px;
+}
+
+/* 生成结果面板的质量徽标：L1 黄色告警 / L3 绿色通过。 */
+.architect-quality-badge {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.architect-quality-badge.is-warning {
+  border: 1px solid rgba(251, 191, 36, 0.5);
+  background: rgba(120, 53, 15, 0.28);
+  color: #fde68a;
+}
+
+.architect-quality-badge.is-success {
+  border: 1px solid rgba(52, 211, 153, 0.5);
+  background: rgba(6, 78, 59, 0.28);
+  color: #a7f3d0;
+}
+
+.fullstack-quality-warnings {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(251, 191, 36, 0.28);
+  border-radius: 10px;
+  color: #fcd34d;
+  font-size: 10px;
+}
+
+.fullstack-quality-warnings ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #e5e7eb;
+  line-height: 1.6;
+}
+
 .architect-decision-hint {
   margin: 0;
   color: var(--faint);

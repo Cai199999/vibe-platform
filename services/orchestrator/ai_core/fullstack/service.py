@@ -45,6 +45,13 @@ from ai_core.fullstack.graph import (
     FullstackGraphRunner,
     FullstackState,
 )
+from ai_core.fullstack.quality import (
+    L1_PROTOTYPE,
+    L1_WARNING_TEXT,
+    quality_policy,
+    resolve_quality_tier,
+    warning_badge,
+)
 from ai_core.observability.fullstack_metrics import FULLSTACK_METRICS
 from ai_core.ports.sandbox import SandboxError, SandboxProvider
 
@@ -118,6 +125,10 @@ class ActiveFullstackRun:
     frontend_entry: str = ""
     table: str = ""
     collection_path: str = ""
+    # 风险自适应门禁：L1 的非阻塞告警 / L3 验收结论随快照返回。
+    quality_tier: str = "L2_STANDARD"
+    warnings: list[str] = field(default_factory=list)
+    mysql_check: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -195,6 +206,7 @@ class FullstackService:
             buffer=get_event_buffer(run_id),
             sandbox_id=sandbox_id,
             preview_url=preview_url,
+            quality_tier=resolve_quality_tier(contract),
         )
         with _ACTIVE_LOCK:
             existing = _ACTIVE_RUNS.get(run_id)
@@ -218,6 +230,8 @@ class FullstackService:
                 "sandboxId": sandbox_id,
                 "previewUrl": preview_url,
                 "appShape": contract.app_shape,
+                "qualityTier": resolve_quality_tier(contract),
+                "qualityPolicy": quality_policy(contract).to_dict(),
                 "mode": mode,
                 "databaseEngine": contract_database_engine(contract),
                 "orm": "sequelize",
@@ -235,21 +249,25 @@ class FullstackService:
 
     def _run_worker(self, active: ActiveFullstackRun) -> None:
         started = time.monotonic()
+        policy = quality_policy(active.contract)
         # 契约结构审计先于任何生成节点：矛盾契约即使重跑一百次也会得到
-        # 同一个错误。这里直接失败并把“重新澄清”的提示送到前端。
+        # 同一个错误。L1 已选择 Demo 级质量，降级为告警继续生成。
         audit = audit_contract(active.contract, mode=active.request.options.mode)
+        warnings: list[str] = []
         if not audit.ok:
-            self._complete_failure(
-                active,
-                audit.summary(),
-                "CONTRACT_REVISION_REQUIRED",
-                node="ConsistencyVerifier",
-                failure_kind="CONTRACT",
-                defect_kind=audit.defect_kind,
-                needs_clarification=True,
-                clarification=audit.payload(),
-            )
-            return
+            if policy.blocking:
+                self._complete_failure(
+                    active,
+                    audit.summary(),
+                    "CONTRACT_REVISION_REQUIRED",
+                    node="ConsistencyVerifier",
+                    failure_kind="CONTRACT",
+                    defect_kind=audit.defect_kind,
+                    needs_clarification=True,
+                    clarification=audit.payload(),
+                )
+                return
+            warnings.append(f"L1 敏捷模式跳过契约审计阻断：{audit.summary()}")
 
         runner = FullstackGraphRunner(self._sandbox, event_sink=active.buffer)
         initial: FullstackState = {
@@ -260,6 +278,9 @@ class FullstackService:
             "contract": active.contract,
             "options": active.request.options,
             "files": [],
+            "quality_tier": policy.tier,
+            "warnings": warnings,
+            "build_retry_count": 0,
         }
         try:
             outcome = runner.run(initial)
@@ -271,6 +292,16 @@ class FullstackService:
                 active.preview_url = str(
                     outcome.get("preview_url") or active.preview_url
                 )
+                active.quality_tier = resolve_quality_tier(active.contract)
+                active.warnings = list(outcome.get("warnings") or [])
+                # L1 成功也必须明确提示“未经过严格校验”，徽标文案由后端
+                # 统一提供，避免前端各写一份。
+                if (
+                    active.quality_tier == L1_PROTOTYPE
+                    and L1_WARNING_TEXT not in active.warnings
+                ):
+                    active.warnings.append(L1_WARNING_TEXT)
+                active.mysql_check = dict(outcome.get("mysql_check") or {})
                 active.status = "SUCCEEDED"
                 active.touch()
             active.buffer.emit(
@@ -286,6 +317,13 @@ class FullstackService:
                     "table": active.table,
                     "collectionPath": active.collection_path,
                     "files": active.files,
+                    "qualityTier": active.quality_tier,
+                    "qualityLabel": quality_policy(active.contract).label,
+                    "qualityBadge": warning_badge(active.quality_tier),
+                    "warnings": list(active.warnings),
+                    # L1/L2 不执行真实迁移验收，空字典必须回传 null，
+                    # 否则前端会误以为“验收失败”。
+                    "mysqlCheck": dict(active.mysql_check) or None,
                     "databaseEngine": contract_database_engine(active.contract),
                     "orm": "sequelize",
                     "dbaFiles": list(outcome.get("dba_files") or []),
@@ -356,6 +394,8 @@ class FullstackService:
                 "mode": active.request.options.mode,
                 "contractId": active.contract.contract_id,
                 "sandboxId": active.sandbox_id,
+                "qualityTier": active.quality_tier,
+                "warnings": list(active.warnings),
                 "node": node,
                 "error": error,
                 "errorCode": code,
@@ -472,6 +512,10 @@ class FullstackService:
                 defect_kind=active.defect_kind,
                 needs_clarification=active.needs_clarification,
                 clarification=active.clarification or {},
+                quality_tier=active.quality_tier,
+                quality_badge=warning_badge(active.quality_tier),
+                warnings=list(active.warnings),
+                mysql_check=dict(active.mysql_check),
                 last_seq=active.buffer.last_seq,
                 created_at=active.created_at,
                 updated_at=active.updated_at,

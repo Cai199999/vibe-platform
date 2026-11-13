@@ -162,11 +162,19 @@ class ArchitectHarness:
             if questions[0].get("prompt") != APP_SHAPE_PROMPT:
                 raise AssertionError("应用形态问题文案不符合约定")
 
-    def decide(self, decision: str, comment: str = "") -> None:
+    def decide(
+        self,
+        decision: str,
+        comment: str = "",
+        quality_tier: str = "",
+    ) -> None:
+        resume: dict[str, Any] = {"decision": decision, "comment": comment}
+        if quality_tier:
+            resume["qualityTier"] = quality_tier
         self.outcome = self.runner.run(
             {},
             run_id=self.run_id,
-            resume={"decision": decision, "comment": comment},
+            resume=resume,
         )
 
     def append_requirement(self, comment: str) -> None:
@@ -270,6 +278,49 @@ class ArchitectFlowTest(unittest.TestCase):
 
         harness.decide("CONFIRM")
         self.assertEqual(harness.outcome.state["status"], "CONFIRMED")
+
+    def test_contract_gate_requires_quality_tier_question(self) -> None:
+        """风险自适应门禁：契约确认 payload 必须携带不可跳过的分级问题。"""
+        harness = ArchitectHarness()
+        payload = harness.drive_to_contract("full_stack_system")
+        self.assertTrue(payload.get("qualityTierRequired"))
+        self.assertIn("请选择您对本次生成的质量要求", payload["qualityTierPrompt"])
+        options = payload.get("qualityTierOptions") or []
+        self.assertEqual(
+            [item["value"] for item in options],
+            ["L1_PROTOTYPE", "L2_STANDARD", "L3_PRODUCTION"],
+        )
+        # 前端未选择时不得把 L2 伪装成“用户已选择”。
+        self.assertEqual(payload.get("qualityTier"), "L2_STANDARD")
+
+        harness.decide("CONFIRM", quality_tier="L3_PRODUCTION")
+        state = harness.outcome.state
+        self.assertEqual(state["status"], "CONFIRMED")
+        self.assertEqual(state["quality_tier"], "L3_PRODUCTION")
+        self.assertEqual(state["contract"]["qualityTier"], "L3_PRODUCTION")
+        confirmed = [
+            event
+            for event in harness.buffer.snapshot()
+            if event.type == "architect.contract.confirmed"
+        ][-1]
+        self.assertEqual(confirmed.payload["contract"]["qualityTier"], "L3_PRODUCTION")
+
+    def test_quality_tier_survives_contract_revision(self) -> None:
+        """修订重算契约时必须沿用用户已选分级，不能被重置回默认 L2。"""
+        harness = ArchitectHarness()
+        harness.drive_to_contract("full_stack_system")
+        harness.decide("REVISE", "增加导出入口", quality_tier="L1_PROTOTYPE")
+        revised = harness.outcome.interrupt or {}
+        self.assertEqual(revised.get("kind"), "contract_confirmation")
+        self.assertEqual(revised["contract"]["qualityTier"], "L1_PROTOTYPE")
+        self.assertEqual(revised.get("qualityTier"), "L1_PROTOTYPE")
+
+        # 旧客户端二次确认不传分级：沿用上一次选择，而不是回退 L2。
+        harness.decide("CONFIRM")
+        self.assertEqual(harness.outcome.state["status"], "CONFIRMED")
+        self.assertEqual(
+            harness.outcome.state["contract"]["qualityTier"], "L1_PROTOTYPE"
+        )
 
     def test_revise_returns_new_contract_then_confirm(self) -> None:
         harness = ArchitectHarness()

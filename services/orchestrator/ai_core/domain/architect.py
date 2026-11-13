@@ -17,6 +17,63 @@ from ai_core.domain.common import CamelModel
 
 AppShape = Literal["lightweight_web", "script_automation", "full_stack_system"]
 
+# 风险自适应门禁：质量分级是契约的一等字段，决定 Applier / 一致性校验 /
+# 数据库验收执行到哪一层。默认 L2，保证旧客户端与历史契约行为不变。
+QualityTier = Literal["L1_PROTOTYPE", "L2_STANDARD", "L3_PRODUCTION"]
+
+QUALITY_TIER_LABELS: dict[str, str] = {
+    "L1_PROTOTYPE": "L1 敏捷模式",
+    "L2_STANDARD": "L2 标准模式",
+    "L3_PRODUCTION": "L3 生产级",
+}
+
+QUALITY_TIER_OPTIONS: list[dict[str, str]] = [
+    {
+        "value": "L1_PROTOTYPE",
+        "label": "A. L1 敏捷模式（极速生成，跳过严格校验，适合做 Demo）",
+    },
+    {
+        "value": "L2_STANDARD",
+        "label": "B. L2 标准模式（带 AST 代码校验与基础数据库，适合内部工具）",
+    },
+    {
+        "value": "L3_PRODUCTION",
+        "label": "C. L3 生产级（全量一致性校验与真实数据库迁移验证，适合上线交付）",
+    },
+]
+
+QUALITY_TIER_PROMPT = (
+    "请选择您对本次生成的质量要求：\n"
+    "- A. L1 敏捷模式（极速生成，跳过严格校验，适合做 Demo）\n"
+    "- B. L2 标准模式（带 AST 代码校验与基础数据库，适合内部工具）\n"
+    "- C. L3 生产级（全量一致性校验与真实数据库迁移验证，适合上线交付）"
+)
+
+
+def normalize_quality_tier(value: Any) -> str:
+    """把用户 / 旧客户端输入归一为稳定枚举。
+
+    兼容前端可能提交的 ``L1`` / ``l3_production`` / 中文选项；无法识别
+    时返回空字符串，由调用方决定默认值（契约默认 L2，保持向后兼容）。
+    """
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    if text in {"L1", "L1_PROTOTYPE", "A", "A. L1", "敏捷", "敏捷模式"}:
+        return "L1_PROTOTYPE"
+    if text in {"L2", "L2_STANDARD", "B", "B. L2", "标准", "标准模式"}:
+        return "L2_STANDARD"
+    if text in {"L3", "L3_PRODUCTION", "C", "C. L3", "生产", "生产级"}:
+        return "L3_PRODUCTION"
+    if text.startswith("L1"):
+        return "L1_PROTOTYPE"
+    if text.startswith("L2"):
+        return "L2_STANDARD"
+    if text.startswith("L3"):
+        return "L3_PRODUCTION"
+    return ""
+
+
 APP_SHAPE_LABELS: dict[str, str] = {
     "lightweight_web": "轻量网页工具",
     "script_automation": "脚本自动化",
@@ -331,6 +388,10 @@ class ArchitectContract(CamelModel):
     contract_id: str
     run_id: str
     app_shape: AppShape
+    # 质量分级：确认契约前必须由用户显式选择；旧契约 / 旧客户端默认 L2。
+    # L1 跳过严格校验，L2 走 AST + SQLite 基础验收，L3 额外执行真实
+    # MySQL 迁移验收。该字段会原样传给 FullstackGraph 与前端结果面板。
+    quality_tier: QualityTier = "L2_STANDARD"
     status: Literal[
         "AWAITING_CONFIRMATION",
         "CONFIRMED",
@@ -383,6 +444,11 @@ class ArchitectContract(CamelModel):
     def _normalize_engine(cls, value: Any) -> str:
         return normalize_database_engine(value)
 
+    @field_validator("quality_tier", mode="before")
+    @classmethod
+    def _normalize_quality_tier(cls, value: Any) -> str:
+        return normalize_quality_tier(value) or "L2_STANDARD"
+
     @model_validator(mode="after")
     def _derive_engine_from_tech_stack(self) -> "ArchitectContract":
         """兼容旧契约：只写了 tech_stack.database 时自动补齐引擎。
@@ -404,6 +470,9 @@ class ArchitectDecisionRequest(CamelModel):
     contract_id: str = Field(min_length=1, max_length=128)
     decision: Literal["CONFIRM", "REVISE", "CANCEL"]
     comment: str | None = Field(default=None, max_length=4000)
+    # 契约确认前的必选质量分级。前端在契约决策表单中强制选择；
+    # API / 脚本未传时回退 L2，保证旧客户端可继续工作。
+    quality_tier: QualityTier | None = None
 
     @model_validator(mode="after")
     def _revision_needs_comment(self) -> "ArchitectDecisionRequest":

@@ -44,6 +44,7 @@ from ai_core.fullstack.diagnostics import (
     OrmDiagnostic,
     check_orm_syntax,
 )
+from ai_core.fullstack.quality import quality_policy
 
 # 后端 Express 模板固定注册的通用路由：健康检查 + 通用数据别名。
 HEALTH_PATH = "/api/health"
@@ -132,6 +133,8 @@ class ConsistencyReport:
     checked_files: tuple[str, ...] = ()
     # MCP 真实数据库结构验收结果（见 schema_mcp.SchemaCheck.to_dict）。
     schema: dict[str, object] | None = None
+    # L3 真实 MySQL 迁移验收结果（见 mysql_schema.MysqlMigrationCheck.to_dict）。
+    mysql: dict[str, object] | None = None
 
     @property
     def ok(self) -> bool:
@@ -222,6 +225,13 @@ class ConsistencyReport:
                 f"table={self.schema.get('table')} "
                 f"missing={self.schema.get('missingColumns')}"
             )
+        if self.mysql:
+            lines.append(
+                "真实 MySQL 迁移验收："
+                f"ok={self.mysql.get('ok')} "
+                f"table={self.mysql.get('table')} "
+                f"missing={self.mysql.get('missingColumns')}"
+            )
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, object]:
@@ -237,6 +247,7 @@ class ConsistencyReport:
             "needsJoinRepair": self.needs_join_repair,
             "issues": [issue.to_dict() for issue in self.issues],
             "schema": self.schema,
+            "mysql": self.mysql,
         }
 
 
@@ -307,9 +318,12 @@ def verify_consistency(
 
     # 维度三：ORM 模型 vs 生产迁移 DDL。路由全对但字段错位时，
     # 服务启动后仍会 500 Unknown column；必须在构建前阻断。
-    orm_issues, orm_checked = _orm_schema_issues(files, contract)
-    issues.extend(orm_issues)
-    checked_files = sorted(set(checked_files) | set(orm_checked))
+    # L1 敏捷模式明确跳过该维度，允许字段模糊匹配（用户已确认 Demo 级质量）。
+    policy = quality_policy(contract)
+    if policy.orm_schema_check:
+        orm_issues, orm_checked = _orm_schema_issues(files, contract)
+        issues.extend(orm_issues)
+        checked_files = sorted(set(checked_files) | set(orm_checked))
 
     return ConsistencyReport(
         calls_checked=len(frontend_calls),

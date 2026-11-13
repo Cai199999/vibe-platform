@@ -320,6 +320,7 @@ def assemble_contract(
     source_hash: str,
     draft: ContractDraft,
     citations: list[ArchitectCitation],
+    quality_tier: str = "L2_STANDARD",
 ) -> ArchitectContract:
     markdown = draft.contract_markdown.strip()
     if citations and "参考规范" not in markdown:
@@ -356,6 +357,7 @@ def assemble_contract(
         contract_id=contract_id,
         run_id=run_id,
         app_shape=shape,  # type: ignore[arg-type]
+        quality_tier=quality_tier,  # type: ignore[arg-type]
         status="AWAITING_CONFIRMATION",
         confidence_score=confidence_score,
         threshold=threshold,

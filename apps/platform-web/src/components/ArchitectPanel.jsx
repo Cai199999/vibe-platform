@@ -298,10 +298,26 @@ function FullstackGeneration({
   const steps = Array.isArray(state.steps) ? state.steps : []
   const outputs = Array.isArray(state.outputs) ? state.outputs : []
   const result = state.result
+  const qualityTier = state.qualityTier ?? contract?.qualityTier ?? null
+  const isPrototype = qualityTier === 'L1_PROTOTYPE'
   // 自愈闭环里每一次重检都会覆盖 consistency 快照；终态仍保留最后一次。
   // 没有报告（旧会话 / 极简契约）时按通过处理，导出入口不应被冻住。
-  const consistencyOk = state.consistency?.ok !== false
+  // L1 已由用户显式接受“跳过严格校验”，一致性问题只做告警，不阻断导出。
+  const consistencyOk = isPrototype || state.consistency?.ok !== false
   const exportReady = status === 'SUCCEEDED' && consistencyOk
+  const qualityBadge =
+    state.qualityBadge ??
+    (isPrototype
+      ? {
+          tone: 'warning',
+          text: '⚠️ 当前为 L1 敏捷模式，代码未经过严格一致性校验，不建议直接用于生产环境。',
+        }
+      : qualityTier === 'L3_PRODUCTION' && status === 'SUCCEEDED'
+        ? { tone: 'success', text: '✅ L3 生产级校验通过，具备部署条件。' }
+        : null)
+  const warnings = Array.isArray(state.warnings)
+    ? state.warnings.filter((item) => item && item !== qualityBadge?.text)
+    : []
   const exportSandboxId = state.sandboxId || result?.sandboxId || null
   const isFullstack = contract?.appShape === 'full_stack_system'
   const apiRouteCount = Array.isArray(contract?.apiRoutes)
@@ -576,6 +592,53 @@ function FullstackGeneration({
         </p>
       )}
 
+      {/* L3 真实 MySQL 迁移验收结果：只有 L3 会产出该快照，
+          L1/L2 不执行真实迁移，保持 null。 */}
+      {status === 'SUCCEEDED' && state.mysqlCheck?.verifiedBy && (
+        <p
+          className="architect-decision-hint"
+          data-quality-mysql={
+            state.mysqlCheck.skipped
+              ? 'skipped'
+              : state.mysqlCheck.ok
+                ? 'passed'
+                : 'failed'
+          }
+        >
+          {state.mysqlCheck.skipped
+            ? '真实 MySQL 迁移验收已跳过（环境开关关闭）。'
+            : state.mysqlCheck.ok
+              ? `真实 MySQL 迁移验收通过：${state.mysqlCheck.table}（${
+                  state.mysqlCheck.actualColumns?.length ?? 0
+                } 个字段）。`
+              : `真实 MySQL 迁移验收失败：${
+                  state.mysqlCheck.error || '字段不一致'
+                }`}
+        </p>
+      )}
+
+      {/* 风险自适应门禁：L1 黄色告警 / L3 绿色通过徽标。 */}
+      {status === 'SUCCEEDED' && qualityBadge && (
+        <div
+          className={`architect-quality-badge is-${qualityBadge.tone}`}
+          data-quality-badge={qualityBadge.tone}
+          role="status"
+        >
+          {qualityBadge.text}
+        </div>
+      )}
+
+      {status === 'SUCCEEDED' && warnings.length > 0 && (
+        <details className="fullstack-quality-warnings" data-quality-warnings>
+          <summary>质量门禁告警（{warnings.length}）</summary>
+          <ul>
+            {warnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+
       {/* 生成成功 + 一致性通过后才出现：用户不必回到顶部工具栏，
           在成功卡片里即可直接下载完整源码包。 */}
       {exportReady && (
@@ -585,10 +648,15 @@ function FullstackGeneration({
               ✓
             </span>
             <div>
-              <strong>全栈代码已生成，接口一致性检查通过</strong>
+              <strong>
+                {isPrototype
+                  ? '全栈代码已生成（L1 敏捷模式）'
+                  : '全栈代码已生成，接口一致性检查通过'}
+              </strong>
               <p>
-                导出内容包含前后端源码、数据库模型、Dockerfile 与
-                .env.example，可直接解压到本地继续开发。
+                {isPrototype
+                  ? '已跳过严格一致性校验，导出产物仅建议用于 Demo / 内部验证，上线前请切换到 L2 或 L3 重新生成。'
+                  : '导出内容包含前后端源码、数据库模型、Dockerfile 与 .env.example，可直接解压到本地继续开发。'}
               </p>
             </div>
           </div>
@@ -831,13 +899,53 @@ function ContractAppend({ contract, submitting, onDecide }) {
   )
 }
 
+// 风险自适应门禁：契约确认前的必选质量分级。与后端
+// QUALITY_TIER_OPTIONS 保持一致，未选择时禁止确认。
+const QUALITY_TIER_OPTIONS = [
+  {
+    value: 'L1_PROTOTYPE',
+    label: 'A. L1 敏捷模式（极速生成，跳过严格校验，适合做 Demo）',
+  },
+  {
+    value: 'L2_STANDARD',
+    label: 'B. L2 标准模式（带 AST 代码校验与基础数据库，适合内部工具）',
+  },
+  {
+    value: 'L3_PRODUCTION',
+    label: 'C. L3 生产级（全量一致性校验与真实数据库迁移验证，适合上线交付）',
+  },
+]
+
 function ContractActions({ contract, submitting, onDecide }) {
   const [comment, setComment] = useState('')
   const [cancelConfirm, setCancelConfirm] = useState(false)
+  const [qualityTier, setQualityTier] = useState('')
   const revisionReady = comment.trim().length > 0
+  const confirmReady = Boolean(qualityTier)
 
   return (
     <div className="architect-contract-actions">
+      <fieldset className="architect-quality-tier" data-quality-tier>
+        <legend>请选择您对本次生成的质量要求：</legend>
+        {QUALITY_TIER_OPTIONS.map((option) => (
+          <label key={option.value} className="architect-quality-option">
+            <input
+              type="radio"
+              name={`quality-tier-${contract.contractId}`}
+              value={option.value}
+              checked={qualityTier === option.value}
+              disabled={submitting}
+              onChange={() => setQualityTier(option.value)}
+            />
+            <span>{option.label}</span>
+          </label>
+        ))}
+        {!confirmReady && (
+          <p className="architect-quality-hint" data-quality-tier-required>
+            该选择不可跳过：确认契约前必须指定质量分级。
+          </p>
+        )}
+      </fieldset>
       <label className="architect-revision">
         <span>修订意见</span>
         <textarea
@@ -874,8 +982,13 @@ function ContractActions({ contract, submitting, onDecide }) {
         <button
           type="button"
           className="architect-primary"
-          disabled={submitting}
-          onClick={() => onDecide('CONFIRM', comment.trim())}
+          disabled={submitting || !confirmReady}
+          title={
+            confirmReady
+              ? '确认契约并进入代码生成'
+              : '请先选择本次生成的质量要求'
+          }
+          onClick={() => onDecide('CONFIRM', comment.trim(), qualityTier)}
         >
           {submitting ? (
             <>
