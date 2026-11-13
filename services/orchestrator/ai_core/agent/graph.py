@@ -2237,8 +2237,14 @@ class AgentGraphRunner:
             resolution=resolution,
         )
         # 先按 anchorId 找到锚点，再按源码起点降序排列。
-        ordered: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
-        for edit in edits:
+        # 起点相同时（同一锚点 / 同一父容器）再按“用户拖入顺序”定序，
+        # 不能依赖模型 tool_calls 的排列：模型可能先写后拖入的组件，
+        # 若照单全收，最终源码顺序就会和画布上的视觉顺序相反。
+        addition_ranks = _layout_addition_ranks(state)
+        ordered: list[
+            tuple[int, int | None, str, int, dict[str, Any], dict[str, Any]]
+        ] = []
+        for sequence, edit in enumerate(edits):
             if not isinstance(edit, dict):
                 continue
             arguments = edit.get("arguments")
@@ -2255,17 +2261,84 @@ class AgentGraphRunner:
                 }
             anchor_range = anchor.get("range") or {}
             start = int(anchor_range.get("startOffset") or 0)
-            ordered.append((start, dict(arguments), anchor))
-        ordered.sort(key=lambda item: item[0], reverse=True)
+            position = str(
+                arguments.get("insert_position")
+                or (anchor.get("placement") or {}).get("insertPosition")
+                or "after"
+            ).lower()
+            rank = _edit_intended_rank(arguments, anchor, addition_ranks)
+            ordered.append((start, rank, position, sequence, dict(arguments), anchor))
+        ordered.sort(key=_edit_order_key)
 
         files = dict(current_files)
         edited_files: set[str] = set()
         calls: list[dict[str, Any]] = []
-        for _, arguments, anchor in ordered:
+        # 每个文件已经应用的“纯插入”变换：(插入点, 插入长度)。后一条
+        # 编辑的锚点按执行顺序重投影，解决同一父容器连续 inside 插入时
+        # 原始 offset 漂移、工具直接报 ANCHOR_RANGE_MISMATCH 的问题。
+        insert_transforms: dict[str, list[tuple[int, int]]] = {}
+        # 同一父容器内已插入子节点的有效序号，用于修正 inside_index：
+        # 例如两次都拖到同一位置时，第二次必须排在第一次之后。
+        parent_slots: dict[tuple[str, int, int], list[int]] = {}
+        # BATCH_LAYOUT 中每个父容器已执行的新增组件拖入序号，用于按
+        # “初始 siblingIndex + 拖入顺序”直接算出确定性 insert_index。
+        batch_parent_ranks: dict[tuple[str, int, int], list[int]] = {}
+        for _, rank, _, _, raw_arguments, anchor in ordered:
+            arguments = dict(raw_arguments)
             file = str(anchor.get("file") or "")
+            original_range = anchor.get("range") or {}
+            original_start = int(original_range.get("startOffset") or 0)
+            original_end = int(original_range.get("endOffset") or 0)
+            parent_key = (file, original_start, original_end)
+
+            projected_start, projected_end = _project_anchor_range(
+                original_start,
+                original_end,
+                insert_transforms.get(file, []),
+            )
+            # 锚点坐标随前序插入右移；工具按 content_override 解析最新内容，
+            # 因此 anchorRange / targetRange 必须同步到同一坐标系。
+            arguments["anchor_range"] = {
+                "startOffset": projected_start,
+                "endOffset": projected_end,
+            }
+            raw_target = arguments.get("target_range")
+            if isinstance(raw_target, dict):
+                arguments["target_range"] = {
+                    **raw_target,
+                    "startOffset": projected_start,
+                    "endOffset": projected_end,
+                }
             if file in edited_files:
-                # 前序编辑已经改变该文件内容，后续锚点基于最新内容计算。
+                # 前序编辑已经改变该文件内容，后续编辑基于最新内容计算。
                 arguments["content_override"] = files[file]
+
+            operation = str(arguments.get("operation") or "").lower()
+            if operation == "insert":
+                position = str(arguments.get("insert_position") or "after").lower()
+                index = arguments.get("insert_index")
+                # BATCH_LAYOUT 的容器内插入：序号由 Resolver 的拖拽落位
+                # + 拖入顺序共同决定，完全不采信模型自己算的 insert_index。
+                # 模型可能为了“第二个排在后面”自行写成 base+1，若再叠加
+                # 顺延就会越界（真实事故：insertIndex 6 > childCount 5）。
+                batch_index = _batch_insert_index(
+                    rank,
+                    parent_key,
+                    position,
+                    anchor.get("placement") or {},
+                    batch_parent_ranks,
+                )
+                if batch_index is not None:
+                    position, index = "inside_index", batch_index
+                else:
+                    position, index = _normalize_insert_slot(
+                        position,
+                        index,
+                        parent_slots.get(parent_key, []),
+                    )
+                arguments["insert_position"] = position
+                arguments["insert_index"] = index
+
             payload = execute_ast_edit(arguments, context)
             if not isinstance(payload, dict) or payload.get("status") != "OK":
                 payload = payload if isinstance(payload, dict) else {}
@@ -2286,6 +2359,14 @@ class AgentGraphRunner:
                         {"file": target_file},
                     )
                 }
+            if operation == "insert":
+                self._record_insert_transform(
+                    insert_transforms,
+                    parent_slots,
+                    parent_key,
+                    target_file,
+                    payload.get("insert"),
+                )
             files[target_file] = content
             edited_files.add(target_file)
             calls.append(
@@ -2318,6 +2399,37 @@ class AgentGraphRunner:
                 )
             }
         return {"files": files, "calls": calls}
+
+    @staticmethod
+    def _record_insert_transform(
+        transforms: dict[str, list[tuple[int, int]]],
+        parent_slots: dict[tuple[str, int, int], list[int]],
+        parent_key: tuple[str, int, int],
+        file: str,
+        info: Any,
+    ) -> None:
+        """记录一次成功插入，供后续编辑重投影锚点 / 修正序号。
+
+        ``apply_ast_edit.mjs`` 返回的 ``insert`` 是**编辑前内容**坐标系下
+        的精确插入点与长度；位置与序号都由 Babel 脚本计算，Graph 不猜。
+        """
+        if not isinstance(info, dict):
+            return
+        try:
+            point = int(info.get("offset"))
+            length = int(info.get("length"))
+        except (TypeError, ValueError):
+            return
+        if point < 0 or length <= 0:
+            return
+        transforms.setdefault(file, []).append((point, length))
+        position = str(info.get("position") or "")
+        index = info.get("index")
+        # 只有容器内部插入才影响兄弟序号；before / after 属于父级兄弟层。
+        if position not in {"inside_start", "inside_index", "inside_end"}:
+            return
+        if isinstance(index, int):
+            parent_slots.setdefault(parent_key, []).append(index)
 
     @staticmethod
     def _ast_edit_failure(
@@ -3496,6 +3608,166 @@ def _build_style_clarification_payload(
         },
         round_no,
     )
+
+
+_CREATED_MARKER_RE = re.compile(r"""data-vibe-created\s*=\s*(?:"([^"]+)"|'([^']+)')""")
+
+
+def _layout_addition_ranks(state: AgentState) -> dict[str, int]:
+    """BATCH_LAYOUT 中新增组件的拖入顺序：annotationId → 序号。
+
+    ``payload.additions`` 由前端按用户拖入 / 暂存先后顺序追加，是唯一
+    可信的“视觉顺序”事实。Coder 的 ``tool_calls`` 只是模型的输出顺序，
+    多组件同父容器连续插入时可能与拖入顺序相反，因此这里把前端顺序
+    提取出来，供 ``_apply_ast_edit_calls`` 做确定性定序。
+    """
+    context = state.get("annotation_context") or {}
+    items = context.get("annotations") if isinstance(context, dict) else None
+    if not isinstance(items, list) or len(items) != 1:
+        return {}
+    annotation = items[0].get("annotation") if isinstance(items[0], dict) else None
+    if not isinstance(annotation, dict):
+        return {}
+    layout = _explicit_layout_batch(annotation)
+    if layout is None:
+        return {}
+    return {
+        str(addition["annotationId"]): index
+        for index, addition in enumerate(layout.get("additions") or [])
+    }
+
+
+def _edit_intended_rank(
+    arguments: dict[str, Any],
+    anchor: dict[str, Any],
+    addition_ranks: dict[str, int],
+) -> int | None:
+    """把一条 AST 编辑映射回它在 BATCH_LAYOUT 里的拖入序号。
+
+    优先读 ``jsx_code`` 里的 ``data-vibe-created``（新增组件必须携带，
+    且与标注一一对应）；模型偶尔漏写标记时回退到锚点上的 annotationId。
+    """
+    if not addition_ranks:
+        return None
+    match = _CREATED_MARKER_RE.search(str(arguments.get("jsx_code") or ""))
+    if match is not None:
+        marker = match.group(1) or match.group(2) or ""
+        rank = addition_ranks.get(marker)
+        if rank is not None:
+            return rank
+    return addition_ranks.get(str(anchor.get("annotationId") or ""))
+
+
+def _edit_order_key(
+    item: tuple[int, int | None, str, int, dict[str, Any], dict[str, Any]],
+) -> tuple[int, tuple[int, int]]:
+    """同一文件内 AST 编辑的执行顺序键。
+
+    - 锚点起点降序：从后往前改，前序编辑不会让后续原始区间失效；
+    - 起点相同（同一父容器连续插入）时按拖入序号定序：
+      ``inside_*`` 每次顺延子节点序号，执行顺序 = 最终顺序，用升序；
+      ``before`` / ``after`` 每次都紧贴锚点插入，后执行的反而更靠近
+      锚点，因此用降序执行，最终源码顺序才与拖入顺序一致；
+    - 缺少拖入顺序信息时（普通多标注流程）保持模型调用顺序。
+    """
+    start, rank, position, sequence, _arguments, _anchor = item
+    if rank is None:
+        tie = (1, sequence)
+    elif position in {"before", "after"}:
+        tie = (0, -rank)
+    else:
+        tie = (0, rank)
+    return (-start, tie)
+
+
+def _project_anchor_range(
+    start: int,
+    end: int,
+    transforms: list[tuple[int, int]],
+) -> tuple[int, int]:
+    """把原始锚点区间重投影到“已应用插入”之后的新内容坐标。
+
+    ``transforms`` 必须按实际执行顺序排列，且每个插入点都是**当时内容**
+    坐标系下的偏移。插入只增加文本，因此：
+
+    - 插入点在锚点起点之前（含起点）：整个区间右移；
+    - 插入点严格位于区间内部：只有终点右移（容器被撑大）；
+    - 插入点正好在终点 / 之后：区间不变（``after`` 兄弟插入不扩张
+      锚点自身；同一锚点的下一次编辑仍能命中原节点）。
+    """
+    for point, length in transforms:
+        if length <= 0:
+            continue
+        if point <= start:
+            start += length
+            end += length
+        elif point < end:
+            end += length
+    return start, end
+
+
+def _batch_insert_index(
+    rank: int | None,
+    parent_key: tuple[str, int, int],
+    position: str,
+    placement: dict[str, Any],
+    prior_ranks: dict[tuple[str, int, int], list[int]],
+) -> int | None:
+    """BATCH_LAYOUT 容器内插入的确定性序号。
+
+    Resolver 已把前端拖拽落位归一化成 ``inside_index + siblingIndex``：
+    这个序号是“拖拽当时的子节点位置”，同一父容器有多个新增组件时，
+    按拖入顺序依次 +1。序号完全由服务端计算：
+
+    - 不采信模型写的 ``insert_index``（模型可能自行预补偿导致越界）；
+    - 与 tool_calls 顺序无关（执行顺序已由拖入序号排定）；
+    - 只处理 Resolver 归一化过的 inside 落位；``before`` / ``after``
+      等模型显式选择的位置保持原语义。
+
+    返回 ``None`` 表示不是可确定序号的批次插入，调用方走原来的顺延逻辑。
+    """
+    if rank is None:
+        return None
+    if str(placement.get("insertPosition") or "").lower() != "inside_index":
+        return None
+    if position not in {"inside_index", "inside_start"}:
+        return None
+    try:
+        base = int(placement.get("siblingIndex"))
+    except (TypeError, ValueError):
+        return None
+    if base < 0:
+        return None
+    # 同一父容器中排在自己前面的新增组件数量（同序号按出现次数顺延）。
+    index = base + sum(1 for item in prior_ranks.get(parent_key, []) if item <= rank)
+    prior_ranks.setdefault(parent_key, []).append(rank)
+    return index
+
+
+def _normalize_insert_slot(
+    position: str,
+    index: int | None,
+    prior_indexes: list[int],
+) -> tuple[str, int | None]:
+    """修正同一父容器连续插入时的子节点序号漂移。
+
+    前端 ``siblingIndex`` 是“拖拽当时”的子节点序号。第一次插入之后，
+    后续同位置的组件必须顺延，否则后插入的会跑到先插入的前面。
+
+    - ``inside_start`` 转为 ``inside_index``，插到已插入的“头部区”之后；
+    - ``inside_index`` 按前序插入中“位于目标序号之前或相同”的数量顺延；
+    - ``inside_end`` 由 Babel 脚本按当前子节点数追加，无需调整。
+    """
+    if position == "inside_start":
+        requested = 0
+    elif position == "inside_index":
+        if index is None:
+            return position, index
+        requested = int(index)
+    else:
+        return position, index
+    shift = sum(1 for item in prior_indexes if item <= requested)
+    return "inside_index", requested + shift
 
 
 def _resolution_requests(

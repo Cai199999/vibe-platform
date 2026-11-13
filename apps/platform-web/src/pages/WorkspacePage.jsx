@@ -5822,6 +5822,9 @@ export default function WorkspacePage() {
       handleClarificationAnswer,
       handleAnnotationRollback,
       handleClearAnnotations,
+      // 路由切换：CanvasStage 只清自己的拖拽会话，标注 / 暂存草稿必须
+      // 由页面级统一清空；漏掉这个键会让幽灵组件一直留在画布上。
+      handleFrameRouteChange,
       handleFrameReady,
       handleApprovalDecision,
       handleDecisionAnswer,

@@ -243,12 +243,20 @@ export function stageTargetLabel(hit) {
 export function formatPlacementAcceptance(placement, parentLabel = '父容器') {
   if (!placement) return ''
   const position = placement.insertPosition || 'inside_end'
+  // before / after 是 SDK 相对兄弟节点的原始语义；文字里必须说明它
+  // 仍发生在父容器内部，避免模型把新增节点插到父容器外面。
+  const positionText =
+    position === 'before'
+      ? '父容器内部，位于兄弟锚点之前'
+      : position === 'after'
+        ? '父容器内部，位于兄弟锚点之后'
+        : position
   const anchor = placement.insertAnchorId || '无'
   const index = Number.isFinite(Number(placement.siblingIndex))
     ? Number(placement.siblingIndex)
     : '未知'
   return (
-    `插入到「${parentLabel}」内部（位置：${position}；` +
+    `插入到「${parentLabel}」内部（位置：${positionText}；` +
     `兄弟锚点：${anchor}；顺序索引：${index}），` +
     '按父容器自然文档流插入，禁止写死 left / top 或 position:absolute'
   )

@@ -246,7 +246,7 @@ class ResolverScriptTest(unittest.TestCase):
             self.assertIn("src/Other.jsx", anchor["sharedReason"])
 
     def test_container_reports_inside_positions_and_echoes_placement(self) -> None:
-        """拖拽落位：容器锚点允许 inside_*，并把 placement 原样回传。"""
+        """拖拽落位：容器锚点允许 inside_*，placement 回传并补齐 siblingCount。"""
         placement = {
             "version": 1,
             "targetParentId": "src/App.jsx:3:5#1",
@@ -281,7 +281,68 @@ class ResolverScriptTest(unittest.TestCase):
                     "inside_index",
                 ],
             )
-            self.assertEqual(anchor["placement"], placement)
+            self.assertEqual(
+                anchor["placement"],
+                {**placement, "siblingCount": 3},
+            )
+
+    def test_sibling_placement_is_converted_to_exact_inside_index(self) -> None:
+        """前端 before 是相对兄弟节点：Resolver 必须换算成父容器子序号。"""
+        placement = {
+            "version": 1,
+            "targetParentId": "src/App.jsx:3:5#1",
+            "insertPosition": "before",
+            "siblingIndex": 1,
+            "insertAnchor": {"line": 5, "column": 7, "label": "第二个按钮"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_project(Path(tmp), {"src/App.jsx": RESOLVER_SOURCE})
+            code, payload, stderr = _run_script(
+                "resolve_target.mjs",
+                {
+                    "workdir": tmp,
+                    "parserRoot": str(TEMPLATE_DIR),
+                    "anchors": [
+                        _anchor_request(
+                            "anc_ann_main", selector="main", placement=placement
+                        )
+                    ],
+                },
+            )
+            self.assertEqual(code, 0, stderr)
+            anchor = payload["anchors"][0]
+            self.assertEqual(anchor["status"], RESOLVED)
+            # 第二个按钮在 main 的子节点里 index = 1；before 即插在它前面。
+            self.assertEqual(anchor["placement"]["insertPosition"], "inside_index")
+            self.assertEqual(anchor["placement"]["siblingIndex"], 1)
+            self.assertEqual(anchor["placement"]["siblingCount"], 3)
+
+    def test_inside_end_placement_appends_after_existing_children(self) -> None:
+        """inside_end 的 siblingIndex 必须归一到子节点数量，避免误插中间。"""
+        placement = {
+            "version": 1,
+            "targetParentId": "src/App.jsx:3:5#1",
+            "insertPosition": "inside_end",
+            "siblingIndex": 0,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_project(Path(tmp), {"src/App.jsx": RESOLVER_SOURCE})
+            code, payload, stderr = _run_script(
+                "resolve_target.mjs",
+                {
+                    "workdir": tmp,
+                    "parserRoot": str(TEMPLATE_DIR),
+                    "anchors": [
+                        _anchor_request(
+                            "anc_ann_main", selector="main", placement=placement
+                        )
+                    ],
+                },
+            )
+            self.assertEqual(code, 0, stderr)
+            anchor = payload["anchors"][0]
+            self.assertEqual(anchor["placement"]["insertPosition"], "inside_end")
+            self.assertEqual(anchor["placement"]["siblingIndex"], 3)
 
     def test_self_closing_anchor_only_allows_sibling_insert(self) -> None:
         """自闭合元素没有 children，必须拒绝 inside_*。"""
@@ -934,6 +995,334 @@ class PlacementEditParseTest(unittest.TestCase):
                 anchors,
                 required_markers={"ann_1"},
             )
+
+
+class AnchorReprojectionTest(unittest.TestCase):
+    """同文件连续插入的坐标重投影 / 序号顺延纯函数。"""
+
+    def test_insert_before_anchor_shifts_both_edges(self) -> None:
+        project = graph_module._project_anchor_range
+        self.assertEqual(project(100, 200, [(50, 10)]), (110, 210))
+        self.assertEqual(project(100, 200, [(100, 7)]), (107, 207))
+
+    def test_insert_inside_anchor_only_extends_end(self) -> None:
+        project = graph_module._project_anchor_range
+        self.assertEqual(project(100, 200, [(150, 12)]), (100, 212))
+
+    def test_insert_after_anchor_keeps_range(self) -> None:
+        project = graph_module._project_anchor_range
+        self.assertEqual(project(100, 200, [(200, 9)]), (100, 200))
+        self.assertEqual(project(100, 200, [(260, 9)]), (100, 200))
+
+    def test_sequential_transforms_use_updated_coordinates(self) -> None:
+        project = graph_module._project_anchor_range
+        # 第一次在 50 插入 10，锚点变为 (110,210)；第二次插入点 150 位于
+        # 新坐标系区间内部，只扩展终点。
+        self.assertEqual(project(100, 200, [(50, 10), (150, 5)]), (110, 215))
+
+    def test_inside_index_shift_keeps_submission_order(self) -> None:
+        normalize = graph_module._normalize_insert_slot
+        # 两个组件都落在同一个位置：第二次顺延到第一次之后。
+        self.assertEqual(normalize("inside_index", 1, []), ("inside_index", 1))
+        self.assertEqual(normalize("inside_index", 1, [1]), ("inside_index", 2))
+        # inside_start 统一转成头部区序号，保证先后顺序。
+        self.assertEqual(normalize("inside_start", 0, []), ("inside_index", 0))
+        self.assertEqual(normalize("inside_start", 0, [0]), ("inside_index", 1))
+        # inside_end 由脚本按当前子节点数追加。
+        self.assertEqual(normalize("inside_end", None, [1]), ("inside_end", None))
+
+
+@unittest.skipUnless(NODE, "node 不可用，跳过 Babel 脚本测试")
+class SameParentMultiInsertTest(unittest.TestCase):
+    """同一父容器连续插入：禁止 ANCHOR_RANGE_MISMATCH，顺序必须稳定。"""
+
+    SOURCE = """export default function App() {
+  return (
+    <main>
+      <p>标题</p>
+      <p>正文</p>
+    </main>
+  );
+}
+"""
+
+    def _setup(self, addition_context: dict[str, Any] | None = None):
+        code = self.SOURCE
+        parent_range = _fix_range(code, "<main", "</main>")
+        anchors = []
+        for annotation_id in ("ann_a", "ann_b"):
+            anchors.append(
+                {
+                    "anchorId": anchor_id_for(annotation_id),
+                    "annotationId": annotation_id,
+                    "file": "src/App.jsx",
+                    "range": dict(parent_range),
+                    "nodeType": "JSXElement",
+                    "component": "App",
+                    "nodeSource": code[
+                        parent_range["startOffset"] : parent_range["endOffset"]
+                    ],
+                    "isShared": False,
+                    "protected": False,
+                    "sharedReason": "",
+                    "componentFile": "",
+                    "callSiteFile": "",
+                    "allowedFiles": ["src/App.jsx"],
+                    "forbiddenRanges": [],
+                    "allowedOperations": ["insert", "delete", "modify"],
+                    "allowedInsertPositions": [
+                        "before",
+                        "after",
+                        "inside_start",
+                        "inside_end",
+                        "inside_index",
+                    ],
+                    # Resolver 归一化后的拖拽落位：两个组件都落在
+                    # “正文”之前（index=1）。
+                    "placement": {
+                        "insertPosition": "inside_index",
+                        "siblingIndex": 1,
+                        "siblingCount": 2,
+                    },
+                    "status": RESOLVED,
+                    "candidates": [],
+                }
+            )
+        resolution = {"status": RESOLVED, "anchors": anchors}
+        sandbox = _Phase1Sandbox({"src/App.jsx": code}, resolution)
+        runner = AgentGraphRunner(
+            sandbox=sandbox,
+            llm=MockAgentLLM(scenario="none"),
+            max_retries=0,
+            checkpointer_provider=MemoryCheckpointerProvider(),
+        )
+        state = {
+            "sandbox_id": "sbx_multi_insert",
+            "target_resolution": resolution,
+            "retry_count": 0,
+        }
+        if addition_context is not None:
+            state["annotation_context"] = addition_context
+        return runner, state, dict(parent_range)
+
+    @staticmethod
+    def _batch_layout_context(order: list[tuple[str, str]]) -> dict[str, Any]:
+        """构造 BATCH_LAYOUT 上下文；order 即前端拖入顺序。"""
+        additions = []
+        for annotation_id, text in order:
+            additions.append(
+                {
+                    "annotationId": annotation_id,
+                    "intent": text,
+                    "componentType": "button",
+                    "annotation": {
+                        "annotationId": annotation_id,
+                        "type": "visual-draw",
+                        "action": "CREATE_NEW",
+                        "intent": {"kind": "UI_ONLY", "ui": {"summary": text}},
+                        "payload": {"text": text},
+                    },
+                }
+            )
+        return {
+            "count": 1,
+            "annotations": [
+                {
+                    "annotation_id": "layout_e2e",
+                    "annotation": {
+                        "annotationId": "layout_e2e",
+                        "type": "drag",
+                        "action": "BATCH_LAYOUT",
+                        "payload": {"text": "统一提交画布变更", "additions": additions},
+                    },
+                }
+            ],
+        }
+
+    @staticmethod
+    def _edit(annotation_id: str, jsx: str, position: str, index=None):
+        return {
+            "name": "apply_ast_edit",
+            "arguments": {
+                "anchor_id": anchor_id_for(annotation_id),
+                "operation": "insert",
+                "jsx_code": jsx,
+                "insert_position": position,
+                "insert_index": index,
+            },
+        }
+
+    def test_two_inside_end_inserts_keep_order_without_range_mismatch(self) -> None:
+        runner, state, _ = self._setup()
+        edits = [
+            self._edit(
+                "ann_a", '<button data-vibe-created="ann_a">A</button>', "inside_end"
+            ),
+            self._edit(
+                "ann_b", '<span data-vibe-created="ann_b">B</span>', "inside_end"
+            ),
+        ]
+        outcome = runner._apply_ast_edit_calls(
+            state, edits, {"src/App.jsx": self.SOURCE}
+        )
+        self.assertNotIn("failure", outcome, outcome.get("failure"))
+        content = outcome["files"]["src/App.jsx"]
+        self.assertLess(content.index("ann_a"), content.index("ann_b"))
+        self.assertLess(content.index("<p>正文</p>"), content.index("ann_a"))
+
+    def test_two_inside_index_inserts_shift_to_preserve_order(self) -> None:
+        runner, state, _ = self._setup()
+        # 都拖到「正文」之前（index=1）：第二个必须顺延到 index=2。
+        edits = [
+            self._edit(
+                "ann_a",
+                '<button data-vibe-created="ann_a">A</button>',
+                "inside_index",
+                1,
+            ),
+            self._edit(
+                "ann_b",
+                '<span data-vibe-created="ann_b">B</span>',
+                "inside_index",
+                1,
+            ),
+        ]
+        outcome = runner._apply_ast_edit_calls(
+            state, edits, {"src/App.jsx": self.SOURCE}
+        )
+        self.assertNotIn("failure", outcome, outcome.get("failure"))
+        content = outcome["files"]["src/App.jsx"]
+        self.assertLess(content.index("ann_a"), content.index("ann_b"))
+        self.assertLess(content.index("<p>标题</p>"), content.index("ann_a"))
+
+    def test_two_inside_start_inserts_keep_order(self) -> None:
+        runner, state, _ = self._setup()
+        edits = [
+            self._edit(
+                "ann_a",
+                '<button data-vibe-created="ann_a">A</button>',
+                "inside_start",
+            ),
+            self._edit(
+                "ann_b",
+                '<span data-vibe-created="ann_b">B</span>',
+                "inside_start",
+            ),
+        ]
+        outcome = runner._apply_ast_edit_calls(
+            state, edits, {"src/App.jsx": self.SOURCE}
+        )
+        self.assertNotIn("failure", outcome, outcome.get("failure"))
+        content = outcome["files"]["src/App.jsx"]
+        self.assertLess(content.index("ann_a"), content.index("ann_b"))
+        self.assertLess(content.index("ann_b"), content.index("<p>标题</p>"))
+
+    def test_batch_layout_reversed_calls_keep_drag_order(self) -> None:
+        """模型把 tool_calls 写反时，源码顺序仍以拖入顺序为准。
+
+        真实事故：用户先拖入“提交”再拖入“重置”，模型先输出重置的
+        tool_call。若按模型顺序执行，两个组件都落在同一 inside_index，
+        最终源码就会变成“重置、提交”，与画布视觉顺序相反。
+        """
+        context = self._batch_layout_context(
+            [("ann_a", "添加一个提交按钮"), ("ann_b", "添加一个重置按钮")]
+        )
+        runner, state, _ = self._setup(addition_context=context)
+        # 故意反转：先 ann_b（第二次拖入），再 ann_a（第一次拖入）。
+        edits = [
+            self._edit(
+                "ann_b",
+                '<span data-vibe-created="ann_b">B</span>',
+                "inside_index",
+                1,
+            ),
+            self._edit(
+                "ann_a",
+                '<button data-vibe-created="ann_a">A</button>',
+                "inside_index",
+                1,
+            ),
+        ]
+        outcome = runner._apply_ast_edit_calls(
+            state, edits, {"src/App.jsx": self.SOURCE}
+        )
+        self.assertNotIn("failure", outcome, outcome.get("failure"))
+        content = outcome["files"]["src/App.jsx"]
+        self.assertLess(content.index("ann_a"), content.index("ann_b"))
+        self.assertLess(content.index("<p>标题</p>"), content.index("ann_a"))
+
+    def test_batch_layout_ignores_model_precompensated_index(self) -> None:
+        """模型自行把第二个 insert_index 写成 base+1 时不得越界。
+
+        真实事故：两次拖拽的 placement.siblingIndex 都是 4，模型为了让
+        第二个排在后面写成 5，服务端若再顺延一次就变成 6 > childCount 5，
+        工具直接 INVALID_INSERTION_POINT。批次内序号必须由服务端计算。
+        """
+        context = self._batch_layout_context(
+            [("ann_a", "添加一个提交按钮"), ("ann_b", "添加一个重置按钮")]
+        )
+        runner, state, _ = self._setup(addition_context=context)
+        edits = [
+            self._edit(
+                "ann_a",
+                '<button data-vibe-created="ann_a">A</button>',
+                "inside_index",
+                1,
+            ),
+            self._edit(
+                "ann_b",
+                '<span data-vibe-created="ann_b">B</span>',
+                "inside_index",
+                2,  # 模型预补偿：placement.siblingIndex(1) + 1
+            ),
+        ]
+        outcome = runner._apply_ast_edit_calls(
+            state, edits, {"src/App.jsx": self.SOURCE}
+        )
+        self.assertNotIn("failure", outcome, outcome.get("failure"))
+        content = outcome["files"]["src/App.jsx"]
+        self.assertLess(content.index("ann_a"), content.index("ann_b"))
+        self.assertLess(content.index("<p>标题</p>"), content.index("ann_a"))
+        self.assertLess(content.index("ann_b"), content.index("<p>正文</p>"))
+
+    def test_same_anchor_inserts_follow_drag_order_without_batch(self) -> None:
+        """缺少 BATCH_LAYOUT 顺序信息时保留原有模型调用顺序（回归）。"""
+        runner, state, _ = self._setup()
+        edits = [
+            self._edit(
+                "ann_b",
+                '<span data-vibe-created="ann_b">B</span>',
+                "inside_index",
+                1,
+            ),
+            self._edit(
+                "ann_a",
+                '<button data-vibe-created="ann_a">A</button>',
+                "inside_index",
+                1,
+            ),
+        ]
+        outcome = runner._apply_ast_edit_calls(
+            state, edits, {"src/App.jsx": self.SOURCE}
+        )
+        self.assertNotIn("failure", outcome, outcome.get("failure"))
+        content = outcome["files"]["src/App.jsx"]
+        self.assertLess(content.index("ann_b"), content.index("ann_a"))
+
+    def test_sibling_inserts_execute_in_reverse_drag_order(self) -> None:
+        """before / after 紧贴锚点插入：后执行的更靠近锚点。
+
+        因此同一锚点的兄弟插入必须按拖入序号**降序**执行，最终源码
+        顺序才与拖入顺序一致（纯排序键测试，不依赖 node）。
+        """
+        key = graph_module._edit_order_key
+        first = (100, 0, "after", 0, {}, {})
+        second = (100, 1, "after", 1, {}, {})
+        self.assertLess(key(second), key(first))
+        # inside_* 则按升序执行，序号顺延保证最终顺序。
+        first_inside = (100, 0, "inside_index", 0, {}, {})
+        second_inside = (100, 1, "inside_index", 1, {}, {})
+        self.assertLess(key(first_inside), key(second_inside))
 
 
 # ------------------------------------------------------------

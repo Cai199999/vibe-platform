@@ -208,7 +208,11 @@ def execute_ast_edit(
             ANCHOR_NOT_FOUND,
             f"锚点状态不是 RESOLVED: {anchor.get('status')}",
         )
-    anchor_range = _anchor_offsets(anchor)
+    # Graph 在同一文件连续插入时会传入重投影后的锚点坐标（服务端计算，
+    # 模型不可见）。缺省仍使用 Resolver 给出的原始 range。
+    anchor_range = _range_offsets(request.get("anchor_range")) or _anchor_offsets(
+        anchor
+    )
     if anchor_range is None:
         return _error(ANCHOR_NOT_FOUND, "锚点缺少有效 range")
 
@@ -294,7 +298,10 @@ def execute_ast_edit(
     edit_spec = {
         "file": file,
         "operation": operation,
-        "anchorRange": anchor.get("range") or {},
+        "anchorRange": {
+            "startOffset": anchor_range[0],
+            "endOffset": anchor_range[1],
+        },
         "targetRange": (
             (request.get("target_range") or request.get("targetRange")) or {}
         ),
@@ -332,7 +339,7 @@ def execute_ast_edit(
     content = result.get("content")
     if not isinstance(content, str) or not content.strip():
         return _error(AST_EDIT_FAILED, "AST 编辑结果为空，拒绝写入")
-    return {
+    payload = {
         "status": "OK",
         "anchorId": anchor_id,
         "annotationId": anchor.get("annotationId"),
@@ -340,6 +347,12 @@ def execute_ast_edit(
         "operation": operation,
         "content": content,
     }
+    # 透传 Babel 计算的精确插入点 / 长度 / 最终序号：Graph 依赖它重投影
+    # 同文件后续锚点，不能靠内容 diff 猜测。
+    insert_info = result.get("insert")
+    if isinstance(insert_info, dict):
+        payload["insert"] = insert_info
+    return payload
 
 
 def build_apply_ast_edit_tool() -> BaseTool:

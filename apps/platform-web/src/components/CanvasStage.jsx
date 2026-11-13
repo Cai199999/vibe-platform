@@ -623,11 +623,18 @@ function AnnotationPopover({
     const overrides = { [questionId]: value }
     setAnswers((previous) => ({ ...previous, ...overrides }))
     if (answersAreComplete(overrides)) {
-      submitClarification('', overrides)
+      // 结构化 quick option 本身已经是服务端预置的确定性选项，
+      // 文案里即使出现“和现有主按钮一致”也不该再切到画布取色：
+      // 那会让“一键选择，立即继续”变成“还要再点一个组件”。
+      submitClarification('', overrides, { skipReference: true })
     }
   }
 
-  const submitClarification = (comment = replyText, overrides = {}) => {
+  const submitClarification = (
+    comment = replyText,
+    overrides = {},
+    { skipReference = false } = {},
+  ) => {
     const replyValue = String(comment || '').trim()
     // 用户直接在主输入栏回复时，把它补进第一个缺失的必填问题；
     // 其余问题已经有选项 / 旧答案，不受影响。
@@ -680,6 +687,7 @@ function AnnotationPopover({
       referenceBypass?.annotationId === annotation.id &&
       referenceBypass?.text === referenceText
     if (
+      !skipReference &&
       !pickingReference &&
       !bypassed &&
       isVisualReferenceText(referenceText)
@@ -2604,9 +2612,11 @@ function CanvasStage({
             {/* 视觉暂存幽灵层：绝对定位铺在 iframe 上方，只表达“这里将会
                 出现什么”，完全不改 sandbox 代码，因此不可能触发白屏。 */}
             {pendingAdditions.map((item) => {
-              // 正在拖拽的卡片改由 StagedDragGhost 渲染，静态层直接留空，
-              // 避免同一个组件在 DOM 中出现两份、位置互相打架。
-              if (stageDrag?.annotationId === item.annotationId) return null
+              // 正在拖拽的卡片改由 StagedDragGhost 渲染；但静态节点必须
+              // 继续留在 DOM 里（只隐藏内容）：pointer capture 绑定在这个
+              // 节点的拖拽把手上，一旦把节点卸载，浏览器会立即释放 capture，
+              // 后续 pointerup 会落进 iframe，拖拽会话就永远结束不了。
+              const isDragging = stageDrag?.annotationId === item.annotationId
               const ghostRect = resolveStagedGhostRect(item)
               const displayRect =
                 mode === 'live'
@@ -2617,17 +2627,22 @@ function CanvasStage({
               return (
                 <div
                   key={`pending-addition-${item.annotationId}`}
-                  className="pending-addition-ghost"
+                  className={`pending-addition-ghost${
+                    isDragging ? ' is-capture-anchor' : ''
+                  }`}
                   data-pending-addition-id={item.annotationId}
+                  aria-hidden={isDragging || undefined}
                   style={{
                     left: `${ghostRect.x * 100}%`,
                     top: `${ghostRect.y * 100}%`,
                     width: `${ghostRect.width * 100}%`,
                     height: `${ghostRect.height * 100}%`,
                     zIndex: 60,
+                    // 只做透明占位，绝不用 display:none / 卸载。
+                    opacity: isDragging ? 0 : undefined,
                   }}
                 >
-                  <StagedGhostCard item={item} />
+                  {!isDragging && <StagedGhostCard item={item} />}
                   {/* 拖拽只从这个小把手发起：整卡可拖会让底下的页面无法
                       点击，也容易和圈选手势冲突。 */}
                   {draggable && (
@@ -2646,7 +2661,7 @@ function CanvasStage({
                     </button>
                   )}
                   {/* 已定位的暂存项给出确定反馈，用户不用猜“到底放进去没有”。 */}
-                  {item.placement?.parent && (
+                  {!isDragging && item.placement?.parent && (
                     <span className="pending-addition-placement-chip">
                       已定位 · {item.placement.parent.label || '父容器'}
                     </span>

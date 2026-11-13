@@ -313,6 +313,85 @@ function allowedInsertPositionsOf(node) {
   return beforeAfter
 }
 
+/** 参与“第几个子节点”计数的节点：纯空白 JSXText 不算。 */
+function meaningfulChildren(node) {
+  const children = Array.isArray(node?.children) ? node.children : []
+  return children.filter(
+    (child) => !(child.type === 'JSXText' && !String(child.value || '').trim()),
+  )
+}
+
+/**
+ * 把前端 placement 归一化成“相对父容器的精确子节点序号”。
+ *
+ * 前端 SDK 的 before / after 是相对“命中兄弟节点”的位置，但 Resolver
+ * 的锚点是父容器。两者坐标系不同：直接照搬 before / after 会把新增
+ * JSX 插到父容器**外面**。这里按 insertAnchor 的行列在父节点直接子节点
+ * 中定位它，换算成 inside_index，保证最终插入仍在父容器内部。
+ */
+function childIndexFor(parentNode, insertAnchor) {
+  if (!insertAnchor || typeof insertAnchor !== 'object') return null
+  const children = meaningfulChildren(parentNode)
+  const line = Number(insertAnchor.line)
+  const column = Number(insertAnchor.column)
+  if (Number.isFinite(line) && line > 0) {
+    for (let index = 0; index < children.length; index += 1) {
+      const start = children[index].loc?.start
+      if (!start) continue
+      if (start.line === line && start.column + 1 === column) return index
+    }
+  }
+  const selector = parseSelector(insertAnchor.selector)
+  if (selector) {
+    for (let index = 0; index < children.length; index += 1) {
+      if (matchesSelector(children[index], selector)) return index
+    }
+  }
+  return null
+}
+
+function normalizePlacement(node, rawPlacement) {
+  if (!rawPlacement || typeof rawPlacement !== 'object') return null
+  const placement = { ...rawPlacement }
+  // 自闭合元素只能作为兄弟插入，不能把 placement 改写成 inside_*。
+  if (!allowedInsertPositionsOf(node).includes('inside_index')) {
+    return placement
+  }
+  const children = meaningfulChildren(node)
+  const position = String(placement.insertPosition || 'inside_end')
+  const insertAnchor = placement.insertAnchor || null
+  if (position === 'inside_start') {
+    placement.insertPosition = 'inside_start'
+    placement.siblingIndex = 0
+    placement.siblingCount = children.length
+    return placement
+  }
+  if (position === 'inside_end') {
+    // 明确追加到末尾，避免前端 siblingIndex 被误当成“第几个子节点”。
+    placement.insertPosition = 'inside_end'
+    placement.siblingIndex = children.length
+    placement.siblingCount = children.length
+    return placement
+  }
+  const index = childIndexFor(node, insertAnchor)
+  if (position === 'before') {
+    placement.insertPosition = 'inside_index'
+    placement.siblingIndex =
+      index === null ? Math.max(0, Number(placement.siblingIndex) || 0) : index
+  } else if (position === 'after') {
+    placement.insertPosition = 'inside_index'
+    placement.siblingIndex =
+      index === null
+        ? Math.max(0, Number(placement.siblingIndex) || 0)
+        : index + 1
+  } else if (position === 'inside_index') {
+    // 显式 inside_index 已经是父容器的目标序号，保持原值。
+    placement.siblingIndex = Math.max(0, Number(placement.siblingIndex) || 0)
+  }
+  placement.siblingCount = children.length
+  return placement
+}
+
 function rangeOf(node) {
   return {
     startLine: node.loc?.start?.line || 0,
@@ -533,9 +612,10 @@ function resolveOne(anchor, parser, workdir) {
   result.forbiddenRanges = forbidden
   result.allowedOperations = ['insert', 'delete', 'modify']
   result.allowedInsertPositions = allowedInsertPositionsOf(node)
-  // 前端拖拽落位事实原样回传：Coder 据此选 inside_end / before / after，
-  // 并由 AST 工具按锚点插入，不能只依赖自然语言描述。
-  result.placement = anchor.placement || null
+  // 前端拖拽落位事实回传：坐标统一换算成“父容器内的精确子节点序号”，
+  // Coder 据此选 inside_index / inside_end，并由 AST 工具按锚点插入，
+  // 不能只依赖自然语言描述。
+  result.placement = normalizePlacement(node, anchor.placement)
   // 共享组件额外给出 callSite 锚点，供 Phase 2 决策“只在当前实例修改”。
   result.callSiteAnchor = null
   if (shared && callSiteFile && callSiteFile !== file) {

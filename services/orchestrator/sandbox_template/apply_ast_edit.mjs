@@ -436,7 +436,18 @@ function main() {
       } catch (error) {
         return fail('INVALID_INSERTION_POINT', `插入后文件无法解析: ${error.message}`)
       }
-      return { status: 'OK', content: next }
+      // Graph 需要精确知道“插入点 / 插入长度”才能重投影同一文件后续
+      // 编辑的锚点；只靠内容 diff 在相同前缀场景会误判。
+      return {
+        status: 'OK',
+        content: next,
+        insert: {
+          offset,
+          length: next.length - code.length,
+          position,
+          index: null,
+        },
+      }
     }
 
     // ---- 容器内部插入（暂存组件拖拽落位）----
@@ -450,10 +461,14 @@ function main() {
     const indent = childIndentFor(code, anchor)
     const snippet = reindent(String(spec.jsxCode), indent)
     let next = ''
+    // 插入点相对“编辑前内容”的偏移：Graph 用它重投影同文件后续锚点。
+    let insertOffset = -1
+    let insertIndex = null
     if (position === 'inside_start') {
       // 开标签之后：作为第一个子节点。
-      const offset = parts.openEnd
-      next = `${code.slice(0, offset)}\n${indent}${snippet}${code.slice(offset)}`
+      insertOffset = parts.openEnd
+      insertIndex = 0
+      next = `${code.slice(0, insertOffset)}\n${indent}${snippet}${code.slice(insertOffset)}`
     } else {
       // inside_end / inside_index：在闭标签前插入。
       const children = meaningfulChildren(anchor)
@@ -468,14 +483,15 @@ function main() {
           childCount: children.length,
         })
       }
+      insertIndex = index
       if (index < children.length) {
         // 插在第 index 个子节点之前，并保留换行 / 缩进。
-        const offset = children[index].start
-        next = `${code.slice(0, offset)}\n${indent}${snippet}\n${indent}${code.slice(offset)}`
+        insertOffset = children[index].start
+        next = `${code.slice(0, insertOffset)}\n${indent}${snippet}\n${indent}${code.slice(insertOffset)}`
       } else {
-        const offset = parts.closeStart
+        insertOffset = parts.closeStart
         const parentIndent = baseIndentAt(code, anchor.start)
-        next = `${code.slice(0, offset)}\n${indent}${snippet}\n${parentIndent}${code.slice(offset)}`
+        next = `${code.slice(0, insertOffset)}\n${indent}${snippet}\n${parentIndent}${code.slice(insertOffset)}`
       }
     }
     try {
@@ -483,7 +499,16 @@ function main() {
     } catch (error) {
       return fail('INVALID_INSERTION_POINT', `插入后文件无法解析: ${error.message}`)
     }
-    return { status: 'OK', content: next }
+    return {
+      status: 'OK',
+      content: next,
+      insert: {
+        offset: insertOffset,
+        length: next.length - code.length,
+        position,
+        index: insertIndex,
+      },
+    }
   }
 
   return fail('INVALID_OPERATION', `不支持的操作类型: ${operation || '(空)'}`)
