@@ -13,6 +13,7 @@ python-ai 容器通过挂载的 /var/run/docker.sock 调用宿主机 Docker：
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 import shlex
@@ -87,6 +88,10 @@ logger = logging.getLogger(__name__)
 AST_CHECK_SCRIPT = "/opt/vibe-ast-check.mjs"
 AST_STAGE_DIR = "/tmp/vibe-ast-stage"
 AST_STAGE_PATCH = "/tmp/vibe-ast-stage.patch"
+# 实例作用域 AST 门禁：独立脚本与独立 stage，避免与语法门禁互相覆盖。
+AST_SCOPE_SCRIPT = "/opt/vibe-ast-scope-check.mjs"
+AST_SCOPE_STAGE_DIR = "/tmp/vibe-scope-stage"
+AST_SCOPE_STAGE_PATCH = "/tmp/vibe-scope-stage.patch"
 SCRIPT_SUFFIXES = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx")
 # unified diff 的 ``+++`` 目标行：兼容 ``b/path``、带引号路径与 /dev/null。
 PATCH_TARGET_RE = re.compile(r"^\+\+\+\s+(?P<path>.+?)\s*$", re.MULTILINE)
@@ -1131,6 +1136,156 @@ class LocalDockerSandbox(SandboxProvider):
             )
         except DockerException:
             logger.warning("failed to inject AST checker", exc_info=True)
+            return False
+        return True
+
+    # --------------------------------------------------------
+    # 写盘前的实例作用域 AST 门禁
+    # --------------------------------------------------------
+    def ast_scope_check(
+        self,
+        sandbox_id: str,
+        files: dict[str, str] | None,
+        patch: str | None,
+        scopes: list[dict],
+        changed_files: list[str],
+    ) -> list[dict]:
+        """用沙盒内的 Babel 对 before / after 做结构差分。
+
+        只复制本次涉及的文件（变更文件 + scope 的源码 / callSite 文件），
+        不复制 node_modules；before 目录取自线上工作树，因此能覆盖
+        “上一轮尚未 commit 的代码”，与真实写盘结果一致。
+        """
+        if not scopes:
+            return []
+        container = self._get_container(sandbox_id)
+        if not self._ensure_ast_scope_checker(container):
+            raise SandboxError("实例 AST 检查器缺失，拒绝写入公共组件")
+
+        workdir = self.settings.sandbox_workdir
+        stage = AST_SCOPE_STAGE_DIR
+        before_root = f"{stage}/before"
+        after_root = f"{stage}/after"
+        paths: list[str] = []
+        for raw in list(changed_files or []):
+            try:
+                normalized = self._normalize_path(raw)
+            except SandboxValidationError:
+                continue
+            if normalized not in paths:
+                paths.append(normalized)
+        for scope in scopes:
+            for key in ("file", "callSiteFile"):
+                raw = str(scope.get(key) or "").strip()
+                if not raw:
+                    continue
+                try:
+                    normalized = self._normalize_path(raw)
+                except SandboxValidationError:
+                    continue
+                if normalized not in paths:
+                    paths.append(normalized)
+
+        try:
+            copy_commands = (
+                " && ".join(
+                    f"([ -f {shlex.quote(rel)} ] && "
+                    f"cp --parents {shlex.quote(rel)} {shlex.quote(before_root)}/ || true)"
+                    for rel in paths
+                )
+                or "true"
+            )
+            command = (
+                f"rm -rf {shlex.quote(stage)} && "
+                f"mkdir -p {shlex.quote(before_root)} {shlex.quote(after_root)} && "
+                f"cd {shlex.quote(workdir)} && {copy_commands} && "
+                f"cp -a {shlex.quote(before_root)}/. {shlex.quote(after_root)}/"
+            )
+            code, output = self._exec(container, ["sh", "-lc", command])
+            if code != 0:
+                raise SandboxError(f"实例 AST 预检快照失败: {self._decode(output)}")
+
+            if files:
+                container.put_archive(after_root, self._build_tar(files))
+            if patch:
+                container.put_archive(
+                    "/tmp", self._build_tar({"vibe-scope-stage.patch": patch})
+                )
+                code, output = self._exec(
+                    container,
+                    [
+                        "sh",
+                        "-lc",
+                        "git apply --recount --whitespace=nowarn "
+                        f"{AST_SCOPE_STAGE_PATCH}",
+                    ],
+                    workdir=after_root,
+                )
+                if code != 0:
+                    raise SandboxError(
+                        "实例 AST 预检补丁应用失败: " + self._decode(output)
+                    )
+
+            spec = {
+                "workdir": workdir,
+                "beforeRoot": before_root,
+                "afterRoot": after_root,
+                "changedFiles": paths,
+                "scopes": scopes,
+            }
+            container.put_archive(
+                stage,
+                self._build_tar({"spec.json": json.dumps(spec, ensure_ascii=False)}),
+            )
+            code, output = self._exec(
+                container, ["node", AST_SCOPE_SCRIPT, f"{stage}/spec.json"]
+            )
+            logs = self._decode(output).strip()
+            if code == 2:
+                # 检查器自身异常：硬门禁必须 fail-closed。
+                raise SandboxError(f"实例 AST 检查器异常: {logs[:1000]}")
+            if code not in (0, 1):
+                raise SandboxError(f"实例 AST 检查器返回未知状态 {code}: {logs[:1000]}")
+            try:
+                payload = json.loads(logs)
+            except json.JSONDecodeError as exc:
+                raise SandboxError(
+                    f"实例 AST 检查器输出不是 JSON: {logs[:1000]}"
+                ) from exc
+            return list(payload.get("violations") or [])
+        finally:
+            try:
+                self._exec(
+                    container,
+                    [
+                        "sh",
+                        "-lc",
+                        f"rm -rf {shlex.quote(stage)} {AST_SCOPE_STAGE_PATCH}",
+                    ],
+                )
+            except DockerException:  # pragma: no cover - 容器已经消失
+                pass
+
+    def _ensure_ast_scope_checker(self, container: Any) -> bool:
+        """把实例作用域检查器推送到容器 /opt，兼容旧沙盒。"""
+        candidates = [
+            Path(self.settings.sandbox_template_dir) / "ast_scope_check.mjs",
+            Path(__file__).resolve().parents[3]
+            / "sandbox_template"
+            / "ast_scope_check.mjs",
+        ]
+        source = next((path for path in candidates if path.is_file()), None)
+        if source is None:
+            return False
+        try:
+            container.put_archive(
+                "/opt",
+                self._build_tar(
+                    {"vibe-ast-scope-check.mjs": source.read_text(encoding="utf-8")}
+                ),
+            )
+        except DockerException:
+            logger.warning("failed to inject AST scope checker", exc_info=True)
             return False
         return True
 

@@ -177,6 +177,22 @@ class SandboxProvider(ABC):
     ) -> list[str]:
         """更新沙盒文件，返回变更文件列表。"""
 
+    def ast_scope_check(
+        self,
+        sandbox_id: str,
+        files: dict[str, str] | None,
+        patch: str | None,
+        scopes: list[dict],
+        changed_files: list[str],
+    ) -> list[dict]:
+        """写盘前对公共组件 / 多实例目标做 AST 差分校验。
+
+        默认实现返回空列表（无 AST 能力的 Provider 不做额外拦截）；
+        LocalDockerSandbox 会用沙盒内的 Babel 解析 before/after 两棵树，
+        拒绝“改基础组件”和“map 里无条件新增 JSX”。
+        """
+        return []
+
     @abstractmethod
     def verify(
         self,

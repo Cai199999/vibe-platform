@@ -1775,6 +1775,16 @@ class AgentGraphRunner:
         files = state.get("generated_files") or {}
         patch = state.get("generated_patch") or None
 
+        # P0 门禁二：删除必须先有结构化范围。先于实例守卫执行，避免
+        # 整文件截断被后续 AST 检查掩盖。
+        delete_violation = _unstructured_delete_violation(state, files, patch)
+        if delete_violation:
+            logger.warning(
+                "unstructured delete rejected: %s",
+                delete_violation["error_code"],
+            )
+            return delete_violation
+
         # 实例作用域守卫：先校验，再写沙盒。污染一旦写进去，HMR 已经
         # 渲染到用户眼前，回滚成本远高于在 Applier 直接打回 Coder。
         violation = _instance_scope_violation(state, files, patch)
@@ -1784,6 +1794,40 @@ class AgentGraphRunner:
                 violation["error_code"],
             )
             return violation
+
+        # P0 门禁一：公共组件 / 多实例目标的 AST 差分校验。字符串守卫
+        # 可以被无关条件蒙混，也会被 ±N 行窗口绕过；这里把 before/after
+        # 交给沙盒内的 Babel，按真实 JSX 祖先链判断“新增节点是否被实例
+        # 条件包住”，并要求基础组件文件本身零结构变化。
+        scope_specs = _instance_scope_specs(state)
+        checker = getattr(self._sandbox, "ast_scope_check", None)
+        if scope_specs and callable(checker):
+            try:
+                ast_violations = checker(
+                    sandbox_id=sandbox_id,
+                    files=files,
+                    patch=patch,
+                    scopes=scope_specs,
+                    changed_files=sorted(set(files) | set(_diff_paths(patch or ""))),
+                )
+            except SandboxError as exc:
+                # 硬门禁必须 fail-closed：检查器不可用时不允许写公共组件。
+                logger.warning("AST scope checker unavailable: %s", exc)
+                return _ast_scope_failure(
+                    [
+                        {
+                            "code": "INSTANCE_AST_CHECK_UNAVAILABLE",
+                            "message": (
+                                "实例 AST 门禁不可用，已阻止修改公共组件 / "
+                                f"多实例目标：{exc}"
+                            ),
+                        }
+                    ],
+                    code="INSTANCE_AST_CHECK_UNAVAILABLE",
+                )
+            if ast_violations:
+                logger.warning("AST scope violations rejected: %s", ast_violations)
+                return _ast_scope_failure(ast_violations)
 
         try:
             # 全量文件与 unified diff 只能二选一：
@@ -3532,6 +3576,380 @@ def _instance_scope_violation(
                     call_site_line=call_site_line,
                 )
     return None
+
+
+# ------------------------------------------------------------
+# P0 硬门禁二：禁止无结构化范围的删除
+# ------------------------------------------------------------
+# 隐式删除阈值：小文件任何多行删除都值得怀疑；大文件最多容忍 30%。
+_IMPLICIT_DELETE_MIN_LINES = 5
+_IMPLICIT_DELETE_RATIO = 0.30
+# 结构化 deleteRange 的粒度上限：一次最多删除 80 行，超出必须拆分成
+# 多个标注，避免“声明了一个大范围”就获得整文件删除权。
+_MAX_STRUCTURED_DELETE_LINES = 80
+
+_EXPORT_NAME_RE = re.compile(
+    r"export\s+(?:default\s+)?(?:async\s+)?"
+    r"(?:function|const|let|var|class)\s+([A-Za-z_$][\w$]*)"
+)
+
+
+def _implicit_delete_threshold(before_lines: int) -> int:
+    """隐式删除的容忍行数。"""
+    if before_lines <= 3:
+        return 1
+    if before_lines < 8:
+        return 3
+    return max(
+        _IMPLICIT_DELETE_MIN_LINES, math.ceil(before_lines * _IMPLICIT_DELETE_RATIO)
+    )
+
+
+def _declared_delete_ranges(state: AgentState) -> list[dict[str, Any]]:
+    """收集标注中显式声明的结构化删除范围。
+
+    契约（P0）：``payload.deleteRange``（或 snake_case）：
+        {file, startLine, endLine, expectedHash?}
+    只有声明了范围，删除才被视为“结构化”；没有声明的删除一律受阈值
+    约束，避免 Coder 用 files 模式整文件截断。
+    """
+    ranges: list[dict[str, Any]] = []
+    context = state.get("annotation_context") or {}
+    for item in context.get("annotations") or []:
+        if not isinstance(item, dict):
+            continue
+        annotation = item.get("annotation")
+        if not isinstance(annotation, dict):
+            continue
+        for scoped in _iter_scope_annotations(annotation):
+            payload = scoped.get("payload")
+            payload = payload if isinstance(payload, dict) else {}
+            declared = payload.get("deleteRange") or payload.get("delete_range")
+            if not isinstance(declared, dict):
+                continue
+            file = _scope_path(declared.get("file"))
+            start = int(declared.get("startLine") or declared.get("start_line") or 0)
+            end = int(declared.get("endLine") or declared.get("end_line") or 0)
+            if not file or start <= 0 or end < start:
+                continue
+            ranges.append(
+                {
+                    "file": file,
+                    "startLine": start,
+                    "endLine": end,
+                    "expectedHash": declared.get("expectedHash")
+                    or declared.get("expected_hash"),
+                }
+            )
+    return ranges
+
+
+def _deleted_spans_files(
+    state: AgentState, files: dict[str, str]
+) -> dict[str, dict[str, Any]]:
+    """files 模式：按 SequenceMatcher 计算每个文件的删除行区间。"""
+    current = state.get("current_files") or {}
+    by_path = {_scope_path(path): str(content) for path, content in current.items()}
+    result: dict[str, dict[str, Any]] = {}
+    for raw_path, content in (files or {}).items():
+        path = _scope_path(raw_path)
+        before = by_path.get(path)
+        if before is None:
+            # 新文件没有“删除”语义。
+            continue
+        before_lines = before.splitlines()
+        after_lines = str(content).splitlines()
+        spans: list[tuple[int, int]] = []
+        deleted = 0
+        matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines)
+        for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
+            if tag not in ("delete", "replace") or i2 <= i1:
+                continue
+            deleted += i2 - i1
+            spans.append((i1 + 1, i2))
+        if deleted:
+            result[path] = {
+                "beforeLines": len(before_lines),
+                "afterLines": len(after_lines),
+                "deleted": deleted,
+                "spans": spans,
+                "before": before,
+                "after": str(content),
+            }
+    return result
+
+
+_HUNK_HEADER_RE = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+\d+(?:,\d+)?\s+@@")
+
+
+def _deleted_spans_patch(patch: str | None) -> dict[str, dict[str, Any]]:
+    """diff 模式：逐行解析 hunk，统计真正以 ``-`` 开头的删除行。
+
+    不能直接用 hunk 头的源文件行数：那包含上下文行，会把“只加一行”
+    误判成“删除整段”。这里维护源文件行号游标，只有 ``-`` 行才计入
+    删除，并合并成连续区间。
+    """
+    result: dict[str, dict[str, Any]] = {}
+    current: str | None = None
+    source_line = 0
+    in_hunk = False
+    deleted_lines: dict[str, list[int]] = {}
+    for raw in (patch or "").splitlines():
+        if raw.startswith("+++ "):
+            target = raw[4:].strip().split("\t")[0]
+            target = _scope_path(target)
+            if target.startswith("b/"):
+                target = target[2:]
+            current = target
+            in_hunk = False
+            continue
+        if raw.startswith("--- "):
+            continue
+        match = _HUNK_HEADER_RE.match(raw)
+        if match:
+            source_line = int(match.group(1))
+            in_hunk = True
+            continue
+        if not current or not in_hunk:
+            continue
+        if raw.startswith("\\"):
+            continue
+        if raw.startswith("-"):
+            deleted_lines.setdefault(current, []).append(source_line)
+            source_line += 1
+        elif raw.startswith("+"):
+            continue
+        elif raw.startswith(" "):
+            source_line += 1
+        else:
+            # 下一个文件 / 非 hunk 内容，结束当前 hunk。
+            in_hunk = False
+
+    for path, lines in deleted_lines.items():
+        lines = sorted(set(lines))
+        spans: list[tuple[int, int]] = []
+        start = end = lines[0]
+        for line in lines[1:]:
+            if line == end + 1:
+                end = line
+                continue
+            spans.append((start, end))
+            start = end = line
+        spans.append((start, end))
+        before_lines = max(end for _start, end in spans)
+        result[path] = {
+            "beforeLines": before_lines,
+            "afterLines": max(0, before_lines - len(lines)),
+            "deleted": len(lines),
+            "spans": spans,
+        }
+    return result
+
+
+def _range_covers(declared: dict[str, Any], spans: list[tuple[int, int]]) -> bool:
+    """声明范围是否覆盖全部删除行（允许首尾 2 行上下文误差）。"""
+    start = int(declared["startLine"])
+    end = int(declared["endLine"])
+    return all(
+        span_start >= start - 2 and span_end <= end + 2
+        for span_start, span_end in spans
+    )
+
+
+def _unstructured_delete_failure(
+    message: str,
+    *,
+    code: str,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "apply_failed": True,
+        "verify_result": _failure(message),
+        "error_code": code,
+        "status": "APPLYING",
+        "delete_gate": evidence,
+        "messages": [_message("applier", message, error=True)],
+    }
+
+
+def _unstructured_delete_violation(
+    state: AgentState,
+    files: dict[str, str],
+    patch: str | None,
+) -> dict[str, Any] | None:
+    """写盘前的删除门禁。
+
+    两条规则：
+      1. 任意 ``export`` 组件被整体删除（files 模式）直接拦截；
+      2. 删除行数超过阈值，且没有匹配的 ``payload.deleteRange``，拦截。
+
+    这不是“禁止删除”，而是“禁止无范围的删除”：用户明确圈定范围时，
+    Coder 必须把范围写进 deleteRange，Applier 只放行声明内的删除。
+    """
+    spans_by_file = (
+        _deleted_spans_files(state, files) if files else _deleted_spans_patch(patch)
+    )
+    if not spans_by_file:
+        return None
+
+    declared = _declared_delete_ranges(state)
+    for path, entry in spans_by_file.items():
+        before_text = entry.get("before")
+        after_text = entry.get("after")
+        # 规则一：组件 / 导出整体消失。即使行数低于阈值也必须拦截，
+        # 因为一个 5 行组件的消失足以让页面白屏。
+        if isinstance(before_text, str) and isinstance(after_text, str):
+            before_exports = set(_EXPORT_NAME_RE.findall(before_text))
+            after_exports = set(_EXPORT_NAME_RE.findall(after_text))
+            missing = sorted(before_exports - after_exports)
+            before_default = "export default" in before_text
+            after_default = "export default" in after_text
+            if missing or (before_default and not after_default):
+                return _unstructured_delete_failure(
+                    f"检测到无结构化范围的组件删除：{path} 丢失导出 "
+                    f"{', '.join(missing) or 'default'}。请改用 "
+                    "payload.deleteRange={file,startLine,endLine} 明确范围，"
+                    "或把删除拆成局部补丁。",
+                    code="UNSTRUCTURED_DELETE_BLOCKED",
+                    evidence={
+                        "file": path,
+                        "missingExports": missing,
+                        "defaultExportRemoved": before_default and not after_default,
+                    },
+                )
+
+        matching = [item for item in declared if item["file"] == path]
+        for item in matching:
+            if item["endLine"] - item["startLine"] + 1 > _MAX_STRUCTURED_DELETE_LINES:
+                return _unstructured_delete_failure(
+                    f"结构化删除范围过大：{path}:{item['startLine']}-"
+                    f"{item['endLine']} 超过 {_MAX_STRUCTURED_DELETE_LINES} 行。"
+                    "请拆分为多个标注，逐段删除。",
+                    code="DELETE_RANGE_TOO_LARGE",
+                    evidence={"file": path, "declared": item},
+                )
+        if matching and any(_range_covers(item, entry["spans"]) for item in matching):
+            continue
+
+        threshold = _implicit_delete_threshold(int(entry["beforeLines"] or 0))
+        if int(entry["deleted"]) <= threshold:
+            continue
+        if matching:
+            return _unstructured_delete_failure(
+                f"删除范围与声明不匹配：{path} 实际删除 "
+                f"{entry['deleted']} 行（区间 {entry['spans']}），"
+                f"但 deleteRange 只声明了 "
+                f"{[(item['startLine'], item['endLine']) for item in matching]}。"
+                "请让声明范围覆盖实际删除行，或缩小本次修改。",
+                code="DELETE_RANGE_MISMATCH",
+                evidence={"file": path, **entry, "declared": matching},
+            )
+        return _unstructured_delete_failure(
+            f"检测到无结构化范围的删除：{path} 从 "
+            f"{entry['beforeLines']} 行变为 {entry['afterLines']} 行"
+            f"（删除 {entry['deleted']} 行，阈值 {threshold}），"
+            "但标注没有 payload.deleteRange。请改用结构化删除范围，"
+            "或让 Coder 输出局部补丁而不是整文件重写。",
+            code="UNSTRUCTURED_DELETE_BLOCKED",
+            evidence={"file": path, **entry},
+        )
+    return None
+
+
+# ------------------------------------------------------------
+# P0 硬门禁一：公共组件必须通过 AST 差分校验
+# ------------------------------------------------------------
+def _instance_scope_specs(state: AgentState) -> list[dict[str, Any]]:
+    """把标注压缩成 AST 校验器需要的实例作用域描述。
+
+    只有两类目标需要进入 AST 门禁：
+      - 基础组件与 callSite 分属不同文件（公共组件）；
+      - instanceCount > 1（同一行被渲染多次）。
+    唯一目标且无 callSite 的普通元素直接跳过，避免无谓的 Node 解析。
+    """
+    specs: list[dict[str, Any]] = []
+    context = state.get("annotation_context") or {}
+    for item in context.get("annotations") or []:
+        if not isinstance(item, dict):
+            continue
+        annotation = item.get("annotation")
+        if not isinstance(annotation, dict):
+            continue
+        for scoped in _iter_scope_annotations(annotation):
+            action = str(scoped.get("action") or "").upper()
+            if action not in _SCOPE_ACTIONS:
+                continue
+            target = scoped.get("target")
+            source = target.get("source") if isinstance(target, dict) else None
+            if not isinstance(source, dict):
+                continue
+            file = _scope_path(source.get("file"))
+            if not file:
+                continue
+            instance_count = int(
+                source.get("instanceCount") or source.get("instance_count") or 1
+            )
+            call_site = source.get("callSite") or source.get("call_site")
+            call_site = call_site if isinstance(call_site, dict) else {}
+            call_site_file = _scope_path(call_site.get("file"))
+            multi_instance = instance_count > 1
+            # 公共组件：源码文件与父级调用点分离；或 SDK 拿不到 callSite
+            # 但同一行渲染多次（无法安全定位父级时，基础组件禁止改）。
+            protect_base = bool(
+                (call_site_file and call_site_file != file)
+                or (multi_instance and not call_site_file)
+            )
+            if not protect_base and not multi_instance:
+                continue
+            instance_props = (
+                source.get("instanceProps") or source.get("instance_props") or {}
+            )
+            specs.append(
+                {
+                    "annotationId": scoped.get("annotationId")
+                    or scoped.get("annotation_id")
+                    or "",
+                    "action": action,
+                    "file": file,
+                    "sourceLine": int(source.get("line") or 0),
+                    "component": str(source.get("component") or ""),
+                    "instance": int(source.get("instance") or 1),
+                    "instanceCount": instance_count,
+                    "instanceKey": str(
+                        source.get("instanceKey") or source.get("instance_key") or ""
+                    ),
+                    "instanceProps": (
+                        instance_props if isinstance(instance_props, dict) else {}
+                    ),
+                    "callSiteFile": call_site_file,
+                    "callSiteLine": int(call_site.get("line") or 0),
+                    "callSiteComponent": str(
+                        call_site.get("component") or source.get("component") or ""
+                    ),
+                    "protectBase": protect_base,
+                    "requireGuard": multi_instance,
+                }
+            )
+    return specs
+
+
+def _ast_scope_failure(
+    violations: list[dict[str, Any]],
+    *,
+    code: str = "INSTANCE_AST_VIOLATION",
+) -> dict[str, Any]:
+    first = violations[0] if violations else {}
+    message = str(first.get("message") or "AST 差分校验未通过")
+    if len(violations) > 1:
+        message += f"（另有 {len(violations) - 1} 处同类问题）"
+    return {
+        "apply_failed": True,
+        "verify_result": _failure(message),
+        "error_code": code,
+        "status": "APPLYING",
+        "ast_scope_violations": violations,
+        "messages": [_message("applier", message, error=True)],
+    }
 
 
 def _select_error_source(logs: str, state: AgentState) -> str:
