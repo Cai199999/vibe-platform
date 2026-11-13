@@ -494,7 +494,9 @@ class Approval(CamelModel):
     options: list[str] = Field(default_factory=lambda: ["approve", "reject"])
     evidence: ApprovalEvidence | None = None
     sandbox_id: str | None = None
+    # 审批期间 iframe 指向草稿预览；is_draft 供前端展示“主工作区未修改”提示。
     preview_url: str | None = None
+    is_draft: bool = False
     expires_at: datetime | None = None
     decided_at: datetime | None = None
     comment: str | None = None

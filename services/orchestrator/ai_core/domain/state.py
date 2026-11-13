@@ -83,7 +83,12 @@ class AgentState(TypedDict, total=False):
     tenant_id: str
     project_id: str
     sandbox_id: str
+    # 主工作树预览地址（审批通过 / 免审批成功后的最终预览）。
     preview_url: str
+    # 隔离草稿：Applier / Verifier 只能通过 draft_id 访问影子目录，
+    # 审批前主工作树保持零变化。
+    draft_id: str
+    draft_preview_url: str
     # 主目标文件（第一个标注），用于消息展示 / 兼容旧状态读取。
     target_file: str
     # 本次 Run 全部标注涉及的文件（去重，最多 3 个）。

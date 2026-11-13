@@ -53,6 +53,24 @@ class SandboxHandle:
 
 
 @dataclass(frozen=True)
+class SandboxDraft:
+    """一次 Run 的隔离草稿。
+
+    草稿是主工作树的 ``git worktree`` 影子目录，拥有独立的预览端口。
+    模型 / Applier 只能写入 ``workdir``；用户审批通过后，Provider 才把
+    草稿变更 promote 回主工作树。
+    """
+
+    draft_id: str
+    sandbox_id: str
+    base_sha: str
+    workdir: str
+    preview_url: str
+    host_port: int
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class SandboxCommit:
     """沙盒 Git 历史中的一条 commit（快照）。
 
@@ -167,6 +185,34 @@ class SandboxProvider(ABC):
         """
         raise SandboxError(f"当前 Provider 不支持重启沙盒: {sandbox_id}")
 
+    # --------------------------------------------------------
+    # 草稿隔离（Phase 0）
+    # --------------------------------------------------------
+    def begin_draft(self, sandbox_id: str) -> SandboxDraft | None:
+        """创建隔离草稿 worktree 与预览服务。
+
+        默认返回 ``None``，表示 Provider 不支持草稿隔离，调用方必须回退
+        到旧的直写路径（仅用于测试替身 / 未升级的 Provider）。
+        """
+        return None
+
+    def discard_draft(self, sandbox_id: str, draft_id: str) -> None:
+        """丢弃草稿：停止预览、移除 worktree，主工作树保持不变。"""
+        raise SandboxError(f"当前 Provider 不支持丢弃草稿: {sandbox_id}")
+
+    def promote_draft(
+        self,
+        sandbox_id: str,
+        draft_id: str,
+        expected_base_sha: str,
+    ) -> str:
+        """把草稿变更合并回主工作树，返回主工作树的新 HEAD。
+
+        调用方必须已获得用户显式审批；Provider 内部仍会校验
+        ``expected_base_sha``，防止审批期间主分支被其它 Run 推进。
+        """
+        raise SandboxError(f"当前 Provider 不支持草稿合并: {sandbox_id}")
+
     @abstractmethod
     def apply_patch(
         self,
@@ -175,7 +221,11 @@ class SandboxProvider(ABC):
         patch: str | None = None,
         deleted_paths: list[str] | None = None,
     ) -> list[str]:
-        """更新沙盒文件，返回变更文件列表。"""
+        """更新沙盒文件，返回变更文件列表。
+
+        ``LocalDockerSandbox`` 额外支持 ``draft_id`` 关键字参数：提供时
+        只写草稿 worktree，未提供时维持旧的直写主工作树行为。
+        """
 
     def ast_scope_check(
         self,

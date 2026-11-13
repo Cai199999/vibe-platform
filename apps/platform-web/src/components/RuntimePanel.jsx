@@ -65,8 +65,14 @@ function ApprovalPanel({
   return (
     <div className="loading-state runtime-loading is-approval">
       <div className="loading-copy timeline-head">
-        <h3 className="loading-title">等待审批</h3>
-        <p className="muted">构建已通过；确认 Diff 后才会写入 Git checkpoint。</p>
+        <h3 className="loading-title">
+          {approval.isDraft ? '等待确认' : '等待审批'}
+        </h3>
+        <p className="muted">
+          {approval.isDraft
+            ? '预览中是隔离草稿，主工作区尚未修改。确认后才会合并并回写 Git。'
+            : '构建已通过；确认 Diff 后才会写入 Git checkpoint。'}
+        </p>
       </div>
 
       <div className="approval-summary">
@@ -134,7 +140,13 @@ function ApprovalPanel({
           disabled={busy}
           onClick={() => onDecision?.('approve', comment)}
         >
-          {busy ? <span className="mini-spinner" aria-label="提交中" /> : '批准并应用'}
+          {busy ? (
+            <span className="mini-spinner" aria-label="提交中" />
+          ) : approval.isDraft ? (
+            '确认并合并'
+          ) : (
+            '批准并应用'
+          )}
         </button>
         <button
           className="ghost-button is-danger"
@@ -142,7 +154,7 @@ function ApprovalPanel({
           disabled={busy}
           onClick={() => onDecision?.('reject', comment)}
         >
-          拒绝并撤销
+          {approval.isDraft ? '放弃草稿' : '拒绝并撤销'}
         </button>
         <button
           className="ghost-button"
@@ -665,7 +677,9 @@ export default function RuntimePanel({
     pendingAction = null,
     backgroundRun = null,
   } = run
-  const previewUrl = result?.previewUrl
+  // 审批期间后端返回草稿预览地址：iframe 展示待确认版本，
+  // 主工作树此时仍是上一轮内容，用户放弃时无需回滚。
+  const previewUrl = approval?.previewUrl || result?.previewUrl
   // 本地秒表：与页面级状态解耦，执行期间不再每 400ms 重渲染整个工作区。
   const elapsed = useElapsed(run.startedAt, submitting)
   const success = SUCCESS_STATUSES.has(result?.status)

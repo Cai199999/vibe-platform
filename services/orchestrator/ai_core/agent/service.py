@@ -75,7 +75,12 @@ from ai_core.context_memory import ContextSummarizer, get_project_memory
 from ai_core.domain.scope import memory_scope, scoped_checkpoint_key
 from ai_core.config import Settings, get_settings
 from ai_core.adapters.sandbox import get_sandbox_provider
-from ai_core.ports.sandbox import SandboxError, SandboxHandle, SandboxProvider
+from ai_core.ports.sandbox import (
+    SandboxDraft,
+    SandboxError,
+    SandboxHandle,
+    SandboxProvider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +228,9 @@ class PreparedRun:
     base_commit: str | None
     initial_state: dict[str, Any]
     event_buffer: RunEventBuffer
+    # 隔离草稿：非空时 Applier / Verifier 只写草稿 worktree，审批通过后
+    # 才 promote 回主工作树；为 None 表示 Provider 不支持草稿（测试替身）。
+    draft: SandboxDraft | None = None
     # 本次 Run 的 Token 用量 / 费用；Runner 结束后回填，供终态事件与审计使用。
     token_usage: dict[str, Any] = field(default_factory=dict)
 
@@ -787,6 +795,8 @@ class RunExecutionService:
             dedupe_key=f"node.started:provision:{run_id}",
         )
         base_commit: str | None = None
+        # 草稿句柄必须在 try 外声明，准备阶段异常时才能统一清理 worktree。
+        draft: SandboxDraft | None = None
         try:
             # 先构造 LLM，避免密钥缺失时已经创建了沙盒。
             llm = build_agent_llm(request, self._settings)
@@ -836,9 +846,20 @@ class RunExecutionService:
                     handle.sandbox_id,
                     exc_info=True,
                 )
+
+            # 草稿隔离：从干净的 HEAD 创建 worktree 影子目录与第二预览端口。
+            # 从这里开始，模型 / Applier / Verifier 只允许写草稿；主工作树在
+            # 用户审批通过前保持零变化。创建失败时绝不回退直写主工作树，
+            # 否则“模型瞎写”会重新污染主工作区，宁可让本次 Run 明确失败。
             try:
-                # 把全部画布标注渲染成 VIBE_CONTEXT.md 写进沙盒，导出源码包时
-                # 自动带上；写入失败只记录日志，不阻塞 Run。
+                draft = self._sandbox.begin_draft(handle.sandbox_id)
+            except SandboxError as exc:
+                raise SandboxError(f"创建隔离草稿失败，已中止: {exc}") from exc
+            draft_kwargs = {"draft_id": draft.draft_id} if draft else {}
+
+            try:
+                # 把全部画布标注渲染成 VIBE_CONTEXT.md 写进草稿（无草稿则写
+                # 主工作树），导出源码包时自动带上；失败只记录日志。
                 self._sandbox.apply_patch(
                     handle.sandbox_id,
                     files={
@@ -849,6 +870,7 @@ class RunExecutionService:
                             target_files,
                         )
                     },
+                    **draft_kwargs,
                 )
             except SandboxError:
                 logger.warning(
@@ -876,6 +898,10 @@ class RunExecutionService:
                 "project_id": request.project_id,
                 "sandbox_id": handle.sandbox_id,
                 "preview_url": handle.preview_url,
+                # 草稿隔离：Applier / Verifier 通过 draft_id 定向写入
+                # /app-drafts/<id>；审批阶段前端 iframe 使用草稿预览地址。
+                "draft_id": draft.draft_id if draft else "",
+                "draft_preview_url": draft.preview_url if draft else "",
                 "target_file": primary_file,
                 "target_files": target_files,
                 "design_system": design_system,
@@ -938,6 +964,17 @@ class RunExecutionService:
                 "error_code": None,
             }
         except Exception as exc:  # noqa: BLE001 - 事件后继续抛出给 API / worker
+            # 准备阶段失败：回收已创建但未交给 Graph 的草稿，避免残留
+            # worktree / 预览进程；主工作树此时仍未发生任何变化。
+            if draft is not None:
+                try:
+                    self._sandbox.discard_draft(handle.sandbox_id, draft.draft_id)
+                except Exception:  # noqa: BLE001 - 清理失败不能掩盖原始异常
+                    logger.warning(
+                        "discard draft after prepare failure failed run_id=%s",
+                        run_id,
+                        exc_info=True,
+                    )
             buffer.emit(
                 "node.finished",
                 {
@@ -977,6 +1014,7 @@ class RunExecutionService:
             base_commit=base_commit,
             initial_state=initial_state,
             event_buffer=buffer,
+            draft=draft,
         )
 
     def _execute_prepared(
@@ -1138,43 +1176,66 @@ class RunExecutionService:
 
         if status in {"AWAITING_APPROVAL", "SUCCEEDED"}:
             # 审批通过（AWAITING_APPROVAL）或免审批直接成功（SUCCEEDED）：
-            # 此时才允许形成可回滚 checkpoint，并统一收敛为 SUCCEEDED。
-            try:
-                commit_hash = self._sandbox.git_commit(
-                    prepared.handle.sandbox_id,
-                    f"run: {prepared.run_id} - turn: {prepared.run_turn_count}",
-                )
-                commits = [
-                    RunCommitRecord(
-                        thread_id=thread_id,
-                        turn_count=prepared.turn_counts[thread_id],
-                        commit_hash=commit_hash,
-                        run_id=prepared.run_id,
-                    )
-                    for thread_id in prepared.thread_ids
-                ]
+            # 先 promote 草稿到主工作树，再形成可回滚 checkpoint。
+            # promote 只能在这里发生：模型 / 节点无权调用。
+            promote_error: SandboxError | None = None
+            if prepared.draft is not None:
                 try:
-                    baseline_commit = self._sandbox.git_baseline_commit(
-                        prepared.handle.sandbox_id
-                    )
-                except SandboxError:
-                    logger.warning(
-                        "failed to read git baseline run_id=%s",
-                        prepared.run_id,
-                        exc_info=True,
-                    )
-                status = "SUCCEEDED"
-            except SandboxError as exc:
-                # 代码已经构建通过，但没有可回滚的 checkpoint 不能宣称成功。
-                logger.exception("git checkpoint failed run_id=%s", prepared.run_id)
+                    self._promote_draft(prepared)
+                except SandboxError as exc:
+                    # 主工作树未发生变化；丢弃草稿避免残留 worktree。
+                    promote_error = exc
+                    self._discard_draft(prepared)
+            if promote_error is not None:
+                logger.error(
+                    "promote draft failed run_id=%s: %s",
+                    prepared.run_id,
+                    promote_error,
+                )
                 status = "FAILED"
-                error = f"Git checkpoint 失败: {exc}"
-                error_code = "COMMIT_FAILED"
-                commit_hash = None
-                commits = []
+                error = f"草稿合并失败: {promote_error}"
+                error_code = "PROMOTE_FAILED"
+            else:
+                try:
+                    commit_hash = self._sandbox.git_commit(
+                        prepared.handle.sandbox_id,
+                        f"run: {prepared.run_id} - turn: {prepared.run_turn_count}",
+                    )
+                    commits = [
+                        RunCommitRecord(
+                            thread_id=thread_id,
+                            turn_count=prepared.turn_counts[thread_id],
+                            commit_hash=commit_hash,
+                            run_id=prepared.run_id,
+                        )
+                        for thread_id in prepared.thread_ids
+                    ]
+                    try:
+                        baseline_commit = self._sandbox.git_baseline_commit(
+                            prepared.handle.sandbox_id
+                        )
+                    except SandboxError:
+                        logger.warning(
+                            "failed to read git baseline run_id=%s",
+                            prepared.run_id,
+                            exc_info=True,
+                        )
+                    status = "SUCCEEDED"
+                except SandboxError as exc:
+                    # 代码已经构建通过，但没有可回滚的 checkpoint 不能宣称成功。
+                    logger.exception("git checkpoint failed run_id=%s", prepared.run_id)
+                    status = "FAILED"
+                    error = f"Git checkpoint 失败: {exc}"
+                    error_code = "COMMIT_FAILED"
+                    commit_hash = None
+                    commits = []
         elif status == "REJECTED":
-            # 用户拒绝：丢弃工作区改动，不生成 commit，不写 thread 成功记忆。
+            # 用户拒绝：丢弃草稿，不生成 commit，不写 thread 成功记忆。
             preview_url = self._revert_sandbox(prepared)
+
+        # 未获批准的终态（REJECTED / FAILED）：草稿必须丢弃，主工作树零变化。
+        if status != "SUCCEEDED":
+            self._discard_draft(prepared)
 
         # Reflection 证据只在真正成功（含审批通过）后落盘；失败、拒绝、
         # 取消的运行不会影响长期偏好。
@@ -1187,7 +1248,8 @@ class RunExecutionService:
             error=error,
             retry_count=retry_count,
         )
-        if status == "REJECTED":
+        if status in {"REJECTED", "FAILED"}:
+            # 主工作树未发生任何变化，返回初始快照才是真实状态。
             final_files = dict(
                 final_state.get("initial_files") or prepared.current_files
             )
@@ -1322,7 +1384,8 @@ class RunExecutionService:
         response = self._to_response(
             prepared.run_id,
             prepared.handle.sandbox_id,
-            prepared.handle.preview_url,
+            # 审批期间主工作树未修改，iframe 必须展示草稿预览。
+            approval.preview_url or prepared.handle.preview_url,
             {
                 **outcome.state,
                 "status": "AWAITING_APPROVAL",
@@ -1386,8 +1449,49 @@ class RunExecutionService:
         )
         return response
 
+    def _promote_draft(self, prepared: PreparedRun) -> None:
+        """把草稿快进合并回主工作树；只允许用户审批通过后调用。"""
+        draft = prepared.draft
+        if draft is None:
+            return
+        self._sandbox.promote_draft(
+            prepared.handle.sandbox_id,
+            draft.draft_id,
+            draft.base_sha,
+        )
+        # Provider 已在合并成功后移除 worktree / 预览，清空句柄避免重复丢弃。
+        prepared.draft = None
+
+    def _discard_draft(self, prepared: PreparedRun) -> None:
+        """丢弃隔离草稿；主工作树保持不变，失败只记录日志。"""
+        draft = prepared.draft
+        if draft is None:
+            return
+        prepared.draft = None
+        try:
+            self._sandbox.discard_draft(
+                prepared.handle.sandbox_id,
+                draft.draft_id,
+            )
+        except SandboxError:
+            logger.warning(
+                "failed to discard draft run_id=%s draft_id=%s",
+                prepared.run_id,
+                draft.draft_id,
+                exc_info=True,
+            )
+
     def _revert_sandbox(self, prepared: PreparedRun) -> str:
-        """把沙盒恢复到本轮 Run 开始前；返回带 cache-busting 的预览地址。"""
+        """把沙盒恢复到本轮 Run 开始前；返回带 cache-busting 的预览地址。
+
+        草稿隔离模式下主工作树从未被写入，直接丢弃草稿即可，无需 git reset。
+        """
+        if prepared.draft is not None:
+            self._discard_draft(prepared)
+            revision = str(int(time.time() * 1000))
+            separator = "&" if "?" in prepared.handle.preview_url else "?"
+            return f"{prepared.handle.preview_url}{separator}v={revision}"
+
         preview_url = prepared.handle.preview_url
         if not prepared.base_commit:
             logger.warning(
@@ -1421,6 +1525,8 @@ class RunExecutionService:
         error: str,
         code: str,
     ) -> ExecuteRunResponse:
+        # 失败路径同样丢弃草稿：主工作树从未被写入，用户看到的仍是上一轮。
+        self._discard_draft(prepared)
         assistant_message = self._assistant_message(
             prepared.instructions, status="FAILED", error=error, retry_count=0
         )

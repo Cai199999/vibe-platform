@@ -1774,6 +1774,10 @@ class AgentGraphRunner:
         sandbox_id = state["sandbox_id"]
         files = state.get("generated_files") or {}
         patch = state.get("generated_patch") or None
+        # 草稿隔离：存在 draft_id 时，所有写盘 / 回读只作用于 worktree；
+        # 未提供时保持旧的直写路径（测试替身与旧 Provider 兼容）。
+        draft_id = state.get("draft_id") or None
+        draft_kwargs = {"draft_id": draft_id} if draft_id else {}
 
         # P0 门禁二：删除必须先有结构化范围。先于实例守卫执行，避免
         # 整文件截断被后续 AST 检查掩盖。
@@ -1809,6 +1813,7 @@ class AgentGraphRunner:
                     patch=patch,
                     scopes=scope_specs,
                     changed_files=sorted(set(files) | set(_diff_paths(patch or ""))),
+                    **draft_kwargs,
                 )
             except SandboxError as exc:
                 # 硬门禁必须 fail-closed：检查器不可用时不允许写公共组件。
@@ -1835,9 +1840,13 @@ class AgentGraphRunner:
             # 若同时应用，会对已更新的文件再次打补丁而失败。
             # 批量标注必须一次写入，避免多次 HMR / 构建。
             if files:
-                changed = self._sandbox.apply_patch(sandbox_id=sandbox_id, files=files)
+                changed = self._sandbox.apply_patch(
+                    sandbox_id=sandbox_id, files=files, **draft_kwargs
+                )
             elif patch:
-                changed = self._sandbox.apply_patch(sandbox_id=sandbox_id, patch=patch)
+                changed = self._sandbox.apply_patch(
+                    sandbox_id=sandbox_id, patch=patch, **draft_kwargs
+                )
             else:
                 changed = []
 
@@ -1848,7 +1857,9 @@ class AgentGraphRunner:
             current_files = dict(state.get("current_files") or {})
             for path in sorted(paths):
                 try:
-                    current_files[path] = self._sandbox.read_file(sandbox_id, path)
+                    current_files[path] = self._sandbox.read_file(
+                        sandbox_id, path, **draft_kwargs
+                    )
                 except SandboxError:
                     # 删除的文件或模型误报路径：不阻塞本次执行，构建阶段会暴露问题。
                     logger.warning("failed to reread %s after apply", path)
@@ -1886,8 +1897,13 @@ class AgentGraphRunner:
             {"checks": ["npm run build", "created-markers"]},
             dedupe_key=f"verify.started:{key}",
         )
+        draft_id = state.get("draft_id") or None
         try:
-            result = self._sandbox.verify(state["sandbox_id"], check="build")
+            result = self._sandbox.verify(
+                state["sandbox_id"],
+                check="build",
+                **({"draft_id": draft_id} if draft_id else {}),
+            )
         except SandboxError as exc:
             logger.warning("verifier execution failed: %s", exc)
             self._emit(
@@ -1995,6 +2011,9 @@ class AgentGraphRunner:
         """
         context = state.get("annotation_context") or {}
         target_files = [str(path) for path in (state.get("target_files") or [])]
+        # 草稿隔离：标记校验必须读草稿 worktree，否则永远读到主工作树的旧内容。
+        draft_id = state.get("draft_id") or None
+        draft_kwargs = {"draft_id": draft_id} if draft_id else {}
         missing: list[dict[str, str]] = []
         pending: list[dict[str, Any]] = []
         for item in context.get("annotations") or []:
@@ -2040,7 +2059,9 @@ class AgentGraphRunner:
                 missing.append({"annotationId": str(marker), "file": "未知文件"})
                 continue
             try:
-                content = self._sandbox.read_file(state["sandbox_id"], path)
+                content = self._sandbox.read_file(
+                    state["sandbox_id"], path, **draft_kwargs
+                )
             except SandboxError as exc:
                 # 读取失败无法证明“没生成”，宁可跳过也不误杀；构建日志
                 # 仍保留在 verify_result 中供人工排查。
@@ -2475,7 +2496,9 @@ def _build_approval_payload(state: AgentState) -> dict[str, Any]:
             },
         },
         "sandboxId": state.get("sandbox_id"),
-        "previewUrl": state.get("preview_url"),
+        # 草稿隔离：审批期间 iframe 必须指向草稿预览；主工作树此时零变化。
+        "previewUrl": (state.get("draft_preview_url") or state.get("preview_url")),
+        "isDraft": bool(state.get("draft_id")),
         "expiresAt": expires_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
 

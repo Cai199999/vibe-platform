@@ -32,6 +32,7 @@ from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from ai_core.config import Settings, get_settings
 from ai_core.ports.sandbox import (
     SandboxCommit,
+    SandboxDraft,
     SandboxError,
     SandboxGitError,
     SandboxHandle,
@@ -52,7 +53,8 @@ LABEL_MANAGED = "vibe.managed"
 # Vite 会在项目根目录瞬时生成 vite.config.js.timestamp-*.mjs 后立即删除；
 # 若 git add 恰好扫描到删除瞬间会报 "unable to stat"，因此必须忽略临时文件。
 GITIGNORE_CONTENT = (
-    "node_modules/\n"
+    # 不带斜杠同时覆盖真实目录与草稿里的 node_modules 软链接。
+    "node_modules\n"
     "dist/\n"
     ".vite/\n"
     "*.log\n"
@@ -68,7 +70,7 @@ GITIGNORE_CONTENT = (
 # 临时文件规则的旧沙盒，避免它们在下一次 checkpoint 时偶发失败。
 GIT_EXCLUDE_CONTENT = (
     "# vibe sandbox excludes\n"
-    "node_modules/\n"
+    "node_modules\n"
     "dist/\n"
     ".vite/\n"
     "*.log\n"
@@ -80,6 +82,9 @@ GIT_EXCLUDE_CONTENT = (
     "*.db\n"
 )
 FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+# 草稿 ID 由服务端生成，必须严格校验后才能拼进 shell 命令。
+DRAFT_ID_RE = re.compile(r"^drf_[0-9a-f]{16,32}$")
+DRAFT_GIT_USER = ("Vibe Draft", "draft@vibe.local")
 logger = logging.getLogger(__name__)
 
 # 写盘前静态门禁：语法错误 / 未绑定的 JSX 组件一律拦截，绝不让坏代码
@@ -124,6 +129,9 @@ class LocalDockerSandbox(SandboxProvider):
         self._sandboxes: dict[str, str] = {}
         # 已分配但尚未被 Docker 确认的宿主端口，避免同进程内重复分配。
         self._reserved_ports: set[int] = set()
+        # 活跃草稿：draft_id -> 元数据。草稿是内存态，Python 进程重启后
+        # 由 /app-drafts 目录与 git worktree 列表负责清理残留。
+        self._drafts: dict[str, dict[str, Any]] = {}
 
     # --------------------------------------------------------
     # 对外接口
@@ -143,6 +151,8 @@ class LocalDockerSandbox(SandboxProvider):
         sandbox_id = f"sbx_{uuid.uuid4().hex[:20]}"
         container_name = f"vibe-sandbox-{sandbox_id}"
         host_port = self._reserve_host_port()
+        # 草稿预览端口随沙盒一起发布：运行中无法给已有容器追加端口映射。
+        draft_host_port = self._reserve_host_port()
 
         env = {
             "PROJECT_ID": project_id,
@@ -162,7 +172,11 @@ class LocalDockerSandbox(SandboxProvider):
                 environment=env,
                 # 只暴露 127.0.0.1，避免沙盒预览直接暴露到局域网。
                 ports={
-                    f"{self.settings.sandbox_dev_port}/tcp": ("127.0.0.1", host_port)
+                    f"{self.settings.sandbox_dev_port}/tcp": ("127.0.0.1", host_port),
+                    f"{self.settings.sandbox_draft_port}/tcp": (
+                        "127.0.0.1",
+                        draft_host_port,
+                    ),
                 },
                 labels={
                     LABEL_MANAGED: "true",
@@ -190,15 +204,18 @@ class LocalDockerSandbox(SandboxProvider):
             with self._lock:
                 self._sandboxes[sandbox_id] = container.id
                 self._reserved_ports.add(host_port)
+                self._reserved_ports.add(draft_host_port)
         except (APIError, DockerException) as exc:
             if container is not None:
                 self._safe_remove(container)
             self._release_host_port(host_port)
+            self._release_host_port(draft_host_port)
             raise SandboxStartupError(f"创建沙盒失败: {exc}") from exc
         except SandboxError:
             if container is not None:
                 self._safe_remove(container)
             self._release_host_port(host_port)
+            self._release_host_port(draft_host_port)
             raise
 
         return SandboxHandle(
@@ -236,6 +253,7 @@ class LocalDockerSandbox(SandboxProvider):
         sandbox_id = f"sbx_{uuid.uuid4().hex[:20]}"
         container_name = f"vibe-sandbox-{sandbox_id}"
         host_port = self._reserve_host_port()
+        draft_host_port = self._reserve_host_port()
         env = {
             "PROJECT_ID": project_id,
             "SANDBOX_ID": sandbox_id,
@@ -256,7 +274,11 @@ class LocalDockerSandbox(SandboxProvider):
                 environment=env,
                 command=["sh", "-lc", start_command],
                 ports={
-                    f"{self.settings.sandbox_dev_port}/tcp": ("127.0.0.1", host_port)
+                    f"{self.settings.sandbox_dev_port}/tcp": ("127.0.0.1", host_port),
+                    f"{self.settings.sandbox_draft_port}/tcp": (
+                        "127.0.0.1",
+                        draft_host_port,
+                    ),
                 },
                 labels={
                     LABEL_MANAGED: "true",
@@ -284,15 +306,18 @@ class LocalDockerSandbox(SandboxProvider):
             with self._lock:
                 self._sandboxes[sandbox_id] = container.id
                 self._reserved_ports.add(host_port)
+                self._reserved_ports.add(draft_host_port)
         except (APIError, DockerException) as exc:
             if container is not None:
                 self._safe_remove(container)
             self._release_host_port(host_port)
+            self._release_host_port(draft_host_port)
             raise SandboxStartupError(f"创建导入沙盒失败: {exc}") from exc
         except SandboxError:
             if container is not None:
                 self._safe_remove(container)
             self._release_host_port(host_port)
+            self._release_host_port(draft_host_port)
             raise
 
         return SandboxHandle(
@@ -690,18 +715,20 @@ class LocalDockerSandbox(SandboxProvider):
         files: dict[str, str] | None = None,
         patch: str | None = None,
         deleted_paths: list[str] | None = None,
+        draft_id: str | None = None,
     ) -> list[str]:
         container = self._get_container(sandbox_id)
+        workdir = self._resolve_workdir(sandbox_id, draft_id)
         changed: list[str] = []
 
         normalized = self._validate_files(files or {})
         # 关键顺序：先在临时副本里预演全部变更并跑 AST 门禁，通过后才
-        # 触碰 /app。这样非法代码不会触发 HMR，沙盒始终停留在上一个
+        # 触碰工作目录。这样非法代码不会触发 HMR，沙盒始终停留在上一个
         # 可运行的 commit，不需要额外 reset。
         if normalized or patch:
-            self._preflight_code_check(container, normalized, patch)
+            self._preflight_code_check(container, normalized, patch, workdir)
         if normalized:
-            self._put_files(container, normalized)
+            self._put_files(container, normalized, workdir)
             changed.extend(sorted(normalized))
 
         for raw_path in deleted_paths or []:
@@ -709,7 +736,7 @@ class LocalDockerSandbox(SandboxProvider):
             code, output = self._exec(
                 container,
                 ["sh", "-lc", f"rm -rf -- {shlex.quote(rel_path)}"],
-                workdir=self.settings.sandbox_workdir,
+                workdir=workdir,
             )
             if code != 0:
                 raise SandboxPatchError(
@@ -718,7 +745,7 @@ class LocalDockerSandbox(SandboxProvider):
             changed.append(rel_path)
 
         if patch:
-            self._apply_unified_diff(container, patch)
+            self._apply_unified_diff(container, patch, workdir)
             changed.append("<unified-diff>")
 
         # 给 Vite 文件监听器一点时间捕获变更；即使尚未触发 HMR，
@@ -726,11 +753,17 @@ class LocalDockerSandbox(SandboxProvider):
         time.sleep(0.2)
         return sorted(set(changed))
 
-    def verify(self, sandbox_id: str, check: str = "build") -> VerifyResult:
+    def verify(
+        self,
+        sandbox_id: str,
+        check: str = "build",
+        draft_id: str | None = None,
+    ) -> VerifyResult:
         if check not in {"build", "test", "install"}:
             raise SandboxValidationError(f"不支持的校验类型: {check}")
 
         container = self._get_container(sandbox_id)
+        workdir = self._resolve_workdir(sandbox_id, draft_id)
         timeout = self.settings.sandbox_verify_timeout_seconds
         # busybox timeout：超时返回 124，避免 exec_run 无限阻塞。
         if check == "install":
@@ -750,7 +783,7 @@ class LocalDockerSandbox(SandboxProvider):
             exit_code, output = self._exec(
                 container,
                 ["sh", "-lc", command],
-                workdir=self.settings.sandbox_workdir,
+                workdir=workdir,
                 demux=True,
             )
         except DockerException as exc:
@@ -772,18 +805,25 @@ class LocalDockerSandbox(SandboxProvider):
             logs_truncated=truncated,
         )
 
-    def read_file(self, sandbox_id: str, path: str) -> str:
+    def read_file(
+        self,
+        sandbox_id: str,
+        path: str,
+        draft_id: str | None = None,
+    ) -> str:
         """读取沙盒内文本文件。
 
         Agent 在每次 apply 之后重新读取目标文件，确保 current_code 与沙盒
-        真实状态一致（尤其适用于 unified diff 场景）。
+        真实状态一致（尤其适用于 unified diff 场景）。传入 ``draft_id``
+        时读取草稿 worktree，审批前绝不触碰主工作树。
         """
         container = self._get_container(sandbox_id)
+        workdir = self._resolve_workdir(sandbox_id, draft_id)
         rel_path = self._normalize_path(path)
         code, output = self._exec(
             container,
             ["sh", "-lc", f"cat {shlex.quote(rel_path)}"],
-            workdir=self.settings.sandbox_workdir,
+            workdir=workdir,
         )
         if code != 0:
             raise SandboxValidationError(
@@ -827,6 +867,25 @@ class LocalDockerSandbox(SandboxProvider):
         return data
 
     def destroy(self, sandbox_id: str) -> None:
+        # 先回收草稿：worktree 的 git 元数据与预览进程都在容器内，
+        # 容器删除后无法再清理，会在宿主留下失联的 worktree 记录。
+        with self._lock:
+            draft_ids = [
+                draft_id
+                for draft_id, meta in self._drafts.items()
+                if meta.get("sandbox_id") == sandbox_id
+            ]
+        for draft_id in draft_ids:
+            try:
+                self.discard_draft(sandbox_id, draft_id)
+            except SandboxError:
+                logger.warning(
+                    "discard draft before destroy failed sandbox=%s draft=%s",
+                    sandbox_id,
+                    draft_id,
+                    exc_info=True,
+                )
+
         container = self._get_container(sandbox_id)
         try:
             container.remove(force=True)
@@ -837,6 +896,396 @@ class LocalDockerSandbox(SandboxProvider):
 
         with self._lock:
             self._sandboxes.pop(sandbox_id, None)
+
+    # --------------------------------------------------------
+    # 草稿隔离（Phase 0）
+    # --------------------------------------------------------
+    def begin_draft(self, sandbox_id: str) -> SandboxDraft:
+        """从当前 HEAD 创建 worktree 影子目录，并启动第二预览服务。
+
+        主工作树在此方法返回后不再接受任何写入：Applier 必须携带
+        ``draft_id`` 才能落到草稿目录。草稿预览使用容器内 5174 端口，
+        与主预览 5173 完全独立。
+        """
+        container = self._get_container(sandbox_id)
+        workdir = self.settings.sandbox_workdir
+        self._ensure_git_repo(container)
+
+        # 同一沙盒只有一个草稿预览端口；存在未完成草稿时再开新草稿会
+        # 抢 5174 并让前一个审批的 iframe 失效。必须显式收敛，不能静默覆盖。
+        with self._lock:
+            active = [
+                draft_id
+                for draft_id, meta in self._drafts.items()
+                if meta.get("sandbox_id") == sandbox_id
+            ]
+        if active:
+            raise SandboxError(
+                "沙盒存在未完成的隔离草稿，请先完成或取消该审批: "
+                + ", ".join(sorted(active))
+            )
+
+        with self._git_lock:
+            code, output = self._exec(
+                container,
+                ["git", "rev-parse", "HEAD"],
+                workdir=workdir,
+            )
+            if code != 0:
+                raise SandboxError(f"读取基准提交失败: {self._decode(output)}")
+            base_sha = self._extract_commit_hash(self._decode(output))
+            if not base_sha:
+                raise SandboxError("读取基准提交失败: 未返回合法 SHA")
+
+            # 未提交的已跟踪文件不会进入 worktree；若存在，说明上一轮
+            # 没有正常收口，继续创建草稿会让审批结果与用户所见不一致。
+            code, output = self._exec(
+                container,
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                workdir=workdir,
+            )
+            if code != 0:
+                raise SandboxError(f"检查主工作树状态失败: {self._decode(output)}")
+            dirty = self._decode(output).strip()
+            if dirty:
+                raise SandboxError(
+                    "主工作树存在未提交修改，无法创建隔离草稿。"
+                    f"请先处理以下文件:\n{dirty[:1000]}"
+                )
+
+            draft_id = f"drf_{uuid.uuid4().hex[:20]}"
+            draft_path = self._draft_workdir(draft_id)
+
+            # --detach：草稿不占用分支名，promote 时以 commit SHA 快进主分支。
+            command = (
+                f"rm -rf -- {shlex.quote(draft_path)} && "
+                f"mkdir -p -- {shlex.quote(self.settings.sandbox_draft_root)} && "
+                f"git worktree add --detach {shlex.quote(draft_path)} "
+                f"{shlex.quote(base_sha)}"
+            )
+            code, output = self._exec(
+                container, ["sh", "-lc", command], workdir=workdir
+            )
+            if code != 0:
+                raise SandboxError(f"创建草稿 worktree 失败: {self._decode(output)}")
+
+            # 依赖目录不复制：软链回主工作树，节省空间并保持版本一致。
+            if (
+                self._exec(
+                    container,
+                    [
+                        "sh",
+                        "-lc",
+                        f"[ -d {shlex.quote(workdir + '/node_modules')} ] && "
+                        f"ln -sfn {shlex.quote(workdir + '/node_modules')} "
+                        f"{shlex.quote(draft_path + '/node_modules')} || true",
+                    ],
+                )[0]
+                != 0
+            ):
+                logger.warning("link node_modules for draft failed")
+
+        try:
+            draft_host_port = self._published_port(
+                container, self.settings.sandbox_draft_port
+            )
+            self._start_draft_preview(
+                container,
+                draft_id,
+                draft_path,
+                draft_host_port,
+            )
+        except SandboxError:
+            # 预览起不来时回滚 worktree，避免留下无法审批的“孤儿草稿”。
+            self._remove_worktree(container, draft_path)
+            raise
+
+        draft = SandboxDraft(
+            draft_id=draft_id,
+            sandbox_id=sandbox_id,
+            base_sha=base_sha,
+            workdir=draft_path,
+            preview_url=(
+                f"http://{self.settings.sandbox_preview_host}:{draft_host_port}"
+                f"/?draft={draft_id}"
+            ),
+            host_port=draft_host_port,
+            created_at=datetime.now(timezone.utc),
+        )
+        with self._lock:
+            self._drafts[draft_id] = {
+                "sandbox_id": sandbox_id,
+                "workdir": draft_path,
+                "base_sha": base_sha,
+                "host_port": draft_host_port,
+                "preview_url": draft.preview_url,
+            }
+        logger.info(
+            "draft created sandbox=%s draft=%s base=%s preview=%s",
+            sandbox_id,
+            draft_id,
+            base_sha[:12],
+            draft.preview_url,
+        )
+        return draft
+
+    def discard_draft(self, sandbox_id: str, draft_id: str) -> None:
+        """停止草稿预览并移除 worktree；主工作树不做任何修改。"""
+        with self._lock:
+            meta = self._drafts.get(draft_id)
+        if meta is None or meta.get("sandbox_id") != sandbox_id:
+            # 幂等：审批取消 / 失败清理可能重复调用。
+            logger.info("draft already gone sandbox=%s draft=%s", sandbox_id, draft_id)
+            return
+
+        container = self._get_container(sandbox_id)
+        self._stop_draft_preview(container, draft_id)
+        self._remove_worktree(container, str(meta["workdir"]))
+        with self._lock:
+            self._drafts.pop(draft_id, None)
+        logger.info("draft discarded sandbox=%s draft=%s", sandbox_id, draft_id)
+
+    def promote_draft(
+        self,
+        sandbox_id: str,
+        draft_id: str,
+        expected_base_sha: str,
+    ) -> str:
+        """审批通过后把草稿快进合并到主工作树。
+
+        安全边界：
+          - 主 HEAD 必须仍是草稿创建时的 ``expected_base_sha``；
+          - 草稿必须仍以该提交为祖先；
+          - 只允许 ``--ff-only`` 合并，绝不产生冲突合并提交。
+        """
+        with self._lock:
+            meta = self._drafts.get(draft_id)
+        if meta is None or meta.get("sandbox_id") != sandbox_id:
+            raise SandboxError(f"草稿不存在或已失效: {draft_id}")
+
+        container = self._get_container(sandbox_id)
+        workdir = self.settings.sandbox_workdir
+        draft_path = str(meta["workdir"])
+
+        with self._git_lock:
+            code, output = self._exec(
+                container, ["git", "rev-parse", "HEAD"], workdir=workdir
+            )
+            current_sha = self._extract_commit_hash(self._decode(output))
+            if code != 0 or not current_sha:
+                raise SandboxError(f"读取主工作树 HEAD 失败: {self._decode(output)}")
+            if current_sha != expected_base_sha:
+                raise SandboxError(
+                    "主工作树在审批期间已变化，拒绝合并草稿。"
+                    f"expected={expected_base_sha[:12]} actual={current_sha[:12]}"
+                )
+
+            # 先停预览，避免合并瞬间 Vite 正在读取草稿文件。
+            self._stop_draft_preview(container, draft_id)
+
+            name, email = DRAFT_GIT_USER
+            commit_command = (
+                "git add -A && "
+                f"git -c user.name={shlex.quote(name)} "
+                f"-c user.email={shlex.quote(email)} "
+                f"commit --allow-empty -m {shlex.quote('draft: ' + draft_id)} && "
+                "git rev-parse HEAD"
+            )
+            code, output = self._exec(
+                container, ["sh", "-lc", commit_command], workdir=draft_path
+            )
+            draft_sha = self._extract_commit_hash(self._decode(output))
+            if code != 0 or not draft_sha:
+                raise SandboxError(f"提交草稿失败: {self._decode(output)}")
+
+            # 草稿必须仍以基准提交为祖先，防止 worktree 被外部改写。
+            code, _ = self._exec(
+                container,
+                ["git", "merge-base", "--is-ancestor", expected_base_sha, draft_sha],
+                workdir=draft_path,
+            )
+            if code != 0:
+                raise SandboxError("草稿历史与基准提交不一致，拒绝合并")
+
+            code, output = self._exec(
+                container,
+                ["git", "merge", "--ff-only", draft_sha],
+                workdir=workdir,
+            )
+            if code != 0:
+                raise SandboxError(f"草稿合并失败: {self._decode(output)}")
+
+            code, output = self._exec(
+                container, ["git", "rev-parse", "HEAD"], workdir=workdir
+            )
+            new_head = self._extract_commit_hash(self._decode(output))
+            if code != 0 or not new_head:
+                raise SandboxError(f"读取合并后 HEAD 失败: {self._decode(output)}")
+
+            self._remove_worktree(container, draft_path, remove_dir=False)
+            with self._lock:
+                self._drafts.pop(draft_id, None)
+
+        logger.info(
+            "draft promoted sandbox=%s draft=%s base=%s head=%s",
+            sandbox_id,
+            draft_id,
+            expected_base_sha[:12],
+            new_head[:12],
+        )
+        return new_head
+
+    def _draft_workdir(self, draft_id: str) -> str:
+        """草稿目录必须由服务端 ID 推导，禁止调用方传入任意路径。"""
+        if not DRAFT_ID_RE.fullmatch(draft_id):
+            raise SandboxValidationError(f"非法草稿 ID: {draft_id}")
+        return f"{self.settings.sandbox_draft_root}/{draft_id}"
+
+    def _resolve_workdir(self, sandbox_id: str, draft_id: str | None) -> str:
+        """把可选的草稿 ID 解析为真实工作目录。
+
+        未传 draft_id 时保持旧行为（主工作树）；传入时必须命中本 Provider
+        登记的活跃草稿，防止任意路径写入。
+        """
+        if not draft_id:
+            return self.settings.sandbox_workdir
+        with self._lock:
+            meta = self._drafts.get(draft_id)
+        if meta is None or meta.get("sandbox_id") != sandbox_id:
+            raise SandboxError(f"草稿不存在或已失效: {draft_id}")
+        return str(meta["workdir"])
+
+    def _published_port(self, container: Any, internal_port: int) -> int:
+        """读取容器启动时发布的宿主端口；旧沙盒没有草稿端口时给出明确错误。"""
+        try:
+            container.reload()
+            attrs = container.attrs
+        except DockerException as exc:
+            raise SandboxError(f"读取沙盒端口失败: {exc}") from exc
+        ports = (attrs.get("NetworkSettings") or {}).get("Ports") or {}
+        bindings = ports.get(f"{internal_port}/tcp") or []
+        if not bindings:
+            raise SandboxError(
+                f"沙盒未发布草稿预览端口 {internal_port}；"
+                "该沙盒创建于草稿隔离上线前，请重新创建沙盒后重试。"
+            )
+        try:
+            return int(bindings[0]["HostPort"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SandboxError(f"草稿预览端口映射异常: {bindings}") from exc
+
+    def _start_draft_preview(
+        self,
+        container: Any,
+        draft_id: str,
+        draft_path: str,
+        draft_host_port: int,
+    ) -> None:
+        """在草稿目录启动第二个预览进程，并等待端口就绪。"""
+        vite_bin = f"{draft_path}/node_modules/.bin/vite"
+        draft_port = self.settings.sandbox_draft_port
+        log_path = f"/tmp/vibe-draft-{draft_id}.log"
+        pid_path = f"/tmp/vibe-draft-{draft_id}.pid"
+        # Vite 项目优先；纯静态导入项目回退到镜像内置静态服务器。
+        command = (
+            f"cd {shlex.quote(draft_path)} && "
+            f"if [ -x {shlex.quote(vite_bin)} ]; then "
+            f"nohup env VITE_HMR_CLIENT_PORT={draft_host_port} "
+            f"{shlex.quote(vite_bin)} --host 0.0.0.0 --port {draft_port} "
+            f"--strictPort </dev/null >{shlex.quote(log_path)} 2>&1 & "
+            "else "
+            "nohup node /opt/vibe-static-server.mjs "
+            f"{shlex.quote(draft_path)} {draft_port} "
+            f"</dev/null >{shlex.quote(log_path)} 2>&1 & "
+            "fi; "
+            f"echo $! > {shlex.quote(pid_path)}"
+        )
+        code, output = self._exec(container, ["sh", "-lc", command], workdir=draft_path)
+        if code != 0:
+            raise SandboxError(f"启动草稿预览失败: {self._decode(output)}")
+
+        try:
+            self._wait_port_ready(
+                container,
+                draft_port,
+                timeout=self.settings.sandbox_draft_start_timeout_seconds,
+                log_path=log_path,
+                label=f"草稿 {draft_id}",
+            )
+        except SandboxStartupError as exc:
+            raise SandboxError(str(exc)) from exc
+
+    def _stop_draft_preview(self, container: Any, draft_id: str) -> None:
+        if not DRAFT_ID_RE.fullmatch(draft_id):
+            return
+        pid_path = f"/tmp/vibe-draft-{draft_id}.pid"
+        command = (
+            f"if [ -f {shlex.quote(pid_path)} ]; then "
+            f"kill $(cat {shlex.quote(pid_path)}) 2>/dev/null || true; "
+            f"rm -f {shlex.quote(pid_path)}; fi"
+        )
+        try:
+            self._exec(container, ["sh", "-lc", command])
+        except DockerException:
+            logger.warning(
+                "stop draft preview failed draft=%s", draft_id, exc_info=True
+            )
+
+    def _remove_worktree(
+        self,
+        container: Any,
+        draft_path: str,
+        *,
+        remove_dir: bool = True,
+    ) -> None:
+        workdir = self.settings.sandbox_workdir
+        # worktree remove 会先检查未提交修改；--force 保证失败 Run 也能回收。
+        command = (
+            f"git worktree remove --force {shlex.quote(draft_path)} "
+            "2>/dev/null || true; "
+            f"git worktree prune; "
+            + (f"rm -rf -- {shlex.quote(draft_path)}; " if remove_dir else "")
+            + "true"
+        )
+        try:
+            self._exec(container, ["sh", "-lc", command], workdir=workdir)
+        except DockerException:
+            logger.warning("remove worktree failed path=%s", draft_path, exc_info=True)
+
+    def _wait_port_ready(
+        self,
+        container: Any,
+        port: int,
+        *,
+        timeout: int,
+        log_path: str = "",
+        label: str = "",
+    ) -> None:
+        """通用端口探活；日志只在该端口启动失败时读取。"""
+        deadline = time.monotonic() + timeout
+        probe = f"wget -q -T 2 -O /dev/null http://127.0.0.1:{port}/"
+        while time.monotonic() < deadline:
+            container.reload()
+            if container.status != "running":
+                break
+            code, _ = self._exec(container, ["sh", "-lc", probe])
+            if code == 0:
+                return
+            time.sleep(0.4)
+
+        logs = ""
+        if log_path:
+            try:
+                code, output = self._exec(
+                    container, ["sh", "-lc", f"tail -40 {shlex.quote(log_path)}"]
+                )
+                if code == 0:
+                    logs = self._decode(output)
+            except DockerException:
+                pass
+        raise SandboxStartupError(
+            f"{label or '草稿'}预览启动超时（端口 {port}）。日志:\n{logs[-3000:]}"
+        )
 
     # --------------------------------------------------------
     # Docker 状态（供健康检查展示，不参与 UP/DEGRADED 判定）
@@ -950,10 +1399,16 @@ class LocalDockerSandbox(SandboxProvider):
     # --------------------------------------------------------
     # 文件写入
     # --------------------------------------------------------
-    def _put_files(self, container: Any, files: dict[str, str]) -> None:
+    def _put_files(
+        self,
+        container: Any,
+        files: dict[str, str],
+        workdir: str | None = None,
+    ) -> None:
         archive = self._build_tar(files)
+        target = workdir or self.settings.sandbox_workdir
         try:
-            ok = container.put_archive(self.settings.sandbox_workdir, archive)
+            ok = container.put_archive(target, archive)
         except DockerException as exc:
             raise SandboxError(f"写入沙盒文件失败: {exc}") from exc
         if not ok:
@@ -975,7 +1430,12 @@ class LocalDockerSandbox(SandboxProvider):
         if not ok:
             raise SandboxError("写入导入文件失败: put_archive 返回 False")
 
-    def _apply_unified_diff(self, container: Any, patch: str) -> None:
+    def _apply_unified_diff(
+        self,
+        container: Any,
+        patch: str,
+        workdir: str | None = None,
+    ) -> None:
         """应用 LLM 生成的 unified diff。
 
         ``--recount`` 是关键：模型经常把 hunk 头的行数写错（例如插入 35 行
@@ -994,7 +1454,7 @@ class LocalDockerSandbox(SandboxProvider):
                     "-lc",
                     "git apply --recount --whitespace=nowarn /tmp/vibe.patch.diff",
                 ],
-                workdir=self.settings.sandbox_workdir,
+                workdir=workdir or self.settings.sandbox_workdir,
             )
         except DockerException as exc:
             raise SandboxPatchError(f"应用补丁失败: {exc}") from exc
@@ -1010,6 +1470,7 @@ class LocalDockerSandbox(SandboxProvider):
         container: Any,
         files: dict[str, str] | None,
         patch: str | None,
+        workdir: str | None = None,
     ) -> None:
         """在临时副本中预演变更并执行 AST 检查。
 
@@ -1026,7 +1487,7 @@ class LocalDockerSandbox(SandboxProvider):
             return
 
         stage = AST_STAGE_DIR
-        workdir = self.settings.sandbox_workdir
+        workdir = workdir or self.settings.sandbox_workdir
         try:
             # 1. 准备临时工作目录。
             if patch:
@@ -1149,6 +1610,7 @@ class LocalDockerSandbox(SandboxProvider):
         patch: str | None,
         scopes: list[dict],
         changed_files: list[str],
+        draft_id: str | None = None,
     ) -> list[dict]:
         """用沙盒内的 Babel 对 before / after 做结构差分。
 
@@ -1162,7 +1624,7 @@ class LocalDockerSandbox(SandboxProvider):
         if not self._ensure_ast_scope_checker(container):
             raise SandboxError("实例 AST 检查器缺失，拒绝写入公共组件")
 
-        workdir = self.settings.sandbox_workdir
+        workdir = self._resolve_workdir(sandbox_id, draft_id)
         stage = AST_SCOPE_STAGE_DIR
         before_root = f"{stage}/before"
         after_root = f"{stage}/after"

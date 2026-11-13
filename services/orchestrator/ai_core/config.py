@@ -74,6 +74,13 @@ class Settings(BaseSettings):
     sandbox_template_dir: str = "/app/sandbox_template"
     sandbox_workdir: str = "/app"
     sandbox_dev_port: int = 5173
+    # 草稿预览端口：与主预览同时发布，审批前 iframe 指向这里。
+    sandbox_draft_port: int = 5174
+    # 草稿 worktree 根目录（容器内）；不能放在 /app 之下，避免主 Vite
+    # 文件监听把草稿产物当成源码。
+    sandbox_draft_root: str = "/app-drafts"
+    # 草稿预览启动超时；Vite 首次冷启动可能慢于主预览。
+    sandbox_draft_start_timeout_seconds: int = 90
 
     # 浏览器访问预览端口时使用的主机名。M1 为单机开发，默认 127.0.0.1。
     sandbox_preview_host: str = "127.0.0.1"

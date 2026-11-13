@@ -9,16 +9,17 @@ React + Vite → Java 21 BFF → Python 3.12 FastAPI/LangGraph → Docker 沙盒
 ## 已闭环能力
 
 - 画布圈选 / ADD / Inspect / 批量拖拽、多标注、双屏同步、HITL 澄清、Diff 审批、取消、Git 快照回滚。
-- 全栈生成：Architect 契约、Frontend/Backend/DBA/Infra 多 Agent、语义路由自愈、SQLite/MySQL 验收、产物导出导入。
+- 全栈生成：Architect 契约、多 Agent、语义路由自愈、SQLite/MySQL 验收、产物导出导入。
 - 混合 RAG、分级决策、Reflection、Token 成本、骨架防脑补、Agent 管理与知识库上传。
-- AST/ORM/DDL 门禁、Applier 责任隔离、契约审计、契约缺陷 vs 代码缺陷归因。
-- 风险自适应门禁 L1/L2/L3：按契约质量分级开关 AST、ORM/DDL、SQLite 与真实 MySQL 验收。
-- **圈选精度评测**：固定夹具 + 6 条 YAML 用例 + Playwright 真实点击/圈选，产出 Hit Rate 与 IoU；修复 SDK 节点去重键冲突与可交互父级提升。
-- **实例污染 P0 门禁**：① AST 差分，拦截公共组件修改 / 无守卫新增 JSX / map 数据源篡改，异常 fail-closed；② 结构化删除，行数阈值 + deleteRange + export 保护。
+- AST/ORM/DDL 门禁、Applier 责任隔离、契约审计、代码/契约缺陷归因。
+- 风险门禁 L1/L2/L3：按契约质量开关 AST、ORM/DDL、SQLite 与 MySQL 验收。
+- **圈选精度**：固定夹具 + 6 条用例 + Playwright 点击/圈选，产出 Hit Rate 与 IoU。
+- **实例污染 P0**：AST 差分拦截公共组件 / 无守卫 JSX / 数据源篡改；结构化删除阈值与 export 保护。
+- **草稿隔离 P0**：git worktree + 5174 草稿预览；审批前主树零变化，批准后 ff-only 合并，拒绝/失败/取消自动丢弃。
 
 ## 最新验证
 
-Python 447 项测试通过；Vite build 通过；风险分级三轮 E2E 通过。圈选基线 100% / IoU 1.000。门禁矩阵 8/8，Adapter 级 files/patch 双通道命中，相关测试 143 通过、门禁单测 25 通过。
+Python 469 项测试通过；Vite build 通过；草稿隔离 E2E 19/19（暂停主树 SHA 不变、草稿可预览、批准合并、拒绝零变化）。
 
 ## 真假边界
 
@@ -26,4 +27,4 @@ DeepSeek 真实调用；鉴权 Mock；BFF 无持久化；沙盒无 gVisor；未�
 
 ## 下一步
 
-Redis checkpoint、迁移回滚脚本、多服务编排、真实云端部署。
+Phase 1 Tool 协议（Resolver / apply_ast_edit）；Phase 2 多轮决策分流；Redis checkpoint；云端部署。
