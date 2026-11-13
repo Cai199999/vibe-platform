@@ -1,0 +1,122 @@
+# ============================================================
+# 圈选精度评测集（Canvas Precision Eval）
+#
+# 坐标系：沙盒 iframe 内 1440×900 CSS 像素。
+# 夹具：services/orchestrator/sandbox_template/canvas-precision.html
+#
+# 指标：
+#   - Hit Rate：target.source / measured.elements 与预期源码出处的一致率；
+#   - IoU：画布回传的世界坐标框与预期组件框的交并比。
+#
+# 运行：
+#   /tmp/vibe-e2e/bin/python scripts/canvas_precision_eval.py
+# ============================================================
+
+version: 1
+fixture: canvas-precision.html
+viewport:
+  width: 1440
+  height: 900
+
+# 达标阈值：低于任一阈值时脚本以非零码退出，便于 CI 拦截回归。
+thresholds:
+  hit_rate: 0.9
+  iou: 0.85
+
+cases:
+  # 1. 深层嵌套卡片：按钮左侧内边距，不落在文字上。
+  - id: hit_deep_button
+    name: 点击命中：深层卡片按钮
+    kind: HIT_TEST
+    point:
+      x: 150
+      y: 194
+    expected_source: "src/components/Button.tsx:12"
+    # 深层卡片有 1px 边框 + 多层绝对定位，真实视觉框是 145/173。
+    expected_box:
+      x: 145
+      y: 173
+      width: 200
+      height: 44
+
+  # 2. 表单输入框：中心点命中。
+  - id: hit_form_input
+    name: 点击命中：表单输入框
+    kind: HIT_TEST
+    point:
+      x: 1040
+      y: 192
+    expected_source: "src/components/TextInput.tsx:8"
+    expected_box:
+      x: 791
+      y: 171
+      width: 500
+      height: 44
+
+  # 3. 悬浮按钮：点在内部 svg 图标上，应提升到 button。
+  - id: hit_fab_icon
+    name: 点击命中：悬浮按钮内图标
+    kind: HIT_TEST
+    point:
+      x: 1348
+      y: 790
+    expected_source: "src/components/FloatingAction.tsx:22"
+    expected_box:
+      x: 1320
+      y: 760
+      width: 64
+      height: 64
+
+  # 4. 层级优先级：文字 span 自带 data-source-file（模拟插件逐元素注入），
+  #    命中应提升到最近的 button，而不是停在 span。
+  - id: layer_priority_inner_text
+    name: 层级优先级：按钮内文字
+    kind: LAYER_PRIORITY
+    point:
+      x: 210
+      y: 194
+    expected_source: "src/components/Button.tsx:12"
+    # 深层卡片有 1px 边框 + 多层绝对定位，真实视觉框是 145/173。
+    expected_box:
+      x: 145
+      y: 173
+      width: 200
+      height: 44
+
+  # 5. 整表单圈选：应召回 3 个可交互组件。
+  - id: elements_in_form
+    name: 圈选命中：整个表单
+    kind: ELEMENTS_IN_BOX
+    box:
+      x: 775
+      y: 155
+      width: 540
+      height: 300
+    expected_sources:
+      - "src/components/TextInput.tsx:8"
+      - "src/components/RoleSelect.tsx:14"
+      - "src/components/SaveButton.tsx:21"
+    expected_box:
+      x: 791
+      y: 171
+      width: 500
+      height: 264
+
+  # 6. 列表圈选：应召回 3 个行内操作按钮。
+  - id: elements_in_list
+    name: 圈选命中：列表操作按钮
+    kind: ELEMENTS_IN_BOX
+    box:
+      x: 495
+      y: 455
+      width: 130
+      height: 230
+    expected_sources:
+      - "src/components/RowAction.tsx:9"
+      - "src/components/RowAction.tsx:10"
+      - "src/components/RowAction.tsx:11"
+    expected_box:
+      x: 501
+      y: 465
+      width: 120
+      height: 216

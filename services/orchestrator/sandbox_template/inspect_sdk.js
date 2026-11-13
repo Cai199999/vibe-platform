@@ -67,6 +67,37 @@
     form: true,
     table: true,
   }
+  // 原生可交互标签：命中其内部文字 / 图标时，应把标注提升到这些节点。
+  var INTERACTIVE_TAGS = {
+    button: true,
+    input: true,
+    select: true,
+    textarea: true,
+    summary: true,
+  }
+  // 只从“纯展示型”节点向上提升，避免把已经是交互节点的目标改掉。
+  var PROMOTE_TAGS = {
+    span: true,
+    p: true,
+    strong: true,
+    em: true,
+    b: true,
+    i: true,
+    small: true,
+    code: true,
+    h1: true,
+    h2: true,
+    h3: true,
+    h4: true,
+    h5: true,
+    h6: true,
+    svg: true,
+    path: true,
+    g: true,
+    use: true,
+    img: true,
+    picture: true,
+  }
 
   function reply(source, origin, type, payload) {
     if (!source || typeof source.postMessage !== 'function') return
@@ -576,6 +607,52 @@
     }
   }
 
+  /** 判断节点本身是否承载交互语义。 */
+  function isInteractiveNode(node) {
+    if (!node || typeof node.getAttribute !== 'function') return false
+    var tag = String(node.tagName || '').toLowerCase()
+    if (INTERACTIVE_TAGS[tag]) return true
+    if (tag === 'a' && node.hasAttribute('href')) return true
+    if (node.getAttribute('data-interactive') === 'true') return true
+    var role = String(node.getAttribute('role') || '').toLowerCase()
+    return (
+      role === 'button' ||
+      role === 'link' ||
+      role === 'checkbox' ||
+      role === 'radio' ||
+      role === 'switch' ||
+      role === 'tab' ||
+      role === 'menuitem'
+    )
+  }
+
+  /**
+   * 层级提升：点击按钮内的 span / 图标时，最近的带源码的可交互祖先
+   * 才是用户真正想操作的目标。
+   *
+   * 插件会逐元素注入 data-source-file，因此 elementFromPoint 往往会先
+   * 命中 <span> 或 <svg>。如果不提升，Agent 会收到“改文字”指令却只拿到
+   * 内联节点的源码位置，导致改错组件或只改到子节点。
+   *
+   * 约束：只有祖先能解析出源码出处时才提升，否则保留原节点，避免把
+   * file:line 信息丢掉。
+   */
+  function promoteInteractiveNode(node) {
+    if (!node || isInteractiveNode(node)) return node
+    var tag = String(node.tagName || '').toLowerCase()
+    if (!PROMOTE_TAGS[tag]) return node
+    var current = node.parentElement
+    var hops = 0
+    while (current && current !== document.body && hops < 8) {
+      if (isInteractiveNode(current)) {
+        return readSource(current) ? current : node
+      }
+      current = current.parentElement
+      hops += 1
+    }
+    return node
+  }
+
   function rectOf(node) {
     var rect = node.getBoundingClientRect()
     return {
@@ -730,14 +807,18 @@
     }
     var selectionArea = Math.max(0, rect.width) * Math.max(0, rect.height)
     var nodes = []
-    var seen = {}
+    // 必须用 Set：以 DOM 节点作为普通对象 key 会被统一转成
+    // "[object HTMLButtonElement]" 之类的字符串，导致同标签只剩第一个
+    // 节点参与命中（列表里的多个按钮会被静默丢掉）。
+    var seen = new Set()
     var candidates = document.querySelectorAll(
       '[data-source], [data-vibe-target]',
     )
     for (var i = 0; i < candidates.length; i += 1) {
-      var node = candidates[i]
-      if (seen[node] || !node.isConnected) continue
-      seen[node] = true
+      // 内层文字 / 图标提升到可交互祖先后再参与覆盖面积计算。
+      var node = promoteInteractiveNode(candidates[i])
+      if (!node || seen.has(node) || !node.isConnected) continue
+      seen.add(node)
       var nodeRect = node.getBoundingClientRect()
       var area = nodeRect.width * nodeRect.height
       if (area <= 0) continue
@@ -771,6 +852,31 @@
       selectionArea <= best.area * ADD_AREA_RATIO &&
       best.share >= MODIFY_MIN_SELECTION_SHARE
     var action = coversEnough ? 'MODIFY_EXISTING' : 'CREATE_NEW'
+
+    // 圈选精度评测：回传框内所有叶子组件（按源码出处去重），
+    // 不只回传“最佳命中”。多组件圈选（如整个表单）需要这份集合
+    // 才能验证召回率；业务侧仍只消费 target 字段，不受影响。
+    var elementSeen = {}
+    var elements = []
+    for (var j = 0; j < leaves.length; j += 1) {
+      var item = leaves[j]
+      var key =
+        (item.source.file || '') +
+        ':' +
+        (item.source.line || 0) +
+        ':' +
+        (item.source.marker || '')
+      if (elementSeen[key]) continue
+      elementSeen[key] = true
+      elements.push({
+        source: item.source,
+        rect: rectOf(item.node),
+        coverage: Number(item.coverage.toFixed(3)),
+      })
+    }
+    elements.sort(function (a, b) {
+      return a.rect.y - b.rect.y || a.rect.x - b.rect.x
+    })
 
     // ADD 父容器：中心点命中的最近容器 → 命中节点祖先 → 重叠最大的容器。
     var centerX = rect.x + rect.width / 2
@@ -810,6 +916,8 @@
         hitArea: best ? Math.round(best.overlap) : 0,
         hitCoverage: best ? Number(best.coverage.toFixed(3)) : 0,
         candidateCount: leaves.length,
+        // 框内叶子组件集合（source + rect），供精度评测计算召回率。
+        elements: elements,
       },
       source: best
         ? readSource(best.node, true)
@@ -1137,6 +1245,9 @@
         tag: String(element.tagName || '').toLowerCase(),
       }
     }
+    // 内层 span / svg 自带 data-source 时，closest 会停在子节点；
+    // 这里再提升一次到最近的可交互祖先（button / a / [role=button]）。
+    target = promoteInteractiveNode(target)
 
     var source = readSource(target, withStyles)
     var rect = rectOf(target)

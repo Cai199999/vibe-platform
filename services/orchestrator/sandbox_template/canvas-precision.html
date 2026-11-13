@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vibe Canvas Precision Fixture</title>
+    <!--
+      圈选精度固定夹具（仅用于评测，不参与业务生成）。
+
+      设计约束：
+        1. 1440×900 固定视口、overflow:hidden，保证坐标完全确定；
+        2. 每个可交互元素都带 data-source-* 源码出处；
+        3. 深层嵌套卡片 / 列表 / 悬浮按钮 / 图标+文字混排 / 透明遮罩；
+        4. 内层 span 故意也带 data-source-file，用于验证命中时应提升到
+           最近的可交互父组件（button），而不是停在 span。
+    -->
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 1440px;
+        height: 900px;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #0b1220;
+        color: #e5e7eb;
+        font-family:
+          Inter, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+      .eval-root {
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(circle at 82% 12%, rgba(56, 189, 248, 0.12), transparent 34%),
+          radial-gradient(circle at 12% 82%, rgba(168, 85, 247, 0.12), transparent 36%),
+          #0b1220;
+      }
+      .panel {
+        position: absolute;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        border-radius: 18px;
+        background: rgba(15, 23, 42, 0.92);
+        box-shadow: 0 24px 60px rgba(2, 6, 23, 0.45);
+      }
+      .panel-title {
+        position: absolute;
+        left: 20px;
+        top: 16px;
+        margin: 0;
+        color: #cbd5e1;
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+      }
+      /* 深层嵌套卡片：按钮绝对坐标 = 80+24+8+8+8+16 / 100+24+8+8+8+24 */
+      .deep-card {
+        left: 80px;
+        top: 100px;
+        width: 360px;
+        height: 240px;
+      }
+      .deep-layer {
+        position: absolute;
+      }
+      .deep-1 {
+        left: 24px;
+        top: 24px;
+        width: 312px;
+        height: 202px;
+      }
+      .deep-2 {
+        left: 8px;
+        top: 8px;
+        width: 296px;
+        height: 186px;
+      }
+      .deep-3 {
+        left: 8px;
+        top: 8px;
+        width: 280px;
+        height: 170px;
+      }
+      .deep-4 {
+        left: 8px;
+        top: 8px;
+        width: 264px;
+        height: 154px;
+      }
+      #deep-export {
+        position: absolute;
+        left: 16px;
+        top: 24px;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        width: 200px;
+        height: 44px;
+        padding: 0 16px;
+        border: 1px solid rgba(56, 189, 248, 0.55);
+        border-radius: 12px;
+        background: rgba(14, 116, 144, 0.35);
+        color: #e0f2fe;
+        cursor: pointer;
+      }
+      #deep-export .icon {
+        flex: 0 0 18px;
+        width: 18px;
+        height: 18px;
+      }
+      #deep-export .label {
+        font-size: 13px;
+        font-weight: 700;
+      }
+      /* 透明装饰遮罩：必须 pointer-events:none，不能拦截按钮命中。 */
+      .glass-sheen {
+        position: absolute;
+        inset: 0;
+        border-radius: 18px;
+        pointer-events: none;
+        background: linear-gradient(
+          120deg,
+          rgba(255, 255, 255, 0.08),
+          transparent 42%
+        );
+      }
+      .list-card {
+        left: 80px;
+        top: 380px;
+        width: 600px;
+        height: 420px;
+      }
+      .list-row {
+        position: absolute;
+        left: 20px;
+        width: 560px;
+        height: 76px;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 14px;
+        background: rgba(30, 41, 59, 0.72);
+      }
+      .list-row.is-first {
+        top: 64px;
+      }
+      .list-row.is-second {
+        top: 154px;
+      }
+      .list-row.is-third {
+        top: 244px;
+      }
+      .row-title {
+        position: absolute;
+        left: 20px;
+        top: 16px;
+        font-size: 13px;
+        font-weight: 700;
+      }
+      .row-meta {
+        position: absolute;
+        left: 20px;
+        top: 40px;
+        color: #94a3b8;
+        font-size: 11px;
+      }
+      .row-action {
+        position: absolute;
+        top: 20px;
+        width: 120px;
+        height: 36px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        border-radius: 10px;
+        background: rgba(51, 65, 85, 0.6);
+        color: #e2e8f0;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      #list-edit-1 {
+        left: 420px;
+      }
+      #list-edit-2 {
+        left: 420px;
+      }
+      #list-edit-3 {
+        left: 420px;
+      }
+      .fab {
+        position: absolute;
+        left: 1320px;
+        top: 760px;
+        display: grid;
+        place-items: center;
+        width: 64px;
+        height: 64px;
+        padding: 0;
+        border: 0;
+        border-radius: 999px;
+        background: linear-gradient(135deg, #0ea5e9, #6366f1);
+        box-shadow: 0 16px 36px rgba(14, 165, 233, 0.4);
+        color: #fff;
+        cursor: pointer;
+      }
+      .fab svg {
+        width: 26px;
+        height: 26px;
+      }
+      .form-card {
+        left: 760px;
+        top: 120px;
+        width: 560px;
+        height: 340px;
+      }
+      .field-label {
+        position: absolute;
+        left: 30px;
+        color: #94a3b8;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+      }
+      .field-label.is-name {
+        top: 34px;
+      }
+      .field-label.is-role {
+        top: 98px;
+      }
+      .field-input {
+        position: absolute;
+        left: 30px;
+        width: 500px;
+        height: 44px;
+        padding: 0 14px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        border-radius: 11px;
+        outline: none;
+        background: rgba(2, 6, 23, 0.55);
+        color: #f8fafc;
+        font-size: 13px;
+      }
+      .field-input:focus {
+        border-color: #38bdf8;
+        box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18);
+      }
+      #name-input {
+        top: 50px;
+      }
+      #role-select {
+        top: 114px;
+      }
+      #save-profile {
+        position: absolute;
+        left: 30px;
+        top: 270px;
+        width: 180px;
+        height: 44px;
+        border: 0;
+        border-radius: 11px;
+        background: linear-gradient(135deg, #22c55e, #16a34a);
+        color: #052e16;
+        font-size: 13px;
+        font-weight: 800;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      class="eval-root"
+      data-source="page"
+      data-source-file="src/pages/Dashboard.tsx"
+      data-source-line="1"
+      data-source-column="1"
+      data-source-component="Dashboard"
+      data-source-kind="container"
+    >
+      <!-- 深层嵌套卡片 -->
+      <section
+        class="panel deep-card"
+        data-source="deep-card"
+        data-source-file="src/components/DeepCard.tsx"
+        data-source-line="18"
+        data-source-column="3"
+        data-source-component="DeepCard"
+        data-source-kind="container"
+      >
+        <h2 class="panel-title">深度嵌套卡片</h2>
+        <div class="deep-layer deep-1">
+          <div class="deep-layer deep-2">
+            <div class="deep-layer deep-3">
+              <div class="deep-layer deep-4">
+                <button
+                  id="deep-export"
+                  type="button"
+                  data-source="deep-export"
+                  data-source-file="src/components/Button.tsx"
+                  data-source-line="12"
+                  data-source-column="3"
+                  data-source-component="Button"
+                  data-interactive="true"
+                >
+                  <svg
+                    class="icon"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    data-source="deep-export-icon"
+                    data-source-file="src/components/Button.tsx"
+                    data-source-line="13"
+                    data-source-column="5"
+                    data-source-component="Button"
+                  >
+                    <path d="M12 3v12m0 0 4-4m-4 4-4-4" />
+                    <path d="M4 19h16" />
+                  </svg>
+                  <span
+                    class="label"
+                    data-source="deep-export-label"
+                    data-source-file="src/components/Button.tsx"
+                    data-source-line="14"
+                    data-source-column="7"
+                    data-source-component="Button"
+                    >导出报表</span
+                  >
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <span class="glass-sheen" aria-hidden="true"></span>
+      </section>
+
+      <!-- 列表：三个行内操作按钮 -->
+      <section
+        class="panel list-card"
+        data-source="activity-list"
+        data-source-file="src/components/ActivityList.tsx"
+        data-source-line="24"
+        data-source-column="3"
+        data-source-component="ActivityList"
+        data-source-kind="container"
+      >
+        <h2 class="panel-title">活动列表</h2>
+        <div class="list-row is-first"></div>
+        <div class="list-row is-second"></div>
+        <div class="list-row is-third"></div>
+        <span class="row-title" style="top: 348px">数据同步</span>
+        <span class="row-title" style="top: 438px">权限审计</span>
+        <span class="row-title" style="top: 528px">账单导出</span>
+        <button
+          id="list-edit-1"
+          class="row-action"
+          type="button"
+          data-source="list-edit-1"
+          data-source-file="src/components/RowAction.tsx"
+          data-source-line="9"
+          data-source-column="5"
+          data-source-component="RowAction"
+          data-interactive="true"
+          style="top: 84px"
+        >
+          编辑
+        </button>
+        <button
+          id="list-edit-2"
+          class="row-action"
+          type="button"
+          data-source="list-edit-2"
+          data-source-file="src/components/RowAction.tsx"
+          data-source-line="10"
+          data-source-column="5"
+          data-source-component="RowAction"
+          data-interactive="true"
+          style="top: 174px"
+        >
+          编辑
+        </button>
+        <button
+          id="list-edit-3"
+          class="row-action"
+          type="button"
+          data-source="list-edit-3"
+          data-source-file="src/components/RowAction.tsx"
+          data-source-line="11"
+          data-source-column="5"
+          data-source-component="RowAction"
+          data-interactive="true"
+          style="top: 264px"
+        >
+          编辑
+        </button>
+      </section>
+
+      <!-- 表单：圈住整块区域应得到 3 个可交互组件 -->
+      <form
+        id="profile-form"
+        class="panel form-card"
+        data-source="profile-form"
+        data-source-file="src/components/ProfileForm.tsx"
+        data-source-line="30"
+        data-source-column="3"
+        data-source-component="ProfileForm"
+        data-source-kind="container"
+        onsubmit="return false"
+      >
+        <h2 class="panel-title">编辑资料</h2>
+        <label class="field-label is-name" for="name-input">姓名</label>
+        <input
+          id="name-input"
+          class="field-input"
+          type="text"
+          value="Ada Lovelace"
+          data-source="name-input"
+          data-source-file="src/components/TextInput.tsx"
+          data-source-line="8"
+          data-source-column="3"
+          data-source-component="TextInput"
+          data-interactive="true"
+        />
+        <label class="field-label is-role" for="role-select">角色</label>
+        <select
+          id="role-select"
+          class="field-input"
+          data-source="role-select"
+          data-source-file="src/components/RoleSelect.tsx"
+          data-source-line="14"
+          data-source-column="3"
+          data-source-component="RoleSelect"
+          data-interactive="true"
+        >
+          <option>管理员</option>
+          <option>成员</option>
+        </select>
+        <button
+          id="save-profile"
+          type="submit"
+          data-source="save-profile"
+          data-source-file="src/components/SaveButton.tsx"
+          data-source-line="21"
+          data-source-column="3"
+          data-source-component="SaveButton"
+          data-interactive="true"
+        >
+          保存资料
+        </button>
+      </form>
+
+      <!-- 悬浮按钮：内部 svg 也带源码标记，命中应提升到 button -->
+      <button
+        id="fab-create"
+        class="fab"
+        type="button"
+        aria-label="新建"
+        data-source="fab-create"
+        data-source-file="src/components/FloatingAction.tsx"
+        data-source-line="22"
+        data-source-column="3"
+        data-source-component="FloatingAction"
+        data-interactive="true"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.4"
+          data-source="fab-create-icon"
+          data-source-file="src/components/FloatingAction.tsx"
+          data-source-line="30"
+          data-source-column="5"
+          data-source-component="FloatingAction"
+        >
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+      </button>
+    </div>
+  </body>
+</html>
