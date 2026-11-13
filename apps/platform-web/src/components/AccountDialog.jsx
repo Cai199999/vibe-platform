@@ -1,5 +1,4 @@
 import { useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext.jsx'
 
 const maskToken = (token = '') => {
@@ -14,7 +13,6 @@ const initials = (name = 'V') => name.trim().slice(0, 1).toUpperCase()
  */
 export default function AccountDialog({ open, onClose }) {
   const { session, user, logout } = useAuth()
-  const navigate = useNavigate()
 
   useEffect(() => {
     if (!open) return undefined
@@ -28,9 +26,8 @@ export default function AccountDialog({ open, onClose }) {
   if (!open || !user) return null
 
   const handleLogout = () => {
-    logout()
+    void logout()
     onClose()
-    navigate('/login', { replace: true })
   }
 
   return (

@@ -1,29 +1,23 @@
 # vibe-platform · 当前状态简报
 
-> 2026-11-13 · 历史细节见 `docs/memory/`
+> 2026-11-13 · 历史细节见 docs/memory/
 
 ## 架构
+React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；中间件复用 ~/Workspace/infra；AI Core 六边形分层。
 
-React + Vite → Java 21 BFF → Python 3.12 FastAPI/LangGraph → Docker 沙盒；中间件复用 `~/Workspace/infra`；AI Core 六边形分层。
-
-## 已闭环能力
-
-- 画布圈选 / ADD / Inspect / 批量拖拽、多标注、双屏同步、HITL 澄清、Diff 审批、取消、Git 快照回滚。
-- 全栈生成：Architect 契约、多 Agent、语义路由自愈、SQLite/MySQL 验收、产物导出导入。
-- 混合 RAG、分级决策、Reflection、Token 成本、骨架防脑补、Agent 管理与知识库上传。
-- AST/ORM/DDL 门禁、Applier 责任隔离、契约审计、代码/契约缺陷归因。
-- 风险门禁 L1/L2/L3；圈选精度夹具；实例污染 AST 拦截；草稿隔离 worktree + 5174 预览。
-- **Phase 1 工具协议**：确定性 Resolver 输出锚点 / 白名单 / 公共组件保护；Coder 仅能调 `apply_ast_edit`（Babel 精确切片 + 删除同构校验 + 硬门禁）。
-- **Phase 2 决策分流**：歧义 / 公共组件保护转 `AWAITING_DECISION` + `decision.required`；安全选项仅 select_target / modify_call_site / cancel；单 interrupt 自环重解析，3 轮上限。
+## 已闭环
+- 画布圈选/ADD/Inspect/批量拖拽、双屏同步、HITL 澄清、Diff 审批、取消、Git 快照回滚。
+- 全栈生成：Architect 契约、多 Agent、语义路由自愈、SQLite/MySQL 验收、导入导出。
+- 混合 RAG、分级决策、Reflection、Token 成本、骨架防脑补、Agent/知识库管理。
+- AST/ORM/DDL 门禁、Applier 隔离、契约审计、缺陷归因、风险门禁 L1/L2/L3。
+- Phase1：确定性 Resolver + apply_ast_edit 硬门禁；Phase2：AWAITING_DECISION + decision.required + 3 轮上限。
+- 画布生命周期：生成后自动 createSnapshot；Zustand+IndexedDB 草稿按 tenant:user:project 隔离；revision barrier 保留保存期间新操作；PreviewState 驱动 effectiveLinked；关闭/退出/刷新守卫+同步墓碑。
 
 ## 最新验证
-
-Python 520 项测试通过（含 Phase 1 25 项、Phase 2 17 项，含真实 LangGraph interrupt/resume）；真实沙盒 Resolver/Edit 冒烟通过；Vite build / BFF package 通过。
+前端 6 项 Vitest、Vite build 通过；Python 520 项测试此前通过（本轮未改后端）。
 
 ## 真假边界
-
-DeepSeek 真实调用；鉴权 Mock；BFF 无持久化；沙盒无 gVisor；未真实部署云端。
+DeepSeek 真实调用；鉴权 Mock；BFF 无持久化；沙盒无 gVisor；未云端部署。
 
 ## 下一步
-
-Phase 2 前端联调与真实沙盒验收；抽取新组件选项；Redis checkpoint；云端部署。
+孤儿 Draft 7 天回收；Phase2 前端联调与真实沙盒验收；Redis checkpoint；云端部署。

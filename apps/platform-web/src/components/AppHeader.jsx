@@ -33,8 +33,7 @@ export default function AppHeader({ busy, onOpenAccount, onOpenSettings }) {
 
   const handleLogout = () => {
     setMenuOpen(false)
-    logout()
-    navigate('/login', { replace: true })
+    void logout()
   }
 
   return (

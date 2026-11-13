@@ -8,6 +8,7 @@ import {
 } from 'react'
 import AppHeader from '../components/AppHeader.jsx'
 import AccountDialog from '../components/AccountDialog.jsx'
+import DraftLeaveGuard from '../components/DraftLeaveGuard.jsx'
 import SettingsDialog from '../components/SettingsDialog.jsx'
 import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
 import ProjectWorkspace from '../components/ProjectWorkspace.jsx'
@@ -43,6 +44,12 @@ import {
   releaseSupervisorGate,
   routeSupervisor,
 } from '../workspace/supervisorClient.js'
+import {
+  draftKeyFor,
+  resolveSaveToast,
+  useDraftStore,
+} from '../workspace/draftStore.js'
+import { writeDraftTombstone } from '../workspace/draftStorage.js'
 import { INITIAL_APP } from '../mockProject.js'
 
 const TARGET_FILE = 'src/App.jsx'
@@ -1253,6 +1260,20 @@ function EmptyWorkspace({ onNewProject }) {
 export default function WorkspacePage() {
   const { user, session } = useAuth()
   const { requireManualApproval } = useSettings()
+  // 草稿隔离维度：租户 + 用户。projectId 在每次读写时补入，避免新建项目
+  // 继承上一个项目的序号 / 操作队列。
+  const draftScope = useMemo(
+    () => ({
+      tenantId: user?.tenantId || 'tenant_local',
+      userId: user?.id || 'anonymous',
+    }),
+    [user?.tenantId, user?.id],
+  )
+  // 已从 IndexedDB 恢复完成的项目 key；恢复前禁止 publish 镜像写库。
+  const draftReadyRef = useRef(new Set())
+  const draftHydratingRef = useRef(new Set())
+  // 进行中的 hydration Promise：关闭 Tab 时先等它结束，避免把落盘草稿误判为空。
+  const draftHydrationRef = useRef(new Map())
   const {
     projects,
     openTabs,
@@ -1310,6 +1331,9 @@ export default function WorkspacePage() {
   }, [loadAgentCatalog])
   // 通用操作提示（rejected / 门控释放失败等），与导出提示分离。
   const [toast, setToast] = useState(null)
+  // 关闭 Tab 的未保存草稿守卫；确认后才真正销毁项目 / 沙盒。
+  const [draftGuard, setDraftGuard] = useState(null)
+  const [draftGuardBusy, setDraftGuardBusy] = useState(false)
   // 递增后 ProjectWorkspace 自动切到预览 Tab，露出局部的执行时间轴。
   const [previewFocus, setPreviewFocus] = useState({})
   // 快照回滚后递增：RuntimePanel 用它作为 iframe key，强制重载最新构建。
@@ -1373,6 +1397,8 @@ export default function WorkspacePage() {
   // 每个项目只处理一次 fullstack.completed：刷新预览 / 聚焦 / Toast 不能因
   // Architect 状态的其他字段更新而重复触发。
   const fullstackHandledRef = useRef(new Map())
+  // 自动 checkpoint 去重：同一项目的生成完成事件只提交一次。
+  const autoSnapshotInflightRef = useRef(new Set())
   // 前端骨架初始化只允许每个契约触发一次；失败重试时由 handler 清除。
   const frontendBootstrapRef = useRef(new Map())
   const frontendBootstrapFailureRef = useRef(new Map())
@@ -1690,75 +1716,137 @@ export default function WorkspacePage() {
       if (!fullstack?.runId || fullstack.status !== 'SUCCEEDED') return
       if (fullstackHandledRef.current.get(projectId) === fullstack.runId) return
       fullstackHandledRef.current.set(projectId, fullstack.runId)
-      patchRun(projectId, (previous) => {
-        const sandboxId = fullstack.sandboxId || previous.result?.sandboxId
-        // 纯 Architect 流程此前没有 run.result；全栈生成第一次创建沙盒，
-        // 必须补一份最小结果，预览面板才会切换到新服务。
-        const nextResult = previous.result
-          ? {
-              ...previous.result,
-              sandboxId: sandboxId || previous.result.sandboxId,
-              previewUrl: fullstack.previewUrl || previous.result.previewUrl,
-            }
-          : sandboxId || fullstack.previewUrl
-            ? {
-                runId: fullstack.runId,
-                status: 'SUCCEEDED',
-                sandboxId: sandboxId || null,
-                previewUrl: fullstack.previewUrl || '',
-                commitHash: null,
-                baselineCommit: null,
-                retryCount: 0,
-                turnCount: 0,
-                commits: [],
-                assistantMessage: '全栈代码已生成，前后端服务已启动。',
-                generatedPatch: '',
-                verifyResult: null,
-                messages: [],
-                error: null,
-              }
-            : previous.result
-        return {
-          ...previous,
-          result: nextResult,
-          sandboxIds:
-            sandboxId && !previous.sandboxIds.includes(sandboxId)
-              ? [...previous.sandboxIds, sandboxId]
-              : previous.sandboxIds,
-        }
-      })
-      setPreviewRefresh((previous) => ({
-        ...previous,
-        [projectId]: (previous[projectId] ?? 0) + 1,
-      }))
 
-      if (fullstack.mode === 'frontend') {
-        // 对话确认后的初始骨架：把真实 App.jsx 写回项目，并把画布从
-        // 空白 / 骨架屏切换为 live。后续标注修改都基于这份源码。
-        const entrySource = fullstack.result?.frontendEntry || ''
-        if (!entrySource) {
-          console.warn('[frontend-bootstrap] 完成事件缺少 frontendEntry', {
-            projectId,
-            runId: fullstack.runId,
-          })
-        }
-        updateProject(projectId, (project) => ({
-          ...project,
-          bootstrap: 'ready',
-          canvasMode: 'live',
-          generated: true,
-          entryFile: 'src/App.jsx',
-          files: entrySource
-            ? { ...project.files, 'src/App.jsx': entrySource }
-            : project.files,
+      const currentRun = runStatesRef.current?.[projectId] ?? EMPTY_RUN
+      const sandboxId =
+        fullstack.sandboxId || currentRun.result?.sandboxId || null
+      const isFrontendBootstrap = fullstack.mode === 'frontend'
+      const checkpointMessage = isFrontendBootstrap
+        ? '自动存档：初始前端骨架已生成'
+        : '自动存档：全栈代码已生成'
+
+      // 先应用生成结果，再执行一次“无感 checkpoint”：
+      // 骨架 / 全栈生成都会直接写主工作树，必须在用户发起下一次标注 Run
+      // 之前把它提交掉，否则 begin_draft 会因 “主工作树存在未提交修改” 拒绝。
+      // 这里复用现有 snapshotClient.createSnapshot，不新增任何接口或按钮。
+      const applyGeneratedResult = () => {
+        if (!workspaceMountedRef.current) return
+        patchRun(projectId, (previous) => {
+          // 纯 Architect 流程此前没有 run.result；全栈生成第一次创建沙盒，
+          // 必须补一份最小结果，预览面板才会切换到新服务。
+          const nextResult = previous.result
+            ? {
+                ...previous.result,
+                sandboxId: sandboxId || previous.result.sandboxId,
+                previewUrl: fullstack.previewUrl || previous.result.previewUrl,
+              }
+            : sandboxId || fullstack.previewUrl
+              ? {
+                  runId: fullstack.runId,
+                  status: 'SUCCEEDED',
+                  sandboxId: sandboxId || null,
+                  previewUrl: fullstack.previewUrl || '',
+                  commitHash: null,
+                  baselineCommit: null,
+                  retryCount: 0,
+                  turnCount: 0,
+                  commits: [],
+                  assistantMessage: '全栈代码已生成，前后端服务已启动。',
+                  generatedPatch: '',
+                  verifyResult: null,
+                  messages: [],
+                  error: null,
+                }
+              : previous.result
+          return {
+            ...previous,
+            result: nextResult,
+            sandboxIds:
+              sandboxId && !previous.sandboxIds.includes(sandboxId)
+                ? [...previous.sandboxIds, sandboxId]
+                : previous.sandboxIds,
+          }
+        })
+        setPreviewRefresh((previous) => ({
+          ...previous,
+          [projectId]: (previous[projectId] ?? 0) + 1,
         }))
-        showToast('success', '初始前端页面已生成，画布已切换为实时预览')
-      } else {
-        focusPreview(projectId)
-        showToast('success', '全栈代码已生成，沙盒前后端已重启')
+
+        if (isFrontendBootstrap) {
+          // 对话确认后的初始骨架：把真实 App.jsx 写回项目，并把画布从
+          // 空白 / 骨架屏切换为 live。后续标注修改都基于这份源码。
+          const entrySource = fullstack.result?.frontendEntry || ''
+          if (!entrySource) {
+            console.warn('[frontend-bootstrap] 完成事件缺少 frontendEntry', {
+              projectId,
+              runId: fullstack.runId,
+            })
+          }
+          updateProject(projectId, (project) => ({
+            ...project,
+            bootstrap: 'ready',
+            canvasMode: 'live',
+            generated: true,
+            entryFile: 'src/App.jsx',
+            files: entrySource
+              ? { ...project.files, 'src/App.jsx': entrySource }
+              : project.files,
+          }))
+          showToast('success', '初始前端页面已生成，画布已切换为实时预览')
+        } else {
+          focusPreview(projectId)
+          showToast('success', '全栈代码已生成，沙盒前后端已重启')
+        }
       }
+
+      if (!sandboxId) {
+        applyGeneratedResult()
+        return
+      }
+
+      // 同一项目同一时刻只允许一次自动存档；完成后才放开画布交互。
+      autoSnapshotInflightRef.current.add(projectId)
+      void (async () => {
+        try {
+          const payload = await createSnapshot(
+            sandboxId,
+            checkpointMessage,
+            session?.token,
+            {
+              projectId,
+              tenantId: user?.tenantId || 'tenant_local',
+              latestChanges: checkpointMessage,
+            },
+          )
+          if (workspaceMountedRef.current) {
+            patchRun(projectId, {
+              // 代码已进入 Git，下一步架构 / 标注 Run 可以安全创建 worktree。
+              dirty: false,
+              projectSummary:
+                payload?.projectSummary || currentRun.projectSummary || '',
+              latestChanges:
+                payload?.latestChanges || currentRun.latestChanges || '',
+            })
+          }
+        } catch (cause) {
+          // 自动存档失败不阻断预览，但必须显式标脏并提示用户手动保存，
+          // 否则下一次标注 Run 仍会撞上“主工作树存在未提交修改”。
+          if (workspaceMountedRef.current) {
+            patchRun(projectId, { dirty: true })
+            showToast(
+              'error',
+              `自动存档失败，请点击【保存快照】后继续：${
+                cause?.message || cause
+              }`,
+            )
+          }
+        } finally {
+          autoSnapshotInflightRef.current.delete(projectId)
+          applyGeneratedResult()
+        }
+      })()
     })
-  }, [architectStates, updateProject])
+  }, [architectStates, updateProject, session?.token, user?.tenantId])
 
   /**
    * 导入项目：上传 zip / tar.gz 全栈包 / 截图 -> Python 解包并启动沙盒 -> 新建 Tab。
@@ -3947,6 +4035,7 @@ export default function WorkspacePage() {
       }
       return next
     })
+    syncDraftMirror(projectId)
   }
 
   /** 把新增组件草稿同步到 React state（幽灵预览与悬浮列表都读它）。 */
@@ -3962,7 +4051,154 @@ export default function WorkspacePage() {
       }
       return next
     })
+    syncDraftMirror(projectId)
   }
+
+  const draftKeyOf = (projectId) =>
+    draftKeyFor({ ...draftScope, projectId })
+
+  /**
+   * 把 ref 草稿镜像到 Zustand / IndexedDB。
+   *
+   * 恢复完成前绝不写库：否则首次渲染时 ref 还是空 Map，会把上一次会话的
+   * 草稿覆盖成空记录。恢复完成后内容相同的操作不会产生新 seq。
+   */
+  const syncDraftMirror = (projectId) => {
+    const key = draftKeyOf(projectId)
+    if (!draftReadyRef.current.has(key)) return
+    const layoutOps = [
+      ...(pendingLayoutChangesRef.current.get(projectId)?.values() ?? []),
+    ]
+    const additions = [
+      ...(pendingAdditionsRef.current.get(projectId)?.values() ?? []),
+    ]
+    useDraftStore
+      .getState()
+      .syncDraft(
+        { ...draftScope, projectId },
+        { layoutOps, additions },
+      )
+  }
+
+  /**
+   * 启动 / 打开项目时从 IndexedDB 恢复草稿。
+   *
+   * 恢复顺序：先读记录 → 合并进 ref（保留本次渲染中用户刚产生的新操作）
+   * → 标记 ready → publish 到 React state。这样刷新 / 崩溃后画布上的位移、
+   * 新增组件与悬浮操作条都能原样回来。
+   */
+  useEffect(() => {
+    if (!user?.id) return
+    openTabs.forEach((projectId) => {
+      const key = draftKeyOf(projectId)
+      if (
+        draftReadyRef.current.has(key) ||
+        draftHydratingRef.current.has(key)
+      ) {
+        return
+      }
+      draftHydratingRef.current.add(key)
+      const hydration = (async () => {
+        try {
+          const record = await useDraftStore
+            .getState()
+            .hydrateProjectDraft({ ...draftScope, projectId })
+          if (
+            !workspaceMountedRef.current ||
+            closedProjectsRef.current.has(projectId)
+          ) {
+            // 读取期间 Tab 已被关闭：清掉可能刚写回内存 Store 的记录。
+            await useDraftStore
+              .getState()
+              .purgeProjectDraft({ ...draftScope, projectId })
+            return
+          }
+          if (record?.ops?.length) {
+            const layoutMap =
+              pendingLayoutChangesRef.current.get(projectId) ?? new Map()
+            const additionMap =
+              pendingAdditionsRef.current.get(projectId) ?? new Map()
+            record.ops.forEach((op) => {
+              if (op.kind === 'layout' && op.payload?.selector) {
+                if (!layoutMap.has(op.payload.selector)) {
+                  layoutMap.set(op.payload.selector, op.payload)
+                }
+              }
+              if (op.kind === 'addition') {
+                const annotationId =
+                  op.payload?.annotationId || op.payload?.id
+                if (annotationId && !additionMap.has(annotationId)) {
+                  additionMap.set(annotationId, op.payload)
+                }
+              }
+            })
+            if (layoutMap.size) {
+              pendingLayoutChangesRef.current.set(projectId, layoutMap)
+            }
+            if (additionMap.size) {
+              pendingAdditionsRef.current.set(projectId, additionMap)
+            }
+          }
+          draftReadyRef.current.add(key)
+          publishPendingLayoutChanges(projectId)
+          publishPendingAdditions(projectId)
+        } catch (cause) {
+          // IndexedDB 损坏 / 配额异常：不阻断工作区，按“无草稿”继续。
+          console.warn('[draft] 恢复本地草稿失败', projectId, cause)
+        } finally {
+          draftHydratingRef.current.delete(key)
+        }
+      })()
+      draftHydrationRef.current.set(key, hydration)
+      void hydration
+        .finally(() => {
+          if (draftHydrationRef.current.get(key) === hydration) {
+            draftHydrationRef.current.delete(key)
+          }
+        })
+        .catch(() => {})
+    })
+  }, [openTabs, draftScope, user?.id])
+
+  /**
+   * 刷新 / 关闭页面保护。
+   *
+   * 浏览器不允许自定义 beforeunload 文案，这里只负责触发原生确认；
+   * 用户确认离开后 pagehide 同步写 localStorage 墓碑，下次进入工作区时
+   * 由 draftStore 清理 IndexedDB。崩溃（没有 pagehide）不写墓碑，草稿保留。
+   */
+  useEffect(() => {
+    if (!user?.id) return undefined
+    const unsavedProjectIds = () =>
+      openTabs.filter(
+        (projectId) =>
+          (useDraftStore.getState().records[draftKeyOf(projectId)]?.ops
+            ?.length ?? 0) > 0,
+      )
+
+    const handleBeforeUnload = (event) => {
+      if (unsavedProjectIds().length === 0) return
+      event.preventDefault()
+      // 兼容旧浏览器：必须给 returnValue 赋非空值才会弹确认框。
+      event.returnValue = ''
+    }
+    const handlePageHide = (event) => {
+      // bfcache（前进 / 后退）不是真正离开：此时写墓碑会在用户返回后
+      // 误删仍然存活的草稿。只有真正卸载才同步落墓碑。
+      if (event.persisted) return
+      const projectIds = unsavedProjectIds()
+      if (projectIds.length > 0) {
+        writeDraftTombstone(draftScope, projectIds)
+      }
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    window.addEventListener('pagehide', handlePageHide)
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+      window.removeEventListener('pagehide', handlePageHide)
+    }
+  }, [openTabs, draftScope, user?.id])
 
   /**
    * 新增 / 更新一条视觉暂存。
@@ -5057,7 +5293,31 @@ export default function WorkspacePage() {
     }
 
     setSnapshotSave((previous) => ({ ...previous, saving: true, error: null }))
+    const scope = { ...draftScope, projectId }
+    // 关键：在点击瞬间记录 revision barrier。随后即使用户继续拖拽 /
+    // 新增组件，这些新操作会拿到更大的 seq，保存成功后不会被误删。
+    const saveTicket = useDraftStore.getState().beginSave(scope)
     try {
+      // 快照提交的是主工作树代码，而画布草稿还只存在于本地。先把草稿
+      // 通过现有【保存布局】链路落进代码，再做 Git checkpoint，否则
+      // “保存快照”会丢掉用户眼前的修改。
+      const hasPendingLayout =
+        (pendingLayoutChangesRef.current.get(projectId)?.size ?? 0) > 0 ||
+        (pendingAdditionsRef.current.get(projectId)?.size ?? 0) > 0
+      if (hasPendingLayout) {
+        const flushed = await handleSaveLayout(projectId)
+        if (!flushed) {
+          useDraftStore.getState().cancelSave(scope)
+          if (!workspaceMountedRef.current) return
+          setSnapshotSave((previous) => ({
+            ...previous,
+            saving: false,
+            error: '画布草稿尚未同步，快照未保存；草稿已保留，可直接重试。',
+          }))
+          return
+        }
+      }
+
       const run = runStates[projectId] ?? EMPTY_RUN
       // latestChanges 是本次快照涵盖的改动说明；为空时退化为快照备注，
       // 保证第一次保存也能生成 global_summary.md。
@@ -5067,6 +5327,11 @@ export default function WorkspacePage() {
         tenantId: user?.tenantId || 'tenant_local',
         latestChanges,
       })
+      // 只删除 barrier 之前已提交的操作；保存期间产生的新修改继续留在
+      // IndexedDB，并提示用户下次保存。
+      const committed = await useDraftStore
+        .getState()
+        .commitSave(scope, { barrier: saveTicket.barrier })
       if (!workspaceMountedRef.current) return
       setSnapshotSave((previous) => ({ ...previous, saving: false, open: false }))
       // 保存成功 = 已落盘：解除下一步门控，并缓存全局摘要供 Architect 使用。
@@ -5075,14 +5340,13 @@ export default function WorkspacePage() {
         projectSummary: payload?.projectSummary || run.projectSummary || '',
         latestChanges: payload?.latestChanges || latestChanges,
       })
-      showSnapshotToast(
-        'success',
-        `快照已保存：${message}（${payload?.shortHash ?? ''}）`,
-      )
+      const notice = resolveSaveToast(committed)
+      showSnapshotToast(notice.kind, notice.text)
       if (snapshotDrawer.open && snapshotDrawer.projectId === projectId) {
         void refreshSnapshotList(projectId, sandboxId)
       }
     } catch (cause) {
+      useDraftStore.getState().cancelSave(scope)
       if (!workspaceMountedRef.current) return
       setSnapshotSave((previous) => ({
         ...previous,
@@ -5305,7 +5569,8 @@ export default function WorkspacePage() {
    * 3. 删除该项目的运行状态；
    * 4. 调用 BFF 依次销毁所有关联沙盒。
    */
-  const handleCloseTab = (projectId) => {
+  const closeProjectNow = (projectId) => {
+    if (closedProjectsRef.current.has(projectId)) return
     const sandboxIds = runStates[projectId]?.sandboxIds ?? []
     closedProjectsRef.current.add(projectId)
     inflightRef.current.delete(projectId)
@@ -5322,8 +5587,21 @@ export default function WorkspacePage() {
     runEpochRef.current.delete(projectId)
     // 项目销毁后丢弃未保存的布局草稿，避免悬浮条残留在其他 Tab。
     pendingLayoutChangesRef.current.delete(projectId)
+    pendingAdditionsRef.current.delete(projectId)
     layoutSaveInflightRef.current.delete(projectId)
+    layoutFlushRef.current.delete(projectId)
+    draftReadyRef.current.delete(draftKeyOf(projectId))
+    // 无草稿直接关闭时也清掉 clean 记录，避免 IndexedDB 留下孤儿。
+    void useDraftStore
+      .getState()
+      .purgeProjectDraft({ ...draftScope, projectId })
     setPendingLayoutChanges((previous) => {
+      if (!previous[projectId]) return previous
+      const next = { ...previous }
+      delete next[projectId]
+      return next
+    })
+    setPendingAdditions((previous) => {
       if (!previous[projectId]) return previous
       const next = { ...previous }
       delete next[projectId]
@@ -5372,6 +5650,59 @@ export default function WorkspacePage() {
     sandboxIds.forEach((sandboxId) => {
       void destroySandbox(sandboxId, session?.token)
     })
+  }
+
+  /**
+   * 关闭 Tab 前检查本地草稿：
+   *  - 有未保存操作：弹自定义 Modal，取消则画布 / 草稿 / 沙盒原样保留；
+   *  - 确认：先清 IndexedDB，再执行原有 closeProjectNow 彻底销毁。
+   */
+  const handleCloseTab = (projectId) => {
+    const key = draftKeyOf(projectId)
+    const hydration = draftHydrationRef.current.get(key)
+    if (hydration) {
+      // 草稿尚未从 IndexedDB 读完：先等恢复完成，再判断是否需要守卫。
+      void hydration.then(
+        () => {
+          draftHydrationRef.current.delete(key)
+          draftHydratingRef.current.delete(key)
+          handleCloseTab(projectId)
+        },
+        () => handleCloseTab(projectId),
+      )
+      return
+    }
+    const hasDraft = useDraftStore
+      .getState()
+      .hasDraftForProject({ ...draftScope, projectId })
+    if (hasDraft) {
+      setDraftGuard({ kind: 'close', projectId })
+      return
+    }
+    closeProjectNow(projectId)
+  }
+
+  const confirmDraftGuard = async () => {
+    if (!draftGuard || draftGuardBusy) return
+    setDraftGuardBusy(true)
+    try {
+      if (draftGuard.kind === 'close') {
+        const projectId = draftGuard.projectId
+        await useDraftStore
+          .getState()
+          .purgeProjectDraft({ ...draftScope, projectId })
+        draftReadyRef.current.delete(draftKeyOf(projectId))
+        setDraftGuard(null)
+        closeProjectNow(projectId)
+      }
+    } finally {
+      setDraftGuardBusy(false)
+    }
+  }
+
+  const cancelDraftGuard = () => {
+    if (draftGuardBusy) return
+    setDraftGuard(null)
   }
 
   const statuses = useMemo(() => {
@@ -5920,6 +6251,14 @@ export default function WorkspacePage() {
           </form>
         </div>
       )}
+
+      <DraftLeaveGuard
+        open={Boolean(draftGuard)}
+        actionText="关闭"
+        busy={draftGuardBusy}
+        onCancel={cancelDraftGuard}
+        onConfirm={confirmDraftGuard}
+      />
 
       <AccountDialog open={accountOpen} onClose={() => setAccountOpen(false)} />
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />

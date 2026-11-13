@@ -10,6 +10,11 @@ import {
   ViewportProvider,
   useViewportState,
 } from '../workspace/ViewportContext.jsx'
+import { usePreviewConnection } from '../workspace/usePreviewConnection.js'
+import {
+  previewLinkHint,
+  resolvePreviewState,
+} from '../workspace/previewState.js'
 import {
   CREATE_NEW,
   MODIFY_EXISTING,
@@ -105,7 +110,13 @@ function ProjectWorkspaceInner({
   onFullstackGenerate,
   onReleaseGate,
 }) {
-  const { linked, setLinked } = useViewportState()
+  const {
+    linked,
+    setLinked,
+    previewState,
+    linkDisabled,
+  } = useViewportState()
+  const linkHint = previewLinkHint(previewState)
   // 当前布局：compare = 单屏切换，dual = 双屏同显。
   const [viewMode, setViewMode] = useState('compare')
   // 仅对比模式生效：当前显示画布还是预览。
@@ -847,10 +858,20 @@ function ProjectWorkspaceInner({
           {viewMode === 'dual' && (
             <button
               type="button"
-              className={`link-toggle ${linked ? 'is-active' : ''}`}
+              className={`link-toggle ${linked ? 'is-active' : ''} ${
+                linkDisabled ? 'is-disabled' : ''
+              }`}
               aria-pressed={linked}
-              title="画布与预览同步缩放、平移"
-              onClick={() => setLinked((value) => !value)}
+              aria-disabled={linkDisabled}
+              data-preview-state={previewState}
+              // 预览 BOOTING / DEGRADED / SNAPSHOT 时只禁用开关，
+              // 绝不调用 setLinked 覆盖用户此前的联动偏好。
+              disabled={linkDisabled}
+              title={linkDisabled ? linkHint : '画布与预览同步缩放、平移'}
+              onClick={() => {
+                if (linkDisabled) return
+                setLinked((value) => !value)
+              }}
             >
               <span className="link-dot" aria-hidden="true" />
               视口联动
@@ -1203,9 +1224,20 @@ function ProjectWorkspaceInner({
  *  - 展示模式下可开启视口联动，两边共享同一组变换。
  */
 function ProjectWorkspace(props) {
+  // 预览连接探测放在 Provider 外层：视口联动必须消费真实的 LIVE 状态，
+  // 不能只看 run 是否成功。探测结果变化只影响联动开关，不会卸载画布/预览。
+  const previewUrl = props.run?.result?.previewUrl ?? ''
+  const connection = usePreviewConnection(previewUrl, Boolean(props.active))
+  const previewState = resolvePreviewState({
+    previewUrl,
+    sandboxId: props.run?.result?.sandboxId,
+    connection,
+    // 有可回滚快照时，断线降级为只读 SNAPSHOT，而不是彻底空白。
+    hasSnapshot: Boolean(props.run?.result?.commitHash),
+  })
   return (
-    <ViewportProvider>
-      <ProjectWorkspaceInner {...props} />
+    <ViewportProvider previewState={previewState}>
+      <ProjectWorkspaceInner {...props} previewState={previewState} />
     </ViewportProvider>
   )
 }

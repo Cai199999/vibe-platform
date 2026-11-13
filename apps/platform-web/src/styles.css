@@ -473,6 +473,22 @@ code {
   box-shadow: 0 0 10px rgba(56, 189, 248, 0.8);
 }
 
+/* 预览非 LIVE 时仅禁用联动，不覆盖用户此前的 linkedPreference。 */
+.link-toggle:disabled,
+.link-toggle.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+  border-color: var(--border);
+  background: rgba(148, 163, 184, 0.04);
+  color: var(--faint);
+}
+
+.link-toggle:disabled:hover,
+.link-toggle.is-disabled:hover {
+  border-color: var(--border);
+  color: var(--faint);
+}
+
 /* 工具栏最右侧的导出入口：整个工作区唯一的实心强调按钮。 */
 .export-button {
   display: inline-flex;
@@ -11321,4 +11337,30 @@ body.is-viewport-panning * {
 .paused-quick-options li span {
   color: rgba(148, 163, 184, 0.9);
   font-size: 10px;
+}
+
+
+/* 未保存草稿离开守卫 */
+.draft-guard-backdrop {
+  z-index: 90;
+}
+
+.draft-guard-modal {
+  border-color: rgba(251, 191, 36, 0.35);
+}
+
+.draft-guard-copy {
+  color: var(--text) !important;
+  font-size: 13px !important;
+  line-height: 1.7;
+}
+
+.draft-guard-detail {
+  margin: -6px 0 18px;
+  color: var(--faint);
+  font-size: 11.5px;
+}
+
+.draft-guard-modal .snapshot-modal-actions {
+  margin-top: 2px;
 }

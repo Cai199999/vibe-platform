@@ -1,4 +1,4 @@
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext.jsx'
 
 const ROLE_LABELS = {
@@ -14,11 +14,9 @@ const initials = (name = 'A') => name.trim().slice(0, 1).toUpperCase()
  */
 export default function AdminHeader() {
   const { user, logout } = useAuth()
-  const navigate = useNavigate()
 
   const handleLogout = () => {
-    logout()
-    navigate('/login', { replace: true })
+    void logout()
   }
 
   return (

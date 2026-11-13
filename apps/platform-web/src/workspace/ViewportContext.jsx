@@ -5,6 +5,10 @@ import {
   useMemo,
   useState,
 } from 'react'
+import {
+  isPreviewLive,
+  resolveEffectiveLinked,
+} from './previewState.js'
 
 /**
  * 画布 / 预览各自的视口状态（缩放 + 平移）。
@@ -34,12 +38,15 @@ const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
  * 画布和预览。两个面板在展示模式下宽高完全一致、基准变换也一致，因此同一
  * 组 zoom/pan 会产生完全相同的视觉变换。
  */
-export function ViewportProvider({ children }) {
+export function ViewportProvider({ children, previewState = 'LIVE' }) {
   const [views, setViews] = useState({
     canvas: DEFAULT_VIEW,
     preview: DEFAULT_VIEW,
   })
-  const [linked, setLinked] = useState(false)
+  // linkedPreference 是用户的显式选择，任何预览状态变化都不得覆盖它。
+  const [linkedPreference, setLinkedPreference] = useState(false)
+  // 真正参与视口计算的是“偏好 + 预览实时可用”的交集。
+  const linked = resolveEffectiveLinked(linkedPreference, previewState)
 
   const updateViewport = useCallback(
     (panel, updater) => {
@@ -76,11 +83,22 @@ export function ViewportProvider({ children }) {
     () => ({
       views,
       linked,
-      setLinked,
+      linkedPreference,
+      setLinked: setLinkedPreference,
+      setLinkedPreference,
+      previewState,
+      linkDisabled: !isPreviewLive(previewState),
       updateViewport,
       resetViewport,
     }),
-    [views, linked, updateViewport, resetViewport],
+    [
+      views,
+      linked,
+      linkedPreference,
+      previewState,
+      updateViewport,
+      resetViewport,
+    ],
   )
 
   return (

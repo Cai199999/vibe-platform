@@ -1,4 +1,16 @@
-import { createContext, useCallback, useContext, useMemo, useState } from 'react'
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+} from 'react'
+import { useNavigate } from 'react-router-dom'
+import DraftLeaveGuard from '../components/DraftLeaveGuard.jsx'
+import {
+  findUnsavedDraftRecords,
+  purgeDraftsForScope,
+} from '../workspace/draftStore.js'
 
 const STORAGE_KEY = 'vibe.auth.session'
 
@@ -66,6 +78,9 @@ const AuthContext = createContext(null)
  */
 export function AuthProvider({ children }) {
   const [session, setSession] = useState(readSession)
+  const [logoutGuard, setLogoutGuard] = useState(null)
+  const [logoutBusy, setLogoutBusy] = useState(false)
+  const navigate = useNavigate()
 
   const login = useCallback(({ account = '', password = '', demo = false, admin = false }) => {
     if (!demo) {
@@ -84,10 +99,55 @@ export function AuthProvider({ children }) {
     return next
   }, [])
 
-  const logout = useCallback(() => {
+  const performLogout = useCallback(() => {
     window.localStorage.removeItem(STORAGE_KEY)
+    setLogoutGuard(null)
     setSession(null)
-  }, [])
+    navigate('/login', { replace: true })
+  }, [navigate])
+
+  /**
+   * 退出登录前先查草稿。
+   *
+   * 注意：这里不能立即清 session / 跳路由，否则 WorkspacePage 会先卸载，
+   * 用户还没确认就已经丢失了草稿。确认后再由 performLogout 统一收尾。
+   */
+  const logout = useCallback(async () => {
+    const current = session?.user
+    if (!current) {
+      performLogout()
+      return
+    }
+    const scope = {
+      tenantId: current.tenantId || 'tenant_local',
+      userId: current.id,
+    }
+    try {
+      const drafts = await findUnsavedDraftRecords(scope)
+      if (drafts.length > 0) {
+        setLogoutGuard({ scope })
+        return
+      }
+    } catch (cause) {
+      console.warn('[auth] 检查本地草稿失败，继续退出', cause)
+    }
+    performLogout()
+  }, [session?.user, performLogout])
+
+  const confirmLogout = useCallback(async () => {
+    if (!logoutGuard || logoutBusy) return
+    setLogoutBusy(true)
+    try {
+      await purgeDraftsForScope(logoutGuard.scope)
+      performLogout()
+    } finally {
+      setLogoutBusy(false)
+    }
+  }, [logoutGuard, logoutBusy, performLogout])
+
+  const cancelLogout = useCallback(() => {
+    if (!logoutBusy) setLogoutGuard(null)
+  }, [logoutBusy])
 
   const value = useMemo(
     () => ({
@@ -101,7 +161,19 @@ export function AuthProvider({ children }) {
     [session, login, logout],
   )
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+      <DraftLeaveGuard
+        open={Boolean(logoutGuard)}
+        actionText="退出登录"
+        confirmText="放弃草稿并退出"
+        busy={logoutBusy}
+        onCancel={cancelLogout}
+        onConfirm={confirmLogout}
+      />
+    </AuthContext.Provider>
+  )
 }
 
 export function useAuth() {
