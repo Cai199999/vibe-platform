@@ -11,8 +11,9 @@ const TERMINAL_EVENTS = new Set([
   'run.cancelled',
   'run.rejected',
   'clarification.required',
-  // 审批暂停同样结束当前连接；决策后用 afterSeq 重放继续。
+  // 审批 / 安全路径决策暂停都会结束当前连接；选择后用 afterSeq 重放继续。
   'approval.required',
+  'decision.required',
 ])
 
 const RECONNECT_LIMIT = 6

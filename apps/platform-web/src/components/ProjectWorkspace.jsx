@@ -71,6 +71,7 @@ function ProjectWorkspaceInner({
   // iframe 文档重建（首次加载 / HMR）：父级清空视觉暂存幽灵节点。
   onFrameReady,
   onApprovalDecision,
+  onDecisionAnswer,
   onCancelRun,
   onSubmit,
   onRetry,
@@ -336,17 +337,21 @@ function ProjectWorkspaceInner({
   const previewVisible = viewMode === 'dual' || mode === 'preview'
   // 审批 / 澄清面板在预览侧。对比模式停留在画布时提供一个显式入口，
   // 避免输入被冻结却找不到处理位置；不强制切换视图，保留用户的画布上下文。
-  const pauseCta = run.approval
-    ? '查看审批差异'
-    : run.clarification
-      ? '回答澄清问题'
-      : null
+  const decisionPending = Boolean(run.pendingDecision)
+  const pauseCta = run.pendingDecision
+    ? '选择安全路径'
+    : run.approval
+      ? '查看审批差异'
+      : run.clarification
+        ? '回答澄清问题'
+        : null
   // 只有每个标注都写了指令才允许提交，避免静默丢标注。
   const submitReady =
     annotations.length > 0 &&
     annotations.every((annotation) => annotation.intent.trim().length > 0)
-  // 审批未决时不允许再发起新 Run，画布交互一并冻结。
+  // 审批 / 安全路径决策未决时不允许再发起新 Run，画布交互一并冻结。
   const approvalPending = Boolean(run.approval)
+  const pausePending = approvalPending || decisionPending
   // both 门控未释放时 UI Graph 不能执行，画布与提交入口同步冻结。
   const gateActive =
     supervisorGate?.status === 'AWAITING_CONTRACT' ||
@@ -357,14 +362,14 @@ function ProjectWorkspaceInner({
       : '正在进行全局架构设计，请先确认契约'
   const status = submitting
     ? 'running'
-    : approvalPending
+    : pausePending
       ? 'pending'
       : run.error
         ? 'error'
         : run.result
           ? 'success'
           : 'idle'
-  const inspectBlocked = submitting || approvalPending || gateActive
+  const inspectBlocked = submitting || pausePending || gateActive
   const activeClarificationId = run.clarification?.clarificationId || null
 
   // 澄清问题已被替换（重试 / 新一轮 Run）时，上一轮的取色任务必须作废，
@@ -759,21 +764,23 @@ function ProjectWorkspaceInner({
               !submitReady ||
               submitting ||
               Boolean(run.clarification) ||
-              approvalPending ||
+              pausePending ||
               gateActive
             }
             title={
               gateActive
                 ? gateStatusText
-                : approvalPending
-                  ? '请先处理预览面板中的 Diff 审批'
-                  : run.clarification
-                    ? '请先回答画布浮层中的澄清问题'
-                    : submitReady
-                      ? `提交全部 ${annotations.length} 个标注`
-                      : annotations.length === 0
-                        ? '请先在画布上圈选组件'
-                        : '请为每个标注填写修改意图'
+                : decisionPending
+                  ? '请先在预览面板选择安全路径'
+                  : approvalPending
+                    ? '请先处理预览面板中的 Diff 审批'
+                    : run.clarification
+                      ? '请先回答画布浮层中的澄清问题'
+                      : submitReady
+                        ? `提交全部 ${annotations.length} 个标注`
+                        : annotations.length === 0
+                          ? '请先在画布上圈选组件'
+                          : '请为每个标注填写修改意图'
             }
             onClick={onSubmit}
           >
@@ -870,7 +877,7 @@ function ProjectWorkspaceInner({
                   role="menuitem"
                   className="ghost-button toolbar-menu-item"
                   disabled={
-                    annotations.length === 0 || submitting || approvalPending
+                    annotations.length === 0 || submitting || pausePending
                   }
                   onClick={() => {
                     setMoreOpen(false)
@@ -991,7 +998,7 @@ function ProjectWorkspaceInner({
               pendingAction={run.pendingAction}
               submitting={submitting}
               disabled={submitting}
-              blocked={approvalPending || gateActive}
+              blocked={pausePending || gateActive}
             />
           </ErrorBoundary>
 
@@ -999,7 +1006,7 @@ function ProjectWorkspaceInner({
               仍由 RuntimePanel 渲染，避免双屏时出现两份输入框。 */}
           {inspectDraft &&
             !submitting &&
-            !run.approval &&
+            !pausePending &&
             viewMode === 'compare' &&
             mode === 'canvas' && (
               <InspectDraftCard
@@ -1055,6 +1062,7 @@ function ProjectWorkspaceInner({
               onRunInBackground={onRunInBackground}
               onGoToCanvas={() => setMode('canvas')}
               onApprovalDecision={onApprovalDecision}
+              onDecisionAnswer={onDecisionAnswer}
               onCancelRun={onCancelRun}
               inspectMode={inspectMode && previewVisible && !inspectBlocked}
               onInspectPick={handleInspectPick}

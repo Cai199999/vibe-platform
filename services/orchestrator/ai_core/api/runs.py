@@ -23,6 +23,11 @@ from ai_core.domain.agent import (
     RollbackRunResponse,
     RunSnapshotResponse,
 )
+from ai_core.domain.decision import (
+    DecisionAnswerResponse,
+    DecisionListResponse,
+    DecisionRequest,
+)
 from ai_core.agent.service import (
     RunExecutionService,
     RunServiceError,
@@ -145,6 +150,40 @@ def list_clarifications(run_id: str) -> ClarificationListResponse:
     service = RunExecutionService()
     try:
         return service.list_clarifications(run_id)
+    except Exception as exc:  # noqa: BLE001
+        _raise_http(exc)
+
+
+# ------------------------------------------------------------
+# HITL 安全路径决策（Phase 2）
+# ------------------------------------------------------------
+@router.post(
+    "/{run_id}/decisions/{decision_id}",
+    response_model=DecisionAnswerResponse,
+    status_code=202,
+)
+def answer_decision(
+    run_id: str,
+    decision_id: str,
+    request: DecisionRequest,
+) -> DecisionAnswerResponse:
+    """提交安全路径选项并后台恢复状态机，返回 202。
+
+    ``cancel`` 选项直接回滚并发送 ``run.cancelled``；其它选项恢复
+    ``decision_gate``，由 Resolver 重新生成 TargetResolution。
+    """
+    service = RunExecutionService()
+    try:
+        return service.answer_decision(run_id, decision_id, request)
+    except Exception as exc:  # noqa: BLE001
+        _raise_http(exc)
+
+
+@router.get("/{run_id}/decisions", response_model=DecisionListResponse)
+def list_decisions(run_id: str) -> DecisionListResponse:
+    service = RunExecutionService()
+    try:
+        return service.list_decisions(run_id)
     except Exception as exc:  # noqa: BLE001
         _raise_http(exc)
 

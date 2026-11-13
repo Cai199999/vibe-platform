@@ -233,6 +233,63 @@ function rendererFunctionOf(node, parents) {
   return null
 }
 
+function jsxElementName(node) {
+  if (!node || node.type !== 'JSXElement') return ''
+  return jsxName(node.openingElement?.name)
+}
+
+/**
+ * Phase 2：为共享组件计算 callSite 锚点。
+ *
+ * Resolver 不允许修改组件定义文件，但“只在当前实例修改”需要一个可写的
+ * 真实节点：调用点里的 `<Card ... />`。这里按组件名（支持 MemberExpression）
+ * 在 callSite 文件中定位该调用节点，实例数量 > 1 时用 1-based 序号消歧。
+ * 找不到就返回 null，前端决策只会提供“取消”，绝不猜一个近似节点。
+ */
+function findCallSiteAnchor(workdir, callSiteFile, component, instance, parser) {
+  if (!callSiteFile || !component) return null
+  let parsed
+  try {
+    parsed = parseFile(workdir, callSiteFile, parser)
+  } catch {
+    return null
+  }
+  const { code, ast } = parsed
+  const index = buildIndex(ast)
+  const shortName = String(component).split('.').pop()
+  const matches = index.jsxNodes.filter((node) => {
+    const name = jsxElementName(node)
+    if (!name) return false
+    return name === component || name.split('.').pop() === shortName
+  })
+  if (matches.length === 0) return null
+  let node = null
+  const position = Number(instance || 0)
+  if (Number.isInteger(position) && position >= 1 && position <= matches.length) {
+    node = matches[position - 1]
+  } else if (matches.length === 1) {
+    node = matches[0]
+  }
+  if (!node) return null
+  return {
+    status: 'RESOLVED',
+    file: callSiteFile,
+    range: rangeOf(node),
+    nodeType: node.type,
+    component: componentOf(node, index.parents, component),
+    nodeSource: code.slice(node.start, node.end).slice(0, 4000),
+    isShared: false,
+    protected: false,
+    sharedReason: '',
+    componentFile: '',
+    callSiteFile,
+    allowedFiles: [callSiteFile],
+    forbiddenRanges: [],
+    allowedOperations: ['insert', 'delete', 'modify'],
+    decisionAction: 'modify_call_site',
+  }
+}
+
 function rangeOf(node) {
   return {
     startLine: node.loc?.start?.line || 0,
@@ -452,6 +509,23 @@ function resolveOne(anchor, parser, workdir) {
   result.allowedFiles = allowedFiles
   result.forbiddenRanges = forbidden
   result.allowedOperations = ['insert', 'delete', 'modify']
+  // 共享组件额外给出 callSite 锚点，供 Phase 2 决策“只在当前实例修改”。
+  result.callSiteAnchor = null
+  if (shared && callSiteFile && callSiteFile !== file) {
+    const callSiteAnchor = findCallSiteAnchor(
+      workdir,
+      callSiteFile,
+      component,
+      anchor.instance,
+      parser,
+    )
+    if (callSiteAnchor) {
+      callSiteAnchor.anchorId = anchor.anchorId
+      callSiteAnchor.annotationId = anchor.annotationId
+      callSiteAnchor.sourceAnchorId = anchor.anchorId
+      result.callSiteAnchor = callSiteAnchor
+    }
+  }
   return result
 }
 

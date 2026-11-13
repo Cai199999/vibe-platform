@@ -16,6 +16,7 @@ from pydantic import Field, field_serializer, model_validator
 
 from ai_core.domain.actions import CREATE_NEW, MODIFY_EXISTING, normalize_action
 from ai_core.domain.common import CamelModel, iso_datetime
+from ai_core.domain.decision import PendingDecision
 
 
 # ------------------------------------------------------------
@@ -546,6 +547,8 @@ class RunSnapshotResponse(CamelModel):
     preview_url: str = ""
     clarification: Clarification | None = None
     approval: Approval | None = None
+    # Phase 2：等待用户在安全路径中做选择（目标歧义 / 公共组件保护）。
+    pending_decision: PendingDecision | None = None
     cancel_requested: bool = False
     assistant_message: str = ""
     error: str | None = None
@@ -557,6 +560,7 @@ class ExecuteRunResponse(CamelModel):
     status: Literal[
         "AWAITING_APPROVAL",
         "AWAITING_CLARIFICATION",
+        "AWAITING_DECISION",
         "SUCCEEDED",
         "REJECTED",
         "CANCELLED",
@@ -583,6 +587,8 @@ class ExecuteRunResponse(CamelModel):
     clarification: Clarification | None = None
     # HITL：仅 AWAITING_APPROVAL（等待审批）时 non-null。
     approval: Approval | None = None
+    # Phase 2：仅 AWAITING_DECISION 时 non-null。
+    pending_decision: PendingDecision | None = None
     # 本次 Run 的 Token 用量与费用（含所有模型调用）。
     token_usage: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None

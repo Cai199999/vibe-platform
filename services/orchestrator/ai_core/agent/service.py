@@ -72,6 +72,22 @@ from ai_core.domain.agent import (
 )
 from ai_core.agent.thread_memory import ThreadMemoryStore, get_thread_store
 from ai_core.context_memory import ContextSummarizer, get_project_memory
+from ai_core.domain.decision import (
+    ACTION_CANCEL,
+    AWAITING_DECISION,
+    DECISION_ANSWERED_EVENT,
+    DECISION_ERROR_OPTION_INVALID,
+    DECISION_KIND_AMBIGUOUS,
+    DECISION_KIND_PROTECTED,
+    FORBIDDEN_DECISION_ACTIONS,
+    DecisionAnswerResponse,
+    DecisionListResponse,
+    DecisionOption,
+    DecisionRequest,
+    DecisionRunStatus,
+    DecisionStatus,
+    PendingDecision,
+)
 from ai_core.domain.scope import memory_scope, scoped_checkpoint_key
 from ai_core.config import Settings, get_settings
 from ai_core.adapters.sandbox import get_sandbox_provider
@@ -104,6 +120,8 @@ ACTIVE_RUN_STATUSES = {
     "REPAIRING",
     "AWAITING_CLARIFICATION",
     "AWAITING_APPROVAL",
+    # Phase 2：Resolver 发现歧义 / 公共组件保护，暂停等待用户选择安全路径。
+    "AWAITING_DECISION",
 }
 
 
@@ -202,6 +220,31 @@ class RunCancelNotAllowedError(RunServiceError):
 
 
 # ------------------------------------------------------------
+# 决策分流异常（Phase 2）
+# ------------------------------------------------------------
+class DecisionNotFoundError(RunServiceError):
+    code = "DECISION_NOT_FOUND"
+    status_code = 404
+
+
+class DecisionStateConflictError(RunServiceError):
+    code = "DECISION_STATE_CONFLICT"
+    status_code = 409
+
+
+class DecisionExpiredError(RunServiceError):
+    code = "DECISION_EXPIRED"
+    status_code = 410
+
+
+class DecisionOptionInvalidError(RunServiceError):
+    """用户回传的 optionId 不在服务端生成的安全选项内。"""
+
+    code = DECISION_ERROR_OPTION_INVALID
+    status_code = 422
+
+
+# ------------------------------------------------------------
 # 运行期数据结构
 # ------------------------------------------------------------
 @dataclass
@@ -249,6 +292,9 @@ class ActiveRun:
     response: ExecuteRunResponse | None = None
     clarification: Clarification | None = None
     clarifications: list[Clarification] = field(default_factory=list)
+    # Phase 2：当前挂起的安全路径决策；历史记录用于幂等与审计。
+    pending_decision: PendingDecision | None = None
+    pending_decisions: list[PendingDecision] = field(default_factory=list)
     approval: Approval | None = None
     approvals: list[Approval] = field(default_factory=list)
     # 协作式取消：API 只置位，后台线程在节点安全点响应。
@@ -454,6 +500,205 @@ class RunExecutionService:
                 error=f"恢复执行失败: {exc}",
                 code="RESUME_FAILED",
             )
+
+    # --------------------------------------------------------
+    # HITL：安全路径决策（Phase 2）
+    # --------------------------------------------------------
+    def answer_decision(
+        self,
+        run_id: str,
+        decision_id: str | None,
+        request: DecisionRequest,
+    ) -> DecisionAnswerResponse:
+        """提交一次安全路径选择，并在后台恢复状态机。
+
+        约束：
+          - 只接受服务端生成的 optionId，前端无法自造区间 / 文件 / 动作；
+          - ``cancel`` 不恢复 Graph，直接回滚沙盒并丢弃草稿；
+          - 其它动作把 ``{optionId, decisionId}`` 作为 ``interrupt`` 的恢复值，
+            ``decision_gate`` 据此写入候选区间或 callSite 覆盖，再回到
+            Resolver 重新生成 TargetResolution。
+        """
+        active = get_active_run(run_id)
+        if active is None:
+            raise RunNotFoundError(f"Run 不存在或已过期: {run_id}")
+
+        now = datetime.now(timezone.utc)
+        expected_id = (decision_id or request.decision_id or "").strip()
+        paused: PendingDecision | None = None
+        option: DecisionOption | None = None
+        cancel_immediately = False
+        prepared: PreparedRun | None = None
+
+        with _ACTIVE_LOCK:
+            self._expire_if_needed(active)
+            # 幂等：同一 decision 重复提交相同 option 直接返回历史结果。
+            recorded = next(
+                (
+                    item
+                    for item in active.pending_decisions
+                    if expected_id and item.decision_id == expected_id
+                ),
+                None,
+            )
+            if recorded is not None and recorded.status in {
+                "ANSWERED",
+                "CANCELLED",
+                "EXPIRED",
+            }:
+                if recorded.status == "CANCELLED":
+                    raise DecisionStateConflictError("该决策已取消，不能再次提交")
+                if recorded.status == "EXPIRED":
+                    raise DecisionExpiredError("决策已过期，请重新发起修改")
+                if (
+                    recorded.selected_option_id
+                    and recorded.selected_option_id != request.option_id
+                ):
+                    raise DecisionStateConflictError("该决策已提交其它选项，不能修改")
+                return DecisionAnswerResponse(
+                    decision=DecisionStatus(
+                        decision_id=recorded.decision_id,
+                        status="ANSWERED",
+                        option_id=recorded.selected_option_id,
+                        answered_at=recorded.answered_at or now,
+                    ),
+                    run=DecisionRunStatus(run_id=run_id, status=active.status),
+                )
+
+            if active.status == "EXPIRED":
+                raise DecisionExpiredError("决策已超过有效期，请重新发起修改")
+            if active.status != AWAITING_DECISION:
+                raise DecisionStateConflictError(
+                    f"Run 当前状态为 {active.status}，没有待决策的安全路径"
+                )
+            paused = active.pending_decision
+            if paused is None:
+                raise DecisionNotFoundError("当前 Run 没有待决策的安全路径")
+            if expected_id and paused.decision_id != expected_id:
+                raise DecisionNotFoundError(f"决策不存在: {expected_id}")
+            if (
+                request.expected_version is not None
+                and request.expected_version != paused.round
+            ):
+                raise DecisionStateConflictError("expectedVersion 与当前决策轮次不一致")
+            option = next(
+                (
+                    item
+                    for item in paused.options
+                    if item.option_id == request.option_id
+                ),
+                None,
+            )
+            if option is None:
+                raise DecisionOptionInvalidError(f"无效的决策选项: {request.option_id}")
+            if option.action in FORBIDDEN_DECISION_ACTIONS:
+                # 双重保险：即使历史检查点被篡改，也绝不豁免安全门禁。
+                raise DecisionOptionInvalidError("该决策动作不在安全白名单内")
+
+            paused.answered_at = now
+            paused.selected_option_id = option.option_id
+            active.pending_decision = None
+            if option.action == ACTION_CANCEL:
+                paused.status = "CANCELLED"
+                active.status = "CANCELLED"
+                active.cancel_requested = True
+                active.cancel_requested_at = now
+                active.cancel_reason = "用户取消本次修改"
+                cancel_immediately = True
+                prepared = active.prepared
+            else:
+                paused.status = "ANSWERED"
+                # 恢复执行期间保持非终态，SSE 可继续订阅。
+                active.status = "RUNNING"
+                prepared = active.prepared
+            active.touch()
+
+        if paused is None:
+            raise DecisionStateConflictError("决策状态异常")
+
+        active.buffer.emit(
+            DECISION_ANSWERED_EVENT,
+            {
+                "decisionId": paused.decision_id,
+                "optionId": option.option_id if option else None,
+                "action": option.action if option else None,
+                "status": paused.status,
+                "answeredAt": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            },
+            dedupe_key=f"{DECISION_ANSWERED_EVENT}:{paused.decision_id}",
+        )
+
+        if cancel_immediately:
+            # 取消不需要恢复 Graph：直接回滚到 Run 开始前，并丢弃草稿。
+            if prepared is not None:
+                self._complete_cancelled(active, prepared, reason="用户取消本次修改")
+            return DecisionAnswerResponse(
+                decision=DecisionStatus(
+                    decision_id=paused.decision_id,
+                    status="CANCELLED",
+                    option_id=option.option_id if option else None,
+                    answered_at=now,
+                ),
+                run=DecisionRunStatus(run_id=run_id, status="CANCELLED"),
+            )
+
+        if prepared is None:
+            self._emit_prepare_failure(
+                active, RunCheckpointLostError("决策 checkpoint 已丢失")
+            )
+            raise RunCheckpointLostError("决策 checkpoint 已丢失")
+
+        thread = threading.Thread(
+            target=self._decision_resume_worker,
+            args=(active, prepared, paused, option),
+            name=f"decision-{run_id}",
+            daemon=True,
+        )
+        thread.start()
+        return DecisionAnswerResponse(
+            decision=DecisionStatus(
+                decision_id=paused.decision_id,
+                status="ANSWERED",
+                option_id=option.option_id,
+                answered_at=now,
+            ),
+            run=DecisionRunStatus(run_id=run_id, status="RUNNING"),
+        )
+
+    def _decision_resume_worker(
+        self,
+        active: ActiveRun,
+        prepared: PreparedRun,
+        decision: PendingDecision,
+        option: DecisionOption,
+    ) -> None:
+        """后台恢复 ``interrupt()``；恢复值只携带服务端签发的 optionId。"""
+        try:
+            self._execute_prepared(
+                active,
+                prepared,
+                resume={
+                    "decisionId": decision.decision_id,
+                    "optionId": option.option_id,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("resume decision failed run_id=%s", active.run_id)
+            self._complete_failure(
+                active,
+                prepared,
+                error=f"决策恢复失败: {exc}",
+                code="RESUME_FAILED",
+            )
+
+    def list_decisions(self, run_id: str) -> DecisionListResponse:
+        active = get_active_run(run_id)
+        if active is None:
+            raise RunNotFoundError(f"Run 不存在或已过期: {run_id}")
+        with _ACTIVE_LOCK:
+            self._expire_if_needed(active)
+            items = [item.model_copy(deep=True) for item in active.pending_decisions]
+        return DecisionListResponse(run_id=run_id, decisions=items)
 
     # --------------------------------------------------------
     # HITL：Diff 审批
@@ -674,11 +919,19 @@ class RunExecutionService:
             active.cancel_requested_at = now
             active.cancel_reason = request.reason or "用户取消执行"
 
-            if active.status in {"AWAITING_APPROVAL", "AWAITING_CLARIFICATION"}:
+            if active.status in {
+                "AWAITING_APPROVAL",
+                "AWAITING_CLARIFICATION",
+                AWAITING_DECISION,
+            }:
                 if active.approval is not None:
                     active.approval.status = "CANCELLED"
                     active.approval.decided_at = now
                     active.approval = None
+                if active.pending_decision is not None:
+                    active.pending_decision.status = "CANCELLED"
+                    active.pending_decision.answered_at = now
+                    active.pending_decision = None
                 active.clarification = None
                 active.status = "CANCELLED"
                 active.touch()
@@ -736,6 +989,7 @@ class RunExecutionService:
             preview_url=response.preview_url if response else "",
             clarification=active.clarification,
             approval=active.approval,
+            pending_decision=active.pending_decision,
             cancel_requested=active.cancel_requested,
             assistant_message=response.assistant_message if response else "",
             error=response.error if response else None,
@@ -1022,7 +1276,9 @@ class RunExecutionService:
         active: ActiveRun,
         prepared: PreparedRun,
         *,
-        resume: list[dict[str, Any]] | None = None,
+        # 澄清恢复是答案列表；决策恢复是 {optionId, decisionId}。两者都直接
+        # 交给 LangGraph 的 Command(resume=...)，因此这里保持 Any。
+        resume: Any | None = None,
     ) -> ExecuteRunResponse:
         runner = AgentGraphRunner(
             sandbox=self._sandbox,
@@ -1082,6 +1338,11 @@ class RunExecutionService:
             payload = outcome.interrupt
             if payload and payload.get("kind") == "approval":
                 return self._complete_approval_pause(active, prepared, outcome)
+            if payload and payload.get("kind") in {
+                DECISION_KIND_AMBIGUOUS,
+                DECISION_KIND_PROTECTED,
+            }:
+                return self._complete_decision_pause(active, prepared, outcome)
             if payload:
                 return self._complete_paused(active, prepared, outcome)
             return self._complete_failure(
@@ -1127,6 +1388,44 @@ class RunExecutionService:
             active.touch()
         # clarification.required 已由 Graph 在 interrupt 前写入事件缓冲；
         # 这里不再追加终态事件，SSE 订阅者会在该事件后自动关闭。
+        return response
+
+    def _complete_decision_pause(
+        self,
+        active: ActiveRun,
+        prepared: PreparedRun,
+        outcome: GraphRunOutcome,
+    ) -> ExecuteRunResponse:
+        """挂起 Run，等待用户在安全路径中做选择。
+
+        ``decision.required`` 已由 Graph 在 ``interrupt()`` 前写入事件缓冲，
+        这里只更新进程内状态与快照，不发送终态事件。
+        """
+        payload = dict(outcome.interrupt or {})
+        decision = PendingDecision.model_validate(payload)
+        with _ACTIVE_LOCK:
+            active.pending_decision = decision
+            active.pending_decisions.append(decision)
+            active.status = AWAITING_DECISION
+            active.touch()
+
+        assistant_message = f"需要决策：{decision.summary or decision.reason}"
+        response = self._to_response(
+            prepared.run_id,
+            prepared.handle.sandbox_id,
+            prepared.handle.preview_url,
+            {
+                **outcome.state,
+                "status": AWAITING_DECISION,
+                "error": None,
+            },
+            reused_sandbox=prepared.reused_sandbox,
+            assistant_message=assistant_message,
+            pending_decision=decision,
+        )
+        with _ACTIVE_LOCK:
+            active.response = response
+            active.touch()
         return response
 
     def _persist_preferences(
@@ -1432,6 +1731,7 @@ class RunExecutionService:
             active.status = "CANCELLED"
             active.approval = None
             active.clarification = None
+            active.pending_decision = None
             active.touch()
         prepared.event_buffer.emit(
             "run.cancelled",
@@ -1735,6 +2035,7 @@ class RunExecutionService:
     # 澄清状态
     # --------------------------------------------------------
     def _expire_if_needed(self, active: ActiveRun) -> None:
+        self._expire_decision_if_needed(active)
         clarification = active.clarification
         if clarification is None or active.status != "AWAITING_CLARIFICATION":
             return
@@ -1758,6 +2059,33 @@ class RunExecutionService:
                 .replace("+00:00", "Z"),
             },
             dedupe_key=f"clarification.expired:{clarification.clarification_id}",
+        )
+
+    def _expire_decision_if_needed(self, active: ActiveRun) -> None:
+        """决策超时与澄清一致：标记 EXPIRED，禁止继续提交选择。"""
+        decision = active.pending_decision
+        if decision is None or active.status != AWAITING_DECISION:
+            return
+        if decision.expires_at is None:
+            return
+        expires_at = decision.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) <= expires_at:
+            return
+        decision.status = "EXPIRED"
+        active.pending_decision = None
+        active.status = "EXPIRED"
+        active.touch()
+        active.buffer.emit(
+            "decision.expired",
+            {
+                "decisionId": decision.decision_id,
+                "expiredAt": datetime.now(timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z"),
+            },
+            dedupe_key=f"decision.expired:{decision.decision_id}",
         )
 
     @staticmethod
@@ -2276,6 +2604,7 @@ class RunExecutionService:
         commits: list[RunCommitRecord] | None = None,
         clarification: Clarification | None = None,
         approval: Approval | None = None,
+        pending_decision: PendingDecision | None = None,
     ) -> ExecuteRunResponse:
         verify_state = state.get("verify_result") or {}
         verify_result = VerifyResultModel(**verify_state) if verify_state else None
@@ -2283,6 +2612,7 @@ class RunExecutionService:
         if status not in {
             "AWAITING_APPROVAL",
             "AWAITING_CLARIFICATION",
+            AWAITING_DECISION,
             "SUCCEEDED",
             "REJECTED",
             "CANCELLED",
@@ -2310,6 +2640,7 @@ class RunExecutionService:
             commits=commits or [],
             clarification=clarification,
             approval=approval,
+            pending_decision=pending_decision,
             token_usage=dict(state.get("token_usage") or {}),
             error=state.get("error"),
             error_code=state.get("error_code"),

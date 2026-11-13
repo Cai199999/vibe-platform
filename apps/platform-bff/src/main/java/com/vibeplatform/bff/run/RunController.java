@@ -122,6 +122,23 @@ public class RunController {
     }
 
     /**
+     * 安全路径决策：提交 optionId；AI Core 后台恢复或直接取消并返回 202。
+     */
+    @PostMapping("/{runId}/decisions/{decisionId}")
+    public ResponseEntity<JsonNode> answerDecision(
+            @PathVariable String runId,
+            @PathVariable String decisionId,
+            @RequestBody(required = false) JsonNode body
+    ) {
+        return runService.answerDecision(runId, decisionId, body);
+    }
+
+    @GetMapping("/{runId}/decisions")
+    public ResponseEntity<JsonNode> getDecisions(@PathVariable String runId) {
+        return runService.getDecisions(runId);
+    }
+
+    /**
      * Diff 审批：批准 / 拒绝本次修改；AI Core 后台恢复状态机并返回 202。
      */
     @PostMapping("/{runId}/approvals/{approvalId}/decision")

@@ -136,9 +136,21 @@ class AgentState(TypedDict, total=False):
     # resolved（全部定位成功）/ ambiguous（触发前端选择）/ skipped
     # （Provider 不支持）/ unresolved（未找到，降级旧路径）/ exhausted。
     resolver_outcome: Literal[
-        "resolved", "ambiguous", "skipped", "unresolved", "exhausted"
+        "resolved", "ambiguous", "skipped", "unresolved", "exhausted", "cancelled"
     ]
     resolver_round: int
+    # ---- Phase 2：多轮决策分流 ----
+    # 当前挂起的安全决策（与 SSE decision.required 同构）；恢复后清空。
+    pending_decision: dict[str, Any] | None
+    # 用户在当前节点内已做出的选择（服务端注入，模型不可见）。
+    user_decision: dict[str, Any] | None
+    # 决策轮次与结果：none / decided / cancelled / exhausted。
+    decision_round: int
+    decision_outcome: Literal["none", "decided", "cancelled", "exhausted"]
+    # 已确认的候选区间：anchorId -> {range, candidateId}。
+    decision_selections: dict[str, Any]
+    # 已确认的 callSite 覆盖：anchorId -> TargetAnchor（实例级修改）。
+    decision_overrides: dict[str, Any]
 
     # ---- 生成结果 ----
     plan: str

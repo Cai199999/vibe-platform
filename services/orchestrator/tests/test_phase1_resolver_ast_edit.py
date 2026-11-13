@@ -854,7 +854,7 @@ class Phase1GraphE2ETest(unittest.TestCase):
         self.assertEqual(len(state.get("ast_edit_calls") or []), 1)
         self.assertTrue(state.get("generated_patch"))
 
-    def test_ambiguous_target_pauses_then_re_resolves(self) -> None:
+    def test_ambiguous_target_pauses_for_decision_then_re_resolves(self) -> None:
         code = EDIT_SOURCE
         button = _fix_range(code, "<button", "</button>")
         resolved = _resolved_anchor(code)
@@ -903,20 +903,44 @@ class Phase1GraphE2ETest(unittest.TestCase):
         state = _e2e_state(_context_payload(_annotation()), code)
         state["clarification_mode"] = "auto"
         state["max_clarification_rounds"] = 3
+        state["run_id"] = "run_phase2_e2e"
 
+        # Phase 2：第一次解析不再 interrupt，而是返回 pending_decision。
+        first = runner._resolver(state)
+        self.assertEqual(first["resolver_outcome"], "ambiguous")
+        decision = first["pending_decision"]
+        self.assertEqual(decision["kind"], "target_ambiguous")
+        select_option = next(
+            item for item in decision["options"] if item["action"] == "select_target"
+        )
+        self.assertTrue(
+            all(
+                item["action"] in {"select_target", "cancel"}
+                for item in decision["options"]
+            )
+        )
+
+        state.update(first)
         with patch.object(
             graph_module,
             "interrupt",
-            return_value=[
-                {
-                    "questionId": f"resolution_{resolved['anchorId']}",
-                    "value": "anc_ann_e2e_c1",
-                }
-            ],
+            return_value={
+                "decisionId": decision["decisionId"],
+                "optionId": select_option["optionId"],
+            },
         ):
-            update = runner._resolver(state)
+            gate_update = runner._decision_gate(state)
+        self.assertEqual(gate_update["decision_outcome"], "decided")
+        self.assertEqual(
+            gate_update["decision_selections"][resolved["anchorId"]]["range"][
+                "startOffset"
+            ],
+            button["startOffset"],
+        )
 
-        self.assertEqual(update["resolver_outcome"], "resolved")
+        state.update(gate_update)
+        second = runner._resolver(state)
+        self.assertEqual(second["resolver_outcome"], "resolved")
         self.assertEqual(len(sandbox.calls), 2)
         self.assertEqual(
             sandbox.calls[1][0]["selectedRange"]["startOffset"],

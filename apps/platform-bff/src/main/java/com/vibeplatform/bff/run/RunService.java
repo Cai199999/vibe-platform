@@ -35,6 +35,10 @@ public class RunService {
             "/api/v1/internal/runs/{runId}/clarifications";
     private static final String CLARIFICATION_ANSWER_PATH =
             "/api/v1/internal/runs/{runId}/clarifications/{clarificationId}/answers";
+    private static final String DECISIONS_PATH =
+            "/api/v1/internal/runs/{runId}/decisions";
+    private static final String DECISION_ANSWER_PATH =
+            "/api/v1/internal/runs/{runId}/decisions/{decisionId}";
     private static final String APPROVALS_PATH =
             "/api/v1/internal/runs/{runId}/approvals";
     private static final String APPROVAL_DECISION_PATH =
@@ -217,6 +221,30 @@ public class RunService {
 
     public ResponseEntity<JsonNode> getClarifications(String runId) {
         return getJson(CLARIFICATIONS_PATH, "clarifications", runId);
+    }
+
+    /**
+     * 提交安全路径决策并后台恢复状态机，AI Core 返回 202。
+     *
+     * <p>optionId 必须是服务端在 decision.required 中下发的 ID；BFF 不透传
+     * 任何自造动作，保持与 AI Core 相同的安全边界。</p>
+     */
+    public ResponseEntity<JsonNode> answerDecision(
+            String runId,
+            String decisionId,
+            JsonNode body
+    ) {
+        return postJson(
+                DECISION_ANSWER_PATH,
+                body,
+                "decision answer",
+                runId,
+                decisionId
+        );
+    }
+
+    public ResponseEntity<JsonNode> getDecisions(String runId) {
+        return getJson(DECISIONS_PATH, "decisions", runId);
     }
 
     /**

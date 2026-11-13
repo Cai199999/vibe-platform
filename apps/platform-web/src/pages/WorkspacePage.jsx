@@ -106,6 +106,8 @@ const EMPTY_RUN = {
   targetAnnotationId: null,
   // Diff 审批：approval.required 的 payload，非空时 RuntimePanel 显示审批栏。
   approval: null,
+  // 安全路径决策：decision.required 的 payload，非空时展示决策悬浮框。
+  pendingDecision: null,
   // 协作式取消：已请求但尚未收到 run.cancelled。
   cancelRequested: false,
   // patch.proposed 的截断 diff，用于详情抽屉；完整结果仍以终态为准。
@@ -1148,6 +1150,7 @@ function finalizeFromResult(run, result, annotationId) {
     pendingAction: null,
     clarification: null,
     approval: null,
+    pendingDecision: null,
     cancelRequested: false,
   }
 }
@@ -1182,6 +1185,23 @@ function applyStreamEvent(run, event, annotationId) {
   }
   if (event.type === 'clarification.answered') {
     return { ...base, clarification: null }
+  }
+  if (event.type === 'decision.required') {
+    // 安全路径决策：payload 与 AWAITING_DECISION 快照同构，悬浮框据此
+    // 渲染选项；用户只能回传服务端生成的 optionId。
+    return {
+      ...base,
+      pendingDecision: payload,
+      clarification: null,
+      approval: null,
+      submitting: false,
+      pendingAnnotationId: null,
+      pendingAction: null,
+      cancelRequested: false,
+    }
+  }
+  if (event.type === 'decision.answered') {
+    return { ...base, pendingDecision: null }
   }
   if (event.type === 'approval.required') {
     return {
@@ -1627,6 +1647,7 @@ export default function WorkspacePage() {
       error: null,
       clarification: null,
       approval: null,
+      pendingDecision: null,
       cancelRequested: false,
       targetAnnotationId:
         previous.targetAnnotationId === annotationId
@@ -3661,6 +3682,76 @@ export default function WorkspacePage() {
   }
 
   /**
+   * 安全路径决策：POST 202 后用 lastSeq 重放事件流。
+   *
+   * 只提交服务端生成的 optionId；cancel 由服务端直接回滚并发送
+   * run.cancelled，其余选项恢复 decision_gate 后重新进入 Resolver。
+   */
+  const handleDecisionAnswer = async (projectId, optionId, comment = '') => {
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const decision = run.pendingDecision
+    if (
+      !run.runId ||
+      !decision?.decisionId ||
+      !optionId ||
+      run.submitting ||
+      inflightRef.current.has(projectId)
+    ) {
+      return
+    }
+    const option = (decision.options ?? []).find(
+      (item) => item.optionId === optionId,
+    )
+    inflightRef.current.add(projectId)
+    patchRun(projectId, {
+      submitting: true,
+      pendingAnnotationId: run.targetAnnotationId,
+      pendingAction: 'run',
+      // 立即收起悬浮框，避免重复点击；失败时恢复原决策。
+      pendingDecision: null,
+      error: null,
+    })
+
+    try {
+      const response = await fetch(
+        `/api/v1/runs/${encodeURIComponent(run.runId)}/decisions/${encodeURIComponent(decision.decisionId)}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session?.token ?? ''}`,
+          },
+          body: JSON.stringify({
+            optionId,
+            comment: String(comment || '').trim() || undefined,
+            expectedVersion: decision.round,
+          }),
+        },
+      )
+      if (!response.ok) {
+        throw new Error(await extractError(response))
+      }
+      await startRunStream(projectId, null, run.targetAnnotationId, {
+        replay: true,
+        runId: run.runId,
+        afterSeq: run.lastSeq,
+      })
+      if (option?.action === 'cancel') {
+        showToast('info', '已取消本次修改，草稿已清理')
+      }
+    } catch (cause) {
+      patchRun(projectId, {
+        submitting: false,
+        pendingAnnotationId: null,
+        pendingAction: null,
+        pendingDecision: decision,
+        error: `提交决策失败：${cause?.message || cause}`,
+      })
+      inflightRef.current.delete(projectId)
+    }
+  }
+
+  /**
    * 协作式取消：停止后续节点，服务端回滚未提交的沙盒改动。
    *
    * 暂停中的 Run（等待澄清 / 审批）会立即产生 run.cancelled；执行中的
@@ -3673,7 +3764,7 @@ export default function WorkspacePage() {
     if (
       !run.runId ||
       run.cancelRequested ||
-      (!run.submitting && !run.approval) ||
+      (!run.submitting && !run.approval && !run.pendingDecision) ||
       inflightRef.current.has(projectId)
     ) {
       return
@@ -5291,8 +5382,8 @@ export default function WorkspacePage() {
         map[projectId] = 'idle'
       } else if (run.submitting) {
         map[projectId] = 'running'
-      } else if (run.approval) {
-        // 待审批：Tab 上用警示色提示需要人工处理，不当作成功或失败。
+      } else if (run.approval || run.pendingDecision) {
+        // 待审批 / 待决策：Tab 上用警示色提示需要人工处理。
         map[projectId] = 'pending'
       } else if (run.error || run.result?.status === 'FAILED') {
         map[projectId] = 'error'
@@ -5338,6 +5429,7 @@ export default function WorkspacePage() {
       handleClearAnnotations,
       handleFrameReady,
       handleApprovalDecision,
+      handleDecisionAnswer,
       handleCancelRun,
       handleSubmit,
       handleRetry,
@@ -5410,6 +5502,8 @@ export default function WorkspacePage() {
         onFrameReady: (payload) => call('handleFrameReady', payload),
         onApprovalDecision: (decision, comment) =>
           call('handleApprovalDecision', decision, comment),
+        onDecisionAnswer: (optionId, comment) =>
+          call('handleDecisionAnswer', optionId, comment),
         onCancelRun: () => call('handleCancelRun'),
         onSubmit: () => call('handleSubmit'),
         onRetry: () => call('handleRetry'),

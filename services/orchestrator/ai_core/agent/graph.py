@@ -72,6 +72,19 @@ from ai_core.agent.preferences import (
 )
 from ai_core.context_memory import get_project_memory
 from ai_core.domain.actions import is_create_action
+from ai_core.domain.decision import (
+    ACTION_CANCEL,
+    ACTION_MODIFY_CALL_SITE,
+    ACTION_SELECT_TARGET,
+    DECISION_KIND_AMBIGUOUS,
+    DECISION_KIND_PROTECTED,
+    DECISION_REQUIRED_EVENT,
+    FORBIDDEN_DECISION_ACTIONS,
+    MAX_DECISION_ROUNDS,
+    DecisionOption,
+    PendingDecision,
+    decision_id_for,
+)
 from ai_core.domain.resolution import (
     RESOLVED,
     SKIPPED,
@@ -109,6 +122,7 @@ NODE_LABELS = {
     "clarify_gate": "检查信息完整性",
     "style_check": "确认视觉样式",
     "resolver": "解析修改锚点",
+    "decision_gate": "等待安全路径决策",
     "coder": "生成修改方案",
     "applier": "写入沙盒",
     "verifier": "构建与校验",
@@ -481,6 +495,14 @@ class AgentGraphRunner:
             self._instrument("resolver", NODE_LABELS["resolver"], self._resolver),
         )
         builder.add_node(
+            "decision_gate",
+            self._instrument(
+                "decision_gate",
+                NODE_LABELS["decision_gate"],
+                self._decision_gate,
+            ),
+        )
+        builder.add_node(
             "coder", self._instrument("coder", NODE_LABELS["coder"], self._coder)
         )
         builder.add_node(
@@ -530,7 +552,16 @@ class AgentGraphRunner:
         builder.add_conditional_edges(
             "resolver",
             self._route_after_resolver,
-            {"coder": "coder", "failed": "failed"},
+            {
+                "decision_gate": "decision_gate",
+                "coder": "coder",
+                "failed": "failed",
+            },
+        )
+        builder.add_conditional_edges(
+            "decision_gate",
+            self._route_after_decision_gate,
+            {"resolver": "resolver", "failed": "failed"},
         )
         builder.add_conditional_edges(
             "coder",
@@ -1183,7 +1214,7 @@ class AgentGraphRunner:
         }
 
     # --------------------------------------------------------
-    # Phase 1：确定性目标解析（Resolver）
+    # Phase 1 / 2：确定性目标解析 + 安全路径决策
     # --------------------------------------------------------
     def _resolver(self, state: AgentState) -> dict[str, Any]:
         """把 AnnotationEnvelope 解析为精确 AST 锚点。
@@ -1191,7 +1222,8 @@ class AgentGraphRunner:
         该节点不调用大模型：
           1. 从标注中提取 file / line / column / selector / 实例信息；
           2. 交给沙盒内 Babel 定位最内层 JSX 节点；
-          3. 发现多个疑似节点时通过 ``interrupt`` 让用户选择；
+          3. 发现歧义或公共组件保护时，写入 ``pending_decision`` 并交给
+             ``decision_gate`` 挂起，由用户选择安全路径；
           4. 输出 TargetResolution，Coder 只能引用其中的 anchorId。
 
         Provider 不具备解析能力（测试替身 / 旧 Provider）时返回 SKIPPED，
@@ -1203,8 +1235,8 @@ class AgentGraphRunner:
             for item in context.get("annotations") or []
             if isinstance(item, dict) and isinstance(item.get("annotation"), dict)
         ]
-        requests = _resolution_requests(state, annotations)  # type: ignore[arg-type]
-        if not requests:
+        base_requests = _resolution_requests(state, annotations)  # type: ignore[arg-type]
+        if not base_requests:
             self._emit(
                 "node.progress",
                 {"node": "resolver", "message": "没有可解析的源码目标，跳过锚点解析"},
@@ -1218,11 +1250,17 @@ class AgentGraphRunner:
                         "anchors": [],
                     }
                 ),
+                "pending_decision": None,
                 "resolver_outcome": "skipped",
                 "resolver_round": int(state.get("resolver_round", 0)),
+                "decision_outcome": "none",
                 "status": "PLANNING",
             }
 
+        # 用户已选择的候选区间：由 decision_gate 写入 state，重解析时优先采用。
+        requests = _apply_stored_selections(
+            base_requests, state.get("decision_selections") or {}
+        )
         draft_id = state.get("draft_id") or None
         try:
             results = self._sandbox.resolve_targets(
@@ -1243,8 +1281,10 @@ class AgentGraphRunner:
                         "anchors": [],
                     }
                 ),
+                "pending_decision": None,
                 "resolver_outcome": "skipped",
                 "resolver_round": int(state.get("resolver_round", 0)),
+                "decision_outcome": "none",
                 "status": "PLANNING",
             }
         if results is None:
@@ -1256,69 +1296,25 @@ class AgentGraphRunner:
                         "anchors": [],
                     }
                 ),
+                "pending_decision": None,
                 "resolver_outcome": "skipped",
                 "resolver_round": int(state.get("resolver_round", 0)),
+                "decision_outcome": "none",
                 "status": "PLANNING",
             }
 
         anchors = [item for item in results if isinstance(item, dict)]
-        ambiguous = [
-            item
-            for item in anchors
-            if item.get("status") == TARGET_AMBIGUOUS and item.get("candidates")
-        ]
-        round_no = int(state.get("resolver_round", 0))
+        # 已决策的 callSite 覆盖：避免再次把公共组件定义当成可写目标。
+        anchors = _apply_anchor_overrides(
+            anchors, state.get("decision_overrides") or {}
+        )
+
         mode = str(state.get("clarification_mode", "auto"))
-        max_rounds = int(state.get("max_clarification_rounds", 3))
-
-        if ambiguous and mode != "off" and round_no < max_rounds:
-            next_round = round_no + 1
-            payload = _build_resolution_clarification_payload(
-                state, ambiguous, next_round
-            )
-            # 与 clarify_gate 一样：暂停帧必须先于 clarification.required，
-            # 保证带 afterSeq 重连的客户端能拿到终态标记。
-            self._emit(
-                "node.finished",
-                {
-                    "node": "resolver",
-                    "status": "paused",
-                    "durationMs": 0,
-                    "summary": "等待用户选择目标节点",
-                },
-                dedupe_key=f"node.finished:resolver:{round_no}:paused",
-            )
-            self._emit(
-                "clarification.required",
-                payload,
-                dedupe_key=f"clarification.required:{payload['clarificationId']}",
-            )
-            answers = interrupt(payload)
-            selections = _resolution_selections(_normalize_answers(answers))
-            round_no = next_round
-            if selections:
-                selected_requests = _apply_resolution_selections(
-                    requests, ambiguous, selections
-                )
-                try:
-                    retry_results = self._sandbox.resolve_targets(
-                        state["sandbox_id"], selected_requests, draft_id=draft_id
-                    )
-                except SandboxError as exc:
-                    logger.warning("resolver retry failed: %s", exc)
-                    retry_results = None
-                if retry_results is not None:
-                    anchors = [item for item in retry_results if isinstance(item, dict)]
-                    ambiguous = [
-                        item
-                        for item in anchors
-                        if item.get("status") == TARGET_AMBIGUOUS
-                        and item.get("candidates")
-                    ]
-
-        if ambiguous:
-            if mode != "off" and round_no >= max_rounds:
-                error = f"连续 {max_rounds} 轮后目标仍存在歧义"
+        round_no = int(state.get("decision_round", 0) or 0)
+        pending = _find_pending_decision(anchors) if mode != "off" else None
+        if pending is not None:
+            if round_no >= MAX_DECISION_ROUNDS:
+                error = "无法确定安全路径，操作已取消"
                 return {
                     "target_resolution": resolution_from_payload(
                         {
@@ -1327,39 +1323,63 @@ class AgentGraphRunner:
                             "anchors": anchors,
                         }
                     ),
+                    "pending_decision": None,
                     "resolver_outcome": "exhausted",
+                    "decision_outcome": "exhausted",
                     "resolver_round": round_no,
                     "status": "FAILED",
-                    "error_code": "RESOLUTION_LIMIT",
+                    "error_code": "DECISION_LIMIT",
                     "error": error,
                     "messages": [_message("resolver", error, error=True)],
                 }
-            # 澄清关闭或用户未选择：绝不猜测，交回旧路径并用现有 P0 门禁兜底。
-            reason = "目标存在歧义且未获得用户选择"
+            kind, anchor = pending
+            payload = _build_pending_decision_payload(state, kind, anchor, round_no + 1)
+            self._emit(
+                "node.progress",
+                {
+                    "node": "resolver",
+                    "message": payload["summary"],
+                },
+                dedupe_key=f"node.progress:resolver:decision:{payload['decisionId']}",
+            )
             return {
                 "target_resolution": resolution_from_payload(
-                    {"status": TARGET_AMBIGUOUS, "reason": reason, "anchors": anchors}
+                    {
+                        "status": TARGET_AMBIGUOUS,
+                        "reason": payload["reason"],
+                        "anchors": anchors,
+                    }
                 ),
-                "resolver_outcome": "unresolved",
+                "pending_decision": payload,
+                "resolver_outcome": (
+                    "ambiguous" if kind == DECISION_KIND_AMBIGUOUS else "unresolved"
+                ),
+                "decision_outcome": "none",
                 "resolver_round": round_no,
                 "status": "PLANNING",
-                "messages": [_message("resolver", f"{reason}，降级旧 Coder 路径")],
+                "messages": [_message("resolver", payload["summary"])],
             }
 
+        coder_ready = [
+            item
+            for item in anchors
+            if item.get("status") == RESOLVED and not item.get("protected")
+        ]
         resolved = [item for item in anchors if item.get("status") == RESOLVED]
-        all_resolved = bool(anchors) and len(resolved) == len(anchors)
+        all_resolved = bool(anchors) and len(coder_ready) == len(anchors)
         resolution = resolution_from_payload(
             {
                 "status": RESOLVED if resolved else TARGET_NOT_FOUND,
                 "reason": (
                     ""
                     if all_resolved
-                    else f"{len(resolved)}/{len(anchors)} 个目标定位成功"
+                    else f"{len(coder_ready)}/{len(anchors)} 个目标可安全写入"
                 ),
                 "anchors": anchors,
                 "evidence": {
-                    "requested": len(requests),
+                    "requested": len(base_requests),
                     "resolved": len(resolved),
+                    "coderReady": len(coder_ready),
                 },
             }
         )
@@ -1368,7 +1388,7 @@ class AgentGraphRunner:
             {
                 "node": "resolver",
                 "message": (
-                    f"解析 {len(requests)} 个标注："
+                    f"解析 {len(base_requests)} 个标注："
                     f"{len(resolved)} 个锚点可用，"
                     f"{len(anchors) - len(resolved)} 个未定位"
                 ),
@@ -1377,14 +1397,158 @@ class AgentGraphRunner:
         )
         return {
             "target_resolution": resolution,
+            "pending_decision": None,
             "resolver_outcome": "resolved" if all_resolved else "unresolved",
             "resolver_round": round_no,
+            "decision_outcome": "decided" if round_no > 0 else "none",
             "status": "PLANNING",
             "messages": [
                 _message(
                     "resolver",
                     f"目标解析完成：{len(resolved)}/{len(anchors)} 个锚点可用",
                 )
+            ],
+        }
+
+    def _decision_gate(self, state: AgentState) -> dict[str, Any]:
+        """Phase 2：把安全路径的选择权交给用户。
+
+        该节点只做一件事：调用 ``interrupt()`` 挂起 Run，等待前端通过
+        ``decision.required`` 渲染选项并回传 ``optionId``。用户选择只写入
+        “候选区间 / callSite 覆盖”，不直接改代码，也不允许豁免保护门禁。
+
+        单节点单次 interrupt 的设计保证 LangGraph 恢复语义稳定：每次恢复
+        只消费一个决策，处理后回到 Resolver 重新评估，最多 3 轮。
+        """
+        raw = state.get("pending_decision")
+        if not isinstance(raw, dict):
+            return {
+                "pending_decision": None,
+                "decision_outcome": "none",
+                "status": "PLANNING",
+            }
+        decision = PendingDecision.model_validate(raw)
+        self._emit(
+            "node.finished",
+            {
+                "node": "decision_gate",
+                "status": "paused",
+                "durationMs": 0,
+                "summary": decision.summary,
+            },
+            dedupe_key=f"node.finished:decision_gate:{decision.decision_id}:paused",
+        )
+        self._emit(
+            DECISION_REQUIRED_EVENT,
+            decision.model_dump(mode="json", by_alias=True),
+            dedupe_key=f"{DECISION_REQUIRED_EVENT}:{decision.decision_id}",
+        )
+        answer = interrupt(decision.model_dump(mode="json", by_alias=True))
+        option = _select_decision_option(decision, answer)
+        anchor_id = str((decision.target or {}).get("anchorId") or "")
+        if option is None:
+            # 没有拿到合法 optionId：仍然消耗一轮，回到 Resolver 重新评估。
+            # 连续 3 轮后由 Resolver 以 DECISION_LIMIT 强制关闭。
+            return {
+                "pending_decision": None,
+                "user_decision": {"optionId": None, "decisionId": decision.decision_id},
+                "decision_round": decision.round,
+                "decision_outcome": "decided",
+                "status": "PLANNING",
+                "messages": [
+                    _message(
+                        "decision_gate",
+                        "未收到有效的安全路径选择，重新解析目标",
+                        error=True,
+                    )
+                ],
+            }
+
+        if option.action == ACTION_CANCEL:
+            # 正常路径由 Service 在恢复前直接取消并清理草稿；这里是防御分支，
+            # 防止历史检查点 / 内部调用绕过 Service。
+            return {
+                "pending_decision": None,
+                "user_decision": {
+                    "optionId": option.option_id,
+                    "decisionId": decision.decision_id,
+                },
+                "decision_round": decision.round,
+                "decision_outcome": "cancelled",
+                "resolver_outcome": "cancelled",
+                "status": "FAILED",
+                "error_code": "DECISION_CANCELLED",
+                "error": "用户取消了本次修改",
+                "messages": [_message("decision_gate", "用户取消本次修改")],
+            }
+
+        base_update = {
+            "pending_decision": None,
+            "user_decision": {
+                "optionId": option.option_id,
+                "action": option.action,
+                "decisionId": decision.decision_id,
+            },
+            "decision_round": decision.round,
+            "decision_outcome": "decided",
+            "status": "PLANNING",
+            "messages": [
+                _message("decision_gate", f"用户选择安全路径：{option.label}")
+            ],
+        }
+
+        if option.action == ACTION_SELECT_TARGET:
+            selected = option.payload.get("range") or {}
+            selections = dict(state.get("decision_selections") or {})
+            selections[anchor_id] = {
+                "range": selected,
+                "candidateId": option.option_id,
+            }
+            return {**base_update, "decision_selections": selections}
+
+        if option.action == ACTION_MODIFY_CALL_SITE:
+            anchor = find_anchor(state.get("target_resolution") or {}, anchor_id)
+            call_site_anchor = (
+                anchor.get("callSiteAnchor") if isinstance(anchor, dict) else None
+            )
+            if not isinstance(call_site_anchor, dict):
+                return {
+                    "pending_decision": None,
+                    "decision_round": decision.round,
+                    "decision_outcome": "exhausted",
+                    "resolver_outcome": "exhausted",
+                    "status": "FAILED",
+                    "error_code": "DECISION_UNSUPPORTED",
+                    "error": "当前目标缺少可用的 callSite 锚点，无法安全修改",
+                    "messages": [
+                        _message(
+                            "decision_gate",
+                            "callSite 锚点缺失，无法执行“只在当前实例修改”",
+                            error=True,
+                        )
+                    ],
+                }
+            override = dict(call_site_anchor)
+            override["anchorId"] = anchor_id
+            override["annotationId"] = (
+                anchor.get("annotationId") or decision.annotation_id
+            )
+            override["decisionAction"] = ACTION_MODIFY_CALL_SITE
+            overrides = dict(state.get("decision_overrides") or {})
+            overrides[anchor_id] = override
+            return {**base_update, "decision_overrides": overrides}
+
+        # 安全白名单之外的动作理论上不可达；fail-closed。
+        return {
+            "pending_decision": None,
+            "decision_round": decision.round,
+            "decision_outcome": "exhausted",
+            "resolver_outcome": "exhausted",
+            "status": "FAILED",
+            "error_code": "DECISION_UNSUPPORTED",
+            "error": f"不支持的决策动作: {option.action}",
+            "messages": [
+                _message("decision_gate", "决策动作不在安全白名单内", error=True)
             ],
         }
 
@@ -2725,10 +2889,25 @@ class AgentGraphRunner:
         return "resolver"
 
     def _route_after_resolver(self, state: AgentState) -> str:
-        if state.get("resolver_outcome") == "exhausted":
+        # 轮次耗尽 / 内部取消：直接进入失败节点收口，等待 Service 清理草稿。
+        if state.get("resolver_outcome") in {"exhausted", "cancelled"}:
             return "failed"
-        # ambiguous 已在节点内通过 interrupt 完成多轮选择；恢复后继续。
+        # 有挂起决策时先让用户在安全路径中做选择；决策节点处理完回到
+        # resolver 重新解析，确保 TargetResolution 始终由确定性解析器生成。
+        if state.get("pending_decision"):
+            return "decision_gate"
         return "coder"
+
+    def _route_after_decision_gate(self, state: AgentState) -> str:
+        # 防御分支：决策节点内部拒绝 / 取消时不再回环。
+        if state.get("status") == "FAILED" or state.get("decision_outcome") in {
+            "cancelled",
+            "exhausted",
+        }:
+            return "failed"
+        # 用户选择已写入 decision_selections / decision_overrides，回到
+        # Resolver 重新生成可写锚点（Task 3：重新解析后再进 Coder）。
+        return "resolver"
 
     def _route_after_coder(self, state: AgentState) -> str:
         # Coder 自身超时 / 结构化输出失败属于终态错误，直接 failed；
@@ -3366,51 +3545,218 @@ def _resolution_requests(
     return requests
 
 
-def _resolution_selections(answers: list[dict[str, Any]]) -> dict[str, str]:
-    """把澄清回答解析为 ``anchorId -> candidateId``。"""
-    selections: dict[str, str] = {}
-    for answer in answers:
-        question_id = str(answer.get("questionId") or "")
-        if not question_id.startswith("resolution_"):
-            continue
-        anchor_id = question_id[len("resolution_") :]
-        value = answer.get("value")
-        if value in (None, ""):
-            value = answer.get("text")
-        if value in (None, ""):
-            continue
-        selections[anchor_id] = str(value)
-    return selections
-
-
-def _apply_resolution_selections(
+def _apply_stored_selections(
     requests: list[dict[str, Any]],
-    ambiguous: list[dict[str, Any]],
-    selections: dict[str, str],
+    selections: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """把用户选择的候选区间写回请求，让 Resolver 精确重解析。"""
-    by_anchor = {
-        str(item.get("anchorId")): item for item in ambiguous if item.get("anchorId")
-    }
+    """把用户已确认的候选区间写回解析请求。
+
+    ``selections`` 仅由 ``decision_gate`` 写入，结构为
+    ``anchorId -> {range, candidateId}``。区间由服务端从候选列表中复制，
+    前端无法自造 ``startOffset`` / ``endOffset``。
+    """
+    if not selections:
+        return requests
     updated: list[dict[str, Any]] = []
     for request in requests:
         anchor_id = str(request.get("anchorId") or "")
-        anchor = by_anchor.get(anchor_id)
-        selected = selections.get(anchor_id) or ""
-        if anchor and selected:
-            candidate = next(
-                (
-                    item
-                    for item in anchor.get("candidates") or []
-                    if str(item.get("candidateId")) == selected
-                ),
-                None,
-            )
-            if candidate is not None:
-                request = dict(request)
-                request["selectedRange"] = candidate.get("range")
+        selected = selections.get(anchor_id)
+        if isinstance(selected, dict) and isinstance(selected.get("range"), dict):
+            request = {**request, "selectedRange": selected["range"]}
         updated.append(request)
     return updated
+
+
+def _apply_anchor_overrides(
+    anchors: list[dict[str, Any]],
+    overrides: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """用已确认的 callSite 锚点覆盖共享组件定义锚点。
+
+    覆盖发生在解析器返回之后、决策检测之前：这样第二轮不会再次命中
+    ``protected``，Coder 拿到的 ``file`` / ``range`` / ``allowedFiles``
+    全部指向调用点文件，AST 工具的允许文件门禁自然通过。
+    """
+    if not overrides:
+        return anchors
+    updated: list[dict[str, Any]] = []
+    for anchor in anchors:
+        anchor_id = str(anchor.get("anchorId") or "")
+        override = overrides.get(anchor_id)
+        if isinstance(override, dict):
+            merged = {**anchor, **override}
+            # 标识字段始终以原始锚点为准，保证审计链路可追踪。
+            merged["anchorId"] = anchor_id
+            merged["annotationId"] = anchor.get("annotationId") or override.get(
+                "annotationId"
+            )
+            merged["sourceAnchorId"] = anchor_id
+            updated.append(merged)
+        else:
+            updated.append(anchor)
+    return updated
+
+
+def _find_pending_decision(
+    anchors: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any]] | None:
+    """挑选本轮需要用户决策的锚点：歧义优先，其次公共组件保护。"""
+    for anchor in anchors:
+        if anchor.get("status") == TARGET_AMBIGUOUS and anchor.get("candidates"):
+            return DECISION_KIND_AMBIGUOUS, anchor
+    for anchor in anchors:
+        if anchor.get("status") == RESOLVED and anchor.get("protected"):
+            return DECISION_KIND_PROTECTED, anchor
+    return None
+
+
+def _build_pending_decision_payload(
+    state: AgentState,
+    kind: str,
+    anchor: dict[str, Any],
+    round_no: int,
+) -> dict[str, Any]:
+    """构造 ``decision.required`` 载荷。
+
+    所有 optionId / range / 文件路径均由服务端生成；用户回传的只是
+    optionId，服务端据此找回对应的安全动作，不存在“强行改公共组件”
+    这类入口。
+    """
+    anchor_id = str(anchor.get("anchorId") or "")
+    file = str(anchor.get("file") or "")
+    component = str(anchor.get("component") or "")
+    options: list[DecisionOption] = []
+
+    if kind == DECISION_KIND_AMBIGUOUS:
+        for candidate in (anchor.get("candidates") or [])[:8]:
+            candidate_id = str(candidate.get("candidateId") or "")
+            if not candidate_id:
+                continue
+            range_view = candidate.get("range") or {}
+            label = (
+                f"第 {range_view.get('startLine') or '?'} 行 · "
+                f"{candidate.get('nodeType') or 'JSX'} · "
+                f"{candidate.get('component') or component or '未知组件'}"
+            )
+            options.append(
+                DecisionOption(
+                    option_id=candidate_id,
+                    action=ACTION_SELECT_TARGET,
+                    label=label,
+                    description=str(candidate.get("preview") or "")[:200],
+                    payload={
+                        "range": range_view,
+                        "candidateId": candidate_id,
+                        "file": candidate.get("file") or file,
+                    },
+                )
+            )
+        summary = (
+            f"目标「{component or file or anchor_id}」命中多个疑似节点，"
+            "请选择要修改的那一个"
+        )
+        reason = str(anchor.get("reason") or "选择器命中多个节点")
+    else:
+        call_site_anchor = (
+            anchor.get("callSiteAnchor")
+            if isinstance(anchor.get("callSiteAnchor"), dict)
+            else None
+        )
+        if call_site_anchor is not None:
+            call_site_file = (
+                call_site_anchor.get("file") or anchor.get("callSiteFile") or ""
+            )
+            options.append(
+                DecisionOption(
+                    option_id=f"{anchor_id}_callsite",
+                    action=ACTION_MODIFY_CALL_SITE,
+                    label="只在当前实例修改",
+                    description=(
+                        f"仅在 {call_site_file} 的调用点修改，" "不触碰公共组件定义"
+                    ),
+                    recommended=True,
+                    payload={"callSiteFile": call_site_file},
+                )
+            )
+        summary = (
+            f"「{component or file or anchor_id}」是公共组件，"
+            "只能在当前调用点做实例级修改"
+        )
+        reason = str(anchor.get("sharedReason") or "公共组件受保护")
+
+    options.append(
+        DecisionOption(
+            option_id=f"cancel_{anchor_id}",
+            action=ACTION_CANCEL,
+            label="取消本次修改",
+            description="不修改任何文件，丢弃本次草稿",
+        )
+    )
+
+    pending = PendingDecision(
+        decision_id=decision_id_for(
+            str(state.get("run_id") or "run"), anchor_id, round_no
+        ),
+        run_id=state.get("run_id"),
+        annotation_id=anchor.get("annotationId"),
+        thread_id=_thread_id_for_annotation(state, anchor.get("annotationId")),
+        kind=kind,  # type: ignore[arg-type]
+        round=round_no,
+        max_rounds=MAX_DECISION_ROUNDS,
+        reason=reason,
+        summary=summary,
+        target={
+            "anchorId": anchor_id,
+            "annotationId": anchor.get("annotationId"),
+            "file": file,
+            "range": anchor.get("range") or {},
+            "component": component,
+            "sharedReason": anchor.get("sharedReason") or "",
+            "callSiteFile": anchor.get("callSiteFile") or "",
+            "candidates": len(anchor.get("candidates") or []),
+        },
+        options=options,
+        expires_at=datetime.now(timezone.utc)
+        + timedelta(hours=int(state.get("clarification_ttl_hours", 24))),
+    )
+    return pending.model_dump(mode="json", by_alias=True)
+
+
+def _select_decision_option(
+    decision: PendingDecision,
+    answer: Any,
+) -> DecisionOption | None:
+    """按服务端生成的 optionId 找回选项，拒绝任何自造动作。
+
+    ``answer`` 是 LangGraph ``interrupt()`` 的恢复值，允许两种形态：
+    - 字符串 optionId；
+    - ``{optionId, decisionId?, action?}``（action 会被忽略）。
+    只要 optionId 不在当前决策的选项列表中，就视为无效回答。
+    """
+    option_id = ""
+    claimed_decision_id = ""
+    if isinstance(answer, dict):
+        option_id = str(
+            answer.get("optionId")
+            or answer.get("option_id")
+            or answer.get("value")
+            or ""
+        ).strip()
+        claimed_decision_id = str(
+            answer.get("decisionId") or answer.get("decision_id") or ""
+        ).strip()
+    else:
+        option_id = str(answer or "").strip()
+    if not option_id:
+        return None
+    if claimed_decision_id and claimed_decision_id != decision.decision_id:
+        return None
+    option = next(
+        (item for item in decision.options if item.option_id == option_id), None
+    )
+    if option is None or option.action in FORBIDDEN_DECISION_ACTIONS:
+        return None
+    return option
 
 
 def _thread_id_for_annotation(
@@ -3425,74 +3771,6 @@ def _thread_id_for_annotation(
         ):
             return annotation.get("threadId") or annotation.get("thread_id")
     return None
-
-
-def _build_resolution_clarification_payload(
-    state: AgentState,
-    ambiguous: list[dict[str, Any]],
-    round_no: int,
-) -> dict[str, Any]:
-    """目标歧义时的多轮选择载荷，复用现有 Clarification 协议。
-
-    每个歧义标注生成一个 single_choice 问题；选项值是服务端生成的
-    candidateId，前端只回传 ID，不能自造源码范围。
-    """
-    questions: list[dict[str, Any]] = []
-    for anchor in ambiguous[:3]:
-        options = []
-        for candidate in anchor.get("candidates") or []:
-            range_view = candidate.get("range") or {}
-            label = (
-                f"第 {range_view.get('startLine')} 行 · "
-                f"{candidate.get('nodeType') or 'JSX'} · "
-                f"{candidate.get('component') or '未知组件'}"
-            )
-            options.append(
-                {
-                    "value": candidate.get("candidateId"),
-                    "label": label,
-                    "description": str(candidate.get("preview") or "")[:200],
-                }
-            )
-        questions.append(
-            {
-                "questionId": f"resolution_{anchor.get('anchorId')}",
-                "type": "single_choice",
-                "prompt": "目标元素存在多个疑似节点，请选择要修改的那一个",
-                "required": True,
-                "options": options,
-            }
-        )
-    first = ambiguous[0] if ambiguous else {}
-    annotation_id = first.get("annotationId")
-    expires_at = datetime.now(timezone.utc) + timedelta(
-        hours=int(state.get("clarification_ttl_hours", 24))
-    )
-    return {
-        "kind": "clarification",
-        "clarificationId": f"clr_{state.get('run_id')}_{round_no}_resolver",
-        "runId": state.get("run_id"),
-        "annotationId": annotation_id,
-        "threadId": _thread_id_for_annotation(state, annotation_id),
-        "round": round_no,
-        "maxRounds": int(state.get("max_clarification_rounds", 3)),
-        "reason": "target_ambiguous",
-        "decisionImpact": "CRITICAL",
-        "decisionSummary": "目标解析到多个疑似节点，必须由用户确认",
-        "questions": questions,
-        "clarificationOptions": [
-            {
-                "optionId": option["value"],
-                "label": option["label"],
-                "description": option["description"],
-                "questionId": question["questionId"],
-                "value": option["value"],
-            }
-            for question in questions
-            for option in question["options"]
-        ],
-        "expiresAt": expires_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
-    }
 
 
 def _build_clarification_payload(

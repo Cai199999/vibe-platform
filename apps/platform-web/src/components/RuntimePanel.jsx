@@ -174,6 +174,109 @@ function ApprovalPanel({
   )
 }
 
+const DECISION_KIND_TEXT = {
+  protected_component: '公共组件保护',
+  target_ambiguous: '目标存在歧义',
+}
+
+/**
+ * 安全路径决策面板。
+ *
+ * 选项全部由服务端生成：歧义候选、callSite 实例级修改、取消。
+ * 前端只回传 optionId，不提供任何“强行修改公共组件”的入口。
+ */
+function DecisionPanel({
+  decision,
+  busy,
+  cancelRequested,
+  onAnswer,
+  onCancel,
+  onGoToCanvas,
+}) {
+  const [comment, setComment] = useState('')
+  const options = decision.options ?? []
+  const target = decision.target ?? {}
+  const kind = DECISION_KIND_TEXT[decision.kind] ?? decision.kind
+
+  return (
+    <div className="loading-state runtime-loading is-decision">
+      <div className="loading-copy timeline-head">
+        <h3 className="loading-title">需要你选择安全路径</h3>
+        <p className="muted">{decision.summary || decision.reason}</p>
+        <p className="decision-meta">
+          第 {decision.round}/{decision.maxRounds} 轮 · {kind}
+        </p>
+      </div>
+
+      {target.file && (
+        <p className="decision-target">
+          <code>{target.file}</code>
+          {target.range?.startLine ? (
+            <span className="muted"> · 第 {target.range.startLine} 行</span>
+          ) : null}
+          {target.component ? (
+            <span className="muted"> · {target.component}</span>
+          ) : null}
+        </p>
+      )}
+      {target.sharedReason && (
+        <p className="decision-reason">{target.sharedReason}</p>
+      )}
+
+      <div className="decision-options">
+        {options.map((option) => (
+          <button
+            key={option.optionId}
+            type="button"
+            className={`decision-option ${
+              option.action === 'cancel' ? 'is-cancel' : ''
+            } ${option.recommended ? 'is-recommended' : ''}`}
+            disabled={busy}
+            onClick={() => onAnswer?.(option.optionId, comment)}
+          >
+            <span className="decision-option-label">
+              {option.label}
+              {option.recommended && <em>推荐</em>}
+            </span>
+            {option.description && (
+              <span className="decision-option-desc">{option.description}</span>
+            )}
+          </button>
+        ))}
+        {options.length === 0 && (
+          <p className="muted">没有可执行的安全路径，请取消本次修改。</p>
+        )}
+      </div>
+
+      <input
+        className="approval-comment decision-comment"
+        type="text"
+        value={comment}
+        maxLength={300}
+        placeholder="补充说明（可选）"
+        disabled={busy}
+        onChange={(event) => setComment(event.target.value)}
+      />
+
+      <div className="approval-actions">
+        <button
+          className="ghost-button"
+          type="button"
+          disabled={busy || cancelRequested}
+          onClick={onCancel}
+        >
+          {cancelRequested ? '正在取消…' : '取消执行'}
+        </button>
+        {onGoToCanvas && (
+          <button className="ghost-button" type="button" onClick={onGoToCanvas}>
+            去画布查看
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function Timeline({ items }) {
   if (!items?.length) {
     return (
@@ -639,6 +742,7 @@ export default function RuntimePanel({
   onRunInBackground,
   onGoToCanvas,
   onApprovalDecision,
+  onDecisionAnswer,
   onCancelRun,
   inspectMode = false,
   onInspectPick,
@@ -673,6 +777,7 @@ export default function RuntimePanel({
     timeline = [],
     clarification = null,
     approval = null,
+    pendingDecision = null,
     cancelRequested = false,
     pendingAction = null,
     backgroundRun = null,
@@ -714,7 +819,10 @@ export default function RuntimePanel({
 
   let stateLabel = 'IDLE'
   let stateClass = 'is-idle'
-  if (approval && !submitting) {
+  if (pendingDecision && !submitting) {
+    stateLabel = 'DECISION · 待选择'
+    stateClass = 'is-paused'
+  } else if (approval && !submitting) {
     stateLabel = 'APPROVAL · 待审批'
     stateClass = 'is-paused'
   } else if (clarification && !submitting) {
@@ -802,7 +910,7 @@ export default function RuntimePanel({
         )}
 
         {/* 精准选择命中后，在预览画布内直接弹出标注输入卡片。 */}
-        {inspectDraft && !submitting && !approval && (
+        {inspectDraft && !submitting && !approval && !pendingDecision && (
           <InspectDraftCard
             draft={inspectDraft}
             onChange={onInspectDraftChange}
@@ -835,9 +943,26 @@ export default function RuntimePanel({
           </div>
         )}
 
+        {!submitting && pendingDecision && (
+          <div className="runtime-overlay">
+            <DecisionPanel
+              decision={pendingDecision}
+              busy={submitting}
+              cancelRequested={cancelRequested}
+              onAnswer={onDecisionAnswer}
+              onCancel={onCancelRun}
+              onGoToCanvas={onGoToCanvas}
+            />
+          </div>
+        )}
+
         {/* 取色期间隐藏 PausedState，否则遮罩会挡住 iframe，用户点不到
             目标组件；改用顶部窄横幅提示操作，画布保持可点击。 */}
-        {!submitting && !approval && clarification && !referencePick && (
+        {!submitting &&
+          !approval &&
+          !pendingDecision &&
+          clarification &&
+          !referencePick && (
           <div className="runtime-overlay">
             <PausedState
               timeline={timeline}
@@ -849,7 +974,7 @@ export default function RuntimePanel({
           </div>
         )}
 
-        {referencePick && !submitting && !approval && (
+        {referencePick && !submitting && !approval && !pendingDecision && (
           <div
             className="runtime-reference-banner"
             role="status"
@@ -888,7 +1013,7 @@ export default function RuntimePanel({
           </div>
         )}
 
-        {!submitting && !approval && !clarification && error && (
+        {!submitting && !approval && !pendingDecision && !clarification && error && (
           <div className="runtime-overlay">
             <div className="error-state runtime-error">
               <span className="error-code">
@@ -916,7 +1041,7 @@ export default function RuntimePanel({
           </div>
         )}
 
-        {!submitting && !approval && !clarification && !error && !result && (
+        {!submitting && !approval && !pendingDecision && !clarification && !error && !result && (
           <div className="runtime-overlay">
             <IdleState hasAnnotation={annotations.length > 0} />
           </div>
@@ -924,6 +1049,7 @@ export default function RuntimePanel({
 
         {!submitting &&
           !approval &&
+          !pendingDecision &&
           !clarification &&
           !error &&
           result &&
@@ -936,6 +1062,7 @@ export default function RuntimePanel({
         {!submitting &&
           !backgroundRun &&
           !approval &&
+          !pendingDecision &&
           !clarification &&
           !error &&
           previewOffline && (
@@ -958,6 +1085,7 @@ export default function RuntimePanel({
         {!submitting &&
           !backgroundRun &&
           !approval &&
+          !pendingDecision &&
           !clarification &&
           !error &&
           result &&
