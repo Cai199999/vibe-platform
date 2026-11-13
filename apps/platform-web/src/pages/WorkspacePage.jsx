@@ -50,6 +50,7 @@ import {
   useDraftStore,
 } from '../workspace/draftStore.js'
 import { writeDraftTombstone } from '../workspace/draftStorage.js'
+import { formatPlacementAcceptance } from '../workspace/stagedPlacement.js'
 import { INITIAL_APP } from '../mockProject.js'
 
 const TARGET_FILE = 'src/App.jsx'
@@ -502,7 +503,14 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
       })
   // Inspect 模式由 SDK 回传真实文件 / 行号 / 列号；圈选模式继续使用
   // data-source 标记反查行号。两者最终都收敛到同一个 AnnotationEnvelope。
-  const precise = entry.inspectSource ?? entry.source ?? null
+  // CREATE_NEW 拖拽落位后，entry.source 是父容器描述；它必须优先于
+  // 创建时记录的叶子 inspectSource，否则 Resolver 会把插入锚点定位到
+  // 子元素而不是用户高亮的盒子。
+  const precise =
+    (isCreateAction(action) && entry.source) ||
+    entry.inspectSource ||
+    entry.source ||
+    null
   const resolvedFile = precise?.file || targetFile
   const line = Number(precise?.line) || findTargetLine(source, target?.marker)
   const column = Number(precise?.column) || 1
@@ -545,6 +553,16 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
       ? [
           `在${target?.label || '圈选区域'}（${target?.selector || '父容器'}）内部新增组件：${instruction}`,
           '只生成组件主体与 data-vibe-created 审计标记，不写死绝对坐标；按父容器自然文档流插入',
+          // 拖拽落位后的确定性插入约束：显式告诉 Coder 兄弟锚点与顺序，
+          // 不让模型再从自然语言里猜“放第几个”。
+          ...(entry.placement
+            ? [
+                formatPlacementAcceptance(
+                  entry.placement,
+                  target?.label || '父容器',
+                ),
+              ]
+            : []),
           '原有 DOM 结构、布局、文案与交互保持不变',
         ]
       : [
@@ -664,6 +682,11 @@ function buildAnnotation(entry, source, targetFile = TARGET_FILE, files = null) 
       // 可视化选型：用户点选的参考组件及其真实类名 / computed CSS。
       // 即使后续重新提交（并非走澄清 checkpoint），也必须保留事实来源。
       ...(entry.reference ? { reference: entry.reference } : {}),
+      // 暂存组件拖拽落位结果：父容器 instanceId + 插入锚点 + 兄弟顺序。
+      // 后端 Resolver / Coder 只读这份结构化事实，不解析自然语言。
+      ...(isCreateAction(action) && entry.placement
+        ? { placement: entry.placement }
+        : {}),
       // 直接拖拽：dx / dy 是相对组件原始位置的累计偏移（不是本次手势
       // 增量）。后端 _try_move_tool 直接读取它调用 move_component，
       // 不再让模型从自然语言里猜方向与距离。
@@ -4231,6 +4254,41 @@ export default function WorkspacePage() {
     publishPendingAdditions(projectId)
   }
 
+  /**
+   * 暂存组件拖拽落位回写。
+   *
+   * 前端只记录“落在哪个父容器 + 相对偏移 + 兄弟锚点”，绝不写代码；
+   * 真正插入发生在【保存布局】时，由后端 Resolver 按 placement 定位。
+   * 这里同时更新 run.annotations 与 pendingAdditionsRef，保证浮层、
+   * 幽灵节点与最终 Envelope 读到的是同一份事实。
+   */
+  const applyPendingAdditionPlacement = (projectId, annotationId, patch) => {
+    if (!annotationId || !patch?.placement) return
+    const map = pendingAdditionsRef.current.get(projectId)
+    const staged = map?.get(annotationId)
+    if (!map || !staged) return
+    const placementFields = {
+      rect: patch.rect ?? staged.rect,
+      documentRect: patch.documentRect ?? staged.documentRect ?? null,
+      frameScroll: patch.frameScroll ?? staged.frameScroll ?? null,
+      addTarget: patch.addTarget ?? staged.addTarget ?? null,
+      source: patch.source ?? staged.source ?? null,
+      relativeRect: patch.relativeRect ?? staged.relativeRect ?? null,
+      placement: patch.placement,
+      placementUpdatedAt: new Date().toISOString(),
+    }
+    map.set(annotationId, { ...staged, ...placementFields })
+    patchRun(projectId, (previous) => ({
+      ...previous,
+      annotations: previous.annotations.map((annotation) =>
+        annotation.id === annotationId
+          ? { ...annotation, ...placementFields }
+          : annotation,
+      ),
+    }))
+    publishPendingAdditions(projectId)
+  }
+
   const removePendingAddition = (projectId, annotationId) => {
     const map = pendingAdditionsRef.current.get(projectId)
     if (!map?.delete(annotationId)) return
@@ -4496,6 +4554,11 @@ export default function WorkspacePage() {
             // 视觉选型结果可能存储在幽灵草稿上（澄清期间未能写回
             // run.annotations）；重新提交时必须随信封一起带走。
             reference: item.reference || raw.reference || null,
+            // 拖拽落位结果以草稿为准：run.annotations 可能尚未同步。
+            placement: item.placement || raw.placement || null,
+            addTarget: item.addTarget || raw.addTarget || null,
+            source: item.source || raw.source || null,
+            relativeRect: item.relativeRect || raw.relativeRect || null,
           },
           sourceCode,
           targetFile,
@@ -5753,6 +5816,7 @@ export default function WorkspacePage() {
       handleAnnotationMove,
       handleComponentDragEnd,
       handleComponentDragCancel,
+      applyPendingAdditionPlacement,
       handleSaveLayout,
       handleUndoLayout,
       handleClarificationAnswer,
@@ -5810,6 +5874,9 @@ export default function WorkspacePage() {
         // 移除暂存组件同时删除前端标注与草稿，不触碰沙盒代码。
         onRemovePendingAddition: (annotationId) =>
           call('handleAnnotationRemove', annotationId),
+        // 拖拽松手：只回写 placement，不触发任何 Agent Run / 代码修改。
+        onPendingAdditionPlacement: (annotationId, patch) =>
+          call('applyPendingAdditionPlacement', annotationId, patch),
         onSaveLayout: () => call('handleSaveLayout'),
         onUndoLayout: () => call('handleUndoLayout'),
         onClarificationAnswer: (

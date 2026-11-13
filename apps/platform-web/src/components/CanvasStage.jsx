@@ -10,6 +10,13 @@ import {
   collectReferenceText,
   isVisualReferenceText,
 } from '../workspace/visualReference.js'
+import {
+  buildPlacementPatch,
+  clampGhostRect,
+  clientToFramePoint,
+  parentAnchorId,
+  stageTargetLabel,
+} from '../workspace/stagedPlacement.js'
 
 const clamp01 = (value) => Math.min(1, Math.max(0, value))
 
@@ -77,6 +84,56 @@ function resolveAnnotationRect(annotation, frameScroll) {
       rect.y + rect.height > 0,
   }
 }
+
+/**
+ * 暂存组件的视觉卡片。
+ *
+ * 静态幽灵与拖拽幽灵共用同一份内容，保证松手前后不会“换个样子”。
+ * 单独 memo：拖动过程中父组件会因父容器高亮而重渲染，但卡片本身
+ * 内容不变，不需要跟着重渲染。
+ */
+const StagedGhostCard = memo(function StagedGhostCard({ item }) {
+  return (
+    <div className="pending-addition-ghost-card">
+      <span className="pending-addition-ghost-badge">暂存 · 未写入</span>
+      <span className="pending-addition-ghost-preview">
+        {item.componentLabel || '新增组件'}
+      </span>
+      <span className="pending-addition-ghost-intent">
+        {/* 多轮澄清时同一条记录原地刷新最终意图，绝不新建第二个幽灵节点。 */}
+        {item.finalIntent || item.intent}
+      </span>
+    </div>
+  )
+})
+
+/**
+ * 拖拽中的幽灵层。
+ *
+ * 位置只在 pointerdown 时写入一次，后续由父组件通过 ref 直接改 left/top；
+ * 这样 60fps 拖动不会触发 CanvasStage 的整树重渲染。
+ */
+const StagedDragGhost = memo(function StagedDragGhost({
+  item,
+  rect,
+  ghostRef,
+}) {
+  return (
+    <div
+      ref={ghostRef}
+      className="pending-addition-ghost is-dragging"
+      style={{
+        left: `${rect.x * 100}%`,
+        top: `${rect.y * 100}%`,
+        width: `${rect.width * 100}%`,
+        height: `${rect.height * 100}%`,
+        zIndex: 80,
+      }}
+    >
+      <StagedGhostCard item={item} />
+    </div>
+  )
+})
 
 /** 把一个带标记的 DOM 节点转换为可序列化的目标描述。 */
 function targetForNode(node) {
@@ -1171,6 +1228,10 @@ function CanvasStage({
   // 真正写代码发生在【保存布局】的一次 BATCH_LAYOUT 请求里。
   pendingAdditions = [],
   onRemovePendingAddition,
+  // 暂存组件自由拖拽：只在预览 LIVE 时开启（ProjectWorkspace 按
+  // PreviewState 下发），否则没有真实 DOM 可以命中父容器。
+  stageDragEnabled = false,
+  onPendingAdditionPlacement,
 }) {
   const stageRef = useRef(null)
   // 固定 1440×900 的视口节点：所有屏幕 → 世界坐标换算都以它的
@@ -1248,6 +1309,23 @@ function CanvasStage({
   const [movingId, setMovingId] = useState(null)
   const [moveOffset, setMoveOffset] = useState({ x: 0, y: 0 })
   const moveDragRef = useRef(null)
+
+  // ---- 暂存组件拖拽 ----------------------------------------------------
+  // stageDrag 只保存“哪个 annotation 正在拖 + 初始 rect”；每帧位置在 ref
+  // 里更新并直接写 DOM，避免 60fps setState。
+  const [stageDrag, setStageDrag] = useState(null)
+  // 当前命中的父容器（高亮框 + Tooltip）。只在容器身份变化时更新。
+  const [stageTarget, setStageTarget] = useState(null)
+  const [stageNotice, setStageNotice] = useState('')
+  const stageDragRef = useRef(null)
+  const stageGhostRef = useRef(null)
+  const stageHitSeqRef = useRef(0)
+  const pendingStageHitRef = useRef(new Map())
+  const stageHitRafRef = useRef(0)
+  const stageNoticeTimerRef = useRef(null)
+  // 拖拽期间 iframe 可能滚动；Drop 时必须读最新滚动快照，不能读旧闭包。
+  const frameScrollRef = useRef(frameScroll)
+  frameScrollRef.current = frameScroll
 
   // 与沙盒预览共用固定 1440×900 逻辑视口：画布容器自身滚动，
   // 不再用外层 scale 强行适配屏幕，页面内容可以完整滚动查看。
@@ -1486,10 +1564,17 @@ function CanvasStage({
             '*',
           )
         setInspectHover(null)
-        // 旧文档里的圈选请求已经不可能再返回，统一按失败收口。
+        // 旧文档里的圈选 / 拖拽命中请求已经不可能再返回，统一收口。
         liveSelectionSeedRef.current += 1
         pendingAnalysisRef.current.forEach((resolve) => resolve(null))
         pendingAnalysisRef.current.clear()
+        pendingStageHitRef.current.forEach((resolve) => resolve(null))
+        pendingStageHitRef.current.clear()
+        if (stageDragRef.current) {
+          stageDragRef.current = null
+          setStageDrag(null)
+          setStageTarget(null)
+        }
         const readyScroll = data.payload?.scroll
         if (readyScroll) {
           setFrameScroll((current) => ({
@@ -1529,11 +1614,27 @@ function CanvasStage({
         }
         return
       }
+      if (data.type === 'stage-hit-result') {
+        const requestId = data.payload?.requestId
+        const resolve = pendingStageHitRef.current.get(requestId)
+        if (resolve) {
+          pendingStageHitRef.current.delete(requestId)
+          resolve(data.payload)
+        }
+        return
+      }
       if (data.type === 'route-change') {
-        // 页面已切换：作废进行中的圈选分析，再通知上层清空标注。
+        // 页面已切换：作废进行中的圈选分析与拖拽命中，再通知上层清空标注。
         liveSelectionSeedRef.current += 1
         pendingAnalysisRef.current.forEach((resolve) => resolve(null))
         pendingAnalysisRef.current.clear()
+        pendingStageHitRef.current.forEach((resolve) => resolve(null))
+        pendingStageHitRef.current.clear()
+        if (stageDragRef.current) {
+          stageDragRef.current = null
+          setStageDrag(null)
+          setStageTarget(null)
+        }
         onFrameRouteChangeRef.current?.(data.payload)
         return
       }
@@ -1744,9 +1845,268 @@ function CanvasStage({
     () => () => {
       pendingAnalysisRef.current.forEach((resolve) => resolve(null))
       pendingAnalysisRef.current.clear()
+      pendingStageHitRef.current.forEach((resolve) => resolve(null))
+      pendingStageHitRef.current.clear()
+      if (stageHitRafRef.current) {
+        window.cancelAnimationFrame(stageHitRafRef.current)
+        stageHitRafRef.current = 0
+      }
+      if (stageNoticeTimerRef.current) {
+        window.clearTimeout(stageNoticeTimerRef.current)
+        stageNoticeTimerRef.current = null
+      }
     },
     [],
   )
+
+  // ---- 暂存组件拖拽 / 落点命中 ---------------------------------------
+  /** 顶部轻提示：不阻塞操作，只解释“为什么没放进去”。 */
+  const showStageNotice = (text) => {
+    setStageNotice(text)
+    if (stageNoticeTimerRef.current) {
+      window.clearTimeout(stageNoticeTimerRef.current)
+    }
+    stageNoticeTimerRef.current = window.setTimeout(() => {
+      stageNoticeTimerRef.current = null
+      setStageNotice('')
+    }, 2400)
+  }
+
+  /** 父页面 client 坐标 → iframe 视口 CSS 像素（含是否在视口内）。 */
+  const stagePointFromClient = (clientX, clientY) => {
+    const viewportNode = viewportRef.current
+    if (!viewportNode || viewport.scale <= 0) return null
+    const box = viewportNode.getBoundingClientRect()
+    return clientToFramePoint({
+      clientX,
+      clientY,
+      box,
+      scale: viewport.scale,
+      width: designWidth,
+      height: designHeight,
+    })
+  }
+
+  /**
+   * 请求 SDK 在 iframe 内做一次落点命中。
+   *
+   * 只读：SDK 不会修改 DOM，也不会触发 HMR。requestId 单调递增，
+   * 过期的响应由 pendingStageHitRef 丢弃。
+   */
+  const requestStageHit = (clientX, clientY, timeout = 260) =>
+    new Promise((resolve) => {
+      const frame = liveFrameRef.current
+      const point = stagePointFromClient(clientX, clientY)
+      if (!frame?.contentWindow || !point?.inside) {
+        resolve(null)
+        return
+      }
+      stageHitSeqRef.current += 1
+      const requestId = `stage_${Date.now().toString(36)}_${stageHitSeqRef.current}`
+      let settled = false
+      const finish = (value) => {
+        if (settled) return
+        settled = true
+        pendingStageHitRef.current.delete(requestId)
+        resolve(value)
+      }
+      pendingStageHitRef.current.set(requestId, finish)
+      frame.contentWindow.postMessage(
+        {
+          channel: 'vibe-inspect',
+          type: 'stage-hit',
+          payload: { requestId, x: point.x, y: point.y },
+        },
+        '*',
+      )
+      window.setTimeout(() => finish(null), timeout)
+    })
+
+  /**
+   * rAF 合并命中请求：最多每帧一次，避免 pointermove 把 postMessage 打爆。
+   * 同一父容器内移动不更新 React state，只在高亮对象变化时才重渲染。
+   */
+  const scheduleStageHit = (clientX, clientY) => {
+    const drag = stageDragRef.current
+    if (!drag) return
+    drag.pendingClient = { clientX, clientY }
+    if (stageHitRafRef.current) return
+    stageHitRafRef.current = window.requestAnimationFrame(() => {
+      stageHitRafRef.current = 0
+      const current = stageDragRef.current
+      if (!current?.pendingClient) return
+      const { clientX: x, clientY: y } = current.pendingClient
+      current.pendingClient = null
+      void requestStageHit(x, y).then((hit) => {
+        // 用户已松手 / 开始下一次拖拽：旧结果必须丢弃。
+        if (stageDragRef.current !== current) return
+        if (!hit?.ok) {
+          current.lastHit = null
+          setStageTarget(null)
+          return
+        }
+        const previous = current.lastHit
+        current.lastHit = hit
+        const changed =
+          !previous ||
+          parentAnchorId(previous.parent) !== parentAnchorId(hit.parent) ||
+          previous.insertPosition !== hit.insertPosition ||
+          Number(previous.siblingIndex) !== Number(hit.siblingIndex)
+        if (changed) setStageTarget(hit)
+      })
+    })
+  }
+
+  /** 暂存 ghost 的可视矩形：以文档坐标为准，滚动 / 平移后自动跟随。 */
+  const resolveStagedGhostRect = (item) => {
+    const display =
+      mode === 'live'
+        ? resolveAnnotationRect(item, frameScrollRef.current)
+        : item.rect
+    return clampGhostRect(
+      display || item.rect || { x: 0, y: 0, width: 0.2, height: 0.1 },
+    )
+  }
+
+  const cancelStagedDrag = (notice = '') => {
+    if (!stageDragRef.current) return
+    stageDragRef.current = null
+    setStageDrag(null)
+    setStageTarget(null)
+    if (notice) showStageNotice(notice)
+  }
+
+  const beginStagedDrag = (event, item) => {
+    if (!stageDragEnabled || disabled || blocked) return
+    if (event.button !== 0) return
+    const point = stagePointFromClient(event.clientX, event.clientY)
+    if (!point?.inside) return
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = resolveStagedGhostRect(item)
+    stageDragRef.current = {
+      annotationId: item.annotationId,
+      pointerId: event.pointerId,
+      rect,
+      grabDx: point.x / designWidth - rect.x,
+      grabDy: point.y / designHeight - rect.y,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      pendingClient: null,
+      lastHit: null,
+      moved: false,
+      finishing: false,
+    }
+    setStageDrag({ annotationId: item.annotationId, rect })
+    setStageTarget(null)
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId)
+    } catch {
+      // Safari 某些版本对已释放的 pointer 会抛错；命中链路仍可用。
+    }
+    scheduleStageHit(event.clientX, event.clientY)
+  }
+
+  const moveStagedDrag = (event) => {
+    const drag = stageDragRef.current
+    if (!drag || event.pointerId !== drag.pointerId) return
+    const distance = Math.hypot(
+      event.clientX - drag.startClientX,
+      event.clientY - drag.startClientY,
+    )
+    if (!drag.moved && distance < 3) return
+    event.preventDefault()
+    event.stopPropagation()
+    drag.moved = true
+    const point = stagePointFromClient(event.clientX, event.clientY)
+    if (!point) return
+    const rect = clampGhostRect({
+      x: point.x / designWidth - drag.grabDx,
+      y: point.y / designHeight - drag.grabDy,
+      width: drag.rect.width,
+      height: drag.rect.height,
+    })
+    drag.rect = rect
+    const node = stageGhostRef.current
+    if (node) {
+      node.style.left = `${rect.x * 100}%`
+      node.style.top = `${rect.y * 100}%`
+    }
+    if (point.inside) {
+      scheduleStageHit(event.clientX, event.clientY)
+    } else {
+      // 指针出了 iframe：ghost 被夹在边界，但不能把“黑边”当父容器。
+      drag.lastHit = null
+      setStageTarget(null)
+    }
+  }
+
+  const finishStagedDrag = async (event) => {
+    const drag = stageDragRef.current
+    if (!drag || event.pointerId !== drag.pointerId || drag.finishing) return
+    drag.finishing = true
+    event.preventDefault()
+    event.stopPropagation()
+    try {
+      event.currentTarget.releasePointerCapture?.(event.pointerId)
+    } catch {
+      // 捕获可能已被浏览器释放，忽略。
+    }
+    // 先解除本地会话，后续异步响应不再写 UI。
+    stageDragRef.current = null
+    setStageDrag(null)
+    setStageTarget(null)
+
+    const point = stagePointFromClient(event.clientX, event.clientY)
+    if (!point?.inside) {
+      showStageNotice('已取消：暂存组件必须放在网页视口内')
+      return
+    }
+    // 松手必须拿“最后一帧”的命中，不能复用拖动过程中的旧容器。
+    const finalHit = await requestStageHit(event.clientX, event.clientY, 320)
+    // 等待命中期间用户又开始了下一次拖拽：旧结果必须丢弃。
+    if (stageDragRef.current) return
+    if (!finalHit?.ok) {
+      showStageNotice('未能定位父容器，已恢复原位置')
+      return
+    }
+    const patch = buildPlacementPatch({
+      ghostRect: drag.rect,
+      hit: finalHit,
+      scroll: finalHit.scroll || frameScrollRef.current,
+    })
+    onPendingAdditionPlacement?.(drag.annotationId, patch)
+    showStageNotice(
+      `已定位到 ${finalHit.parent?.label || '父容器'}，保存布局时写入代码`,
+    )
+  }
+
+  const handleStageLostPointerCapture = (event) => {
+    const drag = stageDragRef.current
+    if (!drag || event.pointerId !== drag.pointerId) return
+    if (drag.finishing) return
+    cancelStagedDrag('拖动已中断，已恢复原位置')
+  }
+
+  // Esc 取消拖拽：与圈选 / 平移的退出习惯保持一致。
+  useEffect(() => {
+    if (!stageDrag) return undefined
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') cancelStagedDrag('已取消拖动')
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+    // cancelStagedDrag 只依赖 ref / setState，不需要进依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stageDrag])
+
+  // 拖拽中的待写入卡片：先从 pendingAdditions 取回最新内容，
+  // 多轮对话若在拖动期间刷新了 intent，卡片文案也能同步。
+  const stageDragItem = stageDrag
+    ? pendingAdditions.find(
+        (item) => item.annotationId === stageDrag.annotationId,
+      )
+    : null
 
   // Inspect 开关或 iframe 地址变化时同步 SDK；iframe 自己发 ready 时也会补发。
   useEffect(() => {
@@ -2231,11 +2591,16 @@ function CanvasStage({
             {/* 视觉暂存幽灵层：绝对定位铺在 iframe 上方，只表达“这里将会
                 出现什么”，完全不改 sandbox 代码，因此不可能触发白屏。 */}
             {pendingAdditions.map((item) => {
-              const ghostRect =
+              // 正在拖拽的卡片改由 StagedDragGhost 渲染，静态层直接留空，
+              // 避免同一个组件在 DOM 中出现两份、位置互相打架。
+              if (stageDrag?.annotationId === item.annotationId) return null
+              const ghostRect = resolveStagedGhostRect(item)
+              const displayRect =
                 mode === 'live'
-                  ? resolveAnnotationRect(item, frameScroll)
+                  ? resolveAnnotationRect(item, frameScrollRef.current)
                   : item.rect
-              if (!ghostRect || ghostRect.visible === false) return null
+              if (displayRect?.visible === false) return null
+              const draggable = stageDragEnabled && !disabled && !blocked
               return (
                 <div
                   key={`pending-addition-${item.annotationId}`}
@@ -2249,22 +2614,77 @@ function CanvasStage({
                     zIndex: 60,
                   }}
                 >
-                  <div className="pending-addition-ghost-card">
-                    <span className="pending-addition-ghost-badge">
-                      暂存 · 未写入
+                  <StagedGhostCard item={item} />
+                  {/* 拖拽只从这个小把手发起：整卡可拖会让底下的页面无法
+                      点击，也容易和圈选手势冲突。 */}
+                  {draggable && (
+                    <button
+                      type="button"
+                      className="pending-addition-drag-handle"
+                      title="按住拖到目标容器，松手后保存布局再写入代码"
+                      aria-label="拖拽暂存组件到目标容器"
+                      onPointerDown={(event) => beginStagedDrag(event, item)}
+                      onPointerMove={moveStagedDrag}
+                      onPointerUp={finishStagedDrag}
+                      onPointerCancel={handleStageLostPointerCapture}
+                      onLostPointerCapture={handleStageLostPointerCapture}
+                    >
+                      ⠿ 拖动定位
+                    </button>
+                  )}
+                  {/* 已定位的暂存项给出确定反馈，用户不用猜“到底放进去没有”。 */}
+                  {item.placement?.parent && (
+                    <span className="pending-addition-placement-chip">
+                      已定位 · {item.placement.parent.label || '父容器'}
                     </span>
-                    <span className="pending-addition-ghost-preview">
-                      {item.componentLabel || '新增组件'}
-                    </span>
-                    <span className="pending-addition-ghost-intent">
-                      {/* 多轮澄清时同一条记录原地刷新最终意图，绝不新建
-                          第二个幽灵节点。 */}
-                      {item.finalIntent || item.intent}
-                    </span>
-                  </div>
+                  )}
                 </div>
               )
             })}
+
+            {/* 拖拽中的幽灵：脱离静态层单独渲染，位置由 ref 直接改 style。 */}
+            {stageDragItem && (
+              <StagedDragGhost
+                item={stageDragItem}
+                rect={stageDrag.rect}
+                ghostRef={stageGhostRef}
+              />
+            )}
+
+            {/* 父容器高亮：虚线框 + 轻 ToolTip，明确“即将塞进这个盒子”。 */}
+            {stageTarget?.parent && stageTarget.rect && (
+              <>
+                <div
+                  className="stage-drop-target"
+                  style={{
+                    left: `${(stageTarget.rect.x / designWidth) * 100}%`,
+                    top: `${(stageTarget.rect.y / designHeight) * 100}%`,
+                    width: `${(stageTarget.rect.width / designWidth) * 100}%`,
+                    height: `${(stageTarget.rect.height / designHeight) * 100}%`,
+                  }}
+                >
+                  <span className="stage-drop-tag">
+                    {stageTargetLabel(stageTarget)}
+                  </span>
+                </div>
+                {stageTarget.insertRect && (
+                  <div
+                    className="stage-insert-line"
+                    style={{
+                      left: `${(stageTarget.insertRect.x / designWidth) * 100}%`,
+                      top: `${(stageTarget.insertRect.y / designHeight) * 100}%`,
+                      width: `${(stageTarget.insertRect.width / designWidth) * 100}%`,
+                    }}
+                  />
+                )}
+              </>
+            )}
+
+            {stageNotice && (
+              <div className="stage-drag-notice" role="status">
+                {stageNotice}
+              </div>
+            )}
 
             {movingAnnotation && movingDisplayRect && (
               <div

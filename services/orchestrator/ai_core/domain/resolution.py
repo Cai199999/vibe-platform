@@ -120,6 +120,12 @@ class TargetAnchor:
     # 禁止修改的源码区间（公共组件定义体）。
     forbidden_ranges: tuple[SourceRange, ...] = ()
     allowed_operations: tuple[str, ...] = VALID_OPERATIONS
+    # 父容器锚点允许的插入位置。自闭合元素只能 before / after；
+    # 成对元素 / Fragment 才允许 inside_start / inside_end / inside_index。
+    allowed_insert_positions: tuple[str, ...] = ("before", "after")
+    # 前端拖拽落位事实（父容器 instanceId、兄弟锚点、顺序索引）。
+    # 只作为 Coder 的确定性提示，写入仍由 apply_ast_edit 校验。
+    placement: dict[str, Any] | None = None
     status: str = RESOLVED
     candidates: tuple[TargetCandidate, ...] = ()
 
@@ -140,6 +146,8 @@ class TargetAnchor:
             "allowedFiles": list(self.allowed_files),
             "forbiddenRanges": [item.to_payload() for item in self.forbidden_ranges],
             "allowedOperations": list(self.allowed_operations),
+            "allowedInsertPositions": list(self.allowed_insert_positions),
+            "placement": dict(self.placement) if self.placement else None,
             "status": self.status,
             "candidates": [item.to_payload() for item in self.candidates],
         }
@@ -224,6 +232,11 @@ def anchor_prompt_view(anchor: dict[str, Any]) -> dict[str, Any]:
         "protected": bool(anchor.get("protected")),
         "allowedFiles": anchor.get("allowedFiles") or [],
         "allowedOperations": anchor.get("allowedOperations") or [],
+        "allowedInsertPositions": anchor.get("allowedInsertPositions")
+        or ["before", "after"],
+        # 拖拽落位：让 Coder 明确“插到父容器内部第几个兄弟位置”，
+        # 而不是从自然语言里猜绝对坐标。
+        "placement": anchor.get("placement") or None,
         "nodeSource": str(anchor.get("nodeSource") or "")[:4000],
     }
 

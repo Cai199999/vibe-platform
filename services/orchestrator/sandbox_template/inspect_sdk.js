@@ -935,6 +935,190 @@
     }
   }
 
+  // ------------------------------------------------------------
+  // 暂存组件拖拽：落点父容器命中
+  // ------------------------------------------------------------
+  /** readSource 永远返回对象；只有 marker / file 才代表“可定位源码”。 */
+  function hasSourceAnchor(source) {
+    return Boolean(source && (source.marker || source.file))
+  }
+
+  /**
+   * 指针命中节点的最近源码父容器。
+   *
+   * 优先级：
+   *  1. data-source-kind=container 的最近祖先（置信度 exact）；
+   *  2. 最近的带源码祖先（容器标记可能缺失，置信度 container_only）；
+   *  3. 页面最大容器 / 页面根（置信度 page）。
+   *
+   * 绝不返回 body / html：它们的源码位置没有意义，会让 Resolver 迷路。
+   */
+  function stageParentOf(node) {
+    var container = node ? findContainer(node) : null
+    if (container) return { node: container, confidence: 'exact' }
+    var current = node
+    var fallback = null
+    while (current && current !== document.documentElement) {
+      var source = readSource(current)
+      if (hasSourceAnchor(source)) {
+        fallback = current
+        break
+      }
+      current = current.parentElement
+    }
+    if (fallback) return { node: fallback, confidence: 'container_only' }
+    var candidates = document.querySelectorAll('[data-source-kind="container"]')
+    var root = null
+    var rootArea = 0
+    for (var i = 0; i < candidates.length; i += 1) {
+      var rect = candidates[i].getBoundingClientRect()
+      var area = Math.max(0, rect.width) * Math.max(0, rect.height)
+      if (area > rootArea) {
+        rootArea = area
+        root = candidates[i]
+      }
+    }
+    return { node: root, confidence: root ? 'page' : 'none' }
+  }
+
+  /**
+   * 父容器的直接 JSX 子节点。
+   *
+   * 只认“自身带 data-source / data-source-file”的直接子元素：
+   * 如果子元素只是无标记的包装层，向下找标记会把插入锚点错认成
+   * 孙子节点，最终把组件插进错误组件内部。宁可退化成 inside_end。
+   */
+  function stageSourceChildren(parentNode) {
+    var result = []
+    if (!parentNode || !parentNode.children) return result
+    var children = parentNode.children
+    for (var i = 0; i < children.length; i += 1) {
+      var child = children[i]
+      if (!child || !child.getBoundingClientRect) continue
+      var source = readSource(child)
+      if (!hasSourceAnchor(source)) continue
+      var rect = child.getBoundingClientRect()
+      result.push({ node: child, source: source, rect: rect })
+    }
+    return result
+  }
+
+  /** 主轴方向：flex-row / grid 横向排列时按 x 判定，其余按 y。 */
+  function stageAxisIsRow(parentNode) {
+    if (!parentNode || typeof window.getComputedStyle !== 'function') return false
+    var style = window.getComputedStyle(parentNode)
+    var display = String(style.display || '')
+    if (display.indexOf('flex') < 0) return false
+    var direction = String(style.flexDirection || 'row')
+    return direction.indexOf('row') === 0
+  }
+
+  /**
+   * 根据指针位置计算“插到哪个兄弟之前 / 之后”。
+   *
+   * 返回的 insertPosition 是给 apply_ast_edit 的结构化指令：
+   *  - before / after：锚点是确定的兄弟节点；
+   *  - inside_start / inside_end：容器没有可定位子节点时的兜底。
+   *
+   * siblingIndex 只是给用户和模型参考的序号，真正写入以锚点为准。
+   */
+  function stageSlotFor(parentNode, children, x, y) {
+    var parentRect = parentNode.getBoundingClientRect()
+    if (!children.length) {
+      var atTop = y < parentRect.top + parentRect.height / 2
+      return {
+        anchor: null,
+        insertPosition: atTop ? 'inside_start' : 'inside_end',
+        siblingIndex: 0,
+        siblingCount: 0,
+        childIndex: 0,
+        insertRect: {
+          x: round2(parentRect.left),
+          y: round2(atTop ? parentRect.top : parentRect.bottom),
+          width: round2(parentRect.width),
+          height: 0,
+        },
+      }
+    }
+    var isRow = stageAxisIsRow(parentNode)
+    var point = isRow ? x : y
+    for (var i = 0; i < children.length; i += 1) {
+      var rect = children[i].rect
+      if (rect.width <= 0 && rect.height <= 0) continue
+      var middle = isRow
+        ? rect.left + rect.width / 2
+        : rect.top + rect.height / 2
+      if (point < middle) {
+        return {
+          anchor: children[i],
+          insertPosition: 'before',
+          siblingIndex: i,
+          siblingCount: children.length,
+          childIndex: i,
+          insertRect: {
+            x: round2(rect.left),
+            y: round2(rect.top),
+            width: round2(rect.width),
+            height: 0,
+          },
+        }
+      }
+    }
+    var last = children[children.length - 1]
+    return {
+      anchor: last,
+      insertPosition: 'after',
+      siblingIndex: children.length,
+      siblingCount: children.length,
+      childIndex: children.length,
+      insertRect: {
+        x: round2(last.rect.left),
+        y: round2(last.rect.bottom),
+        width: round2(last.rect.width),
+        height: 0,
+      },
+    }
+  }
+
+  /**
+   * 暂存组件拖拽时的落点命中（只读，不修改 DOM）。
+   *
+   * 父页面已把指针换算成 iframe 视口 CSS 像素，因此这里可以直接用
+   * elementFromPoint。每次 pointermove（rAF 合并后）调用一次，
+   * readSource 的实例索引有 250ms 缓存，滚动 / HMR 后会自然失效。
+   */
+  function stageHitAt(x, y) {
+    var node = document.elementFromPoint(x, y)
+    if (!node || node === document.documentElement) {
+      return { ok: false, reason: 'NO_ELEMENT' }
+    }
+    var parentHit = stageParentOf(node)
+    var parentNode = parentHit.node
+    if (!parentNode || !hasSourceAnchor(readSource(parentNode))) {
+      return { ok: false, reason: 'NO_SOURCE_PARENT' }
+    }
+    var children = stageSourceChildren(parentNode)
+    var slot = stageSlotFor(parentNode, children, x, y)
+    var parentRect = rectOf(parentNode)
+    var scroll = scrollSnapshot()
+    return {
+      ok: true,
+      parent: targetDescriptor(parentNode),
+      rect: parentRect,
+      documentRect: toDocumentRect(parentRect),
+      insertAnchor: slot.anchor
+        ? targetDescriptor(slot.anchor.node)
+        : null,
+      insertPosition: slot.insertPosition,
+      insertRect: slot.insertRect,
+      siblingIndex: slot.siblingIndex,
+      siblingCount: slot.siblingCount,
+      childIndex: slot.childIndex,
+      confidence: parentHit.confidence,
+      scroll: scroll,
+    }
+  }
+
   /**
    * 按 CSS selector 安全查找节点。
    *
@@ -1425,6 +1609,20 @@
         analyzeBody.requestId || data.requestId || '',
       )
       reply(event.source, event.origin, 'selection-analyzed', analyzed)
+    }
+    if (data.type === 'stage-hit') {
+      // 暂存组件拖拽落点：高频、只读。父页面用 rAF 合并请求，
+      // 这里只做一次 elementFromPoint + 直接子节点遍历。
+      var stageBody = bodyOf(data)
+      var stageHit = stageHitAt(
+        readNumber(data, stageBody, 'x'),
+        readNumber(data, stageBody, 'y'),
+      )
+      stageHit.requestId = String(
+        stageBody.requestId || data.requestId || '',
+      )
+      reply(event.source, event.origin, 'stage-hit-result', stageHit)
+      return
     }
     /*
      * 双屏滚动同步 + 标注态滚轮转发。

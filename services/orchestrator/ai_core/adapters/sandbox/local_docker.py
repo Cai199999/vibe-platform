@@ -1809,6 +1809,8 @@ class LocalDockerSandbox(SandboxProvider):
             "anchorRange": edit.get("anchorRange") or {},
             "targetRange": edit.get("targetRange") or {},
             "insertPosition": edit.get("insertPosition") or "after",
+            # inside_index 的子节点序号；None 表示不适用。
+            "insertIndex": edit.get("insertIndex"),
             "jsxCode": str(edit.get("jsxCode") or ""),
         }
         # 同文件多编辑：服务端把前一条结果作为下一条输入，绝不接受模型传入。

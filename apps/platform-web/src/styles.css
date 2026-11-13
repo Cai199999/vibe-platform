@@ -1223,6 +1223,133 @@ body.is-viewport-panning * {
   white-space: nowrap;
 }
 
+/* 拖动中的幽灵：略提高不透明度，明确“正在搬”的视觉层级。 */
+.pending-addition-ghost.is-dragging {
+  z-index: 80;
+  cursor: grabbing;
+  animation: none;
+  will-change: left, top;
+}
+
+.pending-addition-ghost.is-dragging .pending-addition-ghost-card {
+  border-color: rgba(56, 189, 248, 0.95);
+  box-shadow:
+    0 18px 42px rgba(2, 6, 23, 0.55),
+    0 0 0 1px rgba(56, 189, 248, 0.35) inset;
+  opacity: 0.95;
+}
+
+/* 拖拽把手：只有这里接收指针，幽灵其余区域仍然 pointer-events:none，
+   不会挡住底下的页面和标注手势。 */
+.pending-addition-drag-handle {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  padding: 3px 9px;
+  border: 1px solid rgba(56, 189, 248, 0.55);
+  border-radius: 999px;
+  background: rgba(8, 47, 73, 0.92);
+  color: #bae6fd;
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+}
+
+.pending-addition-drag-handle:hover {
+  border-color: rgba(125, 211, 252, 0.95);
+  background: rgba(7, 89, 133, 0.95);
+}
+
+.pending-addition-drag-handle:active {
+  cursor: grabbing;
+}
+
+/* 已落位的确定反馈，避免用户反复确认“到底放进去没有”。 */
+.pending-addition-placement-chip {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  overflow: hidden;
+  max-width: calc(100% - 76px);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(22, 101, 52, 0.9);
+  color: #bbf7d0;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 父容器落点高亮：虚线框快速闪烁，和静态标注圈明显区分。 */
+.stage-drop-target {
+  position: absolute;
+  z-index: 70;
+  border: 2px dashed #38bdf8;
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.12);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18);
+  pointer-events: none;
+  animation: stage-drop-flash 0.9s ease-in-out infinite;
+}
+
+.stage-drop-tag {
+  position: absolute;
+  left: 0;
+  top: -24px;
+  max-width: 260px;
+  overflow: hidden;
+  padding: 3px 9px;
+  border-radius: 6px;
+  background: rgba(2, 132, 199, 0.95);
+  color: #f0f9ff;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 兄弟插入线：提示真正会插到哪个兄弟节点旁边。 */
+.stage-insert-line {
+  position: absolute;
+  z-index: 71;
+  height: 0;
+  border-top: 2px solid #22d3ee;
+  box-shadow: 0 0 6px rgba(34, 211, 238, 0.8);
+  pointer-events: none;
+}
+
+.stage-drag-notice {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  z-index: 90;
+  transform: translateX(-50%);
+  max-width: 70%;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.92);
+  box-shadow: 0 8px 24px rgba(2, 6, 23, 0.4);
+  color: #e2e8f0;
+  font-size: 11.5px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+@keyframes stage-drop-flash {
+  0%,
+  100% {
+    border-color: rgba(56, 189, 248, 0.45);
+    background: rgba(56, 189, 248, 0.08);
+  }
+  50% {
+    border-color: rgba(125, 211, 252, 1);
+    background: rgba(56, 189, 248, 0.2);
+  }
+}
+
 @keyframes pending-addition-in {
   from {
     opacity: 0;

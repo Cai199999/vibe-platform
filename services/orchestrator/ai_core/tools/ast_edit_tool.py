@@ -7,7 +7,8 @@
   2. 目标文件必须在 Resolver 给出的白名单内；
   3. 保护标识为真时，绝对禁止修改公共组件定义文件 / 定义范围；
   4. modify / delete 的区间必须与锚点完全一致（禁止扩大范围误删父节点）；
-  5. insert 只能插在锚点前 / 后，且父级必须是 JSX 容器；
+  5. insert 支持锚点前 / 后，或按 Resolver 白名单插入容器内部
+     （inside_start / inside_end / inside_index），父级必须是 JSX 容器；
   6. delete 由 Babel 执行器做 AST 同构校验（原树减目标子树 = 结果树）。
 
 工具只计算新文件内容，不直接落盘；Graph 会把结果交给 Applier，
@@ -29,6 +30,7 @@ from ai_core.domain.resolution import (
     AST_EDIT_FAILED,
     EDIT_CONTEXT_REQUIRED,
     FILE_NOT_ALLOWED,
+    INVALID_INSERTION_POINT,
     INVALID_JSX_SNIPPET,
     INVALID_OPERATION,
     OPERATION_NOT_ALLOWED,
@@ -45,6 +47,18 @@ logger = logging.getLogger(__name__)
 
 # 单次 JSX 片段上限：防止模型把整页代码塞进一次编辑，变相恢复“全量写文件”。
 MAX_JSX_SNIPPET_CHARS = 20_000
+
+# 插入位置：
+#  - before / after：以锚点为兄弟插入（旧协议）；
+#  - inside_start / inside_end / inside_index：以锚点为父容器插入子节点，
+#    供“暂存组件拖入某个盒子”使用。是否允许由 Resolver 按节点形态给出。
+VALID_INSERT_POSITIONS = (
+    "before",
+    "after",
+    "inside_start",
+    "inside_end",
+    "inside_index",
+)
 
 
 @dataclass(frozen=True)
@@ -141,6 +155,18 @@ def execute_ast_edit(
         .lower()
         .strip()
     )
+    # inside_index 需要显式序号；其余位置忽略该字段。
+    raw_insert_index = request.get("insert_index", request.get("insertIndex"))
+    insert_index: int | None = None
+    if raw_insert_index is not None and str(raw_insert_index).strip() != "":
+        try:
+            insert_index = int(raw_insert_index)
+        except (TypeError, ValueError):
+            return _error(
+                INVALID_INSERTION_POINT,
+                "insert_index 必须是整数",
+                insertIndex=raw_insert_index,
+            )
 
     # ---- 参数级门禁 ----
     if operation not in VALID_OPERATIONS:
@@ -158,11 +184,16 @@ def execute_ast_edit(
             INVALID_JSX_SNIPPET,
             f"jsxCode 超过 {MAX_JSX_SNIPPET_CHARS} 字符，疑似整文件重写",
         )
-    if insert_position not in {"before", "after"}:
+    if insert_position not in VALID_INSERT_POSITIONS:
         return _error(
-            INVALID_OPERATION,
-            "insertPosition 只能是 before / after",
+            INVALID_INSERTION_POINT,
+            f"insertPosition 只能是 {list(VALID_INSERT_POSITIONS)} 之一",
             insertPosition=insert_position,
+        )
+    if insert_position == "inside_index" and insert_index is None:
+        return _error(
+            INVALID_INSERTION_POINT,
+            "inside_index 必须提供 insert_index（从 0 开始的子节点序号）",
         )
 
     # ---- 锚点门禁 ----
@@ -187,6 +218,21 @@ def execute_ast_edit(
             OPERATION_NOT_ALLOWED,
             f"该锚点不允许 {operation} 操作",
             allowedOperations=allowed_operations,
+        )
+
+    # 节点形态门禁：自闭合元素不能 inside_*，否则会生成非法 JSX。
+    allowed_positions = [
+        str(item) for item in anchor.get("allowedInsertPositions") or []
+    ]
+    if (
+        operation == "insert"
+        and allowed_positions
+        and insert_position not in allowed_positions
+    ):
+        return _error(
+            INVALID_INSERTION_POINT,
+            f"锚点 {anchor_id} 不支持 insertPosition={insert_position}",
+            allowedInsertPositions=allowed_positions,
         )
 
     file = str(anchor.get("file") or "")
@@ -253,6 +299,7 @@ def execute_ast_edit(
             (request.get("target_range") or request.get("targetRange")) or {}
         ),
         "insertPosition": insert_position,
+        "insertIndex": insert_index,
         "jsxCode": jsx_code,
     }
     # 由 Graph 在“同文件多编辑”时注入上一条结果；模型参数不参与该字段。
@@ -309,6 +356,7 @@ def build_apply_ast_edit_tool() -> BaseTool:
         target_range: dict[str, Any],
         jsx_code: str = "",
         insert_position: str = "after",
+        insert_index: int | None = None,
     ) -> str:
         """按解析锚点精确编辑 JSX（唯一写操作）。
 
@@ -317,7 +365,9 @@ def build_apply_ast_edit_tool() -> BaseTool:
             operation: insert / delete / modify。
             target_range: 目标区间，含 startOffset / endOffset。
             jsx_code: insert / modify 使用的新 JSX 片段（单个元素或 Fragment）。
-            insert_position: insert 时插在锚点 before / after。
+            insert_position: insert 位置：before / after / inside_start /
+                inside_end / inside_index（后三者要求锚点是成对 JSX 容器）。
+            insert_index: inside_index 的子节点序号（从 0 开始）。
         """
         context = _EDIT_CONTEXT.get()
         if context is None:
@@ -332,6 +382,7 @@ def build_apply_ast_edit_tool() -> BaseTool:
                 "target_range": target_range,
                 "jsx_code": jsx_code,
                 "insert_position": insert_position,
+                "insert_index": insert_index,
             },
             context,
         )

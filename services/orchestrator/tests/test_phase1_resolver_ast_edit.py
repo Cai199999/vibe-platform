@@ -28,12 +28,13 @@ from unittest.mock import patch
 from ai_core.adapters.checkpoint import MemoryCheckpointerProvider
 from ai_core.agent import graph as graph_module
 from ai_core.agent.graph import AgentGraphRunner
-from ai_core.agent.llm import CodeResult, MockAgentLLM
+from ai_core.agent.llm import CodeResult, MockAgentLLM, _parse_edit_result
 from ai_core.domain.resolution import (
     ANCHOR_NOT_FOUND,
     DELETE_SCOPE_MISMATCH,
     EDIT_CONTEXT_REQUIRED,
     FILE_NOT_ALLOWED,
+    INVALID_INSERTION_POINT,
     INVALID_OPERATION,
     OPERATION_NOT_ALLOWED,
     PROTECTED_COMPONENT,
@@ -69,6 +70,15 @@ EDIT_SOURCE = """export default function App() {
     <main>
       <button className="primary">登录</button>
       <p>欢迎</p>
+    </main>
+  );
+}
+"""
+
+SELF_CLOSING_SOURCE = """export default function App() {
+  return (
+    <main>
+      <img src="/logo.png" />
     </main>
   );
 }
@@ -235,6 +245,61 @@ class ResolverScriptTest(unittest.TestCase):
             self.assertTrue(anchor["protected"])
             self.assertIn("src/Other.jsx", anchor["sharedReason"])
 
+    def test_container_reports_inside_positions_and_echoes_placement(self) -> None:
+        """拖拽落位：容器锚点允许 inside_*，并把 placement 原样回传。"""
+        placement = {
+            "version": 1,
+            "targetParentId": "src/App.jsx:3:5#1",
+            "insertPosition": "inside_index",
+            "siblingIndex": 1,
+            "parent": {"label": "main"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_project(Path(tmp), {"src/App.jsx": RESOLVER_SOURCE})
+            code, payload, stderr = _run_script(
+                "resolve_target.mjs",
+                {
+                    "workdir": tmp,
+                    "parserRoot": str(TEMPLATE_DIR),
+                    "anchors": [
+                        _anchor_request(
+                            "anc_ann_main", selector="main", placement=placement
+                        )
+                    ],
+                },
+            )
+            self.assertEqual(code, 0, stderr)
+            anchor = payload["anchors"][0]
+            self.assertEqual(anchor["status"], RESOLVED)
+            self.assertEqual(
+                anchor["allowedInsertPositions"],
+                [
+                    "before",
+                    "after",
+                    "inside_start",
+                    "inside_end",
+                    "inside_index",
+                ],
+            )
+            self.assertEqual(anchor["placement"], placement)
+
+    def test_self_closing_anchor_only_allows_sibling_insert(self) -> None:
+        """自闭合元素没有 children，必须拒绝 inside_*。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_project(Path(tmp), {"src/App.jsx": SELF_CLOSING_SOURCE})
+            code, payload, stderr = _run_script(
+                "resolve_target.mjs",
+                {
+                    "workdir": tmp,
+                    "parserRoot": str(TEMPLATE_DIR),
+                    "anchors": [_anchor_request("anc_ann_img", selector="img")],
+                },
+            )
+            self.assertEqual(code, 0, stderr)
+            anchor = payload["anchors"][0]
+            self.assertEqual(anchor["status"], RESOLVED)
+            self.assertEqual(anchor["allowedInsertPositions"], ["before", "after"])
+
     def test_missing_file_is_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _write_project(Path(tmp), {"src/App.jsx": RESOLVER_SOURCE})
@@ -305,6 +370,105 @@ class AstEditScriptTest(unittest.TestCase):
             # 兄弟节点必须和锚点同级缩进（6 空格），不能多一层。
             self.assertIn("      <span>新增</span>", content)
             self.assertLess(content.index("<button"), content.index("<span>"))
+
+    def test_insert_inside_end_appends_child_before_closing_tag(self) -> None:
+        """inside_end：按父容器自然文档流追加子节点，缩进比父级深一层。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_project(Path(tmp), {"src/App.jsx": EDIT_SOURCE})
+            main = _fix_range(EDIT_SOURCE, "<main>", "</main>")
+            code, payload, stderr = self._edit(
+                {
+                    "workdir": tmp,
+                    "file": "src/App.jsx",
+                    "operation": "insert",
+                    "anchorRange": main,
+                    "insertPosition": "inside_end",
+                    "jsxCode": "<footer>新增</footer>",
+                }
+            )
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(payload["status"], "OK")
+            content = payload["content"]
+            self.assertIn("      <footer>新增</footer>\n    </main>", content)
+            self.assertLess(content.index("<p>欢迎</p>"), content.index("<footer>"))
+
+    def test_insert_inside_index_places_between_siblings(self) -> None:
+        """inside_index：插到第 N 个子节点之前，顺序与前端 siblingIndex 一致。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_project(Path(tmp), {"src/App.jsx": EDIT_SOURCE})
+            main = _fix_range(EDIT_SOURCE, "<main>", "</main>")
+            code, payload, stderr = self._edit(
+                {
+                    "workdir": tmp,
+                    "file": "src/App.jsx",
+                    "operation": "insert",
+                    "anchorRange": main,
+                    "insertPosition": "inside_index",
+                    "insertIndex": 1,
+                    "jsxCode": "<span>中间</span>",
+                }
+            )
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(payload["status"], "OK")
+            content = payload["content"]
+            self.assertLess(content.index("<button"), content.index("<span>"))
+            self.assertLess(content.index("<span>"), content.index("<p>欢迎</p>"))
+
+    def test_insert_inside_start_places_before_first_child(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_project(Path(tmp), {"src/App.jsx": EDIT_SOURCE})
+            main = _fix_range(EDIT_SOURCE, "<main>", "</main>")
+            code, payload, stderr = self._edit(
+                {
+                    "workdir": tmp,
+                    "file": "src/App.jsx",
+                    "operation": "insert",
+                    "anchorRange": main,
+                    "insertPosition": "inside_start",
+                    "jsxCode": "<header>顶部</header>",
+                }
+            )
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(payload["status"], "OK")
+            content = payload["content"]
+            self.assertLess(content.index("<header>"), content.index("<button"))
+
+    def test_insert_inside_self_closing_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_project(Path(tmp), {"src/App.jsx": SELF_CLOSING_SOURCE})
+            image = _fix_range(SELF_CLOSING_SOURCE, "<img", "/>")
+            code, payload, stderr = self._edit(
+                {
+                    "workdir": tmp,
+                    "file": "src/App.jsx",
+                    "operation": "insert",
+                    "anchorRange": image,
+                    "insertPosition": "inside_end",
+                    "jsxCode": "<span>非法</span>",
+                }
+            )
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(payload["status"], "ERROR")
+            self.assertEqual(payload["code"], INVALID_INSERTION_POINT)
+
+    def test_insert_inside_index_out_of_range_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_project(Path(tmp), {"src/App.jsx": EDIT_SOURCE})
+            main = _fix_range(EDIT_SOURCE, "<main>", "</main>")
+            code, payload, stderr = self._edit(
+                {
+                    "workdir": tmp,
+                    "file": "src/App.jsx",
+                    "operation": "insert",
+                    "anchorRange": main,
+                    "insertPosition": "inside_index",
+                    "insertIndex": 99,
+                    "jsxCode": "<span>越界</span>",
+                }
+            )
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(payload["status"], "ERROR")
+            self.assertEqual(payload["code"], INVALID_INSERTION_POINT)
 
     def test_delete_removes_subtree_and_passes_isomorphism(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -599,6 +763,78 @@ class AstEditGateTest(unittest.TestCase):
         self.assertEqual(result["status"], "OK")
         self.assertEqual(len(fake.calls), 1)
 
+    def test_inside_position_outside_anchor_whitelist_is_rejected(self) -> None:
+        """自闭合锚点只给 before/after 时，inside_* 必须在工具层被拒绝。"""
+        context, fake = _context(
+            _resolution(_anchor(allowedInsertPositions=["before", "after"]))
+        )
+        result = execute_ast_edit(
+            _request(
+                operation="insert",
+                target_range=None,
+                insert_position="inside_end",
+                jsx_code="<span />",
+            ),
+            context,
+        )
+        self.assertEqual(result["code"], INVALID_INSERTION_POINT)
+        self.assertEqual(fake.calls, [])
+
+    def test_inside_index_requires_insert_index(self) -> None:
+        context, fake = _context(
+            _resolution(
+                _anchor(
+                    allowedInsertPositions=[
+                        "before",
+                        "after",
+                        "inside_start",
+                        "inside_end",
+                        "inside_index",
+                    ]
+                )
+            )
+        )
+        result = execute_ast_edit(
+            _request(
+                operation="insert",
+                target_range=None,
+                insert_position="inside_index",
+                jsx_code="<span />",
+            ),
+            context,
+        )
+        self.assertEqual(result["code"], INVALID_INSERTION_POINT)
+        self.assertEqual(fake.calls, [])
+
+    def test_inside_index_passes_index_to_sandbox(self) -> None:
+        context, fake = _context(
+            _resolution(
+                _anchor(
+                    allowedInsertPositions=[
+                        "before",
+                        "after",
+                        "inside_start",
+                        "inside_end",
+                        "inside_index",
+                    ]
+                )
+            )
+        )
+        result = execute_ast_edit(
+            _request(
+                operation="insert",
+                target_range=None,
+                insert_position="inside_index",
+                insert_index=2,
+                jsx_code="<span />",
+            ),
+            context,
+        )
+        self.assertEqual(result["status"], "OK")
+        edit = fake.calls[0]["edit"]
+        self.assertEqual(edit["insertPosition"], "inside_index")
+        self.assertEqual(edit["insertIndex"], 2)
+
     def test_sandbox_error_code_is_passed_through(self) -> None:
         sandbox = _FakeApplySandbox(
             result={
@@ -611,6 +847,93 @@ class AstEditGateTest(unittest.TestCase):
         context, _ = _context(sandbox=sandbox)
         result = execute_ast_edit(_request(operation="delete", jsx_code=""), context)
         self.assertEqual(result["code"], DELETE_SCOPE_MISMATCH)
+
+
+class PlacementEditParseTest(unittest.TestCase):
+    """拖拽落位事实必须能穿透到工具参数，模型漏填时也不能退化。"""
+
+    def _raw(self, arguments: dict[str, Any]) -> str:
+        return json.dumps(
+            {
+                "summary": "新增组件",
+                "tool_calls": [{"name": "apply_ast_edit", "arguments": arguments}],
+            },
+            ensure_ascii=False,
+        )
+
+    def test_placement_defaults_insert_position_and_index(self) -> None:
+        anchors = [
+            _anchor(
+                allowedInsertPositions=[
+                    "before",
+                    "after",
+                    "inside_start",
+                    "inside_end",
+                    "inside_index",
+                ],
+                placement={
+                    "insertPosition": "inside_index",
+                    "siblingIndex": 2,
+                    "targetParentId": "src/App.jsx:3:5#1",
+                },
+            )
+        ]
+        result = _parse_edit_result(
+            self._raw(
+                {
+                    "anchor_id": ANCHOR_ID,
+                    "operation": "insert",
+                    "jsx_code": '<div data-vibe-created="ann_1" />',
+                }
+            ),
+            anchors,
+            required_markers={"ann_1"},
+        )
+        arguments = result.edits[0]["arguments"]
+        self.assertEqual(arguments["insert_position"], "inside_index")
+        self.assertEqual(arguments["insert_index"], 2)
+
+    def test_explicit_position_overrides_placement(self) -> None:
+        anchors = [
+            _anchor(
+                allowedInsertPositions=["before", "after"],
+                placement={"insertPosition": "inside_index", "siblingIndex": 2},
+            )
+        ]
+        result = _parse_edit_result(
+            self._raw(
+                {
+                    "anchor_id": ANCHOR_ID,
+                    "operation": "insert",
+                    "insert_position": "before",
+                    "jsx_code": '<div data-vibe-created="ann_1" />',
+                }
+            ),
+            anchors,
+            required_markers={"ann_1"},
+        )
+        self.assertEqual(result.edits[0]["arguments"]["insert_position"], "before")
+
+    def test_position_outside_anchor_whitelist_is_rejected(self) -> None:
+        anchors = [
+            _anchor(
+                allowedInsertPositions=["before", "after"],
+                placement={"insertPosition": "inside_end", "siblingIndex": 0},
+            )
+        ]
+        with self.assertRaisesRegex(Exception, "不支持 insert_position"):
+            _parse_edit_result(
+                self._raw(
+                    {
+                        "anchor_id": ANCHOR_ID,
+                        "operation": "insert",
+                        "insert_position": "inside_end",
+                        "jsx_code": '<div data-vibe-created="ann_1" />',
+                    }
+                ),
+                anchors,
+                required_markers={"ann_1"},
+            )
 
 
 # ------------------------------------------------------------

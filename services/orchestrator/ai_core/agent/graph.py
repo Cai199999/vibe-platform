@@ -1766,6 +1766,12 @@ class AgentGraphRunner:
                 "retry_count": retry_count,
                 "design_system": state.get("design_system") or {},
             }
+            # 新增组件已逐项解析出父容器锚点时，走 apply_ast_edit 工具协议：
+            # 模型只填 JSX，插入位置由 placement / siblingIndex 决定。
+            if state.get("resolver_outcome") == "resolved" and state.get(
+                "target_resolution"
+            ):
+                generate_kwargs["target_resolution"] = state.get("target_resolution")
             self._emit(
                 "node.progress",
                 {
@@ -1819,24 +1825,43 @@ class AgentGraphRunner:
                     message=f"Coder 生成新增组件失败: {exc}",
                 )
 
-            generated = _materialize_generated_files(current_files, result.files)
-            if not generated and result.patch:
-                applied = _apply_unified_patch(current_files, result.patch)
-                if applied is None:
-                    return self._coder_failure_result(
-                        code="CODER_PATCH_UNPARSEABLE",
-                        message="新增组件补丁无法合并，已保留画布草稿，请重试",
-                    )
+            if result.edits:
+                # AST 工具路径：锚点、白名单与插入位置全部由服务端校验，
+                # 模型无法借“整文件重写”绕过门禁。
+                edit_outcome = self._apply_ast_edit_calls(
+                    state, result.edits, current_files
+                )
+                if edit_outcome.get("failure"):
+                    return edit_outcome["failure"]
                 generated = {
                     path: content
-                    for path, content in applied.items()
+                    for path, content in (edit_outcome.get("files") or {}).items()
                     if content != current_files.get(path)
                 }
-            if not generated:
-                return self._coder_failure_result(
-                    code="CODER_GENERATION_FAILED",
-                    message="模型没有生成任何新增组件代码，画布草稿已保留",
-                )
+                if not generated:
+                    return self._coder_failure_result(
+                        code="CODER_GENERATION_FAILED",
+                        message="AST 编辑没有产生代码差异，画布草稿已保留",
+                    )
+            else:
+                generated = _materialize_generated_files(current_files, result.files)
+                if not generated and result.patch:
+                    applied = _apply_unified_patch(current_files, result.patch)
+                    if applied is None:
+                        return self._coder_failure_result(
+                            code="CODER_PATCH_UNPARSEABLE",
+                            message="新增组件补丁无法合并，已保留画布草稿，请重试",
+                        )
+                    generated = {
+                        path: content
+                        for path, content in applied.items()
+                        if content != current_files.get(path)
+                    }
+                if not generated:
+                    return self._coder_failure_result(
+                        code="CODER_GENERATION_FAILED",
+                        message="模型没有生成任何新增组件代码，画布草稿已保留",
+                    )
             updated.update(generated)
             changed.update(generated)
             summaries.append(result.summary or f"新增 {len(additions)} 个组件")
@@ -3484,15 +3509,14 @@ def _resolution_requests(
     """
     target_files = list(state.get("target_files") or [])
     fallback_file = target_files[0] if target_files else ""
-    requests: list[dict[str, Any]] = []
-    for annotation in annotations:
-        if not isinstance(annotation, dict):
-            continue
+
+    def build_request(annotation: dict[str, Any]) -> dict[str, Any] | None:
+        """单个信封 → Resolver 请求；缺少文件时返回 None（交给旧路径）。"""
         annotation_id = str(
             annotation.get("annotationId") or annotation.get("annotation_id") or ""
         ).strip()
         if not annotation_id:
-            continue
+            return None
         target = (
             annotation.get("target")
             if isinstance(annotation.get("target"), dict)
@@ -3514,34 +3538,66 @@ def _resolution_requests(
             or fallback_file
         ).strip()
         if not file:
-            continue
+            return None
         selector = str(
             target.get("selector") or annotation.get("selector") or ""
         ).strip()
         call_site = (
             source.get("callSite") if isinstance(source.get("callSite"), dict) else {}
         )
-        requests.append(
-            {
-                "anchorId": anchor_id_for(annotation_id),
-                "annotationId": annotation_id,
-                "file": file,
-                "line": source.get("line"),
-                "column": source.get("column"),
-                "selector": selector,
-                "component": str(
-                    source.get("component") or annotation.get("component") or ""
-                ),
-                "instance": source.get("instance"),
-                "instanceCount": source.get("instanceCount"),
-                "callSiteFile": str(
-                    call_site.get("file") or source.get("callSiteFile") or ""
-                ),
-                "action": annotation.get("action")
-                or annotation.get("intentAction")
-                or "",
-            }
+        payload = (
+            annotation.get("payload")
+            if isinstance(annotation.get("payload"), dict)
+            else {}
         )
+        return {
+            "anchorId": anchor_id_for(annotation_id),
+            "annotationId": annotation_id,
+            "file": file,
+            "line": source.get("line"),
+            "column": source.get("column"),
+            "selector": selector,
+            "component": str(
+                source.get("component") or annotation.get("component") or ""
+            ),
+            "instance": source.get("instance"),
+            "instanceCount": source.get("instanceCount"),
+            "callSiteFile": str(
+                call_site.get("file") or source.get("callSiteFile") or ""
+            ),
+            "action": annotation.get("action") or annotation.get("intentAction") or "",
+            # 拖拽落位事实原样传给 Resolver / Coder；没有则不注入空对象，
+            # 避免旧协议被误判为“已定位”。
+            "placement": payload.get("placement") or None,
+        }
+
+    requests: list[dict[str, Any]] = []
+    for annotation in annotations:
+        if not isinstance(annotation, dict):
+            continue
+        action = str(annotation.get("action") or "").upper()
+        payload = (
+            annotation.get("payload")
+            if isinstance(annotation.get("payload"), dict)
+            else {}
+        )
+        # BATCH_LAYOUT 的顶层信封只是批次容器，真正的可写目标是每个
+        # nested addition 的父容器；必须逐项解析，否则多个新增组件会
+        # 共享同一个锚点。
+        if action == "BATCH_LAYOUT" and isinstance(payload.get("additions"), list):
+            for raw in payload["additions"]:
+                nested = raw.get("annotation") if isinstance(raw, dict) else None
+                if not isinstance(nested, dict):
+                    continue
+                normalized = dict(nested)
+                normalized["action"] = "CREATE_NEW"
+                request = build_request(normalized)
+                if request:
+                    requests.append(request)
+            continue
+        request = build_request(annotation)
+        if request:
+            requests.append(request)
     return requests
 
 

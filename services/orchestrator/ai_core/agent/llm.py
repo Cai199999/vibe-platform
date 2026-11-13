@@ -909,8 +909,15 @@ class DeepSeekAgentLLM(AgentLLM):
             "**操作规则**：\n"
             "- modify：target_range 必须与锚点完全一致；jsx_code 返回完整的"
             "新节点（包含原有 className / 事件 / 子节点），只改需要改的部分。\n"
-            "- insert：target_range 可省略；默认插在锚点之后，可用 "
-            'insert_position="before" 插在前面；jsx_code 为完整兄弟节点。\n'
+            "- insert：target_range 可省略。默认插在锚点之后；可用 "
+            'insert_position="before" 插在前面；若锚点是容器（自带 '
+            "allowedInsertPositions 且包含 inside_*），应优先按锚点上的 "
+            "placement 插入到容器内部：inside_start / inside_end / "
+            "inside_index（配 insert_index = placement.siblingIndex）。"
+            "jsx_code 为完整 JSX 节点。\n"
+            "- 拖拽落位（placement）是确定性事实：优先使用 "
+            "placement.insertPosition 与 placement.siblingIndex，禁止改用 "
+            "绝对定位或 left/top 模拟用户拖放。\n"
             "- delete：target_range 必须与锚点完全一致，不需要 jsx_code。\n"
             "- 每个标注至少一个 tool_call；多个标注可一次提交多个调用。\n"
             "**内容规则**：\n"
@@ -1208,6 +1215,47 @@ def _parse_edit_result(
         if operation in {"insert", "modify"} and not jsx_code.strip():
             raise AgentLLMError(f"第 {index} 个调用缺少 jsx_code")
 
+        # 插入位置：先取模型参数，缺省时回落到前端拖拽落位事实。
+        # 这样即使模型没写 insert_position，也不会把“拖进盒子”退化成
+        # “插在盒子后面”的兄弟节点。
+        placement = (
+            anchor.get("placement") if isinstance(anchor.get("placement"), dict) else {}
+        )
+        insert_position = (
+            str(
+                arguments.get("insert_position")
+                or arguments.get("insertPosition")
+                or placement.get("insertPosition")
+                or "after"
+            )
+            .lower()
+            .strip()
+        )
+        raw_index = arguments.get("insert_index")
+        if raw_index is None:
+            raw_index = arguments.get("insertIndex")
+        if raw_index is None:
+            raw_index = placement.get("siblingIndex")
+        insert_index: int | None = None
+        if raw_index is not None and str(raw_index).strip() != "":
+            try:
+                insert_index = int(raw_index)
+            except (TypeError, ValueError) as exc:
+                raise AgentLLMError(
+                    f"第 {index} 个调用 insert_index 必须是整数: {raw_index}"
+                ) from exc
+        if operation == "insert":
+            allowed_positions = [
+                str(item) for item in anchor.get("allowedInsertPositions") or []
+            ]
+            if allowed_positions and insert_position not in allowed_positions:
+                raise AgentLLMError(
+                    f"锚点 {anchor_id} 不支持 insert_position="
+                    f"{insert_position}；允许: {allowed_positions}"
+                )
+            if insert_position == "inside_index" and insert_index is None:
+                raise AgentLLMError(f"第 {index} 个调用 inside_index 缺少 insert_index")
+
         target_range = arguments.get("target_range") or arguments.get("targetRange")
         anchor_range = anchor.get("range") or {}
         if operation in {"modify", "delete"}:
@@ -1231,11 +1279,8 @@ def _parse_edit_result(
                     "operation": operation,
                     "target_range": target_range or anchor_range,
                     "jsx_code": jsx_code,
-                    "insert_position": str(
-                        arguments.get("insert_position")
-                        or arguments.get("insertPosition")
-                        or "after"
-                    ),
+                    "insert_position": insert_position,
+                    "insert_index": (insert_index if operation == "insert" else None),
                 },
             }
         )

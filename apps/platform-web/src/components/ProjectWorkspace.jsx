@@ -63,6 +63,8 @@ function ProjectWorkspaceInner({
   // 视觉暂存的新增组件：只存在于前端，保存布局时才一次性写入代码。
   pendingAdditions = [],
   onRemovePendingAddition,
+  // 落点回写：拖动松手后把 placement patch 写回暂存记录。
+  onPendingAdditionPlacement,
   layoutSaving = false,
   onSaveLayout,
   onUndoLayout,
@@ -1013,6 +1015,10 @@ function ProjectWorkspaceInner({
               dragSyncActive={dragSyncActive}
               pendingAdditions={pendingAdditions}
               onRemovePendingAddition={onRemovePendingAddition}
+              // 只有 LIVE 预览才允许拖动落位：BOOTING / DEGRADED 时
+              // iframe 里没有真实 DOM，命中结果不可信。
+              stageDragEnabled={previewState === 'LIVE'}
+              onPendingAdditionPlacement={onPendingAdditionPlacement}
               clarification={run.clarification}
               onAnnotationRollback={onAnnotationRollback}
               pendingAnnotationId={run.pendingAnnotationId}

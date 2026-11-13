@@ -286,8 +286,31 @@ function findCallSiteAnchor(workdir, callSiteFile, component, instance, parser) 
     allowedFiles: [callSiteFile],
     forbiddenRanges: [],
     allowedOperations: ['insert', 'delete', 'modify'],
+    allowedInsertPositions: allowedInsertPositionsOf(node),
     decisionAction: 'modify_call_site',
   }
+}
+
+/**
+ * 锚点节点支持的插入位置。
+ *
+ * 自闭合元素（<img /> / <Input />）没有 children，只能作为兄弟插入；
+ * 成对元素 / Fragment 才可以 inside_*，避免把子节点插进不存在的
+ * closing tag 里。
+ */
+function allowedInsertPositionsOf(node) {
+  const beforeAfter = ['before', 'after']
+  if (!node) return beforeAfter
+  if (node.type === 'JSXFragment') {
+    return [...beforeAfter, 'inside_start', 'inside_end', 'inside_index']
+  }
+  if (node.type === 'JSXElement') {
+    if (node.openingElement?.selfClosing || !node.closingElement) {
+      return beforeAfter
+    }
+    return [...beforeAfter, 'inside_start', 'inside_end', 'inside_index']
+  }
+  return beforeAfter
 }
 
 function rangeOf(node) {
@@ -509,6 +532,10 @@ function resolveOne(anchor, parser, workdir) {
   result.allowedFiles = allowedFiles
   result.forbiddenRanges = forbidden
   result.allowedOperations = ['insert', 'delete', 'modify']
+  result.allowedInsertPositions = allowedInsertPositionsOf(node)
+  // 前端拖拽落位事实原样回传：Coder 据此选 inside_end / before / after，
+  // 并由 AST 工具按锚点插入，不能只依赖自然语言描述。
+  result.placement = anchor.placement || null
   // 共享组件额外给出 callSite 锚点，供 Phase 2 决策“只在当前实例修改”。
   result.callSiteAnchor = null
   if (shared && callSiteFile && callSiteFile !== file) {

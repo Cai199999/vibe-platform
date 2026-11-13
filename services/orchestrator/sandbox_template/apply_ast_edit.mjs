@@ -13,7 +13,9 @@
  *     "operation": "insert" | "delete" | "modify",
  *     "anchorRange": {"startOffset": 100, "endOffset": 180},
  *     "targetRange": {"startOffset": 100, "endOffset": 180},
- *     "insertPosition": "after" | "before",
+ *     "insertPosition":
+ *       "after" | "before" | "inside_start" | "inside_end" | "inside_index",
+ *     "insertIndex": 2,
  *     "jsxCode": "<button className=\"x\">保存</button>"
  *   }
  *
@@ -227,6 +229,60 @@ function parseSnippet(jsxCode, file, parser) {
   return node
 }
 
+/**
+ * JSX 容器的开闭标签位置。
+ *
+ * inside_* 只对成对元素 / Fragment 有意义；自闭合元素没有子节点区，
+ * 直接拒绝而不是生成非法 JSX。
+ */
+function jsxContainerParts(node) {
+  if (!node) return null
+  if (node.type === 'JSXFragment') {
+    return {
+      openEnd: node.openingFragment?.end ?? -1,
+      closeStart: node.closingFragment?.start ?? -1,
+      selfClosing: !node.openingFragment || !node.closingFragment,
+    }
+  }
+  if (node.type === 'JSXElement') {
+    return {
+      openEnd: node.openingElement?.end ?? -1,
+      closeStart: node.closingElement?.start ?? -1,
+      selfClosing:
+        !node.openingElement ||
+        Boolean(node.openingElement.selfClosing) ||
+        !node.closingElement,
+    }
+  }
+  return null
+}
+
+/** 参与“第几个子节点”计数的节点：纯空白 JSXText 不算。 */
+function meaningfulChildren(node) {
+  const children = Array.isArray(node?.children) ? node.children : []
+  return children.filter(
+    (child) => !(child.type === 'JSXText' && !String(child.value || '').trim()),
+  )
+}
+
+/**
+ * inside_* 插入的子节点缩进。
+ *
+ * 优先抄现有第一个子节点的行首缩进，保持项目原有排版；
+ * 空容器 / 子节点与父节点同行时退化为“父缩进 + 两个空格”。
+ */
+function childIndentFor(code, anchor) {
+  const parentIndent = baseIndentAt(code, anchor.start)
+  const parentLine = anchor.loc?.start?.line || 0
+  const children = meaningfulChildren(anchor)
+  for (const child of children) {
+    if ((child.loc?.start?.line || 0) > parentLine) {
+      return baseIndentAt(code, child.start)
+    }
+  }
+  return `${parentIndent}  `
+}
+
 /** 删除整行节点时连同行首缩进 / 换行一起移除，避免留下空白行。 */
 function deleteSlice(code, node) {
   const lineStart = code.lastIndexOf('\n', Math.max(0, node.start - 1)) + 1
@@ -345,25 +401,83 @@ function main() {
 
   if (operation === 'insert') {
     const position = String(spec.insertPosition || 'after').toLowerCase()
-    if (!['before', 'after'].includes(position)) {
-      return fail('INVALID_OPERATION', `不支持的插入位置: ${position}`)
-    }
-    if (parent.type !== 'JSXElement' && parent.type !== 'JSXFragment') {
-      return fail(
-        'INVALID_INSERTION_POINT',
-        '锚点父级不是 JSX 容器，无法安全插入兄弟节点',
-      )
+    if (
+      ![
+        'before',
+        'after',
+        'inside_start',
+        'inside_end',
+        'inside_index',
+      ].includes(position)
+    ) {
+      return fail('INVALID_INSERTION_POINT', `不支持的插入位置: ${position}`)
     }
     try {
       parseSnippet(spec.jsxCode, file, parser)
     } catch (error) {
       return fail(error.code || 'INVALID_JSX_SNIPPET', error.message)
     }
-    const offset = position === 'before' ? anchor.start : anchor.end
-    // 插入的是兄弟节点：缩进必须与锚点同级，而不是再加一层。
-    const indent = baseIndentAt(code, anchor.start)
+
+    // ---- 兄弟插入（旧协议）----
+    if (position === 'before' || position === 'after') {
+      if (parent.type !== 'JSXElement' && parent.type !== 'JSXFragment') {
+        return fail(
+          'INVALID_INSERTION_POINT',
+          '锚点父级不是 JSX 容器，无法安全插入兄弟节点',
+        )
+      }
+      const offset = position === 'before' ? anchor.start : anchor.end
+      // 插入的是兄弟节点：缩进必须与锚点同级，而不是再加一层。
+      const indent = baseIndentAt(code, anchor.start)
+      const snippet = reindent(String(spec.jsxCode), indent)
+      const next = `${code.slice(0, offset)}\n${indent}${snippet}${code.slice(offset)}`
+      try {
+        parseCode(next, file, parser)
+      } catch (error) {
+        return fail('INVALID_INSERTION_POINT', `插入后文件无法解析: ${error.message}`)
+      }
+      return { status: 'OK', content: next }
+    }
+
+    // ---- 容器内部插入（暂存组件拖拽落位）----
+    const parts = jsxContainerParts(anchor)
+    if (!parts || parts.selfClosing || parts.openEnd < 0 || parts.closeStart < 0) {
+      return fail(
+        'INVALID_INSERTION_POINT',
+        '锚点不是可容纳子节点的 JSX 容器（自闭合元素只能 before / after）',
+      )
+    }
+    const indent = childIndentFor(code, anchor)
     const snippet = reindent(String(spec.jsxCode), indent)
-    const next = `${code.slice(0, offset)}\n${indent}${snippet}${code.slice(offset)}`
+    let next = ''
+    if (position === 'inside_start') {
+      // 开标签之后：作为第一个子节点。
+      const offset = parts.openEnd
+      next = `${code.slice(0, offset)}\n${indent}${snippet}${code.slice(offset)}`
+    } else {
+      // inside_end / inside_index：在闭标签前插入。
+      const children = meaningfulChildren(anchor)
+      const rawIndex = spec.insertIndex
+      const index =
+        rawIndex === null || rawIndex === undefined || rawIndex === ''
+          ? children.length
+          : Number(rawIndex)
+      if (!Number.isInteger(index) || index < 0 || index > children.length) {
+        return fail('INVALID_INSERTION_POINT', 'insertIndex 超出子节点范围', {
+          insertIndex: rawIndex,
+          childCount: children.length,
+        })
+      }
+      if (index < children.length) {
+        // 插在第 index 个子节点之前，并保留换行 / 缩进。
+        const offset = children[index].start
+        next = `${code.slice(0, offset)}\n${indent}${snippet}\n${indent}${code.slice(offset)}`
+      } else {
+        const offset = parts.closeStart
+        const parentIndent = baseIndentAt(code, anchor.start)
+        next = `${code.slice(0, offset)}\n${indent}${snippet}\n${parentIndent}${code.slice(offset)}`
+      }
+    }
     try {
       parseCode(next, file, parser)
     } catch (error) {
