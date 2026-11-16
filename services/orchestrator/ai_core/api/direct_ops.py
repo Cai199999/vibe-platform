@@ -12,6 +12,7 @@ from ai_core.direct_ops.service import DirectActionError, DirectOperationService
 from ai_core.domain.direct_ops import (
     DirectActionPayload,
     DirectActionResponse,
+    DirectDecisionRequest,
     DirectUndoRequest,
 )
 
@@ -41,6 +42,27 @@ def analyze_delete(request: DirectActionPayload) -> dict:
     service = DirectOperationService()
     try:
         return service.analyze_delete(request)
+    except DirectActionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                **(exc.diagnostic or {}),
+            },
+        ) from exc
+
+
+@router.post("/decisions")
+def decide_direct_action(request: DirectDecisionRequest) -> dict:
+    """提交 Direct Ops HITL 选择：视觉隐藏 / 取消 / 转交 AI。"""
+    service = DirectOperationService()
+    try:
+        return service.decide(
+            request.decision_id,
+            request.option_id,
+            request.comment,
+        )
     except DirectActionError as exc:
         raise HTTPException(
             status_code=exc.status_code,

@@ -38,9 +38,10 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 澄清解耦：Architect 源码采集限时 5s，超时回退请求 files；启动 Architect 时前端注入快照 baseline Diff + latestChanges，后端注入 ChangeLog。
 
 - NodeIdentity + ScopePolicy：统一 leaf/container/map_item/component_root/route_root；Direct Ops 先判作用域。根节点删除自动替换 empty-placeholder；map item 返回数据源/视觉隐藏 HITL 选项；普通/callSite/多实例操作不再被无意义拦截。
+- Direct Ops HITL 前端闭环：analyze-delete 返回 decisionId + options，DecisionDialog 复用决策样式；POST `/direct-ops/decisions` 一次性消费决策。VISUAL_ONLY 写 applied=false/visualOnly ChangeLog 并由 SDK 隐藏被点击实例；CANCEL 无副作用；AI_DATA_EDIT/DEFINITION 等返回 HANDOFF_TO_AI。SDK 用 selector + instance 定位循环项，避免总是隐藏第一张卡片。
 
 ## 最新验证
-前端 16 项 Vitest、Python 606 项 unittest 通过；BFF 单测通过。真实沙盒 Direct Ops（含样式继承 ADD 1559ms）正常；新 SDK 已打入 sandbox 镜像。终极 E2E：UPDATE_TEXT 1604ms、ADD 1523ms、DELETE 1603ms；ChangeLog 重启可读，DeepSeek Helper 可复述直接操作。
+前端 18 项 Vitest、Python 621 项 unittest、BFF 单测通过。真实浏览器 E2E：map 列表第 3 张卡片删除 → 选择“仅隐藏视觉” → 仅第 3 张 display:none、弹窗关闭、无错误 Toast、ChangeLog 落盘 visualOnly=true。终极 E2E：UPDATE_TEXT 1604ms、ADD 1523ms、DELETE 1603ms；ChangeLog 重启可读，DeepSeek Helper 可复述直接操作。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 无持久化；沙盒无 gVisor；未云端部署。

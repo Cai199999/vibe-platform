@@ -23,6 +23,8 @@ public class DirectOpsService {
     private static final String ACTIONS_PATH = "/api/v1/internal/direct-ops/actions";
     private static final String ANALYZE_DELETE_PATH =
             "/api/v1/internal/direct-ops/analyze-delete";
+    private static final String DECISIONS_PATH =
+            "/api/v1/internal/direct-ops/decisions";
     private static final String UNDO_PATH = "/api/v1/internal/direct-ops/undo";
     private static final String REVISION_PATH = "/api/v1/internal/direct-ops/revision";
 
@@ -47,6 +49,10 @@ public class DirectOpsService {
 
     public ResponseEntity<JsonNode> undo(JsonNode body) {
         return postJson(UNDO_PATH, body, "direct ops undo");
+    }
+
+    public ResponseEntity<JsonNode> decide(JsonNode body) {
+        return postJson(DECISIONS_PATH, body, "direct ops decision");
     }
 
     private ResponseEntity<JsonNode> postJson(

@@ -870,6 +870,50 @@ class DeleteStaticAnalysisTest(unittest.TestCase):
         self.assertTrue(result["inMap"])
         self.assertIn("数据源", "；".join(result["reasons"]))
 
+    def test_map_item_visual_hide_consumes_decision_without_code_write(self) -> None:
+        sandbox = _FakeSandbox(
+            anchor={
+                **_anchor(),
+                "inMap": True,
+                "isRouteRoot": False,
+                "deleteSafe": False,
+                "deleteReasons": ["位于 map 循环内"],
+            }
+        )
+        service = DirectOperationService(
+            sandbox=sandbox,  # type: ignore[arg-type]
+            settings=_Settings(),  # type: ignore[arg-type]
+        )
+        store = MemoryChangeLogStore(max_entries=20)
+        service._changelog = store
+        payload = DirectActionPayload.model_validate(
+            {
+                **_payload().model_dump(by_alias=True),
+                "action": "DELETE_NODE",
+                "payload": {},
+                "options": {"dryRun": True},
+                "baseRevision": None,
+            }
+        )
+
+        analysis = service.analyze_delete(payload)
+        self.assertTrue(analysis["decisionId"].startswith("ddec_"))
+        self.assertEqual(analysis["strategy"], "hitl")
+
+        decision = service.decide(analysis["decisionId"], "visual_hide")
+
+        self.assertEqual(decision["status"], "VISUAL_ONLY")
+        self.assertFalse(decision["applied"])
+        self.assertFalse(decision["committed"])
+        self.assertEqual(len(sandbox.patches), 0)
+        entries = store.list_for_project(PROJECT_ID)
+        self.assertEqual(len(entries), 1)
+        self.assertTrue(entries[0].visual_only)
+        self.assertFalse(entries[0].applied)
+
+        with self.assertRaises(DirectActionError):
+            service.decide(analysis["decisionId"], "visual_hide")
+
 
 class DirectUndoTest(unittest.TestCase):
     def setUp(self) -> None:

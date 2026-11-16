@@ -8,6 +8,7 @@ import {
 } from 'react'
 import AppHeader from '../components/AppHeader.jsx'
 import AccountDialog from '../components/AccountDialog.jsx'
+import DirectOpsDecisionDialog from '../components/DirectOpsDecisionDialog.jsx'
 import DraftLeaveGuard from '../components/DraftLeaveGuard.jsx'
 import SettingsDialog from '../components/SettingsDialog.jsx'
 import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
@@ -29,6 +30,7 @@ import {
   fetchDirectRevision,
   nextDirectActionId,
   submitDirectAction,
+  submitDirectDecision,
   undoLastDirectAction,
 } from '../workspace/directOps.js'
 import { importProjectFile } from '../workspace/importClient.js'
@@ -1361,6 +1363,10 @@ export default function WorkspacePage() {
   }, [loadAgentCatalog])
   // 通用操作提示（rejected / 门控释放失败等），与导出提示分离。
   const [toast, setToast] = useState(null)
+  // Direct Ops HITL：ScopePolicy 返回 options 时，复用决策面板让用户选择。
+  const [directDecision, setDirectDecision] = useState(null)
+  const [directDecisionBusy, setDirectDecisionBusy] = useState(false)
+  const directDecisionSourceRef = useRef(null)
   // 关闭 Tab 的未保存草稿守卫；确认后才真正销毁项目 / 沙盒。
   const [draftGuard, setDraftGuard] = useState(null)
   const [draftGuardBusy, setDraftGuardBusy] = useState(false)
@@ -1774,6 +1780,41 @@ export default function WorkspacePage() {
     }
   }
 
+  /** 提交 Direct Ops HITL 选择；仅 VISUAL_ONLY 会通知沙盒隐藏 DOM。 */
+  const resolveDirectDecision = async (optionId) => {
+    const current = directDecision
+    if (!current?.decisionId || directDecisionBusy) return
+    setDirectDecisionBusy(true)
+    try {
+      const result = await submitDirectDecision(
+        { decisionId: current.decisionId, optionId },
+        session?.token,
+      )
+      const status = result?.status
+      if (status === 'VISUAL_ONLY') {
+        directDecisionSourceRef.current?.postMessage?.(
+          {
+            channel: 'vibe-inspect',
+            type: 'direct-visual-hide',
+            payload: { source: current.source },
+          },
+          '*',
+        )
+        showToast('success', result?.message || '已隐藏当前项（仅视觉）')
+      } else if (status === 'HANDOFF_TO_AI') {
+        showToast('info', result?.message || '该操作需要 AI 修改数据源')
+      } else {
+        showToast('info', result?.message || '已取消')
+      }
+      directDecisionSourceRef.current = null
+      setDirectDecision(null)
+    } catch (cause) {
+      showToast('error', `决策提交失败：${cause?.message || cause}`)
+    } finally {
+      setDirectDecisionBusy(false)
+    }
+  }
+
   /**
    * 接收沙盒内联 Direct Ops 的消息：
    *  - direct-add：内联 ➕ 新增基础组件
@@ -1816,6 +1857,20 @@ export default function WorkspacePage() {
         const targetProjectId = payload.projectId || activeTabId
         void handleAnalyzeDelete(targetProjectId, { target: payload.source })
           .then((result) => {
+            if (result?.decisionId && result?.options?.length) {
+              // 需要用户决策：父页面弹出面板，SDK 只解锁 pending，不重复提示。
+              directDecisionSourceRef.current = event.source
+              setDirectDecision({
+                ...result,
+                projectId: targetProjectId,
+                source: payload.source,
+              })
+              reply(event.source, 'direct-delete-result', {
+                ...result,
+                handled: true,
+              })
+              return
+            }
             reply(event.source, 'direct-delete-result', result)
           })
           .catch((cause) => {
@@ -6479,6 +6534,16 @@ export default function WorkspacePage() {
             !activeSnapshotTab && <EmptyWorkspace onNewProject={createProject} />}
         </div>
       </main>
+
+      <DirectOpsDecisionDialog
+        decision={directDecision}
+        busy={directDecisionBusy}
+        onChoose={(optionId) => void resolveDirectDecision(optionId)}
+        onClose={() => {
+          directDecisionSourceRef.current = null
+          setDirectDecision(null)
+        }}
+      />
 
       {exportNotice && (
         <div

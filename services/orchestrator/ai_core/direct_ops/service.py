@@ -57,6 +57,13 @@ _EVENT_LOCK = threading.RLock()
 _COMPLETED: dict[str, DirectActionResponse] = {}
 _COMPLETED_LOCK = threading.RLock()
 
+# Direct Ops HITL 决策暂存：analyze-delete 生成，前端选择后消费。
+# 只保存脱敏后的定位摘要，不保存完整源码；10 分钟未选择即失效。
+_DECISIONS: dict[str, dict[str, Any]] = {}
+_DECISIONS_LOCK = threading.RLock()
+_DECISION_TTL_SECONDS = 600
+_DECISION_LIMIT = 200
+
 
 class DirectActionError(Exception):
     """可直接转译为 ErrorEnvelope 的 Direct Ops 业务异常。"""
@@ -112,6 +119,38 @@ def _diff_summary(before: str, after: str, limit: int = 2000) -> str:
     return text[:limit]
 
 
+def _remember_decision(decision_id: str, value: dict[str, Any]) -> None:
+    """登记待决策项；顺带清理过期项，防止无界增长。"""
+    now = time.time()
+    with _DECISIONS_LOCK:
+        expired = [
+            key
+            for key, item in _DECISIONS.items()
+            if now - float(item.get("created_at") or 0) > _DECISION_TTL_SECONDS
+        ]
+        for key in expired:
+            _DECISIONS.pop(key, None)
+        if len(_DECISIONS) >= _DECISION_LIMIT:
+            oldest = min(
+                _DECISIONS,
+                key=lambda key: float(_DECISIONS[key].get("created_at") or 0),
+            )
+            _DECISIONS.pop(oldest, None)
+        _DECISIONS[decision_id] = value
+
+
+def _take_decision(decision_id: str) -> dict[str, Any] | None:
+    """取出并消费决策；决策一次性有效，避免重复执行。"""
+    now = time.time()
+    with _DECISIONS_LOCK:
+        item = _DECISIONS.pop(decision_id, None)
+    if item is None:
+        return None
+    if now - float(item.get("created_at") or 0) > _DECISION_TTL_SECONDS:
+        return None
+    return item
+
+
 class DirectOperationService:
     def __init__(
         self,
@@ -156,7 +195,7 @@ class DirectOperationService:
         result["options"] = list(scope.options)
         result["identity"] = identity.to_dict()
         call_site = anchor.get("callSiteAnchor")
-        result["anchor"] = {
+        anchor_summary = {
             "file": anchor.get("file"),
             "component": anchor.get("component"),
             "range": anchor.get("range"),
@@ -174,7 +213,121 @@ class DirectOperationService:
             "sharedByImport": bool(anchor.get("sharedByImport")),
             "sharedReason": anchor.get("sharedReason") or "",
         }
+        result["anchor"] = anchor_summary
+        if scope.strategy == "hitl" and scope.options:
+            decision_id = f"ddec_{uuid.uuid4().hex[:20]}"
+            _remember_decision(
+                decision_id,
+                {
+                    "payload": payload.model_dump(by_alias=True),
+                    "anchor": anchor_summary,
+                    "identity": identity.to_dict(),
+                    "scope": scope.scope,
+                    "options": list(scope.options),
+                    "created_at": time.time(),
+                },
+            )
+            result["decisionId"] = decision_id
         return result
+
+    def decide(
+        self,
+        decision_id: str,
+        option_id: str,
+        comment: str = "",
+    ) -> dict[str, Any]:
+        """消费一次 Direct Ops HITL 决策。
+
+        目前只执行无副作用的 VISUAL_ONLY/CANCEL；需要改数据源或组件定义的
+        选项统一返回 HANDOFF_TO_AI，由前端显式转交架构师，绝不静默失败。
+        """
+        pending = _take_decision(decision_id)
+        if pending is None:
+            raise DirectActionError(
+                DirectErrorCode.ACTION_INVALID,
+                "该决策已过期或不存在，请重新操作",
+                status_code=409,
+            )
+        option = next(
+            (
+                item
+                for item in pending.get("options") or []
+                if str(item.get("optionId")) == option_id
+            ),
+            None,
+        )
+        if option is None:
+            raise DirectActionError(
+                DirectErrorCode.ACTION_INVALID,
+                f"未知的决策选项: {option_id}",
+                status_code=400,
+            )
+
+        action = str(option.get("action") or "").upper()
+        base = {
+            "decisionId": decision_id,
+            "optionId": option_id,
+            "scope": pending.get("scope") or "",
+        }
+        if action == "CANCEL":
+            return {
+                **base,
+                "status": "CANCELLED",
+                "applied": False,
+                "committed": False,
+                "message": "已取消",
+            }
+        if action == "VISUAL_ONLY":
+            change_id = self._record_visual_only(pending, option, comment)
+            return {
+                **base,
+                "status": "VISUAL_ONLY",
+                "scope": "visual_only",
+                "applied": False,
+                "committed": False,
+                "changeId": change_id,
+                "message": "已隐藏当前项（仅视觉，未修改代码）",
+            }
+        return {
+            **base,
+            "status": "HANDOFF_TO_AI",
+            "applied": False,
+            "committed": False,
+            "message": "该操作需要 AI 修改数据源或组件定义，已保留目标信息",
+        }
+
+    def _record_visual_only(
+        self,
+        pending: dict[str, Any],
+        option: dict[str, Any],
+        comment: str,
+    ) -> str:
+        """记录一条 applied=false 的视觉变更，便于 Architect 回顾。"""
+        payload = pending.get("payload") or {}
+        anchor = pending.get("anchor") or {}
+        component = anchor.get("component") or anchor.get("file") or "目标节点"
+        change_id = f"chg_{uuid.uuid4().hex[:20]}"
+        entry = ChangeLogEntry(
+            change_id=change_id,
+            project_id=str(payload.get("projectId") or ""),
+            sandbox_id=str(payload.get("sandboxId") or ""),
+            run_id=payload.get("runId"),
+            action="DELETE_NODE",
+            target={
+                "file": anchor.get("file") or "",
+                "component": anchor.get("component") or "",
+                "range": anchor.get("range") or {},
+                "nodeSource": anchor.get("nodeSource") or "",
+            },
+            summary=f"仅视觉隐藏 {component}（未修改代码）",
+            diff_summary=(f"用户选择：{option.get('label') or ''}\n{comment}".strip()),
+            risk="L2_HITL",
+            applied=False,
+            visual_only=True,
+            created_at=datetime.now(timezone.utc),
+        )
+        self._changelog.append(entry)
+        return change_id
 
     def undo_last(self, project_id: str, sandbox_id: str) -> dict[str, Any]:
         """撤回最近一次已落盘的 Direct Op。

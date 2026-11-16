@@ -124,6 +124,14 @@ class DirectUndoRequest(CamelModel):
     sandbox_id: str = Field(min_length=1, max_length=64)
 
 
+class DirectDecisionRequest(CamelModel):
+    """Direct Ops HITL 决策：用户从 ScopePolicy 返回的 options 中选择一项。"""
+
+    decision_id: str = Field(min_length=1, max_length=64)
+    option_id: str = Field(min_length=1, max_length=64)
+    comment: str = Field(default="", max_length=500)
+
+
 class DirectActionResponse(CamelModel):
     direct_action_id: str
     run_id: str | None = None
@@ -174,6 +182,7 @@ __all__ = [
     "DirectActionResponse",
     "DirectActionRisk",
     "DirectActionTarget",
+    "DirectDecisionRequest",
     "DirectErrorCode",
     "DirectUndoRequest",
 ]

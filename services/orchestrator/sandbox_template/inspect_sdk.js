@@ -1162,6 +1162,23 @@
     }
   }
 
+  /**
+   * 按源码 selector + 实例序号定位真实 DOM。
+   * map 循环中的多个卡片共享同一 selector，不能再默认取第一个。
+   */
+  function resolveSourceInstance(source) {
+    if (!source || !source.selector) return null
+    var matches
+    try {
+      matches = document.querySelectorAll(source.selector)
+    } catch (error) {
+      return null
+    }
+    if (!matches.length) return null
+    var index = Math.max(0, Number(source.instance || 1) - 1)
+    return matches[index] || matches[0]
+  }
+
   // ------------------------------------------------------------
   // 直接拖拽布局
   // ------------------------------------------------------------
@@ -2351,6 +2368,7 @@
   var directTargetSource = null
   var directContainer = null
   var directDeleteSource = null
+  var directDeleteNode = null
   var directDeleteAutoConfirm = false
   var directDeletePending = false
   var directEdit = null
@@ -2416,6 +2434,8 @@
           showDirectToast('目标已失效，请重新选择组件')
           return
         }
+        // 循环项共享同一 selector，必须记住被点击的 DOM 实例。
+        directDeleteNode = directTarget
         directDeleteAutoConfirm =
           directTarget.getAttribute('data-vibe-created') === 'direct' ||
           Boolean(directTarget.querySelector?.('[data-vibe-created]'))
@@ -2795,6 +2815,10 @@
     if (data.type === 'direct-delete-result') {
       directDeletePending = false
       var result = data.payload || {}
+      if (result.handled) {
+        // 父页面已弹出 HITL 决策面板，SDK 不再重复提示。
+        return
+      }
       if (result.safe && directDeleteAutoConfirm) {
         directDeleteAutoConfirm = false
         post('direct-delete-confirmed', {
@@ -2805,7 +2829,10 @@
       }
       if (result.safe) {
         var panel = ensureDirectConfirm()
-        var node = directDeleteSource && queryNode(directDeleteSource.selector)
+        var node =
+          directDeleteNode && directDeleteNode.isConnected
+            ? directDeleteNode
+            : resolveSourceInstance(directDeleteSource)
         if (node) {
           var rect = node.getBoundingClientRect()
           panel.style.left = Math.max(2, rect.right - 190) + 'px'
@@ -2820,6 +2847,29 @@
           '已拦截：' + ((result.reasons || []).join('；') || '该组件不可直接删除'),
         )
       }
+      return
+    }
+    if (data.type === 'direct-visual-hide') {
+      // 仅视觉隐藏：不改 JSX、不 commit；刷新页面后恢复。
+      var hidePayload = data.payload || {}
+      var hideSource = hidePayload.source || directDeleteSource
+      var hideNode =
+        directDeleteNode && directDeleteNode.isConnected
+          ? directDeleteNode
+          : hideSource && hideSource.selector
+            ? resolveSourceInstance(hideSource)
+            : null
+      if (!hideNode || !hideNode.isConnected) {
+        showDirectToast('目标已失效，请重新选择组件')
+        return
+      }
+      hideNode.style.display = 'none'
+      hideNode.setAttribute('data-vibe-visual-hidden', 'true')
+      directDeleteSource = null
+      directDeleteNode = null
+      directTarget = null
+      hideDirectUi()
+      showDirectToast('已隐藏当前项（仅视觉，未修改代码）')
       return
     }
     if (data.type === 'direct-result') {

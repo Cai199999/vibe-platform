@@ -41,6 +41,12 @@ public class DirectOpsController {
         return directOpsService.analyzeDelete(body);
     }
 
+    /** 提交 Direct Ops HITL 选择。 */
+    @PostMapping("/decisions")
+    public ResponseEntity<JsonNode> decide(@RequestBody JsonNode body) {
+        return directOpsService.decide(body);
+    }
+
     /** 撤回最近一次 Direct Op。 */
     @PostMapping("/undo")
     public ResponseEntity<JsonNode> undo(@RequestBody JsonNode body) {

@@ -91,6 +91,24 @@ export async function analyzeDirectDelete(payload, token) {
   return response.json()
 }
 
+export async function submitDirectDecision(
+  { decisionId, optionId, comment = '' },
+  token,
+) {
+  const response = await fetch('/api/v1/direct-ops/decisions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token ?? ''}`,
+    },
+    body: JSON.stringify({ decisionId, optionId, comment }),
+  })
+  if (!response.ok) {
+    await throwApiError(response)
+  }
+  return response.json()
+}
+
 export async function undoLastDirectAction(projectId, sandboxId, token) {
   const response = await fetch('/api/v1/direct-ops/undo', {
     method: 'POST',
