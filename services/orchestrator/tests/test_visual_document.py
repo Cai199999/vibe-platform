@@ -107,6 +107,25 @@ class VisualDocumentSchemaTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertTrue(any("像素坐标" in item for item in report.errors))
 
+    def test_jsx_markup_is_rejected(self) -> None:
+        report = validate_visual_document(
+            _document(
+                root={
+                    "id": "nd_root",
+                    "type": "page",
+                    "children": [
+                        {
+                            "id": "nd_text",
+                            "type": "text",
+                            "props": {"text": "<Button>提交</Button>"},
+                        }
+                    ],
+                }
+            )
+        )
+        self.assertFalse(report.ok)
+        self.assertTrue(any("JSX/HTML" in item for item in report.errors))
+
     def test_non_container_cannot_have_children(self) -> None:
         report = validate_visual_document(
             _document(
@@ -159,10 +178,33 @@ class VisualDocumentSchemaTest(unittest.TestCase):
                 },
                 interactions=[],
                 bindings=[],
+                status="FROZEN",
             )
         )
         self.assertFalse(report.ok)
         self.assertTrue(any("repeat.source" in item for item in report.errors))
+
+    def test_draft_repeat_without_binding_is_warning_only(self) -> None:
+        report = validate_visual_document(
+            _document(
+                root={
+                    "id": "nd_root",
+                    "type": "page",
+                    "children": [
+                        {
+                            "id": "nd_list",
+                            "type": "list",
+                            "repeat": {"source": "orders"},
+                            "children": [],
+                        }
+                    ],
+                },
+                interactions=[],
+                bindings=[],
+            )
+        )
+        self.assertTrue(report.ok)
+        self.assertTrue(any("业务审查" in item for item in report.warnings))
 
     def test_freeze_writes_stable_content_hash(self) -> None:
         document = VisualDocument.model_validate(_document())

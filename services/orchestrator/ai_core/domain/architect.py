@@ -14,6 +14,7 @@ from typing import Any, Literal, Union
 from pydantic import Field, field_validator, model_validator
 
 from ai_core.domain.common import CamelModel
+from ai_core.domain.visual_document import VisualDocument
 
 AppShape = Literal["lightweight_web", "script_automation", "full_stack_system"]
 
@@ -472,6 +473,8 @@ class ArchitectContract(CamelModel):
     frontend_routes: list[dict[str, Any]] = Field(default_factory=list)
     page_layout: list[dict[str, Any]] = Field(default_factory=list)
     components: list[dict[str, Any]] = Field(default_factory=list)
+    # 离线优先可视化的唯一前端产物；不得包含 React / JSX 源码。
+    visual_document: VisualDocument | None = None
     ui_logic: list[dict[str, Any]] = Field(default_factory=list)
     frontend_data_model: list[dict[str, Any]] = Field(default_factory=list)
     script_spec: dict[str, Any] = Field(default_factory=dict)

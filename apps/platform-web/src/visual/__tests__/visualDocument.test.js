@@ -9,6 +9,7 @@ import {
   moveVisualNodeInDocument,
   updateVisualNodeInDocument,
   validateVisualDocument,
+  visualDocumentFromContract,
 } from '../visualDocument.js'
 
 function emptyDoc() {
@@ -125,6 +126,26 @@ describe('VisualDocument 纯函数', () => {
     expect(validateVisualDocument(doc).ok).toBe(true)
   })
 
+  it('DRAFT 列表未绑定 repeat.source 只给 warning', () => {
+    const doc = emptyDoc()
+    doc.root.children.push(
+      createVisualNode('list', { repeat: { source: 'orders', sampleCount: 3 } }),
+    )
+    const report = validateVisualDocument(doc)
+    expect(report.ok).toBe(true)
+    expect(report.warnings.join('；')).toContain('业务审查')
+  })
+
+  it('校验器拒绝 props 中的 JSX/HTML 标记', () => {
+    const doc = emptyDoc()
+    doc.root.children.push(
+      createVisualNode('text', { props: { text: '<Button>提交</Button>' } }),
+    )
+    const report = validateVisualDocument(doc)
+    expect(report.ok).toBe(false)
+    expect(report.errors.join('；')).toContain('JSX/HTML')
+  })
+
   it('校验器拒绝重复 nodeId 与像素坐标', () => {
     const doc = emptyDoc()
     doc.root.children.push({
@@ -140,5 +161,23 @@ describe('VisualDocument 纯函数', () => {
     expect(report.ok).toBe(false)
     expect(report.errors.join('；')).toContain('重复 nodeId')
     expect(report.errors.join('；')).toContain('像素坐标')
+  })
+})
+
+
+describe('Architect 契约桥接', () => {
+  it('取出 visualDocument 并补齐 projectId/title', () => {
+    const source = createEmptyVisualDocument({ title: '订单工作台' })
+    const document = visualDocumentFromContract(
+      { visualDocument: source },
+      { projectId: 'proj_arch', title: '回退标题' },
+    )
+    expect(document.projectId).toBe('proj_arch')
+    expect(document.title).toBe('订单工作台')
+    expect(validateVisualDocument(document).ok).toBe(true)
+  })
+
+  it('旧契约没有 visualDocument 时返回 null', () => {
+    expect(visualDocumentFromContract({ components: [] })).toBeNull()
   })
 })

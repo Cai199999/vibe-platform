@@ -73,6 +73,7 @@ const FORBIDDEN_PROP_KEYS = new Set([
   '__html',
 ])
 const NODE_ID_PATTERN = /^nd_[A-Za-z0-9_-]{3,64}$/
+const MARKUP_PATTERN = /<\s*\/?\s*[A-Za-z][^>]*>/
 
 const DEFAULT_TOKENS = {
   colors: {
@@ -591,6 +592,11 @@ export function validateVisualDocument(document) {
     if (badProps.length) {
       errors.push(`节点 ${node.id} 含原始 HTML 注入: ${badProps.join(', ')}`)
     }
+    Object.entries(node.props || {}).forEach(([key, value]) => {
+      if (typeof value === 'string' && MARKUP_PATTERN.test(value)) {
+        errors.push(`节点 ${node.id} 的 props.${key} 含 JSX/HTML 标记`)
+      }
+    })
     if (node.repeat && !REPEAT_TYPES.has(node.type)) {
       errors.push(`节点 ${node.id} 只有 list/table 支持 repeat`)
     }
@@ -642,7 +648,14 @@ export function validateVisualDocument(document) {
         (binding) => binding.id === source || binding.entity === source,
       )
       if (!matched) {
-        errors.push(`节点 ${node.id} 的 repeat.source=${source} 没有 binding`)
+        const target =
+          document.status === 'FROZEN' || document.status === 'COMPILED'
+            ? errors
+            : warnings
+        target.push(
+          `节点 ${node.id} 的 repeat.source=${source} 尚未绑定` +
+            (target === warnings ? '，将在业务审查阶段补齐' : ''),
+        )
       }
     }
     node.children.forEach(visit)
@@ -665,4 +678,21 @@ export function validateVisualDocument(document) {
 export function countVisualNodes(root) {
   if (!root) return 0
   return 1 + root.children.reduce((sum, child) => sum + countVisualNodes(child), 0)
+}
+
+/**
+ * 从 Architect 契约中取出 VisualDocument，并补齐项目作用域。
+ * 返回 null 表示旧契约没有虚拟树（走旧链路）。
+ */
+export function visualDocumentFromContract(
+  contract,
+  { projectId = '', title = '' } = {},
+) {
+  const visual = contract?.visualDocument
+  if (!visual || typeof visual !== 'object') return null
+  return {
+    ...visual,
+    projectId: visual.projectId || projectId,
+    title: visual.title || title || '未命名页面',
+  }
 }

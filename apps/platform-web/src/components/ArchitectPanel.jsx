@@ -1252,6 +1252,7 @@ function ConflictDecisionDialog({ conflict, submitting, error, onDecide }) {
 
 export default function ArchitectPanel({
   projectName,
+  projectId = '',
   state,
   onClose,
   onStart,
@@ -1626,33 +1627,60 @@ export default function ArchitectPanel({
 
           {status === 'CONFIRMED' && (
             <>
-              <div className="architect-outcome is-success" role="status">
-                <span aria-hidden="true">✓</span>
-                <div>
-                  <strong>实施契约已确认</strong>
-                  <p>
-                    {autoBootstrap || state.fullstack?.mode === 'frontend'
-                      ? '系统正在依据契约初始化前端页面，完成后画布会自动刷新。'
-                      : '下一阶段可直接依据该契约生成前后端代码与数据库迁移。'}
-                  </p>
+              {contract?.visualDocument ? (
+                <div className="architect-outcome is-success" role="status">
+                  <span aria-hidden="true">✓</span>
+                  <div>
+                    <strong>虚拟骨架已生成</strong>
+                    <p>
+                      已写入离线画布，可直接增删、拖拽、调整布局。
+                      本阶段不生成 React 源码，也不会启动沙盒。
+                    </p>
+                    <a
+                      className="primary-button"
+                      href={`/visual-canvas?project=${encodeURIComponent(
+                        projectId,
+                      )}&title=${encodeURIComponent(
+                        contract.visualDocument.title ||
+                          projectName ||
+                          '未命名页面',
+                      )}`}
+                    >
+                      打开虚拟画布
+                    </a>
+                  </div>
                 </div>
-              </div>
-              {autoBootstrap || state.fullstack?.mode === 'frontend' ? (
-                <FrontendBootstrap
-                  fullstack={state.fullstack}
-                  contract={contract}
-                  onRetry={onFrontendBootstrap}
-                  onFullstackGenerate={onFullstackGenerate}
-                />
               ) : (
-                <FullstackGeneration
-                  fullstack={state.fullstack}
-                  contract={contract}
-                  onGenerate={onFullstackGenerate}
-                  onExport={onExport}
-                  onReclarify={(prompt) => onDecide?.('REVISE', prompt)}
-                  exporting={exporting}
-                />
+                <>
+                  <div className="architect-outcome is-success" role="status">
+                    <span aria-hidden="true">✓</span>
+                    <div>
+                      <strong>实施契约已确认</strong>
+                      <p>
+                        {autoBootstrap || state.fullstack?.mode === 'frontend'
+                          ? '系统正在依据契约初始化前端页面，完成后画布会自动刷新。'
+                          : '下一阶段可直接依据该契约生成前后端代码与数据库迁移。'}
+                      </p>
+                    </div>
+                  </div>
+                  {autoBootstrap || state.fullstack?.mode === 'frontend' ? (
+                    <FrontendBootstrap
+                      fullstack={state.fullstack}
+                      contract={contract}
+                      onRetry={onFrontendBootstrap}
+                      onFullstackGenerate={onFullstackGenerate}
+                    />
+                  ) : (
+                    <FullstackGeneration
+                      fullstack={state.fullstack}
+                      contract={contract}
+                      onGenerate={onFullstackGenerate}
+                      onExport={onExport}
+                      onReclarify={(prompt) => onDecide?.('REVISE', prompt)}
+                      exporting={exporting}
+                    />
+                  )}
+                </>
               )}
               {/* 契约确认后对话栏不关闭：底部持续提供追加需求入口。 */}
               <ContractAppend

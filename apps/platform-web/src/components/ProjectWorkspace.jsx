@@ -347,9 +347,11 @@ function ProjectWorkspaceInner({
         ? 'bootstrapping'
         : project.bootstrap === 'failed'
           ? 'failed'
-          : project.canvasMode === 'live'
-            ? 'live'
-            : 'mock'
+          : project.canvasMode === 'visual'
+            ? 'visual'
+            : project.canvasMode === 'live'
+              ? 'live'
+              : 'mock'
   const canvasVisible = viewMode === 'dual' || mode === 'canvas'
   const previewVisible = viewMode === 'dual' || mode === 'preview'
   // 审批 / 澄清面板在预览侧。对比模式停留在画布时提供一个显式入口，
@@ -445,7 +447,11 @@ function ProjectWorkspaceInner({
     setInspectMode(true)
     // 画布不是 live 时没有真实 DOM 可点，切到预览侧复用同一套 SDK。
     if (viewMode === 'compare') {
-      setMode(canvasMode === 'live' ? 'canvas' : 'preview')
+      setMode(
+        canvasMode === 'live' || canvasMode === 'visual'
+          ? 'canvas'
+          : 'preview',
+      )
     }
     return true
   }
@@ -1208,6 +1214,7 @@ function ProjectWorkspaceInner({
       {architectState?.open && (
         <ArchitectPanel
           projectName={project.name}
+          projectId={project.id}
           state={architectState}
           onClose={onArchitectClose}
           onStart={onArchitectStart}

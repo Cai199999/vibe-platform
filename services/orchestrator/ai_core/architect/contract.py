@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ai_core.architect.llm import ContractDraft
+from ai_core.architect.visual import build_visual_document_from_contract
 from ai_core.domain.architect import (
     ArchitectApiRoute,
     ArchitectCitation,
@@ -28,6 +29,10 @@ from ai_core.domain.architect import (
 from ai_core.domain.relations import (
     normalize_table_relations,
     parse_ddl_table_columns,
+)
+from ai_core.domain.visual_document import (
+    VisualDocument,
+    validate_visual_document,
 )
 
 
@@ -56,10 +61,22 @@ def _normalize_component(raw: dict, index: int) -> dict:
         item["role"] = "placeholder"
         name = str(item.get("name") or item.get("title") or "待定区域").strip()
         item.setdefault("name", name)
-        item.setdefault("placeholder", f'<Placeholder title="{name}" />')
+        # 禁止在契约里输出 JSX；占位信息由 VisualDocument 表达。
+        item.setdefault("placeholder", f"{name}（VisualNode 占位）")
         if not str(item.get("description") or "").strip():
             item["description"] = "需求未明确，等待补充；当前仅渲染占位区域。"
     return item
+
+
+def _visual_title(draft: ContractDraft) -> str:
+    """为兜底 VisualDocument 推导页面标题。"""
+    title = str(draft.tech_stack.get("frontendTitle") or "").strip()
+    if title:
+        return title
+    match = re.search(r"^#\s+(.+)$", draft.contract_markdown, re.MULTILINE)
+    if match:
+        return match.group(1).split("·")[0].strip() or "未命名页面"
+    return "未命名页面"
 
 
 def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
@@ -84,6 +101,7 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
     ui_logic = list(draft.ui_logic)
     frontend_data_model = list(draft.frontend_data_model)
     script_spec = dict(draft.script_spec)
+    visual_document = dict(draft.visual_document or {})
 
     # 前端骨架由 FrontendCoder 直接消费这三项，缺失时不允许进入确认。
     if shape in {"lightweight_web", "full_stack_system"}:
@@ -108,6 +126,25 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
             ]
             if business_components:
                 issues.append("skeleton_mode 契约禁止生成具体业务组件")
+
+        # 离线优先：visualDocument 是前端第一阶段唯一产物。
+        # 模型已经给出时严格校验；旧契约 / Mock 漏写时用确定性
+        # 构建器兜底，绝不回退到 JSX。
+        if visual_document:
+            report = validate_visual_document(visual_document)
+            if not report.ok:
+                preview = "；".join(report.errors[:5])
+                issues.append(
+                    "visual_document 不符合 VisualDocument Schema：" + preview
+                )
+        else:
+            visual_document = build_visual_document_from_contract(
+                title=_visual_title(draft),
+                page_layout=page_layout,
+                components=components,
+                interactions=interactions,
+                api_routes=api_routes,
+            )
 
     if shape == "lightweight_web":
         if api_routes:
@@ -147,6 +184,7 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
         components = []
         ui_logic = []
         frontend_data_model = []
+        visual_document = {}
 
     elif shape == "full_stack_system":
         if not api_routes:
@@ -191,6 +229,7 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
         frontend_routes=frontend_routes,
         page_layout=page_layout,
         components=components,
+        visual_document=visual_document,
         ui_logic=ui_logic,
         frontend_data_model=frontend_data_model,
         script_spec=script_spec,
@@ -216,6 +255,7 @@ def draft_to_dict(draft: ContractDraft) -> dict:
         "frontendRoutes": draft.frontend_routes,
         "pageLayout": draft.page_layout,
         "components": draft.components,
+        "visualDocument": draft.visual_document,
         "uiLogic": draft.ui_logic,
         "frontendDataModel": draft.frontend_data_model,
         "scriptSpec": draft.script_spec,
@@ -284,6 +324,15 @@ def draft_from_dict(payload: dict) -> ContractDraft:
             for item in payload.get("components") or []
             if isinstance(item, dict)
         ],
+        visual_document=(
+            dict(payload.get("visualDocument"))
+            if isinstance(payload.get("visualDocument"), dict)
+            else (
+                dict(payload.get("visual_document"))
+                if isinstance(payload.get("visual_document"), dict)
+                else {}
+            )
+        ),
         ui_logic=[
             dict(item)
             for item in payload.get("uiLogic") or []
@@ -353,6 +402,22 @@ def assemble_contract(
                 derive_when_empty=True,
             )
 
+    visual_payload = dict(draft.visual_document or {})
+    if shape in {"lightweight_web", "full_stack_system"} and not visual_payload:
+        # 旧 checkpoint / 直接调用 assemble 的兼容兜底。
+        visual_payload = build_visual_document_from_contract(
+            title=_visual_title(draft),
+            page_layout=draft.page_layout,
+            components=draft.components,
+            interactions=draft.component_interactions,
+            api_routes=draft.api_routes,
+        )
+    visual_document = (
+        VisualDocument.model_validate(visual_payload)
+        if shape in {"lightweight_web", "full_stack_system"} and visual_payload
+        else None
+    )
+
     return ArchitectContract(
         contract_id=contract_id,
         run_id=run_id,
@@ -372,6 +437,7 @@ def assemble_contract(
         frontend_routes=draft.frontend_routes,
         page_layout=draft.page_layout,
         components=draft.components,
+        visual_document=visual_document,
         ui_logic=draft.ui_logic,
         frontend_data_model=draft.frontend_data_model,
         script_spec=draft.script_spec,

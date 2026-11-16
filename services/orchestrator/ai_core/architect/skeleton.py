@@ -332,11 +332,13 @@ def build_skeleton_draft(
 
 ## 占位组件
 
-主内容区只包含一个占位组件：
+主内容区只包含一个虚拟占位节点：
 
-```jsx
-<Placeholder title="待定区域" />
-```
+- nodeId：由 Architect 生成；
+- type：`container`；
+- 文案：待定区域；
+- 视觉样式：Tailwind 占位类；
+- 不含任何 React / JSX 源码。
 
 禁止在该阶段生成登录表单、简历上传、职位详情、数据表格等用户没有明确
 要求的业务组件。

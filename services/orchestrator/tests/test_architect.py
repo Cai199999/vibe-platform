@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 import uuid
 from dataclasses import replace
@@ -45,6 +46,7 @@ from ai_core.architect.schemas import (
     ArchitectImplementationPhase,
 )
 from ai_core.config import Settings
+from ai_core.domain.visual_document import validate_visual_document
 from ai_core.domain.architect import (
     ArchitectComponentInteraction,
     ArchitectConflictDecisionRequest,
@@ -616,7 +618,10 @@ class ConfidenceGuardTest(unittest.TestCase):
             ArchitectAnalysis(
                 app_shape="lightweight_web",
                 confidence_score=0.99,
-                slots={"ui.primary_flow": "输入 -> 勾选 -> 保存", "ui.layout": "topnav_cards"},
+                slots={
+                    "ui.primary_flow": "输入 -> 勾选 -> 保存",
+                    "ui.layout": "topnav_cards",
+                },
                 assumptions=["假设浏览器支持 localStorage"],
             ),
             {},
@@ -779,6 +784,14 @@ class SkeletonModeTest(unittest.TestCase):
         for forbidden in ("LoginForm", "ResumeUploader", "JDdetail", "登录", "简历"):
             self.assertNotIn(forbidden, component_blob)
 
+        visual = contract["visualDocument"]
+        self.assertEqual(visual["schemaVersion"], "1.0")
+        self.assertEqual(visual["root"]["type"], "page")
+        visual_report = validate_visual_document(visual)
+        self.assertTrue(visual_report.ok, visual_report.errors)
+        self.assertGreaterEqual(visual_report.node_count, 5)
+        self.assertNotIn("<", json.dumps(visual, ensure_ascii=False))
+
         event_types = [event.type for event in buffer.snapshot()]
         self.assertIn("architect.skeleton.detected", event_types)
         self.assertIn("architect.skeleton.contract", event_types)
@@ -793,6 +806,8 @@ class SkeletonModeTest(unittest.TestCase):
         self.assertTrue(validation.draft.skeleton_mode)
         self.assertEqual(len(validation.draft.components), 1)
         self.assertTrue(validation.draft.components[0]["isPlaceholder"])
+        self.assertTrue(validation.draft.visual_document)
+        self.assertTrue(validate_visual_document(validation.draft.visual_document).ok)
 
 
 class ContractTierValidationTest(unittest.TestCase):
@@ -814,6 +829,23 @@ class ContractTierValidationTest(unittest.TestCase):
             draft = llm.draft_contract(self._context(shape))
             validation = validate_draft(shape, draft)
             self.assertTrue(validation.valid, f"{shape}: {validation.issues}")
+
+    def test_invalid_visual_document_is_rejected_before_confirmation(self) -> None:
+        llm = MockArchitectLLM()
+        draft = llm.draft_contract(self._context("lightweight_web"))
+        broken = replace(
+            draft,
+            visual_document={
+                "schemaVersion": "1.0",
+                "docId": "vdoc_bad",
+                "root": {"id": "bad_node_id", "type": "page"},
+            },
+        )
+        validation = validate_draft("lightweight_web", broken)
+        self.assertFalse(validation.valid)
+        self.assertTrue(
+            any("visual_document" in issue for issue in validation.issues)
+        )
 
     def test_lightweight_rejects_api_and_ddl(self) -> None:
         llm = MockArchitectLLM()

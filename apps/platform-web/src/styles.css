@@ -12332,3 +12332,21 @@ body.is-viewport-panning * {
     min-height: 560px;
   }
 }
+
+.canvas-start-state.is-visual {
+  background: radial-gradient(
+    circle at 50% 45%,
+    rgba(16, 185, 129, 0.16),
+    rgba(2, 6, 23, 0.74) 62%
+  );
+}
+
+.canvas-start-state a.canvas-start-button {
+  text-decoration: none;
+}
+
+.architect-outcome .primary-button {
+  display: inline-flex;
+  margin-top: 10px;
+  text-decoration: none;
+}

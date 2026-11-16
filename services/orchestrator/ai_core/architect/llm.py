@@ -90,6 +90,9 @@ class ContractDraft:
     frontend_routes: list[dict[str, Any]] = field(default_factory=list)
     page_layout: list[dict[str, Any]] = field(default_factory=list)
     components: list[dict[str, Any]] = field(default_factory=list)
+    # 离线优先：Architect 首阶段唯一的前端产物。
+    # 它是 VisualDocument 的 JSON 快照，绝不包含 React / JSX 源码。
+    visual_document: dict[str, Any] = field(default_factory=dict)
     ui_logic: list[dict[str, Any]] = field(default_factory=list)
     frontend_data_model: list[dict[str, Any]] = field(default_factory=list)
     script_spec: dict[str, Any] = field(default_factory=dict)
@@ -223,6 +226,7 @@ class MockArchitectLLM(ArchitectLLM):
             frontend_routes=draft.frontend_routes,
             page_layout=draft.page_layout,
             components=draft.components,
+            visual_document=draft.visual_document,
             ui_logic=draft.ui_logic,
             frontend_data_model=draft.frontend_data_model,
             script_spec=draft.script_spec,
@@ -992,10 +996,37 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             '"page_layout":[{"region":"header|main|sidebar","title":"",'
             '"description":""}],"components":[{"name":"","role":"",'
             '"section":"","description":"","is_placeholder":false}],'
+            '"visual_document":{"schemaVersion":"1.0","docId":"vdoc_...",'
+            '"projectId":"","revision":0,"status":"DRAFT","title":"",'
+            '"designTokens":{},"root":{"id":"nd_...","type":"page",'
+            '"name":"页面","props":{},"layout":{"display":"block"},'
+            '"style":{"tokenRefs":[],"className":"","tailwind":[]},'
+            '"children":[],"repeat":null,"semantics":{}, "a11y":{},'
+            '"state":{},"codegen":{},"provenance":{},"locked":false},'
+            '"interactions":[],"bindings":[],"review":{},"metadata":{}},'
             '"ui_logic":[{}],"frontend_data_model":[{}],"script_spec":{},'
             '"implementation_path":[{"phase":"","title":"","tasks":[]}],'
             '"assumptions":[],"include_ai_capability":false,'
             '"skeleton_mode":false}\n\n'
+            "【离线优先 · 最高优先级】\n"
+            "- visual_document 是前端第一阶段唯一产物，必须是完整合法的 "
+            "VisualDocument JSON；严禁在其中输出 React / JSX / HTML / "
+            "TypeScript / 组件源码字符串；\n"
+            '- 视觉树必须有且只有一个 type="page" 根节点；所有节点 id 使用 '
+            "nd_ 开头，children 表达嵌套顺序；style.tailwind 暂存 Tailwind "
+            "类名占位，禁止 x / y / absoluteX 等像素坐标；\n"
+            "- 节点 type 只能取 page/section/container/grid/stack/text/button/"
+            "input/image/list/table/form/modal/component；非容器不得有 children；"
+            "只有 list/table 可以写 repeat；repeat.source 可以暂未绑定，"
+            "但冻结进入 CodeGen 前必须由业务审查补齐 binding；\n"
+            "- 页面布局必须体现 header / sidebar / main 的层级关系；"
+            "组件清单里的每个业务组件都必须在 visual_document 中有对应节点；"
+            "没有明确交互时 interactions / bindings 可以为空；\n"
+            "- skeleton_mode=true 时，visual_document 只能包含一个"
+            "“待定区域”占位容器及其说明文本，禁止生成登录、表单、表格等"
+            "用户未明确要求的业务节点；\n"
+            "- 如果 visual_document 缺失或不符合 Schema，契约会被确定性校验"
+            "打回修复，不能进入用户确认。\n\n"
             "【防脑补铁律 · 最高优先级】\n"
             "- components 只能来自历史对话或 slots 中用户明确说出的业务名词与"
             "动作；禁止自行补出 LoginForm、ResumeUploader、JDdetail、数据表格等"
@@ -1050,8 +1081,9 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "在契约中写明后端通过 Sequelize ORM 与环境变量 DATABASE_URL "
             "连接云数据库，禁止把 SQLite 描述为生产数据库；\n"
             "- 所有 Web 形态（lightweight_web / full_stack_system）都必须给出 "
-            "frontend_routes、page_layout 与 components：前端工程师将直接据此"
-            "生成 React 骨架，不能省略；脚本形态这三项为空；\n"
+            "frontend_routes、page_layout、components 与 visual_document："
+            "前两项用于契约审计，visual_document 才是前端唯一产物，不能省略；"
+            "脚本形态这四项为空；\n"
             "- 【布局铁律】骨架必须使用 CSS Grid / Flexbox 做栅格化布局；"
             "列表 / 卡片必须采用响应式多列布局（如 grid-template-columns: "
             "repeat(auto-fit, minmax(240px, 1fr))）。绝对禁止把所有区域和"
@@ -1572,6 +1604,9 @@ def _parse_contract_draft(payload: dict[str, Any]) -> ContractDraft:
         ),
         page_layout=_as_list(payload.get("page_layout") or payload.get("pageLayout")),
         components=_as_list(payload.get("components")),
+        visual_document=_as_dict(
+            payload.get("visual_document") or payload.get("visualDocument")
+        ),
         ui_logic=_as_list(payload.get("ui_logic") or payload.get("uiLogic")),
         frontend_data_model=_as_list(
             payload.get("frontend_data_model") or payload.get("frontendDataModel")
@@ -1609,6 +1644,7 @@ def _draft_to_payload(draft: ContractDraft) -> dict[str, Any]:
         "frontendRoutes": draft.frontend_routes,
         "pageLayout": draft.page_layout,
         "components": draft.components,
+        "visualDocument": draft.visual_document,
         "uiLogic": draft.ui_logic,
         "frontendDataModel": draft.frontend_data_model,
         "scriptSpec": draft.script_spec,

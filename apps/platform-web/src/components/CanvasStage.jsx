@@ -2917,6 +2917,30 @@ function CanvasStage({
           </div>
         )}
 
+        {mode === 'visual' && (
+          <div
+            className="canvas-start-state is-visual"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <span className="canvas-start-kicker">OFFLINE VISUAL</span>
+            <h2>虚拟骨架已就绪</h2>
+            <p>
+              Architect 已输出虚拟组件树。先进入离线画布自由增删、拖拽与调整布局，
+              确认视觉后再进入全栈代码生成。
+            </p>
+            <a
+              className="canvas-start-button"
+              href={`/visual-canvas?project=${encodeURIComponent(projectId)}`}
+            >
+              <span aria-hidden="true">✨</span>
+              打开虚拟画布
+            </a>
+            <span className="canvas-start-hint">
+              本阶段不启动沙盒，也不会写入真实源码
+            </span>
+          </div>
+        )}
+
         {mode === 'bootstrapping' && (
           <div
             className="canvas-start-state is-busy"
@@ -3080,7 +3104,9 @@ function CanvasStage({
         <div className="canvas-hint">
           {mode === 'blank'
             ? '先完成架构对话，画布会在契约确认后自动生成'
-            : mode === 'bootstrapping'
+            : mode === 'visual'
+              ? '虚拟骨架已生成 · 打开离线画布进行视觉确认'
+              : mode === 'bootstrapping'
               ? '正在生成初始前端页面…'
               : mode === 'failed'
                 ? '可重试初始化，或打开架构面板调整契约'

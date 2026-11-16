@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import AppHeader from '../components/AppHeader.jsx'
 import AccountDialog from '../components/AccountDialog.jsx'
 import DirectOpsDecisionDialog from '../components/DirectOpsDecisionDialog.jsx'
@@ -62,6 +62,14 @@ import {
 import { writeDraftTombstone } from '../workspace/draftStorage.js'
 import { formatPlacementAcceptance } from '../workspace/stagedPlacement.js'
 import { INITIAL_APP } from '../mockProject.js'
+import {
+  validateVisualDocument,
+  visualDocumentFromContract,
+} from '../visual/visualDocument.js'
+import {
+  VISUAL_DOCUMENT_STORAGE_KEY,
+  useVisualDocumentStore,
+} from '../visual/visualDocumentStore.js'
 
 const TARGET_FILE = 'src/App.jsx'
 const MAX_ANNOTATIONS = 3
@@ -1293,6 +1301,7 @@ function EmptyWorkspace({ onNewProject }) {
 export default function WorkspacePage() {
   const { user, session } = useAuth()
   const { requireManualApproval } = useSettings()
+  const navigate = useNavigate()
   // 草稿隔离维度：租户 + 用户。projectId 在每次读写时补入，避免新建项目
   // 继承上一个项目的序号 / 操作队列。
   const draftScope = useMemo(
@@ -1438,6 +1447,11 @@ export default function WorkspacePage() {
   const autoSnapshotInflightRef = useRef(new Set())
   // 前端骨架初始化只允许每个契约触发一次；失败重试时由 handler 清除。
   const frontendBootstrapRef = useRef(new Map())
+  // Architect → VisualDocument 同步：同一 contract/revision 只覆盖一次，
+  // 避免用户画布编辑被后续 Architect 状态刷新冲掉。
+  const visualDocumentSyncRef = useRef(new Map())
+  const visualDocumentNoticeRef = useRef(new Set())
+  const visualDocumentAutoOpenRef = useRef(new Set())
   const frontendBootstrapFailureRef = useRef(new Map())
   // 页面级挂载标记：所有异步回调写状态前必须检查，避免卸载后 setState。
   const workspaceMountedRef = useRef(true)
@@ -3775,11 +3789,121 @@ export default function WorkspacePage() {
     if (manual) showToast('info', '正在根据契约生成初始前端页面…')
   }
 
-  // 契约一旦 CONFIRMED，新建项目自动触发前端骨架生成。
-  // 每个 contractId 只触发一次，避免 Architect 状态更新造成重复 Run。
+  /**
+   * Architect → 离线画布。
+   *
+   * contract.visualDocument 是第一阶段唯一前端产物：
+   *  - 校验通过后直接写入 visualDocumentStore；
+   *  - 不启动 FrontendCoder / 沙盒 / 任何真实源码生成；
+   *  - 契约确认后只自动打开一次虚拟画布，返回工作台不会再次跳转。
+   */
+  useEffect(() => {
+    if (!activeTabId) return
+    const state = architectStates[activeTabId]
+    const contract = state?.contract
+    const visual = contract?.visualDocument
+    if (!visual) return
+
+    const key = [
+      contract.contractId || '',
+      visual.revision ?? 0,
+      visual.metadata?.contentHash || '',
+    ].join(':')
+    const syncKeyStorage = `vibe.visual.sync.${activeTabId}`
+    let storedSyncKey = ''
+    let localDocument = null
+    try {
+      storedSyncKey = window.localStorage.getItem(syncKeyStorage) || ''
+      localDocument = JSON.parse(
+        window.localStorage.getItem(VISUAL_DOCUMENT_STORAGE_KEY) || 'null',
+      )
+    } catch {
+      // 隐私模式 / 损坏 JSON：按未同步处理。
+    }
+    const currentDocument = useVisualDocumentStore.getState().doc
+    const hasLocalDocument =
+      currentDocument?.projectId === activeTabId ||
+      localDocument?.projectId === activeTabId
+    const alreadySynced = storedSyncKey === key && hasLocalDocument
+    const shouldLoad =
+      !alreadySynced &&
+      visualDocumentSyncRef.current.get(activeTabId) !== key
+    if (shouldLoad) {
+      const project = projects.find((item) => item.id === activeTabId)
+      const document = visualDocumentFromContract(contract, {
+        projectId: activeTabId,
+        title: project?.name || '未命名页面',
+      })
+      const report = validateVisualDocument(document)
+      if (!report.ok) {
+        console.warn('[visual-document] invalid contract payload', {
+          projectId: activeTabId,
+          contractId: contract.contractId,
+          errors: report.errors,
+        })
+        if (!visualDocumentNoticeRef.current.has(`invalid:${key}`)) {
+          visualDocumentNoticeRef.current.add(`invalid:${key}`)
+          showToast(
+            'error',
+            `虚拟骨架校验失败：${report.errors[0] || 'Schema 不合法'}`,
+          )
+        }
+        return
+      }
+      useVisualDocumentStore.getState().replaceDocument(document, {
+        resetHistory: true,
+      })
+      visualDocumentSyncRef.current.set(activeTabId, key)
+      try {
+        window.localStorage.setItem(syncKeyStorage, key)
+      } catch {
+        // 隐私模式下至少当前页面内由 ref 防重复覆盖。
+      }
+      updateProject(activeTabId, {
+        bootstrap: 'ready',
+        canvasMode: 'visual',
+        generated: false,
+      })
+      if (!visualDocumentNoticeRef.current.has(`loaded:${key}`)) {
+        visualDocumentNoticeRef.current.add(`loaded:${key}`)
+        showToast('success', '虚拟骨架已生成，可进入画布自由调整')
+      }
+    }
+
+    if (state.status !== 'CONFIRMED') return
+    const activeDocument = useVisualDocumentStore.getState().doc
+    if (activeDocument?.docId !== visual.docId) return
+    const autoOpenKey = `vibe.visual.autoOpened.${activeTabId}.${contract.contractId}`
+    if (visualDocumentAutoOpenRef.current.has(autoOpenKey)) return
+    visualDocumentAutoOpenRef.current.add(autoOpenKey)
+    try {
+      if (window.sessionStorage.getItem(autoOpenKey)) return
+      window.sessionStorage.setItem(autoOpenKey, '1')
+    } catch {
+      // 隐私模式无法写 sessionStorage 时，本页仍只跳转一次。
+    }
+    const project = projects.find((item) => item.id === activeTabId)
+    navigate(
+      `/visual-canvas?project=${encodeURIComponent(
+        activeTabId,
+      )}&title=${encodeURIComponent(
+        activeDocument.title || project?.name || '未命名页面',
+      )}`,
+    )
+  }, [
+    activeTabId,
+    architectStates,
+    navigate,
+    projects,
+    updateProject,
+  ])
+
+  // 契约一旦 CONFIRMED，旧版无 visualDocument 契约才触发前端骨架生成。
+  // 新链路必须等用户在虚拟画布确认视觉后，由阶段三 CodeGen 统一生成。
   useEffect(() => {
     Object.entries(architectStates).forEach(([projectId, state]) => {
       if (state?.status !== 'CONFIRMED') return
+      if (state?.contract?.visualDocument) return
       const project = projects.find((item) => item.id === projectId)
       if (!project || project.bootstrap !== 'pending') return
       const key = state.contract?.contractId || state.runId

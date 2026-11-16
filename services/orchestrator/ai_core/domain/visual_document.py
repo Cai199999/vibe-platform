@@ -73,6 +73,7 @@ _FORBIDDEN_COORDINATE_KEYS = frozenset(
 _FORBIDDEN_PROP_KEYS = frozenset(
     {"dangerouslySetInnerHTML", "dangerously_set_inner_html", "__html"}
 )
+_MARKUP_RE = re.compile(r"<\s*/?\s*[A-Za-z][^>]*>")
 
 
 class VisualValidationError(ValueError):
@@ -196,6 +197,12 @@ class VisualNode(CamelModel):
             raise ValueError(
                 f"节点 {self.id} 禁止原始 HTML 注入: " + ", ".join(forbidden_props)
             )
+        for key, value in self.props.items():
+            if isinstance(value, str) and _MARKUP_RE.search(value):
+                raise ValueError(
+                    f"节点 {self.id} 的 props.{key} 含 JSX/HTML 标记；"
+                    "VisualDocument 只允许纯文案"
+                )
         if self.children and self.type not in CONTAINER_NODE_TYPES:
             raise ValueError(f"节点 {self.id} 类型 {self.type} 不能包含子节点")
         if self.repeat and self.type not in REPEAT_NODE_TYPES:
@@ -313,17 +320,19 @@ class VisualDocument(CamelModel):
                     f"{interaction.binding_id}"
                 )
 
-        for node in _iter_nodes(self.root):
-            if not node.repeat:
-                continue
-            source = node.repeat.source
-            if not any(
-                binding.id == source or binding.entity == source
-                for binding in self.bindings
-            ):
-                raise ValueError(
-                    f"节点 {node.id} 的 repeat.source={source} 没有对应 binding"
-                )
+        # 业务审查前允许列表数据源暂时未绑定；冻结 / 编译阶段必须闭环。
+        if self.status in {"FROZEN", "COMPILED"}:
+            for node in _iter_nodes(self.root):
+                if not node.repeat:
+                    continue
+                source = node.repeat.source
+                if not any(
+                    binding.id == source or binding.entity == source
+                    for binding in self.bindings
+                ):
+                    raise ValueError(
+                        f"节点 {node.id} 的 repeat.source={source} " "没有对应 binding"
+                    )
         return self
 
 
@@ -394,8 +403,23 @@ def validate_visual_document(
         return VisualValidationReport(ok=False, errors=[str(exc)])
 
     nodes = list(_iter_nodes(document.root))
+    warnings: list[str] = []
+    if document.status == "DRAFT":
+        for node in nodes:
+            if not node.repeat:
+                continue
+            source = node.repeat.source
+            if not any(
+                binding.id == source or binding.entity == source
+                for binding in document.bindings
+            ):
+                warnings.append(
+                    f"节点 {node.id} 的 repeat.source={source} 尚未绑定，"
+                    "将在业务审查阶段补齐"
+                )
     return VisualValidationReport(
         ok=True,
+        warnings=warnings,
         node_count=len(nodes),
         max_depth=_tree_depth(document.root),
     )
