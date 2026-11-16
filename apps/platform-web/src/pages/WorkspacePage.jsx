@@ -5119,47 +5119,41 @@ export default function WorkspacePage() {
       )
       return
     }
-    const dx = Math.round(Number(payload.dx) || 0)
-    const dy = Math.round(Number(payload.dy) || 0)
-    // SDK 已用 4px 阈值过滤误触；这里不再二次丢弃，否则内联位移和
-    // 草稿偏移会出现 1~2px 的不一致。
-
     const selector = payload.selector
-    const key = `${projectId}::${selector}`
-    const pending =
-      pendingLayoutChangesRef.current.get(projectId) || new Map()
-    const previous = pending.get(selector)
-    // 第一次拖动：已提交基线 + 本次手势；已有草稿：草稿累计 + 本次手势。
-    // 绝不能用 dragCommittedRef 直接叠加，否则同一组件第二次拖动会丢失
-    // 第一次草稿的位移。
-    const base =
-      previous?.next ??
-      dragCommittedRef.current.get(key) ?? { x: 0, y: 0 }
-    const next = {
-      x: Math.round(base.x + dx),
-      y: Math.round(base.y + dy),
-    }
     const source = payload.source || {}
-    const item = {
-      selector,
-      source: source.file
-        ? `${source.file}:${source.line || 1}`
-        : selector,
-      label: source.component || source.tag || '组件',
-      dx: next.x,
-      dy: next.y,
-      base: previous?.base ?? dragCommittedRef.current.get(key) ?? { x: 0, y: 0 },
-      next,
-      token: payload.token,
-      payload,
-      updatedAt: Date.now(),
+    const placement = payload.placement
+    if (!placement?.parentSelector || !placement?.parentFile) {
+      triggerDragRollback(
+        projectId,
+        [{ token: payload.token, selector }],
+        '没有找到可落位的父容器，本次拖拽已还原',
+      )
+      return
     }
-    pending.set(selector, item)
-    pendingLayoutChangesRef.current.set(projectId, pending)
-    publishPendingLayoutChanges(projectId)
-    if (!previous) {
-      showToast('info', '布局调整已记录，完成后点击【保存布局】统一同步')
-    }
+    // 拖拽不走 Agent：松手后直接调用确定性 MOVE_NODE。
+    void handleDirectAction(projectId, {
+      action: 'MOVE_NODE',
+      dryRun: false,
+      target: { ...source, placement },
+      payload: {},
+    })
+      .then(() => {
+        // 通知 SDK 丢弃临时 translate，并刷新预览等待 HMR。
+        setDragCommits((previous) => ({
+          ...previous,
+          [projectId]: {
+            nonce: (previous[projectId]?.nonce ?? 0) + 1,
+            items: [{ token: payload.token, selector }],
+          },
+        }))
+      })
+      .catch(() => {
+        triggerDragRollback(
+          projectId,
+          [{ token: payload.token, selector }],
+          '移动未写入代码，位置已还原',
+        )
+      })
   }
 
   /** 用户取消拖拽（pointercancel）：SDK 已自行还原，不产生草稿。 */

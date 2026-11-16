@@ -2073,6 +2073,60 @@
       startTranslate:
         inherited === null ? state.startTranslate : inherited,
     }
+    // Direct Ops：松手位置换算为确定性父容器 + 子节点序号。
+    // 父页面据此直接调用 MOVE_NODE，不经过 Agent / LLM。
+    var placement = null
+    try {
+      var hitNode = document.elementFromPoint(event.clientX, event.clientY)
+      var parentHit = stageParentOf(hitNode)
+      var parentNode = parentHit.node
+      if (
+        !parentNode ||
+        parentNode === node ||
+        parentNode.contains(node)
+      ) {
+        parentNode = node.parentElement
+          ? stageParentOf(node.parentElement).node
+          : null
+      }
+      if (parentNode && parentNode !== node && !node.contains(parentNode)) {
+        var parentSource = readSource(parentNode)
+        var children = stageSourceChildren(parentNode)
+        var slot = stageSlotFor(
+          parentNode,
+          children,
+          event.clientX,
+          event.clientY,
+        )
+        var index = slot.siblingIndex
+        if (slot.insertPosition === 'after') index += 1
+        if (slot.insertPosition === 'inside_start') index = 0
+        if (slot.insertPosition === 'inside_end') index = children.length
+        var sourceIndex = children.findIndex(
+          (child) => child.node === node,
+        )
+        if (sourceIndex >= 0 && index > sourceIndex) index -= 1
+        if (
+          parentSource &&
+          parentSource.selector &&
+          parentSource.file
+        ) {
+          placement = {
+            parentSelector: parentSource.selector,
+            parentFile: parentSource.file,
+            parentLine: parentSource.line,
+            parentColumn: parentSource.column,
+            parentComponent: parentSource.component,
+            parentInstance: parentSource.instance,
+            parentInstanceCount: parentSource.instanceCount,
+            insertPosition: 'inside_index',
+            siblingIndex: Math.max(0, index),
+          }
+        }
+      }
+    } catch (error) {
+      placement = null
+    }
     post('drag-end', {
       token: state.token,
       selector: state.selector,
@@ -2086,6 +2140,7 @@
       inlineY: round2(state.baseY + state.dy),
       startTranslate: state.startTranslate,
       rect: rectOf(node),
+      placement: placement,
     })
     settlePendingDragDisarm()
   }
