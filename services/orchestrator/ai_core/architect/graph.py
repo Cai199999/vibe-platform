@@ -545,11 +545,44 @@ class ArchitectGraphRunner:
         context = _context_from_state(state)
         analysis = self._llm.analyze(context)
         self._check_cancelled()
-        analysis, guard = apply_confidence_guard(
-            analysis,
-            dict(state.get("slots") or {}),
-            float(state.get("threshold") or 0.85),
+        review_first_round = (
+            _has_semantic_review_packet(state) and int(state.get("round") or 0) == 0
         )
+        if review_first_round:
+            # 审查包首轮必须停在“业务绑定澄清”，不能被通用槽位问题挤掉，
+            # 也不能直接跳进契约起草。后续轮次恢复正常槽位守卫。
+            reasons = ["语义审查包：优先确认交互与数据绑定"]
+            questions = list(analysis.questions)
+            if not questions:
+                questions = [
+                    ArchitectQuestion(
+                        question_id="q_semantic_review",
+                        slot="ui.interactions",
+                        type="free_text",
+                        prompt=(
+                            "请说明虚拟界面中核心按钮/表单需要什么后端能力？"
+                            "例如登录鉴权、订单 CRUD 或导出接口。"
+                        ),
+                        required=True,
+                    )
+                ]
+            missing = list(analysis.missing_slots) or ["ui.interactions"]
+            analysis = analysis.model_copy(
+                update={
+                    "confidence_score": min(
+                        float(analysis.confidence_score or 0.0), 0.84
+                    ),
+                    "missing_slots": missing,
+                    "questions": questions,
+                }
+            )
+        else:
+            analysis, guard = apply_confidence_guard(
+                analysis,
+                dict(state.get("slots") or {}),
+                float(state.get("threshold") or 0.85),
+            )
+            reasons = list(guard.reasons)
         shape = analysis.app_shape
         questions = [item.model_dump(by_alias=True) for item in analysis.questions]
         update: dict[str, Any] = {
@@ -568,7 +601,7 @@ class ArchitectGraphRunner:
                     "appShape": shape,
                     "label": APP_SHAPE_LABELS.get(shape, shape),
                     "confidenceScore": analysis.confidence_score,
-                    "reasons": guard.reasons,
+                    "reasons": reasons,
                 },
                 dedupe_key=f"architect.app_shape:{state['run_id']}:{shape}",
             )
@@ -580,7 +613,7 @@ class ArchitectGraphRunner:
                 "confidenceScore": analysis.confidence_score,
                 "threshold": float(state.get("threshold") or 0.85),
                 "missingSlots": analysis.missing_slots,
-                "reasons": guard.reasons,
+                "reasons": reasons,
             },
             dedupe_key=(
                 f"architect.analysis:{state['run_id']}:{state.get('round', 0)}"
@@ -1431,6 +1464,15 @@ class ArchitectGraphRunner:
 # ------------------------------------------------------------
 # 状态 / 槽位 / RAG 工具
 # ------------------------------------------------------------
+def _has_semantic_review_packet(state: ArchitectState) -> bool:
+    """冻结画布审查包只影响首轮分析：不压缩、不被通用槽位问题挤掉。"""
+    return any(
+        "【SEMANTIC_REVIEW_PACKET】" in str(item.get("content") or "")
+        for item in (state.get("ui_history") or [])
+        if isinstance(item, dict)
+    )
+
+
 def _context_from_state(state: ArchitectState) -> ArchitectContext:
     return ArchitectContext(
         project_id=str(state.get("project_id") or ""),

@@ -11,6 +11,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   CONTAINER_TYPES,
   NODE_LABELS,
+  collectVisualNodeIds,
   countVisualNodes,
   createEmptyVisualDocument,
   findVisualNode,
@@ -18,6 +19,7 @@ import {
   validateVisualDocument,
 } from './visualDocument.js'
 import { useVisualDocumentStore } from './visualDocumentStore.js'
+import { generateVisualNodes } from './visualAgentClient.js'
 
 const PALETTE = [
   ['section', '区块', '▭'],
@@ -90,9 +92,12 @@ function VisualNodeView({
   onStartDrag,
   onDelete,
   onDuplicate,
+  onMagic,
+  frozen,
   renderNodeList,
 }) {
   const isContainer = CONTAINER_TYPES.has(node.type)
+  const magic = frozen ? null : onMagic
   const isDragging = draggingId === node.id
   const selected = selectedId === node.id
   const handlePointerDown = (event) => {
@@ -124,6 +129,8 @@ function VisualNodeView({
           onStartDrag={handlePointerDown}
           onDelete={onDelete}
           onDuplicate={onDuplicate}
+          onMagic={magic}
+          frozen={frozen}
         />
         <div className="vc-page-body" data-visual-children>
           {node.children.length === 0 ? (
@@ -148,6 +155,8 @@ function VisualNodeView({
           onStartDrag={handlePointerDown}
           onDelete={onDelete}
           onDuplicate={onDuplicate}
+          onMagic={magic}
+          frozen={frozen}
         />
         <span>{node.props?.text || '文本'}</span>
       </div>
@@ -163,6 +172,8 @@ function VisualNodeView({
           onStartDrag={handlePointerDown}
           onDelete={onDelete}
           onDuplicate={onDuplicate}
+          onMagic={magic}
+          frozen={frozen}
         />
         <button
           type="button"
@@ -187,6 +198,8 @@ function VisualNodeView({
           onStartDrag={handlePointerDown}
           onDelete={onDelete}
           onDuplicate={onDuplicate}
+          onMagic={magic}
+          frozen={frozen}
         />
         <input
           className="vc-input"
@@ -207,6 +220,8 @@ function VisualNodeView({
           onStartDrag={handlePointerDown}
           onDelete={onDelete}
           onDuplicate={onDuplicate}
+          onMagic={magic}
+          frozen={frozen}
         />
         <img
           className="vc-image"
@@ -233,6 +248,8 @@ function VisualNodeView({
           onStartDrag={handlePointerDown}
           onDelete={onDelete}
           onDuplicate={onDuplicate}
+          onMagic={magic}
+          frozen={frozen}
         />
         <table className="vc-table">
           <thead>
@@ -292,6 +309,8 @@ function VisualNodeView({
           onStartDrag={handlePointerDown}
           onDelete={onDelete}
           onDuplicate={onDuplicate}
+          onMagic={magic}
+          frozen={frozen}
         />
         <div
           className="vc-list-body"
@@ -327,6 +346,8 @@ function VisualNodeView({
           onStartDrag={handlePointerDown}
           onDelete={onDelete}
           onDuplicate={onDuplicate}
+          onMagic={magic}
+          frozen={frozen}
         />
         <div className="vc-modal-card">
           <strong>弹窗</strong>
@@ -355,6 +376,8 @@ function VisualNodeView({
         onStartDrag={handlePointerDown}
         onDelete={onDelete}
         onDuplicate={onDuplicate}
+        onMagic={magic}
+        frozen={frozen}
       />
       <div className="vc-container-label">
         <span>{node.name || NODE_LABELS[node.type] || node.type}</span>
@@ -371,18 +394,28 @@ function VisualNodeView({
           renderNodeList(node.children)
         )}
       </div>
+
     </div>
   )
 }
 
-function NodeChrome({ node, selected, onStartDrag, onDelete, onDuplicate }) {
+function NodeChrome({
+  node,
+  selected,
+  frozen,
+  onStartDrag,
+  onDelete,
+  onDuplicate,
+  onMagic,
+}) {
   return (
     <div className="vc-node-chrome" data-visual-chrome>
       <button
         type="button"
         className="vc-drag-handle"
-        title="拖拽移动 / 换父容器"
+        title={frozen ? '画布已冻结' : '拖拽移动 / 换父容器'}
         aria-label={`拖拽 ${node.name || node.type}`}
+        disabled={frozen}
         onPointerDown={onStartDrag}
         onClick={(event) => event.stopPropagation()}
       >
@@ -392,8 +425,20 @@ function NodeChrome({ node, selected, onStartDrag, onDelete, onDuplicate }) {
         {NODE_LABELS[node.type] || node.type}
       </span>
       {node.locked && <span className="vc-locked-badge">锁</span>}
-      {selected && (
+      {selected && !frozen && (
         <span className="vc-node-actions">
+          {onMagic && CONTAINER_TYPES.has(node.type) && (
+            <button
+              type="button"
+              title="✨ AI 生成"
+              onClick={(event) => {
+                event.stopPropagation()
+                onMagic(node.id)
+              }}
+            >
+              ✨
+            </button>
+          )}
           <button
             type="button"
             title="复制节点"
@@ -421,7 +466,12 @@ function NodeChrome({ node, selected, onStartDrag, onDelete, onDuplicate }) {
   )
 }
 
-export default function OfflineVisualCanvas({ projectId = '', title = '未命名页面' }) {
+export default function OfflineVisualCanvas({
+  projectId = '',
+  title = '未命名页面',
+  token = '',
+  onFrozen,
+}) {
   const store = useVisualDocumentStore()
   const {
     doc,
@@ -434,17 +484,27 @@ export default function OfflineVisualCanvas({ projectId = '', title = '未命名
     deleteNode,
     duplicateNode,
     moveNode,
+    insertNodes,
     updateNode,
     undo,
     redo,
     resetDocument,
     replaceDocument,
+    freezeDocument,
     clearError,
   } = store
   const [draggingId, setDraggingId] = useState(null)
   const dragRef = useRef(null)
   const canvasRef = useRef(null)
   const [dropHint, setDropHint] = useState('')
+  const [magicTarget, setMagicTarget] = useState(null)
+  const [magicPrompt, setMagicPrompt] = useState('')
+  const [magicBusy, setMagicBusy] = useState(false)
+  const [magicError, setMagicError] = useState('')
+  const [magicNotice, setMagicNotice] = useState('')
+  const [reviewBusy, setReviewBusy] = useState(false)
+  const [reviewError, setReviewError] = useState('')
+  const frozen = doc.status === 'FROZEN'
 
   useEffect(() => {
     if (!projectId) return
@@ -465,6 +525,7 @@ export default function OfflineVisualCanvas({ projectId = '', title = '未命名
   )
 
   const addToSelection = (type) => {
+    if (frozen) return
     let parentId = doc.root?.id || null
     if (selected && CONTAINER_TYPES.has(selected.type)) {
       parentId = selected.id
@@ -479,12 +540,75 @@ export default function OfflineVisualCanvas({ projectId = '', title = '未命名
   }
 
   const removeSelected = (nodeId = selectedId) => {
-    if (!nodeId) return
+    if (!nodeId || frozen) return
     deleteNode(nodeId)
   }
 
+  const handleMagic = (nodeId) => {
+    if (frozen) return
+    const found = findVisualNode(doc.root, nodeId)
+    if (!found?.node) return
+    setMagicTarget(found.node)
+    setMagicPrompt('')
+    setMagicError('')
+    setMagicNotice('')
+  }
+
+  const submitMagic = async () => {
+    if (!magicTarget || !magicPrompt.trim() || magicBusy || frozen) return
+    setMagicBusy(true)
+    setMagicError('')
+    setMagicNotice('')
+    try {
+      const result = await generateVisualNodes(
+        {
+          projectId: doc.projectId || projectId,
+          documentId: doc.docId,
+          nodeId: magicTarget.id,
+          instruction: magicPrompt.trim(),
+          context: magicTarget,
+          existingIds: [...collectVisualNodeIds(doc.root)],
+          maxNodes: 40,
+        },
+        token,
+      )
+      if (!Array.isArray(result?.nodes) || result.nodes.length === 0) {
+        throw new Error('Agent 没有返回可用节点')
+      }
+      const inserted = insertNodes(magicTarget.id, result.nodes)
+      if (!inserted) {
+        throw new Error(lastError || '节点插入失败，请检查容器状态')
+      }
+      setMagicNotice(`已生成 ${result.nodes.length} 个节点`)
+      setMagicTarget(null)
+      setMagicPrompt('')
+    } catch (cause) {
+      setMagicError(String(cause?.message || cause))
+    } finally {
+      setMagicBusy(false)
+    }
+  }
+
+  const handleFreeze = async () => {
+    if (reviewBusy || !report.ok) return
+    setReviewBusy(true)
+    setReviewError('')
+    try {
+      const frozenDoc =
+        doc.status === 'FROZEN' ? doc : await freezeDocument()
+      if (!frozenDoc) {
+        throw new Error(lastError || '冻结失败，请先修复 Schema 错误')
+      }
+      onFrozen?.(frozenDoc)
+    } catch (cause) {
+      setReviewError(String(cause?.message || cause))
+    } finally {
+      setReviewBusy(false)
+    }
+  }
+
   const startDrag = (event, node) => {
-    if (event.button !== 0 || node.locked) return
+    if (frozen || event.button !== 0 || node.locked) return
     event.preventDefault()
     event.stopPropagation()
     if (dragRef.current) return
@@ -657,6 +781,8 @@ export default function OfflineVisualCanvas({ projectId = '', title = '未命名
         onStartDrag={startDrag}
         onDelete={removeSelected}
         onDuplicate={duplicateNode}
+        onMagic={handleMagic}
+        frozen={frozen}
         renderNodeList={renderNodeList}
       />
     ))
@@ -679,7 +805,7 @@ export default function OfflineVisualCanvas({ projectId = '', title = '未命名
           <button
             type="button"
             className="ghost-button"
-            disabled={!history.length}
+            disabled={frozen || !history.length}
             onClick={undo}
           >
             ↶ 撤销
@@ -687,7 +813,7 @@ export default function OfflineVisualCanvas({ projectId = '', title = '未命名
           <button
             type="button"
             className="ghost-button"
-            disabled={!future.length}
+            disabled={frozen || !future.length}
             onClick={redo}
           >
             ↷ 重做
@@ -695,11 +821,36 @@ export default function OfflineVisualCanvas({ projectId = '', title = '未命名
           <button
             type="button"
             className="ghost-button"
+            disabled={frozen}
             onClick={() => resetDocument({ withRoot: true })}
           >
             清空画布
           </button>
-          <a className="primary-button" href="/workspace">
+          {frozen ? (
+            <>
+              <span className="vc-frozen-badge" title={doc.metadata?.contentHash}>
+                已冻结 · {String(doc.metadata?.contentHash || '').slice(0, 20)}
+              </span>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={reviewBusy}
+                onClick={handleFreeze}
+              >
+                {reviewBusy ? '正在唤醒 Architect…' : '进入业务审查'}
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="primary-button"
+              disabled={reviewBusy || !report.ok}
+              onClick={handleFreeze}
+            >
+              {reviewBusy ? '正在冻结…' : '确认视觉，进入业务审查'}
+            </button>
+          )}
+          <a className="ghost-button" href="/workspace">
             返回工作台
           </a>
         </div>
@@ -719,6 +870,16 @@ export default function OfflineVisualCanvas({ projectId = '', title = '未命名
           </button>
         </div>
       )}
+      {reviewError && (
+        <div className="vc-validation-banner is-warning" role="status">
+          <span>业务审查启动失败：{reviewError}</span>
+        </div>
+      )}
+      {magicNotice && (
+        <div className="vc-validation-banner is-success" role="status">
+          <span>✨ {magicNotice}</span>
+        </div>
+      )}
 
       <div className="vc-layout">
         <aside className="vc-palette" aria-label="组件库">
@@ -732,6 +893,7 @@ export default function OfflineVisualCanvas({ projectId = '', title = '未命名
                 key={type}
                 type="button"
                 className="vc-palette-item"
+                disabled={frozen}
                 onClick={() => addToSelection(type)}
               >
                 <span className={`vc-palette-icon vc-badge-${type}`}>
@@ -768,6 +930,8 @@ export default function OfflineVisualCanvas({ projectId = '', title = '未命名
                   onStartDrag={startDrag}
                   onDelete={removeSelected}
                   onDuplicate={duplicateNode}
+                  onMagic={handleMagic}
+                  frozen={frozen}
                   renderNodeList={renderNodeList}
                 />
               </div>
@@ -779,6 +943,7 @@ export default function OfflineVisualCanvas({ projectId = '', title = '未命名
                   <button
                     type="button"
                     className="primary-button"
+                    disabled={frozen}
                     onClick={() => addNode('section')}
                   >
                     ＋ 添加区块
@@ -795,6 +960,7 @@ export default function OfflineVisualCanvas({ projectId = '', title = '未命名
             <span>{selected ? selected.type : '未选择'}</span>
           </div>
           {selected ? (
+            <fieldset className="vc-inspector-fieldset" disabled={frozen}>
             <div className="vc-inspector-body">
               <label>
                 节点名称
@@ -971,11 +1137,107 @@ export default function OfflineVisualCanvas({ projectId = '', title = '未命名
                 </span>
               </div>
             </div>
+            </fieldset>
           ) : (
             <p className="vc-inspector-empty">在画布中选择一个节点查看属性。</p>
           )}
         </aside>
       </div>
+
+      {magicTarget && (
+        <div className="dialog-backdrop" role="presentation">
+          <div
+            className="account-dialog vc-magic-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="vc-magic-title"
+          >
+            <div className="dialog-head">
+              <div>
+                <span className="eyebrow">Local Visual Agent</span>
+                <h2 id="vc-magic-title">✨ AI 生成</h2>
+                <p className="muted">
+                  目标容器：{magicTarget.name || magicTarget.type} · 只返回
+                  VisualNode JSON，不生成源码
+                </p>
+              </div>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="关闭"
+                disabled={magicBusy}
+                onClick={() => {
+                  if (!magicBusy) setMagicTarget(null)
+                }}
+              >
+                ×
+              </button>
+            </div>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault()
+                void submitMagic()
+              }}
+            >
+              <label className="vc-magic-label" htmlFor="vc-magic-prompt">
+                描述你想要的组件
+              </label>
+              <textarea
+                id="vc-magic-prompt"
+                className="vc-magic-input"
+                autoFocus
+                maxLength={2000}
+                rows={5}
+                value={magicPrompt}
+                disabled={magicBusy}
+                placeholder="例如：生成一个包含用户名、密码输入框和登录按钮的表单"
+                onChange={(event) => {
+                  setMagicPrompt(event.target.value)
+                  setMagicError('')
+                }}
+              />
+              <div className="vc-magic-examples">
+                {[
+                  '生成一个包含用户名、密码输入框和登录按钮的表单',
+                  '生成一个三列指标卡网格',
+                  '生成一个带标题、说明和操作按钮的空状态卡片',
+                ].map((example) => (
+                  <button
+                    key={example}
+                    type="button"
+                    disabled={magicBusy}
+                    onClick={() => setMagicPrompt(example)}
+                  >
+                    {example}
+                  </button>
+                ))}
+              </div>
+              {magicError && (
+                <p className="vc-magic-error" role="alert">
+                  {magicError}
+                </p>
+              )}
+              <div className="vc-magic-actions">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={magicBusy}
+                  onClick={() => setMagicTarget(null)}
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  className="primary-button"
+                  disabled={magicBusy || !magicPrompt.trim()}
+                >
+                  {magicBusy ? '正在生成节点…' : '✨ 生成并插入'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

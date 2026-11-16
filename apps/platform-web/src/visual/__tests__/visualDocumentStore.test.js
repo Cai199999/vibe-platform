@@ -73,3 +73,42 @@ describe('VisualDocument Zustand store', () => {
     expect(useVisualDocumentStore.getState().doc.root).not.toBeNull()
   })
 })
+
+
+describe('Agent insert 与冻结', () => {
+  beforeEach(resetStore)
+
+  it('insertNodes 一次提交并选中首个新节点', () => {
+    const store = useVisualDocumentStore.getState()
+    store.addNode('container', store.doc.root.id)
+    const containerId = useVisualDocumentStore.getState().doc.root.children[0].id
+    const before = useVisualDocumentStore.getState().doc.revision
+    const ok = useVisualDocumentStore.getState().insertNodes(containerId, [
+      {
+        type: 'form',
+        name: '登录表单',
+        children: [
+          { type: 'input', props: { placeholder: '用户名' } },
+          { type: 'button', props: { text: '登录' } },
+        ],
+      },
+    ])
+    expect(ok).toBe(true)
+    const after = useVisualDocumentStore.getState()
+    expect(after.doc.revision).toBe(before + 1)
+    expect(after.selectedId).toBeTruthy()
+    expect(after.doc.root.children[0].children[0].type).toBe('form')
+  })
+
+  it('冻结后禁止一切编辑并写 contentHash', async () => {
+    const store = useVisualDocumentStore.getState()
+    store.addNode('section', store.doc.root.id)
+    const frozen = await useVisualDocumentStore.getState().freezeDocument()
+    expect(frozen.status).toBe('FROZEN')
+    expect(frozen.metadata.contentHash).toMatch(/^sha256:[0-9a-f]{64}$/)
+    expect(useVisualDocumentStore.getState().doc.status).toBe('FROZEN')
+    expect(useVisualDocumentStore.getState().addNode('text')).toBe(false)
+    expect(useVisualDocumentStore.getState().undo()).toBe(false)
+    expect(useVisualDocumentStore.getState().updateText('nd_x', 'x')).toBe(false)
+  })
+})

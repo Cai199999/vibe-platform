@@ -40,10 +40,12 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - NodeIdentity + ScopePolicy：统一 leaf/container/map_item/component_root/route_root；Direct Ops 先判作用域。根节点删除自动替换 empty-placeholder；map item 返回数据源/视觉隐藏 HITL 选项；普通/callSite/多实例操作不再被无意义拦截。
 - Direct Ops HITL 前端闭环：analyze-delete 返回 decisionId + options，DecisionDialog 复用决策样式；POST `/direct-ops/decisions` 一次性消费决策。VISUAL_ONLY 写 applied=false/visualOnly ChangeLog 并由 SDK 隐藏被点击实例；CANCEL 无副作用；AI_DATA_EDIT/DEFINITION 等返回 HANDOFF_TO_AI。SDK 用 selector + instance 定位循环项，避免总是隐藏第一张卡片。
 - 离线优先重构阶段一：新增 Python `VisualDocument` / `VisualNode` Schema 与校验器（nodeId 唯一、深度/节点上限、禁止像素坐标、interaction/binding/repeat 引用校验、contentHash 冻结）；前端新增可视化树纯函数、Zustand 命令栈（增删改查/换父容器/撤销重做/localStorage 自动保存，IndexedDB 后续）、`OfflineVisualCanvas`（拖拽只改 DOM ghost，落点才提交，零 API/沙盒调用）。入口 `/visual-canvas`，工作台工具栏“✨ 虚拟画布”。
-- 阶段二 Architect 接入：`ArchitectContract.visualDocument` 成为前端第一阶段唯一产物；DeepSeek Prompt 强制输出 VisualDocument、严禁 JSX，确定性校验失败进入 repair；旧契约/Mock 用 `architect/visual.py` 无 JSX 兜底。前端契约确认后自动写入 visualDocumentStore、校验并跳转离线画布；旧无 visualDocument 契约才走 FrontendCoder。工作台新增 `canvasMode=visual` 入口。局部 JSON Patch Agent 尚未开始。
+- 阶段二 Architect 接入：`ArchitectContract.visualDocument` 成为前端第一阶段唯一产物；DeepSeek Prompt 强制输出 VisualDocument、严禁 JSX，确定性校验失败进入 repair；旧契约/Mock 用 `architect/visual.py` 无 JSX 兜底。前端契约确认后自动写入 visualDocumentStore、校验并跳转离线画布；旧无 visualDocument 契约才走 FrontendCoder。工作台新增 `canvasMode=visual` 入口。
+- 阶段二局部 Agent：`POST /api/v1/visual-agent/nodes` 由轻量 Coder 只返回 VisualNode JSON 数组；服务端重写 id、拒绝 page/坐标/JSX/定位 Tailwind、Schema 校验 + 一次 repair；前端 ✨ AI 生成弹窗与 `insertNodes` 一次命令插入，不触发沙盒。
+- 冻结与业务审查：画布“确认视觉，进入业务审查”用 Web Crypto 生成 `contentHash`、`status=FROZEN`、清空 undo 并锁定编辑；语义审查包（节点层级/交互/binding 缺口）写入 sessionStorage，回工作台后由 Architect 首轮强制提问业务鉴权/接口；画布重开保持只读。
 
 ## 最新验证
-前端 34 项 Vitest、Python 633 项 unittest 通过。真实 DeepSeek 契约：visualDocument 校验通过（16 节点、无 JSX；未绑定 repeat 仅 warning）。真实浏览器 E2E：伪造 CONFIRMED 契约 → 自动进入 `/visual-canvas` → 14 节点渲染/Schema 通过 → 拖拽/删除/撤销 → localStorage 持久化，0 个 `/api/v1/runs`、`/sandbox`、`/direct-ops` 请求。阶段一空白画布 E2E 仍通过。
+前端 37 项 Vitest、Python 641 项 unittest、BFF 单测通过。真实 DeepSeek：契约 visualDocument 16 节点通过；局部 Agent 首轮枚举漂移自动 repair 后通过（form + 2 input + button）。真实 E2E：空白画布 → ✨ 生成登录表单 → Schema 通过 → 冻结 contentHash → 工作台 Architect 首轮询问鉴权问题（真实 DeepSeek 返回 auth.method：JWT/Session/OAuth） → 重开画布只读；全程 0 个 `/api/v1/runs`、`/sandbox`、`/direct-ops`。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 无持久化；沙盒无 gVisor；未云端部署。

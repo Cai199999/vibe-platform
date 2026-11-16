@@ -12,9 +12,12 @@ import {
   deleteVisualNodeFromDocument,
   duplicateVisualNodeInDocument,
   findVisualNode,
+  freezeVisualDocument,
   insertVisualNodeIntoDocument,
+  insertVisualNodesIntoDocument,
   moveVisualNodeInDocument,
   updateVisualNodeInDocument,
+  validateVisualDocument,
 } from './visualDocument.js'
 
 export const VISUAL_DOCUMENT_STORAGE_KEY = 'vibe.visualDocument.v1'
@@ -78,7 +81,10 @@ export const useVisualDocumentStore = create((set, get) => {
   /**
    * 提交一次可撤销命令。history 保存命令前快照，future 在新命令时清空。
    */
+  const editable = () => get().doc.status !== 'FROZEN'
+
   const commit = (nextDocument, selectedId = get().selectedId) => {
+    if (!editable()) return false
     if (!nextDocument || nextDocument === get().doc) return false
     const previous = get().doc
     set((state) => ({
@@ -103,6 +109,7 @@ export const useVisualDocumentStore = create((set, get) => {
     },
 
     addNode: (type, parentId = null, index = -1) => {
+      if (!editable()) return false
       const state = get()
       const node = createVisualNode(type, {
         provenance: { createdBy: 'user', revision: 1, changeId: '' },
@@ -127,6 +134,7 @@ export const useVisualDocumentStore = create((set, get) => {
     },
 
     duplicateNode: (nodeId) => {
+      if (!editable()) return false
       const state = get()
       const found = findVisualNode(state.doc.root, nodeId)
       if (!found) return false
@@ -136,6 +144,7 @@ export const useVisualDocumentStore = create((set, get) => {
     },
 
     deleteNode: (nodeId) => {
+      if (!editable()) return false
       const state = get()
       const next = deleteVisualNodeFromDocument(state.doc, nodeId)
       if (next === state.doc) return false
@@ -143,6 +152,7 @@ export const useVisualDocumentStore = create((set, get) => {
     },
 
     moveNode: (nodeId, parentId, index = -1) => {
+      if (!editable()) return false
       const state = get()
       const next = moveVisualNodeInDocument(state.doc, {
         nodeId,
@@ -152,7 +162,47 @@ export const useVisualDocumentStore = create((set, get) => {
       return commit(next, nodeId)
     },
 
+    /** 局部 Agent 生成：一次命令插入整组节点，只产生一条历史。 */
+    insertNodes: (parentId, nodes, index = -1) => {
+      if (!editable()) return false
+      const state = get()
+      try {
+        const result = insertVisualNodesIntoDocument(state.doc, {
+          parentId: parentId || state.doc.root?.id || null,
+          nodes,
+          index,
+          editor: 'agent',
+        })
+        return commit(result.document, result.insertedIds[0] || parentId)
+      } catch (cause) {
+        set({ lastError: String(cause?.message || cause) })
+        return false
+      }
+    },
+
+    /** 冻结后画布只读；contentHash 与 revision 同时固化。 */
+    freezeDocument: async () => {
+      const state = get()
+      if (state.doc.status === 'FROZEN') return state.doc
+      const report = validateVisualDocument(state.doc)
+      if (!report.ok) {
+        set({ lastError: `Schema 校验失败：${report.errors[0] || '未知错误'}` })
+        return null
+      }
+      const frozen = await freezeVisualDocument(state.doc)
+      set({
+        doc: frozen,
+        selectedId: frozen.root?.id ?? null,
+        history: [],
+        future: [],
+        lastError: '',
+      })
+      persistDocument(frozen)
+      return frozen
+    },
+
     updateNode: (nodeId, patch) => {
+      if (!editable()) return false
       const state = get()
       const next = updateVisualNodeInDocument(state.doc, nodeId, patch)
       return commit(next, nodeId)
@@ -171,6 +221,7 @@ export const useVisualDocumentStore = create((set, get) => {
     },
 
     toggleLock: (nodeId) => {
+      if (!editable()) return false
       const state = get()
       const found = findVisualNode(state.doc.root, nodeId)
       if (!found) return false
@@ -178,6 +229,7 @@ export const useVisualDocumentStore = create((set, get) => {
     },
 
     setTitle: (title) => {
+      if (!editable()) return false
       const state = get()
       const next = {
         ...state.doc,
@@ -189,6 +241,7 @@ export const useVisualDocumentStore = create((set, get) => {
     },
 
     resetDocument: ({ withRoot = true, title = '未命名页面' } = {}) => {
+      if (!editable()) return false
       const next = createEmptyVisualDocument({ title, withRoot })
       return commit(next, next.root?.id ?? null)
     },
@@ -209,6 +262,7 @@ export const useVisualDocumentStore = create((set, get) => {
     },
 
     undo: () => {
+      if (!editable()) return false
       const state = get()
       if (!state.history.length) return false
       const previous = state.history[state.history.length - 1]
@@ -226,6 +280,7 @@ export const useVisualDocumentStore = create((set, get) => {
     },
 
     redo: () => {
+      if (!editable()) return false
       const state = get()
       if (!state.future.length) return false
       const next = state.future[0]

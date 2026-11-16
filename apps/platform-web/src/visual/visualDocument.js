@@ -696,3 +696,152 @@ export function visualDocumentFromContract(
     title: visual.title || title || '未命名页面',
   }
 }
+
+const GENERATED_NODE_TYPES = new Set(
+  NODE_TYPES.filter((type) => type !== 'page'),
+)
+const MAX_AGENT_NODES = 80
+const MAX_AGENT_DEPTH = 6
+
+export function collectVisualNodeIds(root, target = new Set()) {
+  if (!root) return target
+  target.add(root.id)
+  root.children.forEach((child) => collectVisualNodeIds(child, target))
+  return target
+}
+
+/**
+ * 规范化 Agent 返回的节点：
+ *  - 重新分配不冲突的 nodeId；
+ *  - 拒绝 page 根、非容器 children、过深/过多节点；
+ *  - 保留后端校验过的结构，不在前端猜测业务。
+ */
+export function prepareAgentNodes(nodes, existingIds = new Set()) {
+  if (!Array.isArray(nodes) || nodes.length === 0) {
+    throw new Error('Agent 没有返回任何节点')
+  }
+  const used = new Set(existingIds)
+  let count = 0
+
+  const walk = (raw, depth) => {
+    if (!raw || typeof raw !== 'object') {
+      throw new Error('Agent 返回了非对象节点')
+    }
+    if (depth > MAX_AGENT_DEPTH) {
+      throw new Error('Agent 返回的节点层级过深')
+    }
+    count += 1
+    if (count > MAX_AGENT_NODES) {
+      throw new Error('Agent 返回的节点数量过多')
+    }
+    if (!GENERATED_NODE_TYPES.has(raw.type)) {
+      throw new Error(`Agent 返回了非法节点类型: ${raw.type}`)
+    }
+    if (raw.children != null && !Array.isArray(raw.children)) {
+      throw new Error('Agent 节点的 children 必须是数组')
+    }
+    const children = raw.children || []
+    if (children.length && !CONTAINER_TYPES.has(raw.type)) {
+      throw new Error(`节点 ${raw.type} 不能包含 children`)
+    }
+    let id = String(raw.id || '')
+    if (!NODE_ID_PATTERN.test(id) || used.has(id)) {
+      id = newVisualId()
+    }
+    while (used.has(id)) id = newVisualId()
+    used.add(id)
+    return {
+      ...JSON.parse(JSON.stringify(raw)),
+      id,
+      children: children.map((child) => walk(child, depth + 1)),
+    }
+  }
+
+  return nodes.map((node) => walk(node, 1))
+}
+
+/**
+ * 一次性插入一组 Agent 节点；只提交一次 revision 与撤销快照。
+ */
+export function insertVisualNodesIntoDocument(
+  document,
+  { parentId, nodes, index = -1, editor = 'agent' },
+) {
+  let root = document.root
+  const target = root ? findVisualNode(root, parentId) : null
+  if (!root) {
+    root = createVisualNode('page')
+  }
+  if (!target && parentId && parentId !== root.id) {
+    throw new Error('目标父容器不存在')
+  }
+  const targetNode = target?.node || root
+  if (!CONTAINER_TYPES.has(targetNode.type)) {
+    throw new Error('目标节点不是容器')
+  }
+  if (targetNode.locked) throw new Error('目标容器已锁定')
+  const existingIds = collectVisualNodeIds(root)
+  const prepared = prepareAgentNodes(nodes, existingIds)
+  const start = index < 0 ? targetNode.children.length : index
+  let nextRoot = root
+  prepared.forEach((node, offset) => {
+    nextRoot = insertVisualNode(
+      nextRoot,
+      targetNode.id,
+      node,
+      start + offset,
+    )
+  })
+  return {
+    document: touchDocument({ ...document, root: nextRoot }, editor),
+    insertedIds: prepared.map((node) => node.id),
+  }
+}
+
+function sortJson(value) {
+  if (Array.isArray(value)) return value.map(sortJson)
+  if (value && typeof value === 'object') {
+    return Object.keys(value)
+      .sort()
+      .reduce((result, key) => {
+        result[key] = sortJson(value[key])
+        return result
+      }, {})
+  }
+  return value
+}
+
+async function sha256Hex(text) {
+  const subtle = globalThis.crypto?.subtle
+  if (!subtle) {
+    throw new Error('当前浏览器不支持 contentHash 计算（Web Crypto 不可用）')
+  }
+  const digest = await subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+/**
+ * 冻结文档：锁定状态、写 contentHash。与 Python freeze_visual_document
+ * 使用相同的字段排除与稳定 JSON 排序。
+ */
+export async function freezeVisualDocument(document) {
+  const frozen = JSON.parse(JSON.stringify(document))
+  frozen.status = 'FROZEN'
+  frozen.review = {
+    ...(frozen.review || {}),
+    frozenAt: new Date().toISOString(),
+    questionRounds: frozen.review?.questionRounds || 0,
+    answers: frozen.review?.answers || [],
+  }
+  frozen.revision = (Number(frozen.revision) || 0) + 1
+  const payload = JSON.parse(JSON.stringify(frozen))
+  if (payload.metadata) delete payload.metadata.contentHash
+  const hash = await sha256Hex(JSON.stringify(sortJson(payload)))
+  frozen.metadata = {
+    ...(frozen.metadata || {}),
+    contentHash: `sha256:${hash}`,
+  }
+  return frozen
+}

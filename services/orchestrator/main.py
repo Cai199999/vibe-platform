@@ -23,6 +23,7 @@ from ai_core.api.fullstack import router as fullstack_router
 from ai_core.api.runs import router as runs_router
 from ai_core.api.sandbox import router as sandbox_router
 from ai_core.api.supervisor import router as supervisor_router
+from ai_core.api.visual_agent import router as visual_agent_router
 from ai_core.config import get_settings
 from ai_core.error_envelope import install_error_handlers
 from ai_core.sandbox import get_sandbox_provider
@@ -78,6 +79,7 @@ app.include_router(direct_ops_router)
 app.include_router(architect_router)
 app.include_router(fullstack_router)
 app.include_router(supervisor_router)
+app.include_router(visual_agent_router)
 
 
 @app.get("/api/v1/health", response_model=HealthResponse)

@@ -70,6 +70,11 @@ import {
   VISUAL_DOCUMENT_STORAGE_KEY,
   useVisualDocumentStore,
 } from '../visual/visualDocumentStore.js'
+import {
+  buildSemanticReviewContext,
+  peekSemanticReviewPacket,
+  takeSemanticReviewPacket,
+} from '../visual/visualReview.js'
 
 const TARGET_FILE = 'src/App.jsx'
 const MAX_ANNOTATIONS = 3
@@ -1452,6 +1457,7 @@ export default function WorkspacePage() {
   const visualDocumentSyncRef = useRef(new Map())
   const visualDocumentNoticeRef = useRef(new Set())
   const visualDocumentAutoOpenRef = useRef(new Set())
+  const visualReviewStartedRef = useRef(new Set())
   const frontendBootstrapFailureRef = useRef(new Map())
   // 页面级挂载标记：所有异步回调写状态前必须检查，避免卸载后 setState。
   const workspaceMountedRef = useRef(true)
@@ -3896,6 +3902,59 @@ export default function WorkspacePage() {
     navigate,
     projects,
     updateProject,
+  ])
+
+  /**
+   * 冻结画布 → Architect 业务审查。
+   *
+   * VisualCanvasPage 只会把语义审查包写入 sessionStorage 并跳回工作台；
+   * 这里消费一次，启动 Architect Run，复用现有多轮澄清与契约面板。
+   */
+  useEffect(() => {
+    if (!activeTabId) return undefined
+    const pending = peekSemanticReviewPacket(activeTabId)
+    if (!pending) return undefined
+    // StrictMode 会先执行一次 effect 再模拟卸载；延迟到稳定挂载后消费，
+    // 避免刚刚 POST 的 Architect SSE 被第一轮 cleanup abort。
+    const timer = window.setTimeout(() => {
+      const packet = takeSemanticReviewPacket(activeTabId)
+      if (!packet) return
+      const key = `${activeTabId}:${packet.contentHash || packet.documentId}`
+      if (visualReviewStartedRef.current.has(key)) return
+      visualReviewStartedRef.current.add(key)
+      const project = projects.find((item) => item.id === activeTabId)
+      architect.openPanel(activeTabId)
+      architect.start(activeTabId, {
+        runId: newId('arc'),
+        tenantId: user?.tenantId || 'tenant_local',
+        projectId: activeTabId,
+        projectName: project?.name || packet.title || '未命名项目',
+        source: { files: {} },
+        projectSummary: packet.summary,
+        latestChanges: packet.summary,
+        uiHistory: [
+          {
+            role: 'system',
+            content: buildSemanticReviewContext(packet),
+          },
+          {
+            role: 'user',
+            content:
+              '请开始业务审查：只针对这份已冻结虚拟界面的交互和数据绑定缺口发起澄清，' +
+              '不要重新询问页面布局或视觉风格。',
+          },
+        ],
+        options: { llmProvider: modelProvider },
+      })
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [
+    activeTabId,
+    architect.openPanel,
+    architect.start,
+    modelProvider,
+    projects,
+    user?.tenantId,
   ])
 
   // 契约一旦 CONFIRMED，旧版无 visualDocument 契约才触发前端骨架生成。

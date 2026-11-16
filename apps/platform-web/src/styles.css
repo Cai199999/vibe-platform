@@ -12350,3 +12350,94 @@ body.is-viewport-panning * {
   margin-top: 10px;
   text-decoration: none;
 }
+
+.vc-validation-banner.is-success {
+  border-bottom-color: rgba(52, 211, 153, 0.32);
+  background: rgba(52, 211, 153, 0.08);
+  color: #bbf7d0;
+}
+
+.vc-frozen-badge {
+  padding: 5px 9px;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.1);
+  color: #fde68a;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.vc-inspector-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.vc-inspector-fieldset:disabled {
+  opacity: 0.68;
+}
+
+.vc-magic-dialog textarea {
+  font: inherit;
+}
+
+.vc-magic-label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.vc-magic-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 108px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  line-height: 1.65;
+}
+
+.vc-magic-input:focus {
+  outline: 2px solid rgba(56, 189, 248, 0.4);
+  outline-offset: 1px;
+}
+
+.vc-magic-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.vc-magic-examples button {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.vc-magic-examples button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.vc-magic-error {
+  margin: 10px 0 0;
+  color: #fecdd3;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.vc-magic-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}

@@ -809,6 +809,44 @@ class SkeletonModeTest(unittest.TestCase):
         self.assertTrue(validation.draft.visual_document)
         self.assertTrue(validate_visual_document(validation.draft.visual_document).ok)
 
+    def test_semantic_review_packet_forces_first_round_business_question(self) -> None:
+        run_id = f"test_{uuid.uuid4().hex[:12]}"
+        runner = ArchitectGraphRunner(
+            MockArchitectLLM(),
+            checkpointer_provider=MemoryCheckpointerProvider(),
+        )
+        state = _initial_state(run_id)
+        state.update(
+            {
+                "source_files": {},
+                "source_hash": "",
+                "project_summary": "虚拟界面已冻结",
+                "ui_history": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "【SEMANTIC_REVIEW_PACKET】\n"
+                            '{"nodes":[{"name":"登录按钮"}],'
+                            '"unresolvedInteractions":[{"intent":"登录"}]}'
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": "请开始业务审查",
+                    },
+                ],
+            }
+        )
+        outcome = runner.run(state, run_id=run_id)
+        self.assertTrue(outcome.interrupted)
+        payload = outcome.interrupt or {}
+        self.assertEqual(payload.get("reason"), "missing_required_slots")
+        questions = payload.get("questions") or []
+        self.assertTrue(questions)
+        self.assertTrue(
+            any("鉴权" in str(item.get("prompt") or "") for item in questions)
+        )
+
 
 class ContractTierValidationTest(unittest.TestCase):
     def _context(self, shape: str) -> ArchitectContext:
@@ -830,6 +868,34 @@ class ContractTierValidationTest(unittest.TestCase):
             validation = validate_draft(shape, draft)
             self.assertTrue(validation.valid, f"{shape}: {validation.issues}")
 
+    def test_mock_architect_reads_semantic_review_packet(self) -> None:
+        context = ArchitectContext(
+            project_id="p_review",
+            project_name="登录工作台",
+            source_files={},
+            ui_history=[
+                {
+                    "role": "system",
+                    "content": (
+                        "【SEMANTIC_REVIEW_PACKET】\n"
+                        '{"nodes":[{"name":"登录按钮"}],'
+                        '"unresolvedInteractions":[{"intent":"登录"}]}'
+                    ),
+                },
+                {"role": "user", "content": "请开始业务审查"},
+            ],
+            slots={},
+            app_shape=None,
+            round=1,
+            threshold=0.85,
+        )
+        analysis = MockArchitectLLM().analyze(context)
+        self.assertEqual(analysis.app_shape, "full_stack_system")
+        self.assertEqual(analysis.missing_slots, ["ui.interactions"])
+        self.assertEqual(len(analysis.questions), 1)
+        self.assertEqual(analysis.questions[0].slot, "ui.interactions")
+        self.assertIn("鉴权", analysis.questions[0].prompt)
+
     def test_invalid_visual_document_is_rejected_before_confirmation(self) -> None:
         llm = MockArchitectLLM()
         draft = llm.draft_contract(self._context("lightweight_web"))
@@ -843,9 +909,7 @@ class ContractTierValidationTest(unittest.TestCase):
         )
         validation = validate_draft("lightweight_web", broken)
         self.assertFalse(validation.valid)
-        self.assertTrue(
-            any("visual_document" in issue for issue in validation.issues)
-        )
+        self.assertTrue(any("visual_document" in issue for issue in validation.issues))
 
     def test_lightweight_rejects_api_and_ddl(self) -> None:
         llm = MockArchitectLLM()

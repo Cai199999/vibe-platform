@@ -6,6 +6,7 @@ import {
   duplicateVisualNodeInDocument,
   findVisualNode,
   insertVisualNodeIntoDocument,
+  insertVisualNodesIntoDocument,
   moveVisualNodeInDocument,
   updateVisualNodeInDocument,
   validateVisualDocument,
@@ -179,5 +180,41 @@ describe('Architect 契约桥接', () => {
 
   it('旧契约没有 visualDocument 时返回 null', () => {
     expect(visualDocumentFromContract({ components: [] })).toBeNull()
+  })
+})
+
+
+describe('Agent 节点插入', () => {
+  it('一次插入整组节点、重写冲突 id、只增加一次 revision', () => {
+    let doc = emptyDoc()
+    const container = createVisualNode('container')
+    doc = insertVisualNodeIntoDocument(doc, {
+      parentId: doc.root.id,
+      type: 'container',
+      node: container,
+    })
+    const revision = doc.revision
+    const result = insertVisualNodesIntoDocument(doc, {
+      parentId: container.id,
+      nodes: [
+        {
+          id: container.id,
+          type: 'form',
+          name: '登录表单',
+          children: [
+            { id: 'dup', type: 'input', props: { placeholder: '用户名' } },
+            { id: 'dup', type: 'button', props: { text: '登录' } },
+          ],
+        },
+      ],
+    })
+    expect(result.document.revision).toBe(revision + 1)
+    expect(result.insertedIds).toHaveLength(1)
+    const form = findVisualNode(result.document.root, result.insertedIds[0]).node
+    expect(form.type).toBe('form')
+    expect(form.id).not.toBe(container.id)
+    const childIds = form.children.map((child) => child.id)
+    expect(new Set(childIds).size).toBe(2)
+    expect(validateVisualDocument(result.document).ok).toBe(true)
   })
 })

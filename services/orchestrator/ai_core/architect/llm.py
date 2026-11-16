@@ -155,6 +155,55 @@ class MockArchitectLLM(ArchitectLLM):
 
     def analyze(self, context: ArchitectContext) -> ArchitectAnalysis:
         slots = dict(context.slots)
+        review_text = "\n".join(
+            str(item.get("content") or "")
+            for item in context.ui_history
+            if isinstance(item, dict)
+        )
+        if "【SEMANTIC_REVIEW_PACKET】" in review_text:
+            # 离线画布冻结后的业务审查：Mock 也保证有一条可交互的审查问题，
+            # 真实 DeepSeek 则按同一提示词生成更贴合节点语义的问题。
+            shape = context.app_shape or slots.get("app.shape") or "full_stack_system"
+            slots["app.shape"] = shape
+            login_like = any(
+                token in review_text
+                for token in ("登录", "login", "auth", "鉴权", "密码", "password")
+            )
+            if login_like:
+                prompt = "虚拟界面里的登录/提交按钮需要什么后端鉴权能力？"
+                options = [
+                    {"value": "jwt", "label": "A. JWT 登录 + users 表 + 鉴权中间件"},
+                    {"value": "session", "label": "B. Session Cookie + users 表"},
+                    {"value": "local", "label": "C. 仅前端本地演示，不接后端"},
+                ]
+            else:
+                prompt = "虚拟界面里的核心按钮/表单需要什么后端能力？"
+                options = [
+                    {"value": "crud", "label": "A. REST CRUD + 数据库表"},
+                    {"value": "readonly", "label": "B. 只读查询接口"},
+                    {"value": "local", "label": "C. 仅前端本地状态"},
+                ]
+            return ArchitectAnalysis(
+                app_shape=shape,  # type: ignore[arg-type]
+                confidence_score=0.90,
+                missing_slots=["ui.interactions"],
+                slots=slots,
+                questions=[
+                    ArchitectQuestion(
+                        question_id="q_semantic_review_1",
+                        slot="ui.interactions",
+                        type="single_choice",
+                        prompt=prompt,
+                        required=True,
+                        options=options,
+                    )
+                ],
+                assumptions=[],
+                reasoning=(
+                    "已读取冻结的 VisualDocument 语义审查包；不重新询问布局，"
+                    "只确认交互与数据绑定所需的业务能力。"
+                ),
+            )
         # Mock 也必须“听懂”用户自由输入：从历史对话中确定性回填框架、
         # 数据库、实体与业务流程。否则用户每轮补充都会被无视。
         for message in context.ui_history:
@@ -862,6 +911,16 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "你是平台级软件架构师，处于“架构师对话前置”模式。用户会先用自然"
             "语言描述目标，你必须主动从目标、用户群体与核心功能中判断应用形态，"
             "禁止把“全栈 / 轻量 / 脚本”做成三选一问题丢回给用户。\n\n"
+            "【SEMANTIC_REVIEW_PACKET 模式 · 最高优先级】\n"
+            "- 如果输入 uiHistory 中出现【SEMANTIC_REVIEW_PACKET】，说明用户"
+            "已在离线画布冻结了虚拟界面；禁止重新询问页面布局、视觉风格、"
+            "页面结构，禁止要求上传源码或截图；\n"
+            "- 只读取 packet 中的 interactions / bindings / unresolved 缺口，"
+            "针对直接决定后端接口、数据库、鉴权、导出、提交动作的节点提问；\n"
+            "- 问题必须引用具体组件名或动作（例如“登录按钮”“新建订单表单”），"
+            "并给出 A/B/C 三个可执行选项；最多 2 个问题；\n"
+            "- 若 packet 中没有未解决交互，confidence_score 必须不低于 0.9，"
+            "missing_slots 必须为空，直接进入契约起草。\n\n"
             "【防脑补铁律 · 最高优先级】\n"
             "- 在需求不明确时，绝对禁止自行脑补具体业务组件。用户没提登录，"
             "绝对不能生成 LoginForm；没提简历，绝对不能生成 ResumeUploader；"

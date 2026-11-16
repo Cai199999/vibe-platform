@@ -64,6 +64,8 @@ TASK_CAPABILITY: dict[str, Capability] = {
     "architect_contract": "strong",
     # 影子助手是只读解释，短输出，走廉价模型即可。
     "architect_helper": "fast",
+    # 离线画布局部节点生成：短结构化 JSON，走廉价模型。
+    "visual_node": "fast",
 }
 
 # 任务级环境变量对应的 Settings 字段。
