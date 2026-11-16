@@ -18,8 +18,16 @@ Agent 通过 ChangeLog 事后感知，而不是实时参与。
 - `WorkspacePage.handleComponentDragEnd`：
   - 不再写入 `pendingLayoutChanges`，不再等待【保存布局】；
   - 直接调用 `MOVE_NODE` Direct Op；
+  - **handleDirectAction 必须透传 placement**（已修复，此前丢失导致
+    后端拿不到父容器）；
   - 成功后发送 `drag-commit` 清理 SDK inline translate，并刷新预览；
   - 失败 / 无父容器时 `drag-rollback` 还原位置。
+- **root-level 重排**：
+  - 旧逻辑错误地拒绝“目标父容器包含 source”，导致容器只能拖进另一个
+    容器；
+  - 现在允许 source 的祖先作为目标，只要不是 source 自身 / 子树；
+  - 找不到可标记父容器时，回退到页面最顶层带 `data-source` 的 JSX 节点；
+  - 节点数量守恒继续由 Babel move_node 校验。
 - 后端 `MOVE_NODE` 复用现有链路：
   project write lock → baseRevision → source/parent 双锚点 →
   Babel move_node → 节点数量守恒 → Git commit → ChangeLog。
@@ -32,6 +40,13 @@ Agent 通过 ChangeLog 事后感知，而不是实时参与。
 - 前端 16 项 Vitest 全绿，生产构建通过；
 - sandbox 镜像已重建；
 - 后端 MOVE_NODE 既有单测保持通过（Python 606 项）。
+- 新沙盒 E2E（ADD → MOVE → DELETE）：
+  - ADD Button 2759ms；
+  - MOVE h1 到根容器末尾 2861ms；
+  - analyze-delete p safe=true，DELETE 2421ms；
+  - 生成 3 个 direct commit；
+  - 错误码 422 `DIRECT_REQUIRES_LLM` 与 409 `DIRECT_WRITE_CONFLICT`
+    已在前端 Toast 映射为业务文案。
 
 ## 未完成
 

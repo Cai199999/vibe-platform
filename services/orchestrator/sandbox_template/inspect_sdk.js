@@ -1087,6 +1087,21 @@
    * elementFromPoint。每次 pointermove（rAF 合并后）调用一次，
    * readSource 的实例索引有 250ms 缓存，滚动 / HMR 后会自然失效。
    */
+  /** 页面最顶层 JSX 源码节点；用于 root-level 重排兜底。 */
+  function topLevelSourceNode() {
+    var nodes = document.querySelectorAll('[data-source], [data-source-file]')
+    var root = null
+    for (var i = 0; i < nodes.length; i += 1) {
+      var current = nodes[i]
+      var parent = current.parentElement
+      var nested = parent
+        ? parent.closest?.('[data-source], [data-source-file]')
+        : null
+      if (!nested) root = current
+    }
+    return root
+  }
+
   function stageHitAt(x, y) {
     var node = document.elementFromPoint(x, y)
     if (!node || node === document.documentElement) {
@@ -2080,17 +2095,27 @@
       var hitNode = document.elementFromPoint(event.clientX, event.clientY)
       var parentHit = stageParentOf(hitNode)
       var parentNode = parentHit.node
-      if (
-        !parentNode ||
-        parentNode === node ||
-        parentNode.contains(node)
-      ) {
+      // 目标可以是 source 的祖先（同父级 / 根级重排），只要不是 source
+      // 自身或 source 的子树即可。旧逻辑错误地排除了“父容器包含 source”，
+      // 导致容器只能在另一个容器内部移动，无法回到页面根级。
+      if (!parentNode || parentNode === node) {
         parentNode = node.parentElement
           ? stageParentOf(node.parentElement).node
           : null
       }
       if (parentNode && parentNode !== node && !node.contains(parentNode)) {
         var parentSource = readSource(parentNode)
+        if (
+          !parentSource ||
+          !parentSource.selector ||
+          !parentSource.file
+        ) {
+          var rootNode = topLevelSourceNode()
+          if (rootNode && rootNode !== node && !node.contains(rootNode)) {
+            parentNode = rootNode
+            parentSource = readSource(parentNode)
+          }
+        }
         var children = stageSourceChildren(parentNode)
         var slot = stageSlotFor(
           parentNode,

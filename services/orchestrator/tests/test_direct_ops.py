@@ -534,6 +534,27 @@ class DirectOperationServiceTest(unittest.TestCase):
         self.assertIn("direct.started", types)
         self.assertIn("direct.succeeded", types)
 
+    def test_resolver_receives_instance_identity(self) -> None:
+        payload = _payload(
+            target={
+                "anchorId": "anc_dact_test",
+                "selector": "[data-source='same']",
+                "file": "src/App.jsx",
+                "line": 4,
+                "column": 7,
+                "component": "App",
+                "instance": 2,
+                "instanceCount": 3,
+            }
+        )
+        self.direct_action_ids.append(payload.direct_action_id)
+
+        self.service.execute(payload)
+
+        request = self.sandbox.resolutions[0][0]
+        self.assertEqual(request["instance"], 2)
+        self.assertEqual(request["instanceCount"], 3)
+
     def test_stale_revision_is_rejected_before_write(self) -> None:
         payload = _payload(baseRevision="c" * 40)
         self.direct_action_ids.append(payload.direct_action_id)

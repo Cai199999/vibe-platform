@@ -26,7 +26,8 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 内联 Direct Ops：沙盒 SDK 内联 ➕ / 悬浮 ❌ / 双击文本编辑，平台全局消息直连后端；InspectDraftCard 直操工具栏已移除。新增组件继承同级 className / inline style。
 - 骨架布局：ui.layout 成为必需槽位并提供三选一澄清；Prompt 强制 Grid/Flex 响应式多列，禁止全量 flex-col。
 - FailureRouter：白名单新增组件固定走 Direct 模板，目录外组件返回 DIRECT_REQUIRES_LLM 交给 AI。HITL 新增 RETRY（最多 2 次，不调 LLM）与 VISUAL_ONLY（不写代码、不 commit，写 applied=false ChangeLog）。
-- 拖拽直连：SDK 松手计算父容器 + 最终子序号，前端直接 MOVE_NODE；成功 commit + ChangeLog，失败 rollback。已有组件移动不再经过前端 Agent / LLM。
+- 拖拽直连：SDK 松手计算父容器 + 最终子序号，handleDirectAction 完整透传 placement；支持 root-level 重排（祖先容器/顶层根节点）。成功 commit + ChangeLog，失败 rollback，不再经过前端 Agent / LLM。
+- 沙盒镜像已重建，新增/删除节点数校验、根级拖拽与错误码 Toast 已通过新沙盒 E2E。
 
 ## 最新验证
 前端 16 项 Vitest、Python 606 项 unittest 通过；BFF 单测通过。真实沙盒 Direct Ops（含样式继承 ADD 1559ms）正常；新 SDK 已打入 sandbox 镜像。终极 E2E：UPDATE_TEXT 1604ms、ADD 1523ms、DELETE 1603ms；ChangeLog 重启可读，DeepSeek Helper 可复述直接操作。
