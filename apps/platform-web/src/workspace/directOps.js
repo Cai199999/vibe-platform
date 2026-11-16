@@ -17,8 +17,15 @@ async function readApiError(response) {
   const message =
     detail?.message || body?.userMessage || body?.message || response.statusText
   let extra = ''
-  if (detail && typeof detail === 'object') {
-    const parts = Object.entries(detail)
+  const diagnostics =
+    body?.diagnostic && typeof body.diagnostic === 'object'
+      ? body.diagnostic
+      : null
+  const source = diagnostics
+    ? { ...(detail && typeof detail === 'object' ? detail : {}), ...diagnostics }
+    : detail
+  if (source && typeof source === 'object') {
+    const parts = Object.entries(source)
       .filter(([key]) => key !== 'code' && key !== 'message')
       .map(([key, value]) => {
         const text =

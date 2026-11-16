@@ -32,6 +32,7 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 拖拽/删除修复：共享组件 MOVE 使用 callSite 锚点；direct 消息携带 projectId，避免多 Tab 误用 activeTabId 导致 TARGET_NOT_FOUND；新建组件删除跳过确认框。UNSAFE 错误输出 source/parent/callSite；Resolver 失败自动重试一次并返回底层错误诊断。
 - AST stage 隔离：每次 resolve/apply 使用唯一临时目录，消除并发 analyze-delete 的 spec.json ENOENT；SDK 删除增加 pending 防重与失效目标重查；TOOL_FAILED 返回异常类型/底层 error。20 路并发 analyze 全 200。
 - 共享组件 callSite 删除：删除 `<Card />` 实例时改写 App.jsx 调用点，不动 Card.jsx；analyze 不再因定义文件顶层根节点误拦截。真实 E2E 已删除一个实例。
+- 拖拽索引对齐：SDK 改用全部 DOM children 计算 siblingIndex，避免自定义组件/无 data-source 节点导致 Babel insertIndex 越界。错误信封保留 toolCode/resolverError 等 diagnostic，前端 Toast 可显示。
 
 ## 最新验证
 前端 16 项 Vitest、Python 606 项 unittest 通过；BFF 单测通过。真实沙盒 Direct Ops（含样式继承 ADD 1559ms）正常；新 SDK 已打入 sandbox 镜像。终极 E2E：UPDATE_TEXT 1604ms、ADD 1523ms、DELETE 1603ms；ChangeLog 重启可读，DeepSeek Helper 可复述直接操作。

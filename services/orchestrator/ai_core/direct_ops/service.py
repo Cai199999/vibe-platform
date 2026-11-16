@@ -145,11 +145,20 @@ class DirectOperationService:
         anchor = self._resolve(payload)
         analysis = analyze_delete_anchor(dict(anchor))
         result = analysis.to_dict()
+        call_site = anchor.get("callSiteAnchor")
         result["anchor"] = {
             "file": anchor.get("file"),
             "component": anchor.get("component"),
             "range": anchor.get("range"),
             "nodeSource": str(anchor.get("nodeSource") or "")[:500],
+            "isShared": bool(anchor.get("isShared")),
+            "protected": bool(anchor.get("protected")),
+            "inMap": bool(anchor.get("inMap")),
+            "isRouteRoot": bool(anchor.get("isRouteRoot")),
+            "deleteSafe": bool(anchor.get("deleteSafe")),
+            "callSiteFile": anchor.get("callSiteFile") or "",
+            "hasCallSite": isinstance(call_site, dict) and bool(call_site.get("file")),
+            "sharedReason": anchor.get("sharedReason") or "",
         }
         return result
 

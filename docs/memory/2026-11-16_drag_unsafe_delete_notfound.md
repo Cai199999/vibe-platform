@@ -84,6 +84,33 @@
   前端 `directOps` 会解析 detail 并拼进 Toast。
 - 移动 UNSAFE 返回 source/parent/callSite/parentShared/risk。
 
+## 拖拽索引与自定义组件
+
+- 根因：SDK 的 siblingIndex 只统计“带 data-source 的 children”，
+  而 Babel `move_node` 统计全部 JSX children。
+- Architect 骨架包含无 data-source 的自定义组件时，序号偏小/偏大，
+  Babel 报 `INVALID_MOVE_TARGET: insertIndex 超出子节点范围`，
+  前端只看到 `DIRECT_TOOL_FAILED`。
+- 修复：拖拽落点改用 `parentNode.children` 全部元素计算序号，
+  与 Babel 的 JSX children 对齐；同父容器仍按移除 source 后修正。
+
+## 错误诊断透传
+
+- `translate_exception` 现在把 HTTPException.detail 中的附加字段
+  （toolCode / toolMessage / resolverError / file / line 等）保留到
+  `ErrorEnvelope.diagnostic`。
+- 前端 `directOps.js` 合并 `detail + diagnostic` 到 Toast。
+- 实测：非法移动返回
+  `DIRECT_TOOL_FAILED`，诊断包含
+  `toolCode=INVALID_MOVE_TARGET, toolMessage=insertIndex 超出子节点范围`。
+
+## 根节点删除
+
+- 分析结果新增 isShared / protected / inMap / isRouteRoot /
+  deleteSafe / callSiteFile / hasCallSite。
+- 页面顶层根节点（hasCallSite=false）仍禁止删除；
+  共享组件实例有 callSite 时允许删除调用点。
+
 ## 验证
 
 - 新增 callSite move 单测；

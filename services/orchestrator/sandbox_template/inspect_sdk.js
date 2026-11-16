@@ -2116,20 +2116,32 @@
             parentSource = readSource(parentNode)
           }
         }
-        var children = stageSourceChildren(parentNode)
+        // Babel 的 move_node 以“全部 JSX 子节点”计数；这里不能用
+        // stageSourceChildren（只含带 data-source 的节点），否则自定义
+        // 组件 / 无标记节点会造成 siblingIndex 越界。
+        var allChildren = Array.prototype.slice
+          .call(parentNode.children || [])
+          .filter(function (child) {
+            return child && child.getBoundingClientRect
+          })
+        var slotChildren = allChildren.map(function (child) {
+          return {
+            node: child,
+            source: readSource(child),
+            rect: child.getBoundingClientRect(),
+          }
+        })
         var slot = stageSlotFor(
           parentNode,
-          children,
+          slotChildren,
           event.clientX,
           event.clientY,
         )
         var index = slot.siblingIndex
         if (slot.insertPosition === 'after') index += 1
         if (slot.insertPosition === 'inside_start') index = 0
-        if (slot.insertPosition === 'inside_end') index = children.length
-        var sourceIndex = children.findIndex(
-          (child) => child.node === node,
-        )
+        if (slot.insertPosition === 'inside_end') index = allChildren.length
+        var sourceIndex = allChildren.indexOf(node)
         if (sourceIndex >= 0 && index > sourceIndex) index -= 1
         if (
           parentSource &&

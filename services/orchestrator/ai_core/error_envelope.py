@@ -385,12 +385,22 @@ def translate_exception(
             type(exc).__name__,
             exc_info=(type(exc), exc, exc.__traceback__),
         )
+    diagnostic: dict[str, Any] = {}
+    if isinstance(exc, StarletteHTTPException) and isinstance(exc.detail, dict):
+        # Direct Ops / 服务层会故意把 toolCode、resolverError、file 等
+        # 排障字段放在 detail 中；不能在这里丢掉。
+        diagnostic = {
+            str(key): value
+            for key, value in exc.detail.items()
+            if key not in {"code", "message"}
+        }
     return envelope_from_code(
         code,
         technical_message=technical,
         trace_id=trace_id,
         run_id=run_id,
         stage=stage,
+        diagnostic=diagnostic,
     )
 
 
