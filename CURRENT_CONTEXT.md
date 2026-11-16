@@ -19,9 +19,12 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - UPDATE_TEXT 闭环：服务端 Resolver → 公共组件拦截 → Babel update_text → apply_patch → Git commit → ChangeLog；前端 Inspect 悬浮 ➕❌✏️，Phase1 仅 ✏️ 落盘。
 - ChangeLog → Architect：成功 Direct Op 写入内存 ChangeLog；Architect 初始状态读取最近 10 条并注入 System Prompt，真实 DeepSeek Helper 可正确提及用户刚改的文案。
 - MOVE_NODE：同文件容器内移动，placement.siblingIndex 为移除后的最终序号；节点数量守恒校验；公共组件/跨文件转 HITL/AI；前端 ↕ 移到容器末尾。
+- ADD_COMPONENT：Button/Input/Text/Card 白名单模板，AST insert + 节点增量校验 + import 补全；前端 ➕ 下拉直接插入。
+- ChangeLog 持久化：JSONL 落盘 `data/changelog.jsonl`，重启后 Architect 仍可读取最近记录。
+- DELETE_NODE 前置静态分析：共享组件 / map 循环 / 路由根三类风险；前端 ❌ 只分析不删除。
 
 ## 最新验证
-前端 16 项 Vitest、Python 580 项 unittest 通过；BFF 单测通过。真实沙盒 UPDATE_TEXT 1673ms、MOVE_NODE 2448ms；ChangeLog → DeepSeek Helper 已实测能说出“标题改成了待办清单”。真实服务验证信封与 Direct Ops 409 冲突经 BFF 透传一致。
+前端 16 项 Vitest、Python 590 项 unittest 通过；BFF 单测通过。真实沙盒 ADD_COMPONENT 1959ms、MOVE_NODE 2448ms、UPDATE_TEXT 1673ms；ChangeLog 重启后仍可读取。DELETE 分析对 `<h1>` 判定 safe、`<main>` 判定路由根拦截。ChangeLog → DeepSeek Helper 已实测能说出用户刚改的标题。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 无持久化；沙盒无 gVisor；未云端部署。

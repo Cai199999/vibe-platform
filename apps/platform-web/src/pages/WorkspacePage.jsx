@@ -25,6 +25,7 @@ import {
 } from '../workspace/useArchitect.js'
 import { createFrameBatcher, streamRun } from '../workspace/runStream.js'
 import {
+  analyzeDirectDelete,
   fetchDirectRevision,
   nextDirectActionId,
   submitDirectAction,
@@ -1730,6 +1731,44 @@ export default function WorkspacePage() {
       ...previous,
       [projectId]: (previous[projectId] ?? 0) + 1,
     }))
+  }
+
+  /** DELETE_NODE 前置静态分析：只分析，不执行删除。 */
+  const handleAnalyzeDelete = async (projectId, request = {}) => {
+    const run = runStatesRef.current?.[projectId]
+    const sandboxId = run?.result?.sandboxId
+    const source = request.target ?? {}
+    if (!sandboxId) {
+      showToast('error', '请先生成或导入一个可预览项目')
+      throw new Error('缺少沙盒，无法分析删除')
+    }
+    const directActionId = nextDirectActionId()
+    const payload = {
+      directActionId,
+      projectId,
+      sandboxId,
+      action: 'DELETE_NODE',
+      baseRevision: 'analysis-only',
+      target: {
+        anchorId: source.anchorId,
+        selector: source.selector,
+        file: source.file,
+        line: source.line,
+        column: source.column,
+        component: source.component,
+        instance: source.instance,
+        instanceCount: source.instanceCount,
+        callSiteFile: source.callSite?.file,
+      },
+      payload: {},
+      options: { source: 'FLOATING_TOOLBAR', dryRun: true },
+    }
+    try {
+      return await analyzeDirectDelete(payload, session?.token)
+    } catch (cause) {
+      showToast('error', `删除分析失败：${cause?.message || cause}`)
+      throw cause
+    }
   }
 
   /**
@@ -5929,6 +5968,7 @@ export default function WorkspacePage() {
       handleReleaseGate,
       architectClose: architect.closePanel,
       handleDirectAction,
+      handleAnalyzeDelete,
       architectAnswer: architect.answer,
       architectDecide: architect.decide,
       architectDecideConflict: architect.decideConflict,
@@ -6031,6 +6071,8 @@ export default function WorkspacePage() {
           ),
         onDirectAction: (request) =>
           workspaceActionsRef.current?.handleDirectAction(projectId, request),
+        onAnalyzeDelete: (request) =>
+          workspaceActionsRef.current?.handleAnalyzeDelete(projectId, request),
         onArchitectAskHelper: (question) =>
           workspaceActionsRef.current?.architectAskHelper(projectId, question),
         onArchitectCancel: () =>

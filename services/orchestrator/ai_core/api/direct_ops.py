@@ -31,6 +31,23 @@ def get_revision(projectId: str, sandboxId: str) -> dict[str, str]:
         ) from exc
 
 
+@router.post("/analyze-delete")
+def analyze_delete(request: DirectActionPayload) -> dict:
+    """DELETE_NODE 前置静态分析：只返回安全判定，不删除。"""
+    service = DirectOperationService()
+    try:
+        return service.analyze_delete(request)
+    except DirectActionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                **(exc.diagnostic or {}),
+            },
+        ) from exc
+
+
 @router.post("/actions", response_model=DirectActionResponse)
 def execute_direct_action(
     request: DirectActionPayload,

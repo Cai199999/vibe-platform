@@ -109,6 +109,7 @@ function ProjectWorkspaceInner({
   onArchitectDecideConflict,
   onArchitectAskHelper,
   onDirectAction,
+  onAnalyzeDelete,
   onArchitectCancel,
   onArchitectExport,
   onFullstackGenerate,
@@ -1047,6 +1048,7 @@ function ProjectWorkspaceInner({
                 onCancel={() => setInspectDraft(null)}
                 onSubmit={handleInspectDraftSubmit}
                 onDirectAction={onDirectAction}
+                onAnalyzeDelete={onAnalyzeDelete}
               />
             )}
 

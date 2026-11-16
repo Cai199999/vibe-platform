@@ -21,8 +21,10 @@ export default function InspectDraftCard({
   onCancel,
   onSubmit,
   onDirectAction,
+  onAnalyzeDelete,
 }) {
   const [textOpen, setTextOpen] = useState(false)
+  const [addOpen, setAddOpen] = useState(false)
   const [directText, setDirectText] = useState('')
   const [directBusy, setDirectBusy] = useState(false)
   const [directHint, setDirectHint] = useState('')
@@ -60,6 +62,41 @@ export default function InspectDraftCard({
       }
     } catch (cause) {
       setDirectHint(`操作失败：${cause?.message || cause}`)
+    } finally {
+      setDirectBusy(false)
+    }
+  }
+
+  const containerTarget = () => {
+    const container = draft.container?.source
+    if (!container) return null
+    return {
+      ...container,
+      placement: {
+        parentFile: container.file,
+        parentSelector: container.selector,
+        parentLine: container.line,
+        parentColumn: container.column,
+        insertPosition: 'inside_end',
+        siblingIndex: null,
+      },
+    }
+  }
+
+  const analyzeDelete = async () => {
+    if (!onAnalyzeDelete || directBusy) return
+    setDirectBusy(true)
+    setDirectHint('')
+    try {
+      const result = await onAnalyzeDelete({ target: source })
+      if (!result) return
+      setDirectHint(
+        result.safe
+          ? '静态判定通过：可以安全删除（删除执行待接入）'
+          : `已拦截：${(result.reasons || []).join('；')}`,
+      )
+    } catch (cause) {
+      setDirectHint(`删除分析失败：${cause?.message || cause}`)
     } finally {
       setDirectBusy(false)
     }
@@ -112,23 +149,21 @@ export default function InspectDraftCard({
       >
         <button
           type="button"
-          title="新增（Phase 0 dryRun）"
-          disabled={directBusy}
-          onClick={() =>
-            runDirect(
-              'ADD_COMPONENT',
-              { componentType: 'Button' },
-              true,
-            )
-          }
+          className={addOpen ? 'is-active' : ''}
+          title="新增基础组件"
+          disabled={directBusy || !draft.container?.source}
+          onClick={() => {
+            setAddOpen((previous) => !previous)
+            setDirectHint('')
+          }}
         >
           ➕
         </button>
         <button
           type="button"
-          title="删除（Phase 0 dryRun）"
+          title="检查删除安全性"
           disabled={directBusy}
-          onClick={() => runDirect('DELETE_NODE', {}, true)}
+          onClick={analyzeDelete}
         >
           ❌
         </button>
@@ -177,6 +212,29 @@ export default function InspectDraftCard({
           </span>
         )}
       </div>
+
+      {addOpen && draft.container?.source && (
+        <div className="inspect-direct-add-menu" data-direct-add-menu>
+          {['Button', 'Input', 'Text', 'Card'].map((componentType) => (
+            <button
+              key={componentType}
+              type="button"
+              disabled={directBusy}
+              onClick={() => {
+                setAddOpen(false)
+                runDirect(
+                  'ADD_COMPONENT',
+                  { componentType },
+                  false,
+                  containerTarget(),
+                )
+              }}
+            >
+              {componentType}
+            </button>
+          ))}
+        </div>
+      )}
 
       {textOpen && (
         <div className="inspect-direct-text" data-direct-text-editor>

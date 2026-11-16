@@ -177,6 +177,8 @@ class Settings(BaseSettings):
     direct_ops_lock_timeout_seconds: float = 3.0
     direct_ops_max_text_chars: int = 2000
     direct_ops_changelog_limit: int = 200
+    # ChangeLog 落盘路径；容器内 data/ 已挂载到宿主机，重启后仍可读取。
+    direct_ops_changelog_path: str = "data/changelog.jsonl"
 
     # ------------------------------------------------------------
     # Token 成本优化

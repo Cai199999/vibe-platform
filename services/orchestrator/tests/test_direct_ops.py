@@ -50,6 +50,16 @@ MOVED = """export default function App() {
 }
 """
 
+ADDED = """export default function App() {
+  return (
+    <main>
+      <h1>待办</h1>
+      <button type="button" data-vibe-created="direct">按钮</button>
+    </main>
+  );
+}
+"""
+
 
 def _anchor(*, shared: bool = False) -> dict[str, Any]:
     return {
@@ -117,8 +127,17 @@ class _FakeSandbox:
         self, sandbox_id: str, edit: dict[str, Any], draft_id: str | None = None
     ) -> dict[str, Any]:
         self.edits.append(dict(edit))
-        content = MOVED if edit.get("operation") == "move_node" else UPDATED
-        return {"status": "OK", "content": content}
+        operation = edit.get("operation")
+        if operation == "move_node":
+            return {"status": "OK", "content": MOVED}
+        if operation == "insert":
+            return {
+                "status": "OK",
+                "content": ADDED,
+                "nodeCountBefore": 3,
+                "nodeCountAfter": 4,
+            }
+        return {"status": "OK", "content": UPDATED}
 
     def apply_patch(
         self,
@@ -251,6 +270,80 @@ class DirectOperationMoveTest(unittest.TestCase):
             )
 
 
+def _add_payload(**overrides: Any) -> DirectActionPayload:
+    data = {
+        "directActionId": "dact_add",
+        "idempotencyKey": "proj_direct:dact_add",
+        "projectId": PROJECT_ID,
+        "sandboxId": SANDBOX_ID,
+        "baseRevision": BASE_SHA,
+        "action": "ADD_COMPONENT",
+        "target": {
+            "anchorId": "anc_dact_add",
+            "file": "src/App.jsx",
+            "line": 3,
+            "column": 5,
+            "component": "App",
+        },
+        "payload": {"componentType": "Button"},
+        "options": {"source": "FLOATING_TOOLBAR", "dryRun": False},
+    }
+    data.update(overrides)
+    return DirectActionPayload.model_validate(data)
+
+
+class DirectOperationAddTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryChangeLogStore(max_entries=50)
+        self.store.clear()
+        self.sandbox = _FakeSandbox()
+        self.service = DirectOperationService(
+            sandbox=self.sandbox,  # type: ignore[arg-type]
+            settings=_Settings(),  # type: ignore[arg-type]
+        )
+        self.service._changelog = self.store
+
+    def tearDown(self) -> None:
+        from ai_core.direct_ops import service as service_module
+
+        with service_module._COMPLETED_LOCK:
+            service_module._COMPLETED.clear()
+
+    def test_add_component_inserts_and_validates_node_delta(self) -> None:
+        payload = _add_payload()
+
+        response = self.service.execute(payload)
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(response.risk, "L0_DIRECT")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "insert")
+        self.assertIn("<button", self.sandbox.edits[0]["jsxCode"])
+        self.assertEqual(self.sandbox.patches, [{"src/App.jsx": ADDED}])
+        self.assertEqual(len(self.sandbox.commits), 1)
+        entries = self.store.list_for_project(PROJECT_ID)
+        self.assertIn("新增 Button", entries[0].summary)
+
+    def test_add_component_rejects_unknown_type(self) -> None:
+        with self.assertRaises(ValueError):
+            _add_payload(payload={"componentType": "LoginForm"})
+
+    def test_node_delta_mismatch_blocks_write(self) -> None:
+        original = self.sandbox.apply_ast_edit
+
+        def broken(sandbox_id: str, edit: dict[str, Any], draft_id: str | None = None):
+            result = original(sandbox_id, edit, draft_id)
+            result["nodeCountAfter"] = result["nodeCountBefore"]
+            return result
+
+        self.sandbox.apply_ast_edit = broken  # type: ignore[method-assign]
+
+        with self.assertRaises(DirectActionError) as ctx:
+            self.service.execute(_add_payload())
+
+        self.assertEqual(ctx.exception.code, DirectErrorCode.TOOL_FAILED)
+        self.assertEqual(self.sandbox.patches, [])
+
+
 class DirectOperationServiceTest(unittest.TestCase):
     def setUp(self) -> None:
         store = MemoryChangeLogStore(max_entries=50)
@@ -365,11 +458,125 @@ class DirectOperationServiceTest(unittest.TestCase):
         self.assertEqual(len(self.sandbox.commits), 1)
 
 
+class DeleteStaticAnalysisTest(unittest.TestCase):
+    def test_safe_leaf_node(self) -> None:
+        from ai_core.direct_ops.static_analysis import analyze_delete_anchor
+
+        result = analyze_delete_anchor(
+            {"isShared": False, "inMap": False, "isRouteRoot": False}
+        )
+        self.assertTrue(result.safe)
+        self.assertEqual(result.reasons, [])
+
+    def test_shared_map_and_route_root_are_unsafe(self) -> None:
+        from ai_core.direct_ops.static_analysis import analyze_delete_anchor
+
+        result = analyze_delete_anchor(
+            {
+                "isShared": True,
+                "sharedReason": "被 2 个文件引用",
+                "inMap": True,
+                "isRouteRoot": True,
+            }
+        )
+        self.assertFalse(result.safe)
+        self.assertTrue(result.is_shared)
+        self.assertTrue(result.in_map)
+        self.assertTrue(result.is_route_root)
+        self.assertEqual(len(result.reasons), 3)
+
+    def test_service_analyze_delete_returns_reasons(self) -> None:
+        sandbox = _FakeSandbox(
+            anchor={
+                **_anchor(),
+                "inMap": True,
+                "isRouteRoot": False,
+                "deleteSafe": False,
+                "deleteReasons": ["位于 map 循环内"],
+            }
+        )
+        service = DirectOperationService(
+            sandbox=sandbox,  # type: ignore[arg-type]
+            settings=_Settings(),  # type: ignore[arg-type]
+        )
+        payload = DirectActionPayload.model_validate(
+            {
+                **_payload().model_dump(by_alias=True),
+                "action": "DELETE_NODE",
+                "payload": {},
+                "options": {"dryRun": True},
+                "baseRevision": None,
+            }
+        )
+
+        result = service.analyze_delete(payload)
+
+        self.assertFalse(result["safe"])
+        self.assertTrue(result["inMap"])
+        self.assertIn("map", "；".join(result["reasons"]))
+
+
+class ComponentTemplateTest(unittest.TestCase):
+    def test_ensure_imports_is_idempotent_and_inserted_after_last_import(self) -> None:
+        from ai_core.direct_ops.templates import ensure_imports
+
+        content = "import React from 'react'\n\nexport default function App() {}\n"
+        once = ensure_imports(content, ["import Button from './Button'"])
+        twice = ensure_imports(once, ["import Button from './Button'"])
+
+        self.assertEqual(once, twice)
+        self.assertEqual(once.count("import Button"), 1)
+        self.assertLess(once.index("import React"), once.index("import Button"))
+
+    def test_card_template_declares_two_nodes(self) -> None:
+        from ai_core.direct_ops.templates import COMPONENT_TEMPLATES
+
+        self.assertEqual(COMPONENT_TEMPLATES["Card"].node_count, 2)
+        self.assertIn("vibe-direct-card", COMPONENT_TEMPLATES["Card"].jsx)
+
+
+class ChangeLogPersistenceTest(unittest.TestCase):
+    def test_jsonl_store_survives_reload(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from ai_core.direct_ops.changelog import JsonlChangeLogStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "changelog.jsonl"
+            first = JsonlChangeLogStore(path, max_entries=10)
+            first.append(
+                ChangeLogEntry(
+                    change_id="chg_persist",
+                    project_id="proj_persist",
+                    sandbox_id=SANDBOX_ID,
+                    action="ADD_COMPONENT",
+                    target={"file": "src/App.jsx", "component": "main"},
+                    summary="在 main 中新增 Button",
+                    before_hash="sha256:a",
+                    after_hash="sha256:b",
+                    commit_hash="d" * 40,
+                    risk="L0_DIRECT",
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+
+            second = JsonlChangeLogStore(path, max_entries=10)
+            entries = second.list_for_project("proj_persist")
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].change_id, "chg_persist")
+        self.assertIn("新增 Button", entries[0].summary)
+
+
 class ChangeLogArchitectBridgeTest(unittest.TestCase):
     def test_recent_changelog_is_available_to_architect(self) -> None:
-        from ai_core.architect.service import _recent_direct_changes
+        from unittest.mock import patch
 
-        store = get_change_log_store()
+        from ai_core.architect.service import _recent_direct_changes
+        from ai_core.direct_ops import changelog as changelog_module
+
+        store = MemoryChangeLogStore(max_entries=10)
         store.append(
             ChangeLogEntry(
                 change_id="chg_arch_test",
@@ -386,7 +593,8 @@ class ChangeLogArchitectBridgeTest(unittest.TestCase):
             )
         )
 
-        changes = _recent_direct_changes("proj_arch_bridge")
+        with patch.object(changelog_module, "_change_log_store", store):
+            changes = _recent_direct_changes("proj_arch_bridge")
 
         self.assertEqual(len(changes), 1)
         self.assertEqual(changes[0]["action"], "UPDATE_TEXT")

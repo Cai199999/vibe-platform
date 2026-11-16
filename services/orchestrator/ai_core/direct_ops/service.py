@@ -22,6 +22,8 @@ from ai_core.adapters.sandbox import get_sandbox_provider
 from ai_core.agent.events import RunEventBuffer
 from ai_core.config import Settings, get_settings
 from ai_core.direct_ops.changelog import get_change_log_store
+from ai_core.direct_ops.static_analysis import analyze_delete_anchor
+from ai_core.direct_ops.templates import COMPONENT_TEMPLATES, ensure_imports
 from ai_core.domain.direct_ops import (
     ChangeLogEntry,
     DirectActionPayload,
@@ -126,6 +128,22 @@ class DirectOperationService:
             "sandboxId": sandbox_id,
             "revision": self._sandbox.git_head(sandbox_id),
         }
+
+    # --------------------------------------------------------
+    # 静态分析（不写代码）
+    # --------------------------------------------------------
+    def analyze_delete(self, payload: DirectActionPayload) -> dict[str, Any]:
+        """只分析删除安全性，不执行删除。"""
+        anchor = self._resolve(payload)
+        analysis = analyze_delete_anchor(dict(anchor))
+        result = analysis.to_dict()
+        result["anchor"] = {
+            "file": anchor.get("file"),
+            "component": anchor.get("component"),
+            "range": anchor.get("range"),
+            "nodeSource": str(anchor.get("nodeSource") or "")[:500],
+        }
+        return result
 
     # --------------------------------------------------------
     # 执行
@@ -537,7 +555,11 @@ class DirectOperationService:
             ):
                 return "L2_HITL"
             return "L0_DIRECT"
-        # ADD_COMPONENT / DELETE_NODE 仍在后续阶段实现。
+        if payload.action == "ADD_COMPONENT":
+            if anchor.get("isShared") or anchor.get("protected"):
+                return "L2_HITL"
+            return "L0_DIRECT"
+        # DELETE_NODE 仍在后续阶段实现。
         return "L3_AI_REQUIRED"
 
     def _build_new_content(
@@ -592,10 +614,43 @@ class DirectOperationService:
                 "insertPosition": position,
                 "insertIndex": index,
             }
+        elif payload.action == "ADD_COMPONENT":
+            component_type = str(payload.payload.get("componentType") or "")
+            template = COMPONENT_TEMPLATES.get(component_type)
+            if template is None:
+                raise DirectActionError(
+                    DirectErrorCode.UNSAFE_OPERATION,
+                    "该组件不在直接新增白名单内。",
+                    status_code=409,
+                )
+            placement = payload.target.placement or {}
+            position = str(placement.get("insertPosition") or "inside_end")
+            if position not in {
+                "inside_start",
+                "inside_end",
+                "inside_index",
+            }:
+                position = "inside_end"
+            raw_index = placement.get("siblingIndex")
+            index = (
+                int(raw_index)
+                if isinstance(raw_index, (int, float)) and int(raw_index) >= 0
+                else None
+            )
+            if position == "inside_index" and index is None:
+                index = 0
+            edit = {
+                "operation": "insert",
+                "file": file,
+                "anchorRange": anchor.get("range") or {},
+                "insertPosition": position,
+                "insertIndex": index,
+                "jsxCode": template.jsx,
+            }
         else:
             raise DirectActionError(
                 DirectErrorCode.UNSAFE_OPERATION,
-                "当前版本只支持直接修改文本与移动组件。",
+                "当前版本只支持直接修改文本、移动与新增基础组件。",
                 status_code=409,
             )
         result = self._sandbox.apply_ast_edit(payload.sandbox_id, edit)
@@ -604,11 +659,36 @@ class DirectOperationService:
             message = str((result or {}).get("message") or "文本修改失败")
             raise DirectActionError(
                 DirectErrorCode.TOOL_FAILED,
-                "该组件无法安全直接修改文本，请改用 AI 修改。",
+                "该组件无法安全直接修改，请改用 AI 修改。",
                 status_code=409,
                 diagnostic={"toolCode": code, "toolMessage": message[:500]},
             )
-        return str(result.get("content") or "")
+        content = str(result.get("content") or "")
+        if payload.action == "ADD_COMPONENT":
+            component_type = str(payload.payload.get("componentType") or "")
+            template = COMPONENT_TEMPLATES[component_type]
+            before = result.get("nodeCountBefore")
+            after = result.get("nodeCountAfter")
+            if isinstance(before, int) and isinstance(after, int):
+                if after - before != template.node_count:
+                    raise DirectActionError(
+                        DirectErrorCode.TOOL_FAILED,
+                        "新增组件的结构校验未通过，代码已保持原样。",
+                        status_code=409,
+                        diagnostic={
+                            "nodeCountBefore": before,
+                            "nodeCountAfter": after,
+                            "expectedDelta": template.node_count,
+                        },
+                    )
+            else:
+                raise DirectActionError(
+                    DirectErrorCode.TOOL_FAILED,
+                    "新增组件缺少节点数量校验结果，已阻断。",
+                    status_code=409,
+                )
+            content = ensure_imports(content, template.imports)
+        return content
 
     def _rollback(self, payload: DirectActionPayload, file: str, old: str) -> None:
         try:
@@ -639,6 +719,11 @@ class DirectOperationService:
             summary = (
                 f"将 {component} 移动到 "
                 f"{placement.get('parentSelector') or placement.get('parentFile') or '新容器'}"
+            )
+        elif payload.action == "ADD_COMPONENT":
+            summary = (
+                f"在 {component} 中新增 "
+                f"{payload.payload.get('componentType') or '基础组件'}"
             )
         else:
             summary = f"对 {component} 执行 {payload.action}"

@@ -34,4 +34,10 @@ public class DirectOpsController {
     public ResponseEntity<JsonNode> execute(@RequestBody JsonNode body) {
         return directOpsService.execute(body);
     }
+
+    /** DELETE_NODE 前置静态分析：只返回安全判定。 */
+    @PostMapping("/analyze-delete")
+    public ResponseEntity<JsonNode> analyzeDelete(@RequestBody JsonNode body) {
+        return directOpsService.analyzeDelete(body);
+    }
 }

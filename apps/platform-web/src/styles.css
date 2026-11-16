@@ -11619,3 +11619,24 @@ body.is-viewport-panning * {
   flex: 1;
   min-width: 0;
 }
+
+.inspect-direct-add-menu {
+  display: flex;
+  gap: 6px;
+  padding: 8px 2px 4px;
+  flex-wrap: wrap;
+}
+
+.inspect-direct-add-menu button {
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  background: rgba(96, 165, 250, 0.08);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.inspect-direct-add-menu button:hover:not(:disabled) {
+  border-color: rgba(96, 165, 250, 0.75);
+}

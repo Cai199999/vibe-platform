@@ -148,6 +148,37 @@ def _fix_range(code: str, start_token: str, end_token: str) -> dict[str, int]:
 class ResolverScriptTest(unittest.TestCase):
     """确定性解析节点：不依赖 LLM，只依据 AST + 前端定位信息。"""
 
+    def test_delete_safety_flags_map_and_route_root(self) -> None:
+        source = """export default function App() {
+  const items = [1, 2]
+  return (
+    <main>
+      <ul>{items.map((item) => <li>{item}</li>)}</ul>
+    </main>
+  )
+}
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_project(Path(tmp), {"src/App.jsx": source})
+            code, payload, stderr = _run_script(
+                "resolve_target.mjs",
+                {
+                    "workdir": tmp,
+                    "parserRoot": str(TEMPLATE_DIR),
+                    "anchors": [
+                        _anchor_request("anc_li", selector="li"),
+                        _anchor_request("anc_main", selector="main"),
+                    ],
+                },
+            )
+        self.assertEqual(code, 0, stderr)
+        anchors = {item["anchorId"]: item for item in payload["anchors"]}
+        self.assertTrue(anchors["anc_li"]["inMap"])
+        self.assertFalse(anchors["anc_li"]["deleteSafe"])
+        self.assertTrue(anchors["anc_main"]["isRouteRoot"])
+        self.assertFalse(anchors["anc_main"]["deleteSafe"])
+        self.assertIn("map", "；".join(anchors["anc_li"]["deleteReasons"]))
+
     def test_selector_with_instance_resolves_exact_node(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _write_project(Path(tmp), {"src/App.jsx": RESOLVER_SOURCE})

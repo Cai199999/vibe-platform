@@ -21,6 +21,8 @@ public class DirectOpsService {
 
     private static final Logger log = LoggerFactory.getLogger(DirectOpsService.class);
     private static final String ACTIONS_PATH = "/api/v1/internal/direct-ops/actions";
+    private static final String ANALYZE_DELETE_PATH =
+            "/api/v1/internal/direct-ops/analyze-delete";
     private static final String REVISION_PATH = "/api/v1/internal/direct-ops/revision";
 
     private final RestClient aiCoreRunRestClient;
@@ -35,6 +37,18 @@ public class DirectOpsService {
     }
 
     public ResponseEntity<JsonNode> execute(JsonNode body) {
+        return postJson(ACTIONS_PATH, body, "direct ops");
+    }
+
+    public ResponseEntity<JsonNode> analyzeDelete(JsonNode body) {
+        return postJson(ANALYZE_DELETE_PATH, body, "direct ops delete analysis");
+    }
+
+    private ResponseEntity<JsonNode> postJson(
+            String path,
+            JsonNode body,
+            String operation
+    ) {
         long startedAt = System.nanoTime();
         final String jsonBody;
         try {
@@ -47,7 +61,7 @@ public class DirectOpsService {
         }
         try {
             ResponseEntity<JsonNode> response = aiCoreRunRestClient.post()
-                    .uri(ACTIONS_PATH)
+                    .uri(path)
                     .contentType(MediaType.APPLICATION_JSON)
                     .accept(MediaType.APPLICATION_JSON)
                     .body(jsonBody)

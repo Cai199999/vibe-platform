@@ -578,8 +578,9 @@ function main() {
       const indent = baseIndentAt(code, anchor.start)
       const snippet = reindent(String(spec.jsxCode), indent)
       const next = `${code.slice(0, offset)}\n${indent}${snippet}${code.slice(offset)}`
+      let nextAst
       try {
-        parseCode(next, file, parser)
+        nextAst = parseCode(next, file, parser)
       } catch (error) {
         return fail('INVALID_INSERTION_POINT', `插入后文件无法解析: ${error.message}`)
       }
@@ -588,6 +589,8 @@ function main() {
       return {
         status: 'OK',
         content: next,
+        nodeCountBefore: countJsxNodes(ast),
+        nodeCountAfter: countJsxNodes(nextAst),
         insert: {
           offset,
           length: next.length - code.length,
@@ -641,14 +644,17 @@ function main() {
         next = `${code.slice(0, insertOffset)}\n${indent}${snippet}\n${parentIndent}${code.slice(insertOffset)}`
       }
     }
+    let nextAst
     try {
-      parseCode(next, file, parser)
+      nextAst = parseCode(next, file, parser)
     } catch (error) {
       return fail('INVALID_INSERTION_POINT', `插入后文件无法解析: ${error.message}`)
     }
     return {
       status: 'OK',
       content: next,
+      nodeCountBefore: countJsxNodes(ast),
+      nodeCountAfter: countJsxNodes(nextAst),
       insert: {
         offset: insertOffset,
         length: next.length - code.length,

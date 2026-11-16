@@ -478,6 +478,54 @@ function parseFile(workdir, file, parser) {
   return { code, ast }
 }
 
+/** 节点是否位于数组 / 列表的 .map(...) 回调内部。 */
+function isInsideMapCallback(node, parents) {
+  let current = node
+  while (current) {
+    const parent = parents.get(current)
+    if (!parent) break
+    if (parent.type === 'CallExpression') {
+      const callee = parent.callee
+      if (
+        callee?.type === 'MemberExpression' &&
+        !callee.computed &&
+        (callee.property?.name === 'map' || callee.property?.value === 'map')
+      ) {
+        return true
+      }
+      if (callee?.type === 'Identifier' && callee.name === 'map') {
+        return true
+      }
+    }
+    // 再检查一层：ArrowFunctionExpression -> CallExpression 的父链
+    if (
+      (parent.type === 'ArrowFunctionExpression' ||
+        parent.type === 'FunctionExpression') &&
+      parents.get(parent)?.type === 'CallExpression'
+    ) {
+      const call = parents.get(parent)
+      const callee = call.callee
+      if (callee?.type === 'MemberExpression' && callee.property?.name === 'map') {
+        return true
+      }
+    }
+    current = parent
+  }
+  return false
+}
+
+/** 是否为页面 / 组件文件中最外层的 JSX 根节点（没有 JSX 祖先）。 */
+function isTopLevelJsxRoot(node, parents) {
+  let current = node
+  while (current) {
+    const parent = parents.get(current)
+    if (!parent) return true
+    if (JSX_TYPES.has(parent.type)) return false
+    current = parent
+  }
+  return true
+}
+
 function resolveOne(anchor, parser, workdir) {
   const file = String(anchor.file || '').trim()
   const result = {
@@ -616,6 +664,16 @@ function resolveOne(anchor, parser, workdir) {
   // Coder 据此选 inside_index / inside_end，并由 AST 工具按锚点插入，
   // 不能只依赖自然语言描述。
   result.placement = normalizePlacement(node, anchor.placement)
+  // ---- DELETE_NODE 静态安全判定（只分析，不执行删除）----
+  const inMap = isInsideMapCallback(node, index.parents)
+  const isRouteRoot = isTopLevelJsxRoot(node, index.parents)
+  const deleteReasons = [...reasons]
+  if (inMap) deleteReasons.push('位于 map 循环内，删除会影响多个实例')
+  if (isRouteRoot) deleteReasons.push('是页面顶层 JSX 根节点')
+  result.inMap = inMap
+  result.isRouteRoot = isRouteRoot
+  result.deleteSafe = !shared && !inMap && !isRouteRoot
+  result.deleteReasons = deleteReasons
   // 共享组件额外给出 callSite 锚点，供 Phase 2 决策“只在当前实例修改”。
   result.callSiteAnchor = null
   if (shared && callSiteFile && callSiteFile !== file) {

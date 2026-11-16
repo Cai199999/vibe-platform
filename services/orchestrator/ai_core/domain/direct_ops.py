@@ -31,6 +31,9 @@ DirectActionRisk = Literal[
     "L3_AI_REQUIRED",
 ]
 
+# Direct Ops 白名单基础组件；不含业务组件，避免绕过架构确认。
+ALLOWED_ADD_COMPONENTS = ("Button", "Input", "Text", "Card")
+
 
 class DirectErrorCode:
     """Direct Ops 稳定错误码；前端与错误注册表共用。"""
@@ -106,6 +109,13 @@ class DirectActionPayload(CamelModel):
                 raise ValueError(
                     "MOVE_NODE 必须在 target.placement 中提供父容器定位信息"
                 )
+        if self.action == "ADD_COMPONENT":
+            component_type = str(self.payload.get("componentType") or "")
+            if component_type not in ALLOWED_ADD_COMPONENTS:
+                raise ValueError(
+                    "ADD_COMPONENT 只支持白名单组件: "
+                    + ", ".join(ALLOWED_ADD_COMPONENTS)
+                )
         return self
 
 
@@ -146,6 +156,7 @@ class ChangeLogEntry(CamelModel):
 
 
 __all__ = [
+    "ALLOWED_ADD_COMPONENTS",
     "ChangeLogEntry",
     "DirectActionKind",
     "DirectActionOptions",

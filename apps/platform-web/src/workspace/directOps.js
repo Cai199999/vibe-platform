@@ -53,6 +53,23 @@ export async function submitDirectAction(payload, token) {
   return response.json()
 }
 
+export async function analyzeDirectDelete(payload, token) {
+  const response = await fetch('/api/v1/direct-ops/analyze-delete', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token ?? ''}`,
+    },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    const error = new Error(await responseError(response))
+    error.httpStatus = response.status
+    throw error
+  }
+  return response.json()
+}
+
 let seq = 0
 
 export function nextDirectActionId() {
