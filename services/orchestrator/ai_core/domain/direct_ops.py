@@ -63,6 +63,8 @@ class DirectActionTarget(CamelModel):
     instance: int | None = Field(default=None, ge=1)
     instance_count: int | None = Field(default=None, ge=1)
     call_site_file: str | None = Field(default=None, max_length=500)
+    # SDK 侧 NodeIdentity 基础事实；Resolver 会用 AST 补全 kind/scope。
+    identity: dict[str, Any] | None = None
     placement: dict[str, Any] | None = None
 
 

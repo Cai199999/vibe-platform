@@ -586,11 +586,24 @@
     // 实例定位：同一份源码可能渲染多个 DOM 节点，必须把“第几个”与
     // 父级 JSX 调用位置一并回传，否则 Coder 只能改基础组件造成全局污染。
     var instanceInfo = instanceInfoFor(node, file, line, column)
+    var identity = {
+      file: file,
+      line: line,
+      column: column,
+      component: component || 'Component',
+      selector: marker ? '[data-source="' + marker + '"]' : '',
+      instance: instanceInfo.instance,
+      instanceCount: instanceInfo.instanceCount,
+      callSiteFile: (instanceInfo.callSite && instanceInfo.callSite.file) || '',
+      sourceKind: sourceKindFor(file),
+      domKind: kind,
+    }
     return {
       file: file,
       line: line,
       column: column,
       component: component || 'Component',
+      identity: identity,
       marker: marker,
       sourceKind: sourceKindFor(file),
       kind: kind,

@@ -453,12 +453,27 @@ class DirectOperationDeleteTest(unittest.TestCase):
         self.assertEqual(response.risk, "L0_DIRECT")
         self.assertEqual(self.sandbox.edits[0]["file"], "src/Page.jsx")
 
-    def test_unsafe_delete_is_blocked(self) -> None:
+    def test_root_delete_replaces_with_placeholder(self) -> None:
         self.sandbox.anchor = {
             **_anchor(),
             "deleteSafe": False,
             "isRouteRoot": True,
             "deleteReasons": ["组件是页面顶层 JSX 根节点"],
+        }
+
+        response = self.service.execute(_delete_payload())
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        edit = self.sandbox.edits[0]
+        self.assertEqual(edit["operation"], "modify")
+        self.assertIn("empty-placeholder", edit["jsxCode"])
+
+    def test_unsafe_delete_is_blocked(self) -> None:
+        self.sandbox.anchor = {
+            **_anchor(),
+            "inMap": True,
+            "deleteSafe": False,
+            "deleteReasons": ["组件位于 map 循环内"],
         }
         payload = _delete_payload()
 
@@ -697,6 +712,73 @@ class DirectOperationServiceTest(unittest.TestCase):
         self.assertEqual(len(self.sandbox.commits), 1)
 
 
+class NodeIdentityScopePolicyTest(unittest.TestCase):
+    def _identity(self, **overrides: Any):
+        from ai_core.domain.node_identity import NodeIdentity
+
+        data = {
+            "file": "src/App.jsx",
+            "line": 3,
+            "column": 5,
+            "component": "App",
+            "node_type": "JSXElement",
+            "kind": "leaf",
+            "allowed_insert_positions": ("before", "after"),
+            "range": {"startOffset": 1, "endOffset": 10},
+        }
+        data.update(overrides)
+        return NodeIdentity(**data)
+
+    def test_leaf_delete_is_direct_instance(self) -> None:
+        from ai_core.direct_ops.scope_policy import decide_scope
+
+        decision = decide_scope("DELETE_NODE", self._identity())
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.scope, "instance")
+        self.assertEqual(decision.strategy, "direct")
+
+    def test_map_item_delete_returns_hitl_options(self) -> None:
+        from ai_core.direct_ops.scope_policy import decide_scope
+
+        decision = decide_scope(
+            "DELETE_NODE",
+            self._identity(kind="map_item", in_map=True),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.scope, "data_source")
+        self.assertTrue(decision.options)
+        self.assertEqual(
+            {item["action"] for item in decision.options},
+            {"AI_DATA_EDIT", "VISUAL_ONLY", "CANCEL"},
+        )
+
+    def test_route_root_delete_uses_placeholder(self) -> None:
+        from ai_core.direct_ops.scope_policy import decide_scope
+
+        decision = decide_scope(
+            "DELETE_NODE",
+            self._identity(kind="route_root", is_route_root=True),
+        )
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.scope, "replace_root")
+        self.assertEqual(decision.strategy, "replace_placeholder")
+
+    def test_repeated_instances_move_all(self) -> None:
+        from ai_core.direct_ops.scope_policy import decide_scope
+
+        decision = decide_scope(
+            "MOVE_NODE",
+            self._identity(
+                kind="leaf",
+                instance_count=6,
+                importer_count=0,
+                is_shared=True,
+            ),
+        )
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.scope, "all_instances")
+
+
 class DeleteStaticAnalysisTest(unittest.TestCase):
     def test_safe_leaf_node(self) -> None:
         from ai_core.direct_ops.static_analysis import analyze_delete_anchor
@@ -786,7 +868,7 @@ class DeleteStaticAnalysisTest(unittest.TestCase):
 
         self.assertFalse(result["safe"])
         self.assertTrue(result["inMap"])
-        self.assertIn("map", "；".join(result["reasons"]))
+        self.assertIn("数据源", "；".join(result["reasons"]))
 
 
 class DirectUndoTest(unittest.TestCase):

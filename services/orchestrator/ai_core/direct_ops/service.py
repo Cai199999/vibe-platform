@@ -26,12 +26,14 @@ from ai_core.direct_ops.failure_router import (
     ROUTE_LLM_CODER,
     route_add_component,
 )
+from ai_core.direct_ops.scope_policy import ScopeDecision, decide_scope
 from ai_core.direct_ops.static_analysis import analyze_delete_anchor
 from ai_core.direct_ops.templates import (
     COMPONENT_TEMPLATES,
     apply_style_context,
     ensure_imports,
 )
+from ai_core.domain.node_identity import identity_from_anchor
 from ai_core.domain.direct_ops import (
     ChangeLogEntry,
     DirectActionPayload,
@@ -143,8 +145,16 @@ class DirectOperationService:
     def analyze_delete(self, payload: DirectActionPayload) -> dict[str, Any]:
         """只分析删除安全性，不执行删除。"""
         anchor = self._resolve(payload)
+        identity = identity_from_anchor(anchor)
+        scope = decide_scope("DELETE_NODE", identity)
         analysis = analyze_delete_anchor(dict(anchor))
         result = analysis.to_dict()
+        result["safe"] = scope.allowed
+        result["reasons"] = list(scope.reasons)
+        result["scope"] = scope.scope
+        result["strategy"] = scope.strategy
+        result["options"] = list(scope.options)
+        result["identity"] = identity.to_dict()
         call_site = anchor.get("callSiteAnchor")
         result["anchor"] = {
             "file": anchor.get("file"),
@@ -430,8 +440,24 @@ class DirectOperationService:
             )
             if payload.action == "DELETE_NODE":
                 move_anchor = self._delete_source_anchor(anchor)
-            risk = self._risk(payload, anchor, parent)
+            identity = identity_from_anchor(anchor)
+            scope = decide_scope(payload.action, identity)
+            risk = "L0_DIRECT" if scope.allowed else "L2_HITL"
+            if scope.strategy == "blocked":
+                risk = "L3_AI_REQUIRED"
+            if payload.action == "MOVE_NODE" and parent is not None:
+                if parent.get("file") != move_anchor.get("file"):
+                    scope = ScopeDecision(
+                        allowed=False,
+                        scope="blocked",
+                        strategy="blocked",
+                        reasons=["跨文件移动需要 AI 处理"],
+                    )
+                    risk = "L3_AI_REQUIRED"
             resolved_target = {
+                "identity": identity.to_dict(),
+                "scope": scope.scope,
+                "strategy": scope.strategy,
                 "file": move_anchor.get("file"),
                 "component": move_anchor.get("component") or anchor.get("component"),
                 "range": anchor.get("range"),
@@ -462,6 +488,9 @@ class DirectOperationService:
                         started=started,
                     )
                 shared_reason = str(anchor.get("sharedReason") or "")
+                policy_reason = "；".join(scope.reasons)
+                if policy_reason:
+                    shared_reason = f"{policy_reason}；{shared_reason}".strip("；")
                 call_site_file = str(anchor.get("callSiteFile") or "")
                 parent_file = str((parent or {}).get("file") or "")
                 parent_shared = bool(
@@ -490,7 +519,7 @@ class DirectOperationService:
             file = str(move_anchor.get("file") or "")
             mark = time.perf_counter()
             old_content = self._sandbox.read_file(payload.sandbox_id, file)
-            new_content = self._build_new_content(payload, move_anchor, parent)
+            new_content = self._build_new_content(payload, move_anchor, parent, scope)
             timings["astEditMs"] = _elapsed_ms(mark)
 
             if payload.options.dry_run:
@@ -588,6 +617,7 @@ class DirectOperationService:
             "instance": target.instance,
             "instanceCount": target.instance_count,
             "callSiteFile": target.call_site_file,
+            "identity": dict(target.identity or {}),
             "placement": target.placement,
         }
         results = None
@@ -813,6 +843,7 @@ class DirectOperationService:
         payload: DirectActionPayload,
         anchor: dict[str, Any],
         parent: dict[str, Any] | None = None,
+        scope: ScopeDecision | None = None,
     ) -> str:
         file = str(anchor.get("file") or "")
         if payload.action == "UPDATE_TEXT":
@@ -898,12 +929,21 @@ class DirectOperationService:
                 "jsxCode": jsx_code,
             }
         elif payload.action == "DELETE_NODE":
-            edit = {
-                "operation": "delete",
-                "file": file,
-                "anchorRange": anchor.get("range") or {},
-                "targetRange": anchor.get("range") or {},
-            }
+            if scope is not None and scope.strategy == "replace_placeholder":
+                edit = {
+                    "operation": "modify",
+                    "file": file,
+                    "anchorRange": anchor.get("range") or {},
+                    "targetRange": anchor.get("range") or {},
+                    "jsxCode": ('<div className="empty-placeholder">空节点</div>'),
+                }
+            else:
+                edit = {
+                    "operation": "delete",
+                    "file": file,
+                    "anchorRange": anchor.get("range") or {},
+                    "targetRange": anchor.get("range") or {},
+                }
         else:
             raise DirectActionError(
                 DirectErrorCode.UNSAFE_OPERATION,
@@ -945,7 +985,9 @@ class DirectOperationService:
                     status_code=409,
                 )
             content = ensure_imports(content, template.imports)
-        if payload.action == "DELETE_NODE":
+        if payload.action == "DELETE_NODE" and not (
+            scope is not None and scope.strategy == "replace_placeholder"
+        ):
             before = result.get("nodeCountBefore")
             after = result.get("nodeCountAfter")
             target_nodes = result.get("targetNodeCount")

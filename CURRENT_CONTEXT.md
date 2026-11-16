@@ -37,6 +37,8 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - v0 基线：骨架写入后静默保存 `v0: Architect Skeleton`；快照成功才把 bootstrap 切 ready/进入画布。架构师节点无特殊保护标记，仅按 shared/map/根节点风险分类；Resolver 用 importers 兜底 callSite。
 - 澄清解耦：Architect 源码采集限时 5s，超时回退请求 files；启动 Architect 时前端注入快照 baseline Diff + latestChanges，后端注入 ChangeLog。
 
+- NodeIdentity + ScopePolicy：统一 leaf/container/map_item/component_root/route_root；Direct Ops 先判作用域。根节点删除自动替换 empty-placeholder；map item 返回数据源/视觉隐藏 HITL 选项；普通/callSite/多实例操作不再被无意义拦截。
+
 ## 最新验证
 前端 16 项 Vitest、Python 606 项 unittest 通过；BFF 单测通过。真实沙盒 Direct Ops（含样式继承 ADD 1559ms）正常；新 SDK 已打入 sandbox 镜像。终极 E2E：UPDATE_TEXT 1604ms、ADD 1523ms、DELETE 1603ms；ChangeLog 重启可读，DeepSeek Helper 可复述直接操作。
 
