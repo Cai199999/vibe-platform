@@ -37,6 +37,18 @@
   - analyze-delete safe 后直接确认删除，不再弹确认框；
   - 原有骨架 / 公共组件仍保留确认与安全分析。
 
+## 诊断增强
+
+- MOVE_NODE 的 UNSAFE_OPERATION 现在携带：
+  - sourceFile / parentFile / callSiteFile
+  - parentShared / sharedReason / risk
+  - Toast 直接显示这些字段，便于判断是 callSite 缺失还是父容器受保护。
+- Resolver 偶发失败自动重试一次（80ms）；仍失败时返回
+  `DIRECT_RESOLVER_UNAVAILABLE` 并携带：
+  - resolverError
+  - file / line / column
+  不再把底层 SandboxError 吞成泛化“服务不可用”。
+
 ## 验证
 
 - 新增 callSite move 单测；

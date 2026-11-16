@@ -360,11 +360,30 @@ class DirectOperationService:
                         timings=timings,
                         started=started,
                     )
+                shared_reason = str(anchor.get("sharedReason") or "")
+                call_site_file = str(anchor.get("callSiteFile") or "")
+                parent_file = str((parent or {}).get("file") or "")
+                parent_shared = bool(
+                    (parent or {}).get("isShared") or (parent or {}).get("protected")
+                )
+                detail = (
+                    f"risk={risk} source={anchor.get('file') or ''} "
+                    f"parent={parent_file} callSite={call_site_file or '(none)'} "
+                    f"parentShared={parent_shared} {shared_reason}"
+                )
+                action_label = "移动" if payload.action == "MOVE_NODE" else "修改"
                 raise DirectActionError(
                     DirectErrorCode.UNSAFE_OPERATION,
-                    "该组件被多处使用，直接修改可能影响其它页面，请改用 AI 修改。",
+                    f"该组件无法直接{action_label}：" + detail.strip(),
                     status_code=409,
-                    diagnostic={"sharedReason": anchor.get("sharedReason") or ""},
+                    diagnostic={
+                        "risk": risk,
+                        "sourceFile": anchor.get("file") or "",
+                        "parentFile": parent_file,
+                        "callSiteFile": call_site_file,
+                        "parentShared": parent_shared,
+                        "sharedReason": shared_reason,
+                    },
                 )
 
             file = str(move_anchor.get("file") or "")
@@ -469,14 +488,36 @@ class DirectOperationService:
             "callSiteFile": target.call_site_file,
             "placement": target.placement,
         }
-        try:
-            results = self._sandbox.resolve_targets(payload.sandbox_id, [request])
-        except SandboxError as exc:
+        results = None
+        last_error: SandboxError | None = None
+        # HMR / 其它直接操作可能在短暂窗口内重建 Vite 模块；解析器偶发
+        # 失败时重试一次，仍失败才对外报 RESOLVER_UNAVAILABLE。
+        for attempt in range(2):
+            try:
+                results = self._sandbox.resolve_targets(payload.sandbox_id, [request])
+                break
+            except SandboxError as exc:
+                last_error = exc
+                if attempt == 0:
+                    time.sleep(0.08)
+        if results is None and last_error is not None:
+            logger.warning(
+                "direct resolver unavailable sandbox=%s error=%s",
+                payload.sandbox_id,
+                last_error,
+                exc_info=True,
+            )
             raise DirectActionError(
                 DirectErrorCode.RESOLVER_UNAVAILABLE,
-                "目标解析服务暂时不可用，请稍后重试。",
+                f"目标解析服务暂时不可用：{last_error}",
                 status_code=503,
-            ) from exc
+                diagnostic={
+                    "resolverError": str(last_error)[:500],
+                    "file": target.file or "",
+                    "line": target.line,
+                    "column": target.column,
+                },
+            ) from last_error
         if results is None:
             raise DirectActionError(
                 DirectErrorCode.RESOLVER_UNAVAILABLE,
