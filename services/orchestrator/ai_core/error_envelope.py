@@ -268,6 +268,11 @@ _SPECS: dict[str, ErrorSpec] = {
     "DIRECT_ROLLBACK_FAILED": ErrorSpec(
         "DIRECT_OP", "FATAL", "修改失败且自动回滚未完成，请刷新页面检查代码。"
     ),
+    "DIRECT_REQUIRES_LLM": ErrorSpec(
+        "DIRECT_OP",
+        "DECISION_REQUIRED",
+        "这个组件不在基础模板范围内，需要由 AI 生成，是否继续？",
+    ),
     "BFF_INTERNAL_ERROR": ErrorSpec(
         "INTERNAL", "FATAL", "服务暂时不可用，已记录诊断编号，请稍后重试。"
     ),

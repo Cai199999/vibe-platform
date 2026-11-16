@@ -146,9 +146,14 @@ class AgentState(TypedDict, total=False):
     user_decision: dict[str, Any] | None
     # 决策轮次与结果：none / decided / cancelled / exhausted。
     decision_round: int
-    decision_outcome: Literal["none", "decided", "cancelled", "exhausted"]
+    decision_retry_count: int
+    decision_outcome: Literal[
+        "none", "decided", "cancelled", "exhausted", "visual_only"
+    ]
     # 已确认的候选区间：anchorId -> {range, candidateId}。
     decision_selections: dict[str, Any]
+    # 用户选择“仅视觉占位”时为 True：不写源码、不 commit。
+    visual_only: bool
     # 已确认的 callSite 覆盖：anchorId -> TargetAnchor（实例级修改）。
     decision_overrides: dict[str, Any]
 

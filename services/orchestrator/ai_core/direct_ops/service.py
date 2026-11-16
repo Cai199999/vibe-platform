@@ -22,6 +22,10 @@ from ai_core.adapters.sandbox import get_sandbox_provider
 from ai_core.agent.events import RunEventBuffer
 from ai_core.config import Settings, get_settings
 from ai_core.direct_ops.changelog import get_change_log_store
+from ai_core.direct_ops.failure_router import (
+    ROUTE_LLM_CODER,
+    route_add_component,
+)
 from ai_core.direct_ops.static_analysis import analyze_delete_anchor
 from ai_core.direct_ops.templates import (
     COMPONENT_TEMPLATES,
@@ -261,6 +265,22 @@ class DirectOperationService:
         timings: dict[str, float],
         started: float,
     ) -> DirectActionResponse:
+        # 入口分流必须先于沙盒 / 锚点访问：目录外组件直接转交 AI Coder，
+        # 不能因为沙盒暂时不可用而被误报为 Direct 工具失败。
+        if payload.action == "ADD_COMPONENT":
+            route = route_add_component(str(payload.payload.get("componentType") or ""))
+            if route.route == ROUTE_LLM_CODER:
+                raise DirectActionError(
+                    DirectErrorCode.ROUTE_TO_LLM,
+                    "该组件不在直接新增白名单内，需要交给 AI Coder 生成。",
+                    status_code=422,
+                    diagnostic={
+                        "route": route.route,
+                        "componentType": route.component_type,
+                        "reason": route.reason,
+                    },
+                )
+
         handle = self._sandbox.get(payload.sandbox_id)
         if handle.project_id != payload.project_id:
             raise DirectActionError(

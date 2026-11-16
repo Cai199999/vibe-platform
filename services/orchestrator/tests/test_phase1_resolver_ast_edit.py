@@ -1677,7 +1677,7 @@ class Phase1GraphE2ETest(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                item["action"] in {"select_target", "cancel"}
+                item["action"] in {"select_target", "retry", "cancel"}
                 for item in decision["options"]
             )
         )

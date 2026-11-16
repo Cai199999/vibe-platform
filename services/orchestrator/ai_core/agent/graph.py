@@ -75,7 +75,9 @@ from ai_core.domain.actions import is_create_action
 from ai_core.domain.decision import (
     ACTION_CANCEL,
     ACTION_MODIFY_CALL_SITE,
+    ACTION_RETRY,
     ACTION_SELECT_TARGET,
+    ACTION_VISUAL_ONLY,
     DECISION_KIND_AMBIGUOUS,
     DECISION_KIND_PROTECTED,
     DECISION_REQUIRED_EVENT,
@@ -1480,6 +1482,53 @@ class AgentGraphRunner:
                 "error_code": "DECISION_CANCELLED",
                 "error": "用户取消了本次修改",
                 "messages": [_message("decision_gate", "用户取消本次修改")],
+            }
+
+        if option.action == ACTION_RETRY:
+            # 只重跑确定性步骤；不重新调用 LLM。重试次数上限为 2，
+            # 到上限后 _build_pending_decision_payload 不再下发重试选项。
+            return {
+                "pending_decision": None,
+                "user_decision": {
+                    "optionId": option.option_id,
+                    "action": option.action,
+                    "decisionId": decision.decision_id,
+                },
+                "decision_round": decision.round,
+                "decision_retry_count": int(state.get("decision_retry_count") or 0) + 1,
+                "decision_outcome": "decided",
+                "status": "PLANNING",
+                "messages": [
+                    _message(
+                        "decision_gate",
+                        f"用户选择重试（{int(state.get('decision_retry_count') or 0) + 1}/2）",
+                    )
+                ],
+            }
+
+        if option.action == ACTION_VISUAL_ONLY:
+            # 视觉占位：不写源码、不 commit；Service 会丢弃草稿并返回
+            # committed=false。前端据 visual_only 保留幽灵节点。
+            return {
+                "pending_decision": None,
+                "user_decision": {
+                    "optionId": option.option_id,
+                    "action": option.action,
+                    "decisionId": decision.decision_id,
+                },
+                "decision_round": decision.round,
+                "decision_outcome": "visual_only",
+                "resolver_outcome": "visual_only",
+                "visual_only": True,
+                "status": "REJECTED",
+                "error_code": "VISUAL_ONLY",
+                "error": "用户选择仅视觉占位，代码未写入",
+                "messages": [
+                    _message(
+                        "decision_gate",
+                        "已降级为视觉占位，仅保留画面预览",
+                    )
+                ],
             }
 
         base_update = {
@@ -3938,6 +3987,23 @@ def _find_pending_decision(
     return None
 
 
+def _is_visual_safe_target(state: AgentState, anchor: dict[str, Any]) -> bool:
+    """新增组件或公共组件视觉修改允许降级为视觉占位。"""
+    annotation_id = str(anchor.get("annotationId") or "")
+    for item in (state.get("annotation_context") or {}).get("annotations", []):
+        annotation = item.get("annotation") or {}
+        item_id = (
+            annotation.get("annotationId")
+            or annotation.get("annotation_id")
+            or item.get("annotation_id")
+        )
+        if annotation_id and str(item_id or "") != annotation_id:
+            continue
+        if is_create_action(annotation.get("action")):
+            return True
+    return False
+
+
 def _build_pending_decision_payload(
     state: AgentState,
     kind: str,
@@ -4012,6 +4078,28 @@ def _build_pending_decision_payload(
         )
         reason = str(anchor.get("sharedReason") or "公共组件受保护")
 
+    retry_count = int(state.get("decision_retry_count") or 0)
+    if retry_count < 2:
+        options.append(
+            DecisionOption(
+                option_id=f"retry_{anchor_id}",
+                action=ACTION_RETRY,
+                label="重试本次修改",
+                description=(
+                    "保留当前目标与错误上下文，只重跑失败的确定性步骤，"
+                    f"不会重新调用 LLM（已重试 {retry_count}/2 次）"
+                ),
+            )
+        )
+    if kind == DECISION_KIND_PROTECTED or _is_visual_safe_target(state, anchor):
+        options.append(
+            DecisionOption(
+                option_id=f"visual_{anchor_id}",
+                action=ACTION_VISUAL_ONLY,
+                label="降级为视觉占位",
+                description="不写入源码、不产生 commit，仅在画布保留视觉预览",
+            )
+        )
     options.append(
         DecisionOption(
             option_id=f"cancel_{anchor_id}",

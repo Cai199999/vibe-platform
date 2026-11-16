@@ -47,6 +47,7 @@ class DirectErrorCode:
     TOOL_FAILED = "DIRECT_TOOL_FAILED"
     RESOLVER_UNAVAILABLE = "DIRECT_RESOLVER_UNAVAILABLE"
     ROLLBACK_FAILED = "DIRECT_ROLLBACK_FAILED"
+    ROUTE_TO_LLM = "DIRECT_REQUIRES_LLM"
 
 
 class DirectActionTarget(CamelModel):
@@ -110,12 +111,9 @@ class DirectActionPayload(CamelModel):
                     "MOVE_NODE 必须在 target.placement 中提供父容器定位信息"
                 )
         if self.action == "ADD_COMPONENT":
-            component_type = str(self.payload.get("componentType") or "")
-            if component_type not in ALLOWED_ADD_COMPONENTS:
-                raise ValueError(
-                    "ADD_COMPONENT 只支持白名单组件: "
-                    + ", ".join(ALLOWED_ADD_COMPONENTS)
-                )
+            component_type = str(self.payload.get("componentType") or "").strip()
+            if not component_type:
+                raise ValueError("ADD_COMPONENT 必须提供 payload.componentType")
         return self
 
 
@@ -152,6 +150,9 @@ class ChangeLogEntry(CamelModel):
     after_hash: str = ""
     commit_hash: str = ""
     risk: DirectActionRisk = "L0_DIRECT"
+    # 视觉占位 / 失败转译：applied=false 且 visual_only=true。
+    applied: bool = True
+    visual_only: bool = False
     created_at: datetime
 
 

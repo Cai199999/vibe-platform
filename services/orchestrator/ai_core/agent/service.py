@@ -90,6 +90,8 @@ from ai_core.domain.decision import (
 )
 from ai_core.domain.scope import memory_scope, scoped_checkpoint_key
 from ai_core.error_envelope import attach_error_envelope, envelope_from_code
+from ai_core.direct_ops.changelog import get_change_log_store
+from ai_core.domain.direct_ops import ChangeLogEntry
 from ai_core.config import Settings, get_settings
 from ai_core.project_lock import ProjectBusyError, project_write_lock
 from ai_core.adapters.sandbox import get_sandbox_provider
@@ -1549,6 +1551,8 @@ class RunExecutionService:
         elif status == "REJECTED":
             # 用户拒绝：丢弃草稿，不生成 commit，不写 thread 成功记忆。
             preview_url = self._revert_sandbox(prepared)
+            if bool(final_state.get("visual_only")):
+                self._record_visual_only_change(prepared, final_state)
 
         # 未获批准的终态（REJECTED / FAILED）：草稿必须丢弃，主工作树零变化。
         if status != "SUCCEEDED":
@@ -1565,6 +1569,11 @@ class RunExecutionService:
             error=error,
             retry_count=retry_count,
         )
+        if bool(final_state.get("visual_only")):
+            assistant_message = (
+                "已降级为视觉占位：代码未写入，也不会产生 Git commit。"
+                "当前画面仅用于预览，刷新后可在视觉草稿中恢复。"
+            )
         if status in {"REJECTED", "FAILED"}:
             # 主工作树未发生任何变化，返回初始快照才是真实状态。
             final_files = dict(
@@ -1654,6 +1663,8 @@ class RunExecutionService:
                     "previewUrl": preview_url,
                     "message": assistant_message,
                     "assistantMessage": assistant_message,
+                    "visualOnly": bool(final_state.get("visual_only")),
+                    "committed": not bool(final_state.get("visual_only")),
                     "usage": usage,
                 },
                 dedupe_key=f"run.rejected:{prepared.run_id}",
@@ -2701,7 +2712,56 @@ class RunExecutionService:
             error=state.get("error"),
             error_code=state.get("error_code"),
             background_available=bool(state.get("background_available")),
+            visual_only=bool(state.get("visual_only")),
+            committed=not bool(state.get("visual_only")),
         )
+
+    def _record_visual_only_change(
+        self,
+        prepared: PreparedRun,
+        final_state: dict[str, Any],
+    ) -> None:
+        """视觉占位不写代码，但必须进入 ChangeLog 供 Architect 感知。"""
+        annotations = list(final_state.get("annotations") or [])
+        create = any(
+            str(item.get("action") or "").upper() in {"CREATE_NEW", "ADD"}
+            for item in annotations
+        )
+        target = {}
+        if annotations:
+            first = annotations[0]
+            target = {
+                "file": first.get("targetFile") or first.get("file") or "",
+                "component": first.get("component") or "",
+                "anchorId": first.get("anchorId") or "",
+            }
+        try:
+            get_change_log_store().append(
+                ChangeLogEntry(
+                    change_id=f"chg_{uuid.uuid4().hex[:20]}",
+                    project_id=prepared.request.project_id,
+                    sandbox_id=prepared.handle.sandbox_id,
+                    run_id=prepared.run_id,
+                    actor="AI_RUN",
+                    action="ADD_COMPONENT" if create else "UPDATE_PROPS",
+                    target=target,
+                    summary="用户选择降级为视觉占位（代码未写入）",
+                    diff_summary="",
+                    before_hash="",
+                    after_hash="",
+                    commit_hash="",
+                    risk="L2_HITL",
+                    applied=False,
+                    visual_only=True,
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+        except Exception:  # noqa: BLE001 - 记录失败不能阻断 Run 收尾
+            logger.warning(
+                "failed to record visual-only changelog run_id=%s",
+                prepared.run_id,
+                exc_info=True,
+            )
 
     def _maybe_destroy(self, sandbox_id: str, request: ExecuteRunRequest) -> None:
         if request.options.keep_sandbox:

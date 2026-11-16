@@ -29,6 +29,7 @@ from ai_core.agent.service import (
 from ai_core.api import runs as runs_api
 from ai_core.domain.agent import AnnotationEnvelope, ExecuteRunRequest
 from ai_core.domain.decision import (
+    ACTION_RETRY,
     ACTION_CANCEL,
     ACTION_MODIFY_CALL_SITE,
     ACTION_SELECT_TARGET,
@@ -198,11 +199,16 @@ class DecisionPayloadTests(unittest.TestCase):
         self.assertEqual(decision.max_rounds, 3)
         self.assertEqual(
             [item.option_id for item in decision.options],
-            ["anc_ann_1_c1", "anc_ann_1_c2", "cancel_anc_ann_1"],
+            [
+                "anc_ann_1_c1",
+                "anc_ann_1_c2",
+                "retry_anc_ann_1",
+                "cancel_anc_ann_1",
+            ],
         )
         self.assertTrue(
             all(
-                item.action in {ACTION_SELECT_TARGET, ACTION_CANCEL}
+                item.action in {ACTION_SELECT_TARGET, ACTION_RETRY, ACTION_CANCEL}
                 for item in decision.options
             )
         )

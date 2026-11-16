@@ -447,9 +447,16 @@ class DirectOperationAddTest(unittest.TestCase):
         self.assertIn("toolbar primary", jsx)
         self.assertIn('style="border-radius: 8px"', jsx)
 
-    def test_add_component_rejects_unknown_type(self) -> None:
-        with self.assertRaises(ValueError):
-            _add_payload(payload={"componentType": "LoginForm"})
+    def test_unknown_component_routes_to_llm_before_sandbox_access(self) -> None:
+        def boom(_sandbox_id: str) -> Any:
+            raise AssertionError("路由前不应访问沙盒")
+
+        self.sandbox.get = boom  # type: ignore[method-assign]
+
+        with self.assertRaises(DirectActionError) as ctx:
+            self.service.execute(_add_payload(payload={"componentType": "LoginForm"}))
+        self.assertEqual(ctx.exception.code, DirectErrorCode.ROUTE_TO_LLM)
+        self.assertEqual(self.sandbox.patches, [])
 
     def test_node_delta_mismatch_blocks_write(self) -> None:
         original = self.sandbox.apply_ast_edit

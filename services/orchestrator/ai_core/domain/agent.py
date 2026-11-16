@@ -596,6 +596,9 @@ class ExecuteRunResponse(CamelModel):
     # “转后台运行”，而不是普通失败。
     error_code: str | None = None
     background_available: bool = False
+    # 仅视觉占位：不写源码、不 commit；前端应保留视觉草稿。
+    visual_only: bool = False
+    committed: bool = True
 
 
 class RollbackRunRequest(CamelModel):

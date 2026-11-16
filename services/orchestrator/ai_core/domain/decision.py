@@ -32,12 +32,26 @@ DECISION_KIND_PROTECTED = "protected_component"
 # ---- 安全动作（白名单）----
 ACTION_SELECT_TARGET = "select_target"
 ACTION_MODIFY_CALL_SITE = "modify_call_site"
+ACTION_RETRY = "retry"
+ACTION_VISUAL_ONLY = "visual_placeholder"
 ACTION_CANCEL = "cancel"
 
-DecisionAction = Literal["select_target", "modify_call_site", "cancel"]
+DecisionAction = Literal[
+    "select_target",
+    "modify_call_site",
+    "retry",
+    "visual_placeholder",
+    "cancel",
+]
 
 SAFE_DECISION_ACTIONS = frozenset(
-    {ACTION_SELECT_TARGET, ACTION_MODIFY_CALL_SITE, ACTION_CANCEL}
+    {
+        ACTION_SELECT_TARGET,
+        ACTION_MODIFY_CALL_SITE,
+        ACTION_RETRY,
+        ACTION_VISUAL_ONLY,
+        ACTION_CANCEL,
+    }
 )
 
 # 防御性黑名单：即使前端 / 历史检查点伪造了这些动作，服务端也直接拒绝。
@@ -131,7 +145,9 @@ class DecisionListResponse(CamelModel):
 __all__ = [
     "ACTION_CANCEL",
     "ACTION_MODIFY_CALL_SITE",
+    "ACTION_RETRY",
     "ACTION_SELECT_TARGET",
+    "ACTION_VISUAL_ONLY",
     "AWAITING_DECISION",
     "DECISION_ANSWERED_EVENT",
     "DECISION_ERROR_CANCELLED",
