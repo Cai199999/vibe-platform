@@ -850,6 +850,7 @@ class ArchitectService:
                     active.contract.model_copy(deep=True) if active.contract else None
                 ),
                 messages=[dict(item) for item in active.messages],
+                direct_changelog=list(active.state.get("direct_changelog") or []),
                 error=active.error,
                 error_code=active.error_code,
             )

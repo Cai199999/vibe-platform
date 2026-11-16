@@ -543,7 +543,14 @@ function main() {
         '删除后 AST 与预期的“原树减目标子树”不一致，已阻断',
       )
     }
-    return { status: 'OK', content: next }
+    return {
+      status: 'OK',
+      content: next,
+      nodeCountBefore: countJsxNodes(ast),
+      nodeCountAfter: countJsxNodes(nextAst),
+      // 目标子树本身的 JSX 节点数（含根），用于精确校验删除量。
+      targetNodeCount: countJsxNodes(target),
+    }
   }
 
   if (operation === 'insert') {

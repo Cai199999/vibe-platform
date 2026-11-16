@@ -21,10 +21,10 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - MOVE_NODE：同文件容器内移动，placement.siblingIndex 为移除后的最终序号；节点数量守恒校验；公共组件/跨文件转 HITL/AI；前端 ↕ 移到容器末尾。
 - ADD_COMPONENT：Button/Input/Text/Card 白名单模板，AST insert + 节点增量校验 + import 补全；前端 ➕ 下拉直接插入。
 - ChangeLog 持久化：JSONL 落盘 `data/changelog.jsonl`，重启后 Architect 仍可读取最近记录。
-- DELETE_NODE 前置静态分析：共享组件 / map 循环 / 路由根三类风险；前端 ❌ 只分析不删除。
+- DELETE_NODE 闭环：静态分析 safe=false 前端拦截；safe=true 二次 Revision 校验 + AST 删除 + 子树节点数守恒校验 + commit + ChangeLog。Direct Ops 四项动作 ✏️/↕/➕/❌ 全部闭环。
 
 ## 最新验证
-前端 16 项 Vitest、Python 590 项 unittest 通过；BFF 单测通过。真实沙盒 ADD_COMPONENT 1959ms、MOVE_NODE 2448ms、UPDATE_TEXT 1673ms；ChangeLog 重启后仍可读取。DELETE 分析对 `<h1>` 判定 safe、`<main>` 判定路由根拦截。ChangeLog → DeepSeek Helper 已实测能说出用户刚改的标题。
+前端 16 项 Vitest、Python 594 项 unittest 通过；BFF 单测通过。终极真实沙盒 E2E（无 LLM）：UPDATE_TEXT 1604ms、ADD_COMPONENT 1523ms、DELETE_NODE 1603ms，全部低于阈值。ChangeLog 落盘并重启可读；Architect 快照含 3 条直接操作，DeepSeek Helper 准确复述“改文案/加按钮/删说明段落”。删除静态分析对根节点、map 节点、公共组件全部拦截。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 无持久化；沙盒无 gVisor；未云端部署。

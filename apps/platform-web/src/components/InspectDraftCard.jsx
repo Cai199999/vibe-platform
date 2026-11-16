@@ -25,6 +25,7 @@ export default function InspectDraftCard({
 }) {
   const [textOpen, setTextOpen] = useState(false)
   const [addOpen, setAddOpen] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState(false)
   const [directText, setDirectText] = useState('')
   const [directBusy, setDirectBusy] = useState(false)
   const [directHint, setDirectHint] = useState('')
@@ -59,9 +60,12 @@ export default function InspectDraftCard({
       } else if (result.status === 'SUCCEEDED') {
         setDirectHint(`已保存 · ${result.latencyMs}ms`)
         setTextOpen(false)
+        setDeleteConfirm(false)
       }
+      return result
     } catch (cause) {
       setDirectHint(`操作失败：${cause?.message || cause}`)
+      throw cause
     } finally {
       setDirectBusy(false)
     }
@@ -90,12 +94,14 @@ export default function InspectDraftCard({
     try {
       const result = await onAnalyzeDelete({ target: source })
       if (!result) return
+      setDeleteConfirm(Boolean(result.safe))
       setDirectHint(
         result.safe
-          ? '静态判定通过：可以安全删除（删除执行待接入）'
+          ? '静态判定通过，请确认是否删除'
           : `已拦截：${(result.reasons || []).join('；')}`,
       )
     } catch (cause) {
+      setDeleteConfirm(false)
       setDirectHint(`删除分析失败：${cause?.message || cause}`)
     } finally {
       setDirectBusy(false)
@@ -212,6 +218,27 @@ export default function InspectDraftCard({
           </span>
         )}
       </div>
+
+      {deleteConfirm && (
+        <div className="inspect-direct-delete-confirm" data-direct-delete-confirm>
+          <span>静态判定通过，确认删除这个组件？</span>
+          <button
+            type="button"
+            className="is-danger"
+            disabled={directBusy}
+            onClick={() => runDirect('DELETE_NODE', {}, false, source)}
+          >
+            确认删除
+          </button>
+          <button
+            type="button"
+            disabled={directBusy}
+            onClick={() => setDeleteConfirm(false)}
+          >
+            取消
+          </button>
+        </div>
+      )}
 
       {addOpen && draft.container?.source && (
         <div className="inspect-direct-add-menu" data-direct-add-menu>

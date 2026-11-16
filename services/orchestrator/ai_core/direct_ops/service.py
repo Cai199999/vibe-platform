@@ -559,7 +559,21 @@ class DirectOperationService:
             if anchor.get("isShared") or anchor.get("protected"):
                 return "L2_HITL"
             return "L0_DIRECT"
-        # DELETE_NODE 仍在后续阶段实现。
+        if payload.action == "DELETE_NODE":
+            safe = anchor.get("deleteSafe")
+            if safe is True:
+                return "L0_DIRECT"
+            if safe is False:
+                return "L2_HITL"
+            # 旧 Resolver / 测试替身没有 deleteSafe 字段时按同一规则兜底。
+            if (
+                anchor.get("isShared")
+                or anchor.get("protected")
+                or anchor.get("inMap")
+                or anchor.get("isRouteRoot")
+            ):
+                return "L2_HITL"
+            return "L0_DIRECT"
         return "L3_AI_REQUIRED"
 
     def _build_new_content(
@@ -647,6 +661,13 @@ class DirectOperationService:
                 "insertIndex": index,
                 "jsxCode": template.jsx,
             }
+        elif payload.action == "DELETE_NODE":
+            edit = {
+                "operation": "delete",
+                "file": file,
+                "anchorRange": anchor.get("range") or {},
+                "targetRange": anchor.get("range") or {},
+            }
         else:
             raise DirectActionError(
                 DirectErrorCode.UNSAFE_OPERATION,
@@ -688,6 +709,33 @@ class DirectOperationService:
                     status_code=409,
                 )
             content = ensure_imports(content, template.imports)
+        if payload.action == "DELETE_NODE":
+            before = result.get("nodeCountBefore")
+            after = result.get("nodeCountAfter")
+            target_nodes = result.get("targetNodeCount")
+            if not (
+                isinstance(before, int)
+                and isinstance(after, int)
+                and isinstance(target_nodes, int)
+            ):
+                raise DirectActionError(
+                    DirectErrorCode.TOOL_FAILED,
+                    "删除组件缺少节点数量校验结果，已阻断。",
+                    status_code=409,
+                )
+            removed = before - after
+            if target_nodes < 1 or removed != target_nodes:
+                raise DirectActionError(
+                    DirectErrorCode.TOOL_FAILED,
+                    "删除的节点范围与目标不一致，代码已保持原样。",
+                    status_code=409,
+                    diagnostic={
+                        "nodeCountBefore": before,
+                        "nodeCountAfter": after,
+                        "removed": removed,
+                        "targetNodeCount": target_nodes,
+                    },
+                )
         return content
 
     def _rollback(self, payload: DirectActionPayload, file: str, old: str) -> None:
@@ -725,6 +773,13 @@ class DirectOperationService:
                 f"在 {component} 中新增 "
                 f"{payload.payload.get('componentType') or '基础组件'}"
             )
+        elif payload.action == "DELETE_NODE":
+            node_preview = " ".join(str(anchor.get("nodeSource") or "").split())[:80]
+            summary = (
+                f"删除 {component} 内的节点 {node_preview}"
+                if node_preview
+                else f"删除 {component} 内的节点"
+            )
         else:
             summary = f"对 {component} 执行 {payload.action}"
         entry = ChangeLogEntry(
@@ -739,6 +794,9 @@ class DirectOperationService:
                 "anchorId": anchor.get("anchorId") or "",
                 "range": anchor.get("range") or {},
                 "placement": placement,
+                "nodeSource": " ".join(str(anchor.get("nodeSource") or "").split())[
+                    :200
+                ],
             },
             summary=summary,
             diff_summary=_diff_summary(before, after),

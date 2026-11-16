@@ -441,6 +441,25 @@ class AstEditScriptTest(unittest.TestCase):
             self.assertIn("bg-blue-600", content)
             self.assertIn("<p>欢迎</p>", content)
 
+    def test_delete_reports_exact_subtree_node_count(self) -> None:
+        source = "<main><h1>标题</h1><p>说明</p></main>"
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_project(Path(tmp), {"src/App.jsx": source})
+            code, payload, stderr = self._edit(
+                {
+                    "workdir": tmp,
+                    "file": "src/App.jsx",
+                    "operation": "delete",
+                    "anchorRange": _fix_range(source, "<h1>", "</h1>"),
+                    "targetRange": _fix_range(source, "<h1>", "</h1>"),
+                }
+            )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(payload["status"], "OK")
+        self.assertEqual(payload["nodeCountBefore"], 3)
+        self.assertEqual(payload["nodeCountAfter"], 2)
+        self.assertEqual(payload["targetNodeCount"], 1)
+
     def test_insert_sibling_uses_anchor_indent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _write_project(Path(tmp), {"src/App.jsx": EDIT_SOURCE})

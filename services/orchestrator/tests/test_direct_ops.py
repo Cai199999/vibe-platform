@@ -50,6 +50,15 @@ MOVED = """export default function App() {
 }
 """
 
+DELETED = """export default function App() {
+  return (
+    <main>
+      <h1>待办</h1>
+    </main>
+  );
+}
+"""
+
 ADDED = """export default function App() {
   return (
     <main>
@@ -73,6 +82,10 @@ def _anchor(*, shared: bool = False) -> dict[str, Any]:
         "isShared": shared,
         "protected": shared,
         "sharedReason": "被 2 个文件引用" if shared else "",
+        "inMap": False,
+        "isRouteRoot": False,
+        "deleteSafe": not shared,
+        "deleteReasons": ["被 2 个文件引用"] if shared else [],
     }
 
 
@@ -136,6 +149,14 @@ class _FakeSandbox:
                 "content": ADDED,
                 "nodeCountBefore": 3,
                 "nodeCountAfter": 4,
+            }
+        if operation == "delete":
+            return {
+                "status": "OK",
+                "content": DELETED,
+                "nodeCountBefore": 3,
+                "nodeCountAfter": 2,
+                "targetNodeCount": 1,
             }
         return {"status": "OK", "content": UPDATED}
 
@@ -290,6 +311,91 @@ def _add_payload(**overrides: Any) -> DirectActionPayload:
     }
     data.update(overrides)
     return DirectActionPayload.model_validate(data)
+
+
+def _delete_payload(**overrides: Any) -> DirectActionPayload:
+    data = {
+        "directActionId": "dact_delete",
+        "idempotencyKey": "proj_direct:dact_delete",
+        "projectId": PROJECT_ID,
+        "sandboxId": SANDBOX_ID,
+        "baseRevision": BASE_SHA,
+        "action": "DELETE_NODE",
+        "target": {
+            "anchorId": "anc_dact_delete",
+            "file": "src/App.jsx",
+            "line": 4,
+            "column": 7,
+            "component": "App",
+        },
+        "payload": {},
+        "options": {"source": "FLOATING_TOOLBAR", "dryRun": False},
+    }
+    data.update(overrides)
+    return DirectActionPayload.model_validate(data)
+
+
+class DirectOperationDeleteTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryChangeLogStore(max_entries=50)
+        self.store.clear()
+        self.sandbox = _FakeSandbox()
+        self.service = DirectOperationService(
+            sandbox=self.sandbox,  # type: ignore[arg-type]
+            settings=_Settings(),  # type: ignore[arg-type]
+        )
+        self.service._changelog = self.store
+
+    def tearDown(self) -> None:
+        from ai_core.direct_ops import service as service_module
+
+        with service_module._COMPLETED_LOCK:
+            service_module._COMPLETED.clear()
+
+    def test_safe_delete_commits_and_changelog(self) -> None:
+        payload = _delete_payload()
+
+        response = self.service.execute(payload)
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(response.risk, "L0_DIRECT")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "delete")
+        self.assertEqual(self.sandbox.patches, [{"src/App.jsx": DELETED}])
+        self.assertEqual(len(self.sandbox.commits), 1)
+        entries = self.store.list_for_project(PROJECT_ID)
+        self.assertIn("内的节点", entries[0].summary)
+        self.assertIn("<h1>", entries[0].summary)
+
+    def test_unsafe_delete_is_blocked(self) -> None:
+        self.sandbox.anchor = {
+            **_anchor(),
+            "deleteSafe": False,
+            "isRouteRoot": True,
+            "deleteReasons": ["组件是页面顶层 JSX 根节点"],
+        }
+        payload = _delete_payload()
+
+        with self.assertRaises(DirectActionError) as ctx:
+            self.service.execute(payload)
+
+        self.assertEqual(ctx.exception.code, DirectErrorCode.UNSAFE_OPERATION)
+        self.assertEqual(self.sandbox.patches, [])
+
+    def test_delete_node_count_mismatch_blocks_write(self) -> None:
+        original = self.sandbox.apply_ast_edit
+
+        def broken(sandbox_id: str, edit: dict[str, Any], draft_id: str | None = None):
+            result = original(sandbox_id, edit, draft_id)
+            result["targetNodeCount"] = 2
+            return result
+
+        self.sandbox.apply_ast_edit = broken  # type: ignore[method-assign]
+
+        with self.assertRaises(DirectActionError) as ctx:
+            self.service.execute(_delete_payload())
+
+        self.assertEqual(ctx.exception.code, DirectErrorCode.TOOL_FAILED)
+        self.assertEqual(self.sandbox.patches, [])
 
 
 class DirectOperationAddTest(unittest.TestCase):

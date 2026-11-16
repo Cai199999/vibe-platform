@@ -11640,3 +11640,26 @@ body.is-viewport-panning * {
 .inspect-direct-add-menu button:hover:not(:disabled) {
   border-color: rgba(96, 165, 250, 0.75);
 }
+
+.inspect-direct-delete-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 2px 4px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.inspect-direct-delete-confirm button {
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.inspect-direct-delete-confirm button.is-danger {
+  border-color: rgba(248, 113, 113, 0.55);
+  background: rgba(248, 113, 113, 0.12);
+}

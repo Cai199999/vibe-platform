@@ -616,5 +616,7 @@ class ArchitectSnapshotResponse(CamelModel):
     conflict: ArchitectContractConflict | None = None
     contract: ArchitectContract | None = None
     messages: list[dict[str, Any]] = Field(default_factory=list)
+    # 最近 Direct Ops 摘要；便于前端 / 诊断确认 Architect 是否真的看到。
+    direct_changelog: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
     error_code: str | None = None
