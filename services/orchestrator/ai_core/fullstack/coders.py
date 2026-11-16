@@ -994,6 +994,87 @@ _NON_COLLECTION_SUFFIXES = (
     "/extract",
 )
 
+# 认证 / 会话 / 账号相关路径是“动作端点组”，不是独立实体资源。
+# 这些资源在建模上对应 users 表：登录、注册、登出、刷新令牌都是对
+# 用户的动作，不能要求 DDL 里存在 auth / session / account 表。
+ACTION_RESOURCE_ROOTS = frozenset(
+    {
+        "auth",
+        "authentication",
+        "authorize",
+        "session",
+        "sessions",
+        "account",
+        "accounts",
+        "login",
+        "logout",
+        "register",
+        "signup",
+        "signin",
+        "signout",
+        "token",
+        "tokens",
+        "password",
+        "passwords",
+        "credential",
+        "credentials",
+    }
+)
+_AUTH_ACTION_RESOURCE_TABLES = (
+    "users",
+    "user",
+    "accounts",
+    "account",
+    "members",
+    "memberships",
+)
+
+
+def _path_resource(path: str) -> str:
+    """提取 ``/api/<version>/<resource>`` 中的资源段。"""
+    segments = [segment for segment in str(path or "").split("/") if segment]
+    if len(segments) < 2 or segments[0].lower() != "api":
+        return ""
+    if len(segments) >= 3 and re.match(r"^v\d+$", segments[1].lower()):
+        return segments[2]
+    return segments[1]
+
+
+def is_action_resource(resource: str) -> bool:
+    """判断资源名是否属于认证 / 会话 / 账号动作组。"""
+    value = str(resource or "").strip().lower()
+    if not value:
+        return False
+    return (
+        value in ACTION_RESOURCE_ROOTS or _singular_word(value) in ACTION_RESOURCE_ROOTS
+    )
+
+
+def action_resource_table(
+    resource: str,
+    tables: Iterable[str],
+) -> str:
+    """把认证类动作资源映射到真实业务表（优先 users）。
+
+    返回空字符串表示当前 DDL 没有任何可承接的用户表；调用方应跳过
+    “集合根必须有同名表”的校验，而不是误报契约矛盾。
+    """
+    if not is_action_resource(resource):
+        return ""
+    table_names = [str(item) for item in tables]
+    by_singular = {}
+    for table in table_names:
+        lowered = table.lower()
+        by_singular.setdefault(lowered, table)
+        by_singular.setdefault(_singular_word(lowered), table)
+    for candidate in _AUTH_ACTION_RESOURCE_TABLES:
+        hit = by_singular.get(candidate.lower()) or by_singular.get(
+            _singular_word(candidate)
+        )
+        if hit:
+            return hit
+    return ""
+
 
 def _is_collection_candidate(path: str) -> bool:
     """静态、以 /api/ 开头、且不是动作 / 流式端点的路径。"""
@@ -1001,6 +1082,10 @@ def _is_collection_candidate(path: str) -> bool:
     if not normalized.startswith("/api/"):
         return False
     if _has_path_params(normalized):
+        return False
+    # 认证 / 会话 / 账号是“动作端点组”，不是 CRUD 集合。即使模型写成
+    # 裸的 /api/v1/auth，也不能把它当成前端数据面板的集合根。
+    if is_action_resource(_path_resource(normalized)):
         return False
     lowered = normalized.rstrip("/").lower()
     return not any(
@@ -1046,6 +1131,9 @@ def collection_path(routes: Iterable[ArchitectApiRoute]) -> str:
     for route in route_list:
         path = str(route.path or "").split("?", 1)[0].strip()
         if not path.startswith("/api/"):
+            continue
+        # 认证 / 会话类动作端点不能作为集合根；继续找下一个真实资源。
+        if is_action_resource(_path_resource(path)):
             continue
         segments = [segment for segment in path.split("/") if segment]
         # 至少保留 /api + 版本号 + 资源名；没有版本号时保留 /api + 资源名。
@@ -4517,9 +4605,11 @@ __all__ = [
     "API_PORT",
     "DATABASE_ENGINE_LABELS",
     "DdlColumn",
+    "ACTION_RESOURCE_ROOTS",
     "DdlTable",
     "GeneratedBundle",
     "PRODUCTION_ENGINES",
+    "action_resource_table",
     "check_orm_schema",
     "collection_path",
     "contract_database_engine",
@@ -4533,6 +4623,7 @@ __all__ = [
     "generate_frontend_bundle",
     "generate_frontend_skeleton_bundle",
     "generate_infra_bundle",
+    "is_action_resource",
     "item_path",
     "parse_ddl_tables",
     "select_core_table",

@@ -283,6 +283,9 @@ class ArchitectState(TypedDict, total=False):
     contract_id: str
     contract_decision: str
     contract_feedback: str
+    # 契约与 DDL 命名矛盾 → AWAITING_DECISION，由用户三选一。
+    contract_conflict: dict[str, Any]
+    conflict_resolution_applied: bool
     repair_count: int
     repair_limit: int
     contract_revision_count: int

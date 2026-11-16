@@ -14,6 +14,7 @@ import unittest
 import uuid
 from dataclasses import replace
 from typing import Any
+from unittest.mock import patch
 
 from ai_core.agent.checkpoint import MemoryCheckpointerProvider
 from ai_core.agent.events import RunEventBuffer
@@ -45,6 +46,9 @@ from ai_core.architect.schemas import (
 )
 from ai_core.config import Settings
 from ai_core.domain.architect import (
+    ArchitectComponentInteraction,
+    ArchitectConflictDecisionRequest,
+    ArchitectContractConflict,
     ArchitectHelperRequest,
     ArchitectQuestion,
     ArchitectRunRequest,
@@ -118,11 +122,11 @@ def _answer_for(question: dict[str, Any], shape: str) -> dict[str, Any]:
 
 
 class ArchitectHarness:
-    def __init__(self, *, max_rounds: int = 5) -> None:
+    def __init__(self, *, max_rounds: int = 5, llm: Any | None = None) -> None:
         self.run_id = f"test_{uuid.uuid4().hex[:12]}"
         self.buffer = RunEventBuffer(self.run_id)
         self.runner = ArchitectGraphRunner(
-            MockArchitectLLM(),
+            llm or MockArchitectLLM(),
             event_sink=self.buffer,
             checkpointer_provider=MemoryCheckpointerProvider(),
         )
@@ -977,6 +981,10 @@ class ArchitectSubresourcePromptTest(unittest.TestCase):
         self.assertIn("profiles", system)
         self.assertIn("relations", system)
         self.assertIn("禁止", system)
+        # 资源 / 动作分离：认证接口不得被建模为独立集合与独立表。
+        self.assertIn("资源与动作分离铁律", system)
+        self.assertIn("/api/v1/users/login", system)
+        self.assertIn("禁止把 /auth", system)
 
     def test_revise_prompt_requires_explicit_child_table(self) -> None:
         llm, client = self._llm()
@@ -990,6 +998,8 @@ class ArchitectSubresourcePromptTest(unittest.TestCase):
         self.assertIn("/users/{user_id}/profile", system)
         self.assertIn("databaseDdl", system)
         self.assertIn("禁止依赖隐式推断", system)
+        self.assertIn("必须区分资源与动作", system)
+        self.assertIn("禁止把 /auth", system)
         self.assertIn("补充 /users/{id}/profile", human)
 
 
@@ -1073,6 +1083,244 @@ class ArchitectHelperTest(unittest.TestCase):
         )
         with self.assertRaises(Exception):
             service.helper("arc_missing_helper_run", request)
+
+
+class _NamingConflictLLM(MockArchitectLLM):
+    """模拟“自动修复耗尽后仍有集合根 ↔ 表名矛盾”的契约。"""
+
+    def draft_contract(self, context: ArchitectContext) -> ContractDraft:
+        base = super().draft_contract(context)
+        routes = [
+            ArchitectApiRoute(
+                method="GET",
+                path="/api/v1/orders",
+                response="订单列表",
+                description="查询订单",
+            ),
+            ArchitectApiRoute(
+                method="POST",
+                path="/api/v1/orders",
+                request="订单字段",
+                response="新订单",
+                description="创建订单",
+            ),
+            ArchitectApiRoute(
+                method="GET",
+                path="/api/v1/orders/{id}",
+                response="订单详情",
+                description="订单详情",
+            ),
+        ]
+        interactions = [
+            ArchitectComponentInteraction(
+                component="OrderList",
+                event="mount",
+                api_route="GET /api/v1/orders",
+                logic="加载订单列表",
+            ),
+            ArchitectComponentInteraction(
+                component="OrderForm",
+                event="submit",
+                api_route="POST /api/v1/orders",
+                logic="提交新订单",
+            ),
+        ]
+        ddl = (
+            "CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR(64));\n"
+            "CREATE TABLE resumes (id BIGINT PRIMARY KEY, user_id BIGINT);"
+        )
+        return replace(
+            base,
+            api_routes=routes,
+            component_interactions=interactions,
+            database_ddl=ddl,
+        )
+
+    def revise_contract(
+        self,
+        context: ArchitectContext,
+        previous: ContractDraft,
+        feedback: str,
+    ) -> ContractDraft:
+        # 模拟模型“修不动”：自动维修一次后仍是同一份矛盾契约。
+        return self.draft_contract(context)
+
+
+class ContractConflictDecisionTest(unittest.TestCase):
+    """自动修复失败后必须停下来向用户要决策，而不是直接 FAILED。"""
+
+    def _drive_to_conflict(self) -> ArchitectHarness:
+        harness = ArchitectHarness(llm=_NamingConflictLLM())
+        payload = harness.outcome.interrupt or {}
+        for _ in range(10):
+            if payload.get("kind") == "contract_naming_conflict":
+                return harness
+            if payload.get("kind") == "contract_confirmation":
+                self.fail("矛盾契约不应直接进入确认")
+            harness.assert_shape_question_or_slots(payload, "full_stack_system")
+            payload = harness.answer(payload, "full_stack_system")
+        self.fail(f"未在预期轮次进入冲突决策: {payload}")
+
+    def _resume(self, harness: ArchitectHarness, option_id: str) -> Any:
+        harness.outcome = harness.runner.run(
+            {},
+            run_id=harness.run_id,
+            resume={"optionId": option_id},
+        )
+        return harness.outcome
+
+    def test_repair_exhausted_pauses_for_user_decision(self) -> None:
+        harness = self._drive_to_conflict()
+        payload = harness.outcome.interrupt or {}
+
+        self.assertEqual(payload.get("kind"), "contract_naming_conflict")
+        self.assertEqual(payload.get("apiCollection"), "/api/v1/orders")
+        self.assertEqual(payload.get("resource"), "orders")
+        actions = {item.get("action") for item in payload.get("options") or []}
+        self.assertIn("MAP_TO_TABLE", actions)
+        self.assertIn("CREATE_TABLE", actions)
+        self.assertIn("CANCEL", actions)
+        self.assertEqual(payload.get("status"), "PENDING")
+        # 状态必须是等待决策，而不是终态失败。
+        self.assertEqual(harness.outcome.state.get("status"), "AWAITING_DECISION")
+
+    def test_create_table_resolution_reaches_contract_confirmation(self) -> None:
+        harness = self._drive_to_conflict()
+
+        outcome = self._resume(harness, "create_table")
+
+        payload = outcome.interrupt or {}
+        self.assertTrue(outcome.interrupted)
+        self.assertEqual(payload.get("kind"), "contract_confirmation")
+        contract = payload.get("contract") or {}
+        self.assertIn(
+            "CREATE TABLE IF NOT EXISTS orders", contract.get("databaseDdl", "")
+        )
+        self.assertTrue(
+            any(
+                item.get("path") == "/api/v1/orders"
+                for item in contract.get("apiRoutes") or []
+            )
+        )
+
+    def test_map_to_table_resolution_rewrites_collection_root(self) -> None:
+        harness = self._drive_to_conflict()
+        conflict = harness.outcome.interrupt or {}
+        map_option = next(
+            item
+            for item in conflict.get("options") or []
+            if item.get("action") == "MAP_TO_TABLE"
+        )
+
+        outcome = self._resume(harness, map_option["optionId"])
+
+        payload = outcome.interrupt or {}
+        self.assertEqual(payload.get("kind"), "contract_confirmation")
+        contract = payload.get("contract") or {}
+        target = map_option.get("targetTable")
+        self.assertTrue(
+            any(
+                str(item.get("path") or "") == f"/api/v1/{target}"
+                for item in contract.get("apiRoutes") or []
+            ),
+            contract.get("apiRoutes"),
+        )
+
+    def test_cancel_resolution_ends_run_without_contract(self) -> None:
+        harness = self._drive_to_conflict()
+
+        outcome = self._resume(harness, "cancel")
+
+        self.assertFalse(outcome.interrupted)
+        self.assertEqual(outcome.state.get("status"), "CANCELLED")
+
+
+class ContractConflictServiceTest(unittest.TestCase):
+    """服务层只接受服务端下发的 optionId，并正确推进状态。"""
+
+    def _register_active(self) -> ActiveArchitectRun:
+        run_id = f"conflict_{uuid.uuid4().hex[:10]}"
+        request = ArchitectRunRequest.model_validate(
+            {
+                "projectId": "project_conflict_test",
+                "projectName": "冲突决策测试项目",
+                "options": {"llmProvider": "mock", "ragProvider": "markdown"},
+            }
+        )
+        conflict = ArchitectContractConflict.model_validate(
+            {
+                "conflictId": f"ccf_{run_id}",
+                "runId": run_id,
+                "contractId": "ctr_conflict",
+                "appShape": "full_stack_system",
+                "message": "API 集合 /api/v1/orders 对应的业务表 orders 不在 DDL 中",
+                "apiCollection": "/api/v1/orders",
+                "resource": "orders",
+                "missingTable": "orders",
+                "suggestedTable": "resumes",
+                "tables": ["users", "resumes"],
+                "options": [
+                    {
+                        "optionId": "map_to_table",
+                        "action": "MAP_TO_TABLE",
+                        "label": "映射到 resumes",
+                        "targetTable": "resumes",
+                    },
+                    {
+                        "optionId": "create_table",
+                        "action": "CREATE_TABLE",
+                        "label": "新建 orders 表",
+                        "targetTable": "orders",
+                    },
+                    {
+                        "optionId": "cancel",
+                        "action": "CANCEL",
+                        "label": "取消",
+                    },
+                ],
+            }
+        )
+        active = ActiveArchitectRun(
+            run_id=run_id,
+            fingerprint="conflict-test",
+            request=request,
+            llm=MockArchitectLLM(),
+            buffer=RunEventBuffer(run_id),
+            status="AWAITING_DECISION",
+            conflict=conflict,
+        )
+        with architect_service_module._ACTIVE_LOCK:
+            architect_service_module._ACTIVE_RUNS[run_id] = active
+        self.addCleanup(lambda: architect_service_module._ACTIVE_RUNS.pop(run_id, None))
+        return active
+
+    def test_valid_option_clears_conflict_and_resumes_graph(self) -> None:
+        active = self._register_active()
+        service = ArchitectService(llm=MockArchitectLLM())
+        request = ArchitectConflictDecisionRequest.model_validate(
+            {"optionId": "create_table", "comment": "保留现有接口"}
+        )
+
+        with patch.object(ArchitectService, "_resume_worker", lambda *args: None):
+            response = service.decide_conflict(
+                active.run_id, active.conflict.conflict_id, request
+            )
+
+        self.assertEqual(response.conflict.status, "ANSWERED")
+        self.assertEqual(active.status, "ANALYZING")
+        self.assertIsNone(active.conflict)
+
+    def test_invalid_option_is_rejected(self) -> None:
+        active = self._register_active()
+        service = ArchitectService(llm=MockArchitectLLM())
+        request = ArchitectConflictDecisionRequest.model_validate(
+            {"optionId": "drop_database"}
+        )
+
+        with self.assertRaises(Exception):
+            service.decide_conflict(active.run_id, active.conflict.conflict_id, request)
+        self.assertEqual(active.status, "AWAITING_DECISION")
+        self.assertIsNotNone(active.conflict)
 
 
 if __name__ == "__main__":

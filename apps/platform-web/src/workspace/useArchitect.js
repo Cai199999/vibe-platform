@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   fetchArchitectAnswers,
   fetchArchitectCancel,
+  fetchArchitectConflictDecision,
   fetchArchitectDecision,
   fetchArchitectHelper,
   streamArchitect,
@@ -145,6 +146,8 @@ export const EMPTY_ARCHITECT = {
   round: 0,
   maxRounds: 10,
   clarification: null,
+  // status=AWAITING_DECISION 时非空：契约与 DDL 命名冲突，等待用户三选一。
+  conflict: null,
   contract: null,
   citations: [],
   messages: [],
@@ -153,6 +156,7 @@ export const EMPTY_ARCHITECT = {
   submitting: false,
   answerSubmitting: false,
   decisionSubmitting: false,
+  conflictSubmitting: false,
   cancelRequested: false,
   updatedAt: null,
   // 影子助手的独立会话：只读问答，不影响主状态机。
@@ -179,6 +183,7 @@ function loadStates() {
         submitting: false,
         answerSubmitting: false,
         decisionSubmitting: false,
+        conflictSubmitting: false,
         cancelRequested: Boolean(saved.cancelRequested),
         messages: Array.isArray(saved.messages) ? saved.messages : [],
         helper: {
@@ -250,7 +255,7 @@ function answerSummary(payload, questions) {
   return lines.join('\n')
 }
 
-function reduceArchitect(state, event) {
+export function reduceArchitect(state, event) {
   const payload = event.payload ?? {}
   const base = {
     ...state,
@@ -306,6 +311,7 @@ function reduceArchitect(state, event) {
         ...base,
         status: 'AWAITING_CLARIFICATION',
         clarification: payload,
+        conflict: null,
         appShape: payload.appShape ?? state.appShape,
         confidenceScore: payload.confidenceScore ?? state.confidenceScore,
         threshold: payload.threshold ?? state.threshold,
@@ -350,10 +356,45 @@ function reduceArchitect(state, event) {
           createdAt: new Date().toISOString(),
         }),
       }
+    case 'architect.contract.conflict':
+      return {
+        ...base,
+        status: 'AWAITING_DECISION',
+        conflict: payload,
+        clarification: null,
+        contract: null,
+        conflictSubmitting: false,
+        decisionSubmitting: false,
+        submitting: false,
+        streamingText: '',
+        streamingNode: null,
+        messages: appendMessage(state.messages, {
+          id: `conflict:${payload.conflictId}`,
+          role: 'assistant',
+          kind: 'conflict',
+          content: `架构师发现命名冲突：${payload.message || '契约集合与数据库表不一致'}。请选择处理方式。`,
+          createdAt: new Date().toISOString(),
+        }),
+      }
+    case 'architect.contract.conflict.answered':
+      return {
+        ...base,
+        status: 'ANALYZING',
+        conflict: null,
+        conflictSubmitting: false,
+        submitting: true,
+        messages: appendMessage(state.messages, {
+          id: `conflict-answered:${payload.conflictId}`,
+          role: 'user',
+          content: `已选择冲突处理方案：${payload.action || payload.optionId}`,
+          createdAt: new Date().toISOString(),
+        }),
+      }
     case 'architect.contract.ready':
       return {
         ...base,
         status: 'AWAITING_CONTRACT_CONFIRMATION',
+        conflict: null,
         contract: payload.contract ?? state.contract,
         citations: payload.citations ?? state.citations,
         confidenceScore:
@@ -401,6 +442,7 @@ function reduceArchitect(state, event) {
       return {
         ...base,
         status: 'CONFIRMED',
+        conflict: null,
         contract: payload.contract ?? state.contract,
         submitting: false,
         decisionSubmitting: false,
@@ -416,6 +458,7 @@ function reduceArchitect(state, event) {
         ...base,
         status: 'CANCELLED',
         clarification: null,
+        conflict: null,
         submitting: false,
         decisionSubmitting: false,
         cancelRequested: false,
@@ -433,6 +476,7 @@ function reduceArchitect(state, event) {
         error: payload.error || '架构澄清失败',
         errorCode: payload.errorCode ?? null,
         clarification: null,
+        conflict: null,
         streamingText: '',
         streamingNode: null,
         submitting: false,
@@ -720,6 +764,7 @@ export function useArchitect({ token } = {}) {
           round: state.round,
           maxRounds: state.maxRounds,
           clarification: state.clarification,
+          conflict: state.conflict,
           contract: state.contract,
           citations: state.citations,
           messages: state.messages,
@@ -1145,6 +1190,36 @@ export function useArchitect({ token } = {}) {
     [connect, patch, token],
   )
 
+  const decideConflict = useCallback(
+    async (projectId, optionId, comment = '') => {
+      const current = statesRef.current[projectId]
+      const conflict = current?.conflict
+      if (!current?.runId || !conflict?.conflictId || !optionId) return
+      patch(projectId, { conflictSubmitting: true, error: null })
+      try {
+        await fetchArchitectConflictDecision(
+          current.runId,
+          conflict.conflictId,
+          optionId,
+          comment,
+          token,
+        )
+        await connect(projectId, {
+          runId: current.runId,
+          streamPath: current.streamPath,
+          replay: true,
+          afterSeq: current.lastSeq,
+        })
+      } catch (cause) {
+        patch(projectId, {
+          conflictSubmitting: false,
+          error: `提交冲突决策失败：${cause?.message || cause}`,
+        })
+      }
+    },
+    [connect, patch, token],
+  )
+
   /**
    * 影子助手：只读提问。
    *
@@ -1338,6 +1413,7 @@ export function useArchitect({ token } = {}) {
     toggleOpen,
     answer,
     decide,
+    decideConflict,
     askHelper,
     cancel,
     generateFullstack,

@@ -279,6 +279,56 @@ class ArchitectClarification(CamelModel):
     answered_at: datetime | None = None
 
 
+class ArchitectConflictOption(CamelModel):
+    """契约冲突的用户决策选项。"""
+
+    option_id: str
+    action: Literal["MAP_TO_TABLE", "CREATE_TABLE", "CANCEL"]
+    label: str
+    description: str = ""
+    # MAP_TO_TABLE 的目标表 / CREATE_TABLE 的新表名。
+    target_table: str = ""
+
+
+class ArchitectContractConflict(CamelModel):
+    """契约与 DDL 命名矛盾：暂停生成，交给用户显式决策。
+
+    这不是普通校验失败：模型已经尝试过自动修复，仍然无法确定用户
+    想要“复用已有表”还是“新建表”。继续自动重试只会原地打转，因此
+    必须带着明确选项让用户拍板。
+    """
+
+    conflict_id: str
+    run_id: str
+    contract_id: str = ""
+    kind: Literal["contract_naming_conflict"] = "contract_naming_conflict"
+    status: Literal["PENDING", "ANSWERED", "EXPIRED"] = "PENDING"
+    app_shape: str = ""
+    reason: str = "collection_table_missing"
+    message: str = ""
+    api_collection: str = ""
+    resource: str = ""
+    missing_table: str = ""
+    suggested_table: str = ""
+    tables: list[str] = Field(default_factory=list)
+    issues: list[str] = Field(default_factory=list)
+    options: list[ArchitectConflictOption] = Field(default_factory=list)
+    answered_at: datetime | None = None
+
+
+class ArchitectConflictDecisionRequest(CamelModel):
+    """用户对契约冲突的选择；只接受服务端下发的 optionId。"""
+
+    option_id: str = Field(min_length=1, max_length=64)
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class ArchitectConflictStatus(CamelModel):
+    conflict_id: str
+    status: Literal["ANSWERED"]
+    answered_at: datetime
+
+
 class ArchitectAnswer(CamelModel):
     question_id: str
     value: Any = None
@@ -539,6 +589,11 @@ class ArchitectDecisionResponse(CamelModel):
     architect_run: ArchitectRunStatus
 
 
+class ArchitectConflictDecisionResponse(CamelModel):
+    conflict: ArchitectConflictStatus
+    architect_run: ArchitectRunStatus
+
+
 class ArchitectCancelResponse(CamelModel):
     run_id: str
     status: str
@@ -557,6 +612,8 @@ class ArchitectSnapshotResponse(CamelModel):
     source_hash: str = ""
     last_seq: int = 0
     clarification: ArchitectClarification | None = None
+    # 契约与 DDL 命名矛盾时的待决策项；status=AWAITING_DECISION 时非空。
+    conflict: ArchitectContractConflict | None = None
     contract: ArchitectContract | None = None
     messages: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None

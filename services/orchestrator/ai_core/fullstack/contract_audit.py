@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
 
 from ai_core.domain.architect import ArchitectContract
 from ai_core.domain.relations import (
@@ -28,7 +28,12 @@ from ai_core.domain.relations import (
     parse_ddl_table_columns,
     relation_audit_issues,
 )
-from ai_core.fullstack.coders import collection_path, core_table_for_contract
+from ai_core.fullstack.coders import (
+    action_resource_table,
+    collection_path,
+    core_table_for_contract,
+    is_action_resource,
+)
 
 FAILURE_KIND_CONTRACT = "CONTRACT"
 FAILURE_KIND_CODE = "CODE"
@@ -156,6 +161,20 @@ def _collection_resource(path: str) -> str:
         return ""
     # /api/v1/<resource> 或 /api/<resource>
     return segments[2] if segments[0] == "api" and len(segments) >= 3 else segments[1]
+
+
+def collection_resource(path: str) -> str:
+    """公开资源段解析，供 Architect 构造冲突决策使用。"""
+    return _collection_resource(path)
+
+
+def has_business_collection_routes(routes: Iterable[Any]) -> bool:
+    """是否存在真正的实体资源路由（排除 /auth、/session 等动作端点）。"""
+    for route in routes:
+        resource = _collection_resource(str(getattr(route, "path", "") or ""))
+        if resource and not is_action_resource(resource):
+            return True
+    return False
 
 
 def _table_exists_for_resource(resource: str, tables: Iterable[str]) -> bool:
@@ -347,12 +366,23 @@ def _audit_database(contract: ArchitectContract, mode: str) -> list[ContractProb
             )
         collection = collection_path(contract.api_routes or [])
         resource = _collection_resource(collection)
+        # 认证 / 会话 / 账号是动作端点组，不是 CRUD 实体：
+        #   - 若 DDL 有 users 等用户表，自动视为已映射；
+        #   - 若没有用户表，也不报“缺 auth 表”，交给生成阶段使用业务表。
+        # 只有真正的业务集合根才要求 DDL 同名表。
+        action_mapped = bool(resource and is_action_resource(resource)) and bool(
+            action_resource_table(resource, tables)
+        )
+        has_business = has_business_collection_routes(contract.api_routes or [])
         # 没有 API 路由时已由路由审计报告问题，这里不能再拿兜底集合
         # /api/v1/records 误判 DDL 缺表。
         if (
             contract.api_routes
             and resource
             and tables
+            and has_business
+            and not action_mapped
+            and not is_action_resource(resource)
             and not _table_exists_for_resource(resource, tables)
         ):
             problems.append(

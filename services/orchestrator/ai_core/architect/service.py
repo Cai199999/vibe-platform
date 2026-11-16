@@ -38,7 +38,11 @@ from ai_core.domain.architect import (
     ArchitectCitation,
     ArchitectClarification,
     ArchitectClarificationStatus,
+    ArchitectConflictDecisionRequest,
+    ArchitectConflictDecisionResponse,
+    ArchitectConflictStatus,
     ArchitectContract,
+    ArchitectContractConflict,
     ArchitectContractStatus,
     ArchitectDecisionRequest,
     ArchitectDecisionResponse,
@@ -118,6 +122,8 @@ class ActiveArchitectRun:
     confidence_score: float = 0.0
     threshold: float = 0.85
     clarification: ArchitectClarification | None = None
+    # status=AWAITING_DECISION 时非空：契约与 DDL 命名矛盾等待用户三选一。
+    conflict: ArchitectContractConflict | None = None
     contract: ArchitectContract | None = None
     messages: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
@@ -332,11 +338,18 @@ class ArchitectService:
                 active.app_shape = clarification.app_shape or active.app_shape
                 active.confidence_score = clarification.confidence_score
                 active.threshold = clarification.threshold
+            elif event_type == "architect.contract.conflict":
+                conflict = ArchitectContractConflict.model_validate(payload)
+                active.conflict = conflict
+                active.clarification = None
+                active.contract = None
+                active.status = "AWAITING_DECISION"
             elif event_type == "architect.contract.ready":
                 raw_contract = payload.get("contract") or {}
                 contract = ArchitectContract.model_validate(raw_contract)
                 contract.status = "AWAITING_CONFIRMATION"
                 active.contract = contract
+                active.conflict = None
                 active.clarification = None
                 active.status = "AWAITING_CONTRACT_CONFIRMATION"
             elif event_type == "architect.contract.confirmed":
@@ -348,6 +361,7 @@ class ArchitectService:
                     contract.status = "CONFIRMED"
                     active.contract = contract
                 active.clarification = None
+                active.conflict = None
                 active.status = "CONFIRMED"
             active.touch()
 
@@ -613,6 +627,84 @@ class ArchitectService:
         return _decision_response(active, contract, now)
 
     # --------------------------------------------------------
+    # 契约命名冲突决策
+    # --------------------------------------------------------
+    def decide_conflict(
+        self,
+        run_id: str,
+        conflict_id: str | None,
+        request: ArchitectConflictDecisionRequest,
+    ) -> ArchitectConflictDecisionResponse:
+        """用户在“映射已有表 / 新建表 / 取消”之间做出选择并恢复图。
+
+        与契约 CONFIRM/REVISE 决策独立：此时契约尚未 ready，不能复用
+        ``decide_contract``；Graph 在 ``conflict_gate`` 中等待这个回复。
+        """
+        active = _require_run(run_id)
+        now = datetime.now(timezone.utc)
+        with _ACTIVE_LOCK:
+            if active.status != "AWAITING_DECISION":
+                raise ArchitectStateConflictError(
+                    f"Architect 当前状态为 {active.status}，没有待决策的契约冲突"
+                )
+            conflict = active.conflict
+            if conflict is None:
+                raise ArchitectContractNotFoundError("当前没有待决策的契约冲突")
+            if conflict_id and conflict.conflict_id != conflict_id:
+                raise ArchitectContractNotFoundError(f"契约冲突不存在: {conflict_id}")
+            allowed = {item.option_id for item in conflict.options}
+            if request.option_id not in allowed:
+                raise ArchitectStateConflictError(
+                    f"无效的冲突决策选项: {request.option_id}"
+                )
+            option = next(
+                item for item in conflict.options if item.option_id == request.option_id
+            )
+            conflict.status = "ANSWERED"
+            conflict.answered_at = now
+            active.conflict = None
+            # 保持 ANALYZING：Graph 恢复后会先应用决策再重新校验。
+            active.status = "ANALYZING"
+            active.touch()
+
+        active.buffer.emit(
+            "architect.contract.conflict.answered",
+            {
+                "conflictId": conflict.conflict_id,
+                "optionId": option.option_id,
+                "action": option.action,
+                "targetTable": option.target_table,
+                "comment": (request.comment or "").strip(),
+            },
+            # 与 Graph 恢复后发出的同名事件共用 dedupe key，避免重复入队。
+            dedupe_key=f"architect.contract.conflict.answered:{conflict.conflict_id}",
+        )
+        threading.Thread(
+            target=self._resume_worker,
+            args=(
+                active,
+                {
+                    "optionId": option.option_id,
+                    "action": option.action,
+                    "comment": (request.comment or "").strip(),
+                },
+            ),
+            name=f"architect-conflict-{run_id}",
+            daemon=True,
+        ).start()
+        return ArchitectConflictDecisionResponse(
+            conflict=ArchitectConflictStatus(
+                conflict_id=conflict.conflict_id,
+                status="ANSWERED",
+                answered_at=now,
+            ),
+            architect_run=ArchitectRunStatus(
+                run_id=active.run_id,
+                status="ANALYZING",
+            ),
+        )
+
+    # --------------------------------------------------------
     # 影子助手（只读）
     # --------------------------------------------------------
     def helper(
@@ -711,9 +803,11 @@ class ArchitectService:
             if active.status in {
                 "AWAITING_CLARIFICATION",
                 "AWAITING_CONTRACT_CONFIRMATION",
+                "AWAITING_DECISION",
             }:
                 active.status = "CANCELLED"
                 active.clarification = None
+                active.conflict = None
                 if active.contract is not None:
                     active.contract.status = "CANCELLED"
                     active.contract.decided_at = datetime.now(timezone.utc)
@@ -746,6 +840,9 @@ class ArchitectService:
                     active.clarification.model_copy(deep=True)
                     if active.clarification
                     else None
+                ),
+                conflict=(
+                    active.conflict.model_copy(deep=True) if active.conflict else None
                 ),
                 contract=(
                     active.contract.model_copy(deep=True) if active.contract else None
@@ -794,10 +891,19 @@ class ArchitectService:
                     if payload.get("kind") == "contract_confirmation":
                         active.status = "AWAITING_CONTRACT_CONFIRMATION"
                         active.clarification = None
+                        active.conflict = None
                         if active.contract is not None:
                             active.contract.status = "AWAITING_CONFIRMATION"
+                    elif payload.get("kind") == "contract_naming_conflict":
+                        active.status = "AWAITING_DECISION"
+                        active.clarification = None
+                        active.contract = None
+                        active.conflict = ArchitectContractConflict.model_validate(
+                            payload
+                        )
                     else:
                         active.status = "AWAITING_CLARIFICATION"
+                        active.conflict = None
                         active.clarification = _clarification_from_interrupt(
                             payload, state
                         )
@@ -809,6 +915,8 @@ class ArchitectService:
                         active.threshold = active.clarification.threshold
                 else:
                     status = str(state.get("status") or "FAILED")
+                    if status in {"CONFIRMED", "CANCELLED", "FAILED"}:
+                        active.conflict = None
                     if status == "CONFIRMED":
                         active.status = "CONFIRMED"
                     elif status == "CANCELLED":
@@ -841,6 +949,7 @@ class ArchitectService:
                 return
             active.status = "CANCELLED"
             active.clarification = None
+            active.conflict = None
             if active.contract is not None:
                 active.contract.status = "CANCELLED"
                 active.contract.decided_at = datetime.now(timezone.utc)
@@ -877,6 +986,7 @@ class ArchitectService:
             active.error = message
             active.error_code = code
             active.clarification = None
+            active.conflict = None
             active.touch()
         active.buffer.emit(
             "architect.failed",
@@ -990,6 +1100,8 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         "contract_id": "",
         "contract_decision": "",
         "contract_feedback": "",
+        "contract_conflict": {},
+        "conflict_resolution_applied": False,
         "repair_count": 0,
         "repair_limit": request.options.contract_repair_limit,
         "contract_revision_count": 0,

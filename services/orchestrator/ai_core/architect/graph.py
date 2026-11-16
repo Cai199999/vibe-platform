@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import nullcontext
@@ -107,6 +108,7 @@ NODE_LABELS = {
     "draft_contract": "起草实施契约",
     "validate_contract": "校验契约分级",
     "revise_contract": "修订实施契约",
+    "conflict_gate": "等待契约冲突决策",
     "contract_ready": "生成实施契约",
     "contract_gate": "等待契约决策",
     "confirmed": "契约已确认",
@@ -280,6 +282,7 @@ class ArchitectGraphRunner:
             "draft_contract": self._draft_contract,
             "validate_contract": self._validate_contract,
             "revise_contract": self._revise_contract,
+            "conflict_gate": self._conflict_gate,
             "contract_ready": self._contract_ready,
             "contract_gate": self._contract_gate,
             "confirmed": self._confirmed,
@@ -333,10 +336,21 @@ class ArchitectGraphRunner:
             {
                 "contract_ready": "contract_ready",
                 "revise_contract": "revise_contract",
+                "conflict_gate": "conflict_gate",
                 "failed": "failed",
             },
         )
         builder.add_edge("revise_contract", "validate_contract")
+        # 用户决策后重新跑确定性校验：A/B 修契约，C 直接取消。
+        builder.add_conditional_edges(
+            "conflict_gate",
+            self._route_conflict_decision,
+            {
+                "validate_contract": "validate_contract",
+                "cancelled": "cancelled",
+                "failed": "failed",
+            },
+        )
         builder.add_edge("contract_ready", "contract_gate")
         builder.add_conditional_edges(
             "contract_gate",
@@ -735,6 +749,7 @@ class ArchitectGraphRunner:
         shape = str(state.get("app_shape") or "")
         validation = validate_draft(shape, draft)
         issues = list(validation.issues)
+        audit_problems: list[Any] = []
         if validation.valid and validation.draft is not None:
             # 契约确认前的最后一道自检：DDL 表、relations、apiRoutes 与
             # 组件交互必须彼此自洽。这里与运行期 audit_contract 共用同一
@@ -748,6 +763,7 @@ class ArchitectGraphRunner:
                     self._contract_view(state, validation.draft),
                     mode="fullstack",
                 )
+                audit_problems = list(audit.problems)
                 issues.extend(problem.message for problem in audit.problems)
             if not issues:
                 return {
@@ -778,12 +794,216 @@ class ArchitectGraphRunner:
                 "repair_count": repair_count + 1,
                 "status": "REPAIRING_CONTRACT",
             }
+
+        # 自动修复已耗尽：如果剩余问题属于“集合根与 DDL 表名矛盾”，
+        # 不再直接 FAILED，而是把选择权交给用户（映射已有表 / 新建表 /
+        # 取消）。这是死锁唯一正确的出口：继续重试只会产出同一错误。
+        if (
+            validation.valid
+            and validation.draft is not None
+            and audit_problems
+            and not bool(state.get("conflict_resolution_applied"))
+        ):
+            conflict = self._build_contract_conflict(
+                state, validation.draft, audit_problems, issues
+            )
+            if conflict is not None:
+                return {
+                    "contract_draft": raw,
+                    "contract_issues": issues,
+                    "contract_conflict": conflict,
+                    "status": "AWAITING_DECISION",
+                }
+
         return {
             "contract_draft": raw,
             "contract_issues": issues,
             "status": "FAILED",
             "error": "实施契约未通过分级校验：" + "；".join(issues),
             "error_code": "CONTRACT_VALIDATION_FAILED",
+        }
+
+    def _build_contract_conflict(
+        self,
+        state: ArchitectState,
+        draft: ContractDraft,
+        audit_problems: list[Any],
+        issues: list[str],
+    ) -> dict[str, Any] | None:
+        """把“集合根 → 表名”矛盾转换为用户可决策的结构化冲突。
+
+        只针对 ``collection_table_missing``：这类矛盾有两个确定性出路
+        （映射到已有表、或新建缺失表），适合交给用户拍板。其它契约
+        问题（关联字段不存在等）仍按原逻辑失败，避免把复杂矛盾误包装成
+        三选一。
+        """
+        problem = next(
+            (
+                item
+                for item in audit_problems
+                if item.code == "collection_table_missing"
+            ),
+            None,
+        )
+        if problem is None:
+            return None
+
+        from ai_core.domain.relations import parse_ddl_table_columns
+        from ai_core.fullstack.coders import (
+            action_resource_table,
+            collection_path,
+            core_table_for_contract,
+        )
+        from ai_core.fullstack.contract_audit import collection_resource
+
+        tables_map = parse_ddl_table_columns(draft.database_ddl or "")
+        tables = list(tables_map)
+        if not tables:
+            return None
+        collection = collection_path(draft.api_routes or [])
+        resource = collection_resource(collection)
+        if not resource:
+            return None
+
+        # 认证类动作优先映射 users；普通业务资源映射到契约选出的核心表。
+        suggested = action_resource_table(resource, tables)
+        if not suggested:
+            core = core_table_for_contract(self._contract_view(state, draft))
+            if core.name.lower() in {name.lower() for name in tables}:
+                suggested = core.name
+        options: list[dict[str, Any]] = []
+        if suggested:
+            options.append(
+                {
+                    "optionId": "map_to_table",
+                    "action": "MAP_TO_TABLE",
+                    "label": f"自动将 {collection} 映射到 {suggested} 表（推荐）",
+                    "description": (
+                        f"保留现有接口，把集合根 {collection} 改写到真实表 "
+                        f"{suggested} 对应的路径，不新增冗余表。"
+                    ),
+                    "targetTable": suggested,
+                }
+            )
+        if resource.lower() not in {name.lower() for name in tables}:
+            options.append(
+                {
+                    "optionId": "create_table",
+                    "action": "CREATE_TABLE",
+                    "label": f"在 DDL 中新建 {resource} 表",
+                    "description": (
+                        f"新增一张最小可用的 {resource} 表（id / name / "
+                        "时间戳），保持现有 /api 集合路径不变。"
+                    ),
+                    "targetTable": resource,
+                }
+            )
+        options.append(
+            {
+                "optionId": "cancel",
+                "action": "CANCEL",
+                "label": "取消生成，我重新修改契约",
+                "description": "停止本次架构流程，回到需求澄清重新描述数据模型。",
+                "targetTable": "",
+            }
+        )
+
+        contract_id = str(state.get("contract_id") or "")
+        return {
+            "conflictId": f"ccf_{contract_id or state.get('run_id')}",
+            "runId": str(state.get("run_id") or ""),
+            "contractId": contract_id,
+            "kind": "contract_naming_conflict",
+            "status": "PENDING",
+            "appShape": str(state.get("app_shape") or ""),
+            "reason": problem.code,
+            "message": problem.message,
+            "apiCollection": collection,
+            "resource": resource,
+            "missingTable": resource,
+            "suggestedTable": suggested,
+            "tables": tables,
+            "issues": list(issues),
+            "options": options,
+        }
+
+    def _conflict_gate(self, state: ArchitectState) -> dict[str, Any]:
+        """暂停图执行，让用户选择如何处理契约命名冲突。"""
+        self._check_cancelled()
+        conflict = dict(state.get("contract_conflict") or {})
+        if not conflict:
+            return {
+                "status": "FAILED",
+                "error": "契约冲突决策缺少上下文",
+                "error_code": "CONTRACT_CONFLICT_MISSING",
+            }
+        self._emit(
+            "architect.contract.conflict",
+            conflict,
+            dedupe_key=f"architect.contract.conflict:{conflict.get('conflictId')}",
+        )
+        response = interrupt(conflict)
+        option = _normalize_conflict_option(conflict, response)
+        if option is None:
+            return {
+                "status": "FAILED",
+                "error": "契约冲突决策无效：请选择服务端下发的 optionId",
+                "error_code": "CONTRACT_CONFLICT_OPTION_INVALID",
+            }
+        comment = ""
+        if isinstance(response, dict):
+            comment = str(response.get("comment") or "").strip()
+        self._emit(
+            "architect.contract.conflict.answered",
+            {
+                "conflictId": conflict.get("conflictId"),
+                "optionId": option.get("optionId"),
+                "action": option.get("action"),
+                "targetTable": option.get("targetTable"),
+                "comment": comment,
+            },
+            dedupe_key=(
+                "architect.contract.conflict.answered:" f"{conflict.get('conflictId')}"
+            ),
+        )
+        if option.get("action") == "CANCEL":
+            return {
+                "contract_conflict": {
+                    **conflict,
+                    "status": "ANSWERED",
+                    "answeredAt": datetime.now(timezone.utc).isoformat(),
+                },
+                "contract_decision": "CANCEL",
+                "contract_feedback": comment or "用户取消生成，准备重新修改契约",
+                "status": "CANCELLED",
+            }
+
+        raw = state.get("contract_draft") or {}
+        try:
+            draft = draft_from_dict(raw)
+            resolved = _apply_conflict_resolution(draft, conflict, option)
+        except Exception as exc:  # noqa: BLE001 - 决策应用失败必须收敛
+            logger.warning("apply contract conflict resolution failed", exc_info=True)
+            return {
+                "status": "FAILED",
+                "error": f"应用契约冲突决策失败: {exc}",
+                "error_code": "CONTRACT_CONFLICT_RESOLUTION_FAILED",
+            }
+
+        repair_limit = int(state.get("repair_limit") or 1)
+        return {
+            "contract_draft": draft_to_dict(resolved),
+            "contract_issues": [],
+            "contract_feedback": "",
+            "contract_conflict": {
+                **conflict,
+                "status": "ANSWERED",
+                "answeredAt": datetime.now(timezone.utc).isoformat(),
+            },
+            "conflict_resolution_applied": True,
+            # 用户已拍板，不再让模型自动修一次；直接确定性复验。
+            "repair_count": repair_limit,
+            "status": "DRAFTING_CONTRACT",
         }
 
     @staticmethod
@@ -1000,14 +1220,25 @@ class ArchitectGraphRunner:
         }
 
     def _route_validation(self, state: ArchitectState) -> str:
-        if state.get("status") == "FAILED":
+        status = state.get("status")
+        if status == "FAILED":
             return "failed"
+        if status == "AWAITING_DECISION":
+            return "conflict_gate"
         if state.get("contract_issues"):
             repair_limit = int(state.get("repair_limit") or 1)
             if int(state.get("repair_count") or 0) <= repair_limit:
                 return "revise_contract"
             return "failed"
         return "contract_ready"
+
+    def _route_conflict_decision(self, state: ArchitectState) -> str:
+        status = state.get("status")
+        if status == "CANCELLED":
+            return "cancelled"
+        if status == "FAILED":
+            return "failed"
+        return "validate_contract"
 
     def _route_contract_decision(self, state: ArchitectState) -> str:
         if state.get("status") == "FAILED":
@@ -1327,6 +1558,162 @@ def _contract_from_state(state: ArchitectState) -> ArchitectContract | None:
         return ArchitectContract.model_validate(payload)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _normalize_conflict_option(
+    conflict: dict[str, Any],
+    response: Any,
+) -> dict[str, Any] | None:
+    """只接受服务端下发的 optionId / action，拒绝模型或客户端自造选项。"""
+    if not isinstance(response, dict):
+        return None
+    options = [item for item in conflict.get("options") or [] if isinstance(item, dict)]
+    option_id = str(response.get("optionId") or response.get("option_id") or "").strip()
+    if option_id:
+        return next(
+            (item for item in options if item.get("optionId") == option_id),
+            None,
+        )
+    action = str(response.get("action") or "").strip().upper()
+    if action:
+        return next(
+            (item for item in options if str(item.get("action")).upper() == action),
+            None,
+        )
+    return None
+
+
+def _rewrite_collection_path(path: str, old: str, new: str) -> str:
+    """把集合根及其子路径的公共前缀从 old 替换为 new，保留查询串。
+
+    component_interactions 里是 ``GET /api/v1/orders`` 这类“方法 + 路径”
+    写法，必须保留方法前缀后只改路径，否则交互引用会与 api_routes
+    失配，审计会继续报 undeclared_interaction_route。
+    """
+    raw = str(path or "")
+    head, space, rest = raw.partition(" ")
+    if space and head.upper() in {
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "HEAD",
+        "OPTIONS",
+    }:
+        return f"{head.upper()} {_rewrite_collection_path(rest, old, new)}"
+    base, sep, query = raw.partition("?")
+    if base == old or base.startswith(old + "/"):
+        return new + base[len(old) :] + sep + query
+    return raw
+
+
+def _sanitize_table_name(value: str) -> str:
+    name = re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower())
+    name = re.sub(r"_+", "_", name).strip("_")
+    if not name or not re.match(r"^[a-z_]", name):
+        name = f"app_{name}" if name else "app_records"
+    return name[:48]
+
+
+def _minimal_table_ddl(table: str, engine: str) -> str:
+    """生成最小可用表结构；只用于用户在冲突决策中显式选择“新建表”。"""
+    name = _sanitize_table_name(table)
+    normalized = str(engine or "").strip().lower()
+    if "postgres" in normalized:
+        body = (
+            "  id BIGSERIAL PRIMARY KEY,\n"
+            "  name VARCHAR(255) NOT NULL,\n"
+            "  created_at TIMESTAMP(3) NOT NULL,\n"
+            "  updated_at TIMESTAMP(3) NOT NULL\n"
+        )
+    elif "sqlite" in normalized:
+        body = (
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+            "  name TEXT NOT NULL,\n"
+            "  created_at TEXT NOT NULL,\n"
+            "  updated_at TEXT NOT NULL\n"
+        )
+    else:
+        body = (
+            "  id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,\n"
+            "  name VARCHAR(255) NOT NULL,\n"
+            "  created_at DATETIME(3) NOT NULL,\n"
+            "  updated_at DATETIME(3) NOT NULL\n"
+        )
+    return f"CREATE TABLE IF NOT EXISTS {name} (\n{body});"
+
+
+def _apply_conflict_resolution(
+    draft: ContractDraft,
+    conflict: dict[str, Any],
+    option: dict[str, Any],
+) -> ContractDraft:
+    """把用户选择确定性地写回契约草稿。
+
+    两条路径都必须产出“可重新通过审计”的契约：
+      - MAP_TO_TABLE：重写集合根及其子路由 / 交互路径到目标真实表；
+      - CREATE_TABLE：向 DDL 追加最小表，保留现有 API 路径。
+    """
+    action = str(option.get("action") or "").upper()
+    label = str(option.get("label") or action)
+    markdown = draft.contract_markdown.rstrip() + (
+        f"\n\n## 命名冲突决策\n\n- 用户选择：{label}\n"
+    )
+
+    if action == "MAP_TO_TABLE":
+        old_collection = str(conflict.get("apiCollection") or "").strip()
+        target = _sanitize_table_name(str(option.get("targetTable") or ""))
+        if not old_collection or not target:
+            raise ValueError("映射决策缺少集合路径或目标表")
+        segments = [item for item in old_collection.split("/") if item]
+        if not segments:
+            raise ValueError("集合路径无效")
+        segments[-1] = target
+        new_collection = "/" + "/".join(segments)
+
+        seen: set[tuple[str, str]] = set()
+        routes = []
+        for route in draft.api_routes:
+            path = _rewrite_collection_path(
+                str(route.path or ""), old_collection, new_collection
+            )
+            key = (str(route.method or "GET").upper(), path)
+            if key in seen:
+                continue
+            seen.add(key)
+            routes.append(route.model_copy(update={"path": path}))
+        interactions = [
+            item.model_copy(
+                update={
+                    "api_route": _rewrite_collection_path(
+                        str(item.api_route or ""), old_collection, new_collection
+                    )
+                }
+            )
+            for item in draft.component_interactions
+        ]
+        return replace(
+            draft,
+            contract_markdown=markdown,
+            api_routes=routes,
+            component_interactions=interactions,
+        )
+
+    if action == "CREATE_TABLE":
+        table = _sanitize_table_name(
+            str(option.get("targetTable") or conflict.get("missingTable") or "")
+        )
+        engine = str(draft.tech_stack.get("database") or "mysql")
+        ddl = _minimal_table_ddl(table, engine)
+        separator = "\n\n" if draft.database_ddl.strip() else ""
+        return replace(
+            draft,
+            contract_markdown=markdown,
+            database_ddl=f"{draft.database_ddl.rstrip()}{separator}{ddl}",
+        )
+
+    raise ValueError(f"不支持的冲突决策: {action}")
 
 
 def _find_interrupt(snapshot: Any) -> dict[str, Any] | None:

@@ -1172,6 +1172,84 @@ function ArchitectInputDock({
   )
 }
 
+/**
+ * 契约命名冲突决策弹窗。
+ *
+ * 服务端已自动修复过一次仍无法收敛，此时继续重试只会重复同一错误；
+ * 必须让用户在“映射已有表 / 新建表 / 取消”之间显式选择。选项 ID 由
+ * 服务端下发，前端只回传 optionId，不能自行改写契约。
+ */
+function ConflictDecisionDialog({ conflict, submitting, error, onDecide }) {
+  const [comment, setComment] = useState('')
+  if (!conflict) return null
+  const options = Array.isArray(conflict.options) ? conflict.options : []
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <div
+        className="account-dialog architect-conflict-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="architect-conflict-title"
+        data-contract-conflict
+      >
+        <div className="dialog-head">
+          <h3 id="architect-conflict-title">⚠️ 架构师发现命名冲突</h3>
+        </div>
+        <div className="architect-conflict-body">
+          <p>{conflict.message || 'API 集合与数据库表名不一致。'}</p>
+          <p className="architect-conflict-meta">
+            API 集合：<code>{conflict.apiCollection || '—'}</code>
+            <span aria-hidden="true"> · </span>
+            缺失表：<code>{conflict.missingTable || conflict.resource || '—'}</code>
+          </p>
+          {Array.isArray(conflict.tables) && conflict.tables.length > 0 && (
+            <p className="architect-conflict-meta">
+              现有表：<code>{conflict.tables.join('、')}</code>
+            </p>
+          )}
+          <label className="architect-conflict-comment">
+            <span>补充说明（可选）</span>
+            <textarea
+              value={comment}
+              maxLength={2000}
+              rows={2}
+              placeholder="例如：认证接口要复用已有 users 表，不要新建冗余表。"
+              onChange={(event) => setComment(event.target.value)}
+            />
+          </label>
+          <div className="architect-conflict-options">
+            {options.map((option) => (
+              <button
+                key={option.optionId}
+                type="button"
+                className={`architect-conflict-option ${
+                  option.action === 'CANCEL' ? 'is-danger' : ''
+                }`}
+                data-conflict-option={option.optionId}
+                disabled={submitting}
+                onClick={() => onDecide?.(option.optionId, comment)}
+              >
+                <strong>{option.label}</strong>
+                {option.description && <span>{option.description}</span>}
+              </button>
+            ))}
+          </div>
+          {submitting && (
+            <p className="architect-conflict-pending" role="status">
+              正在应用你的选择并重新校验契约…
+            </p>
+          )}
+          {error && (
+            <div className="architect-helper-error" role="alert">
+              {error}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function ArchitectPanel({
   projectName,
   state,
@@ -1179,6 +1257,7 @@ export default function ArchitectPanel({
   onStart,
   onAnswer,
   onDecide,
+  onDecideConflict,
   onAskHelper,
   onCancel,
   onRestart,
@@ -1517,6 +1596,16 @@ export default function ArchitectPanel({
                 onAnswer(answers, comment, options)
               }
               onCancel={onCancel}
+            />
+          )}
+
+          {status === 'AWAITING_DECISION' && state.conflict && (
+            <ConflictDecisionDialog
+              key={state.conflict.conflictId}
+              conflict={state.conflict}
+              submitting={Boolean(state.conflictSubmitting)}
+              error={state.error}
+              onDecide={onDecideConflict}
             />
           )}
 

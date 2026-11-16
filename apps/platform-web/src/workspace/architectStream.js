@@ -8,6 +8,7 @@
 
 const ARCHITECT_TERMINAL_EVENTS = new Set([
   'architect.clarification.required',
+  'architect.contract.conflict',
   'architect.contract.ready',
   'architect.contract.confirmed',
   'architect.cancelled',
@@ -200,6 +201,39 @@ export async function fetchArchitectDecision(
         decision,
         comment: comment || undefined,
         qualityTier: qualityTier || undefined,
+      }),
+    },
+  )
+  if (!response.ok) {
+    throw new Error(await responseError(response))
+  }
+  return response.json()
+}
+
+/**
+ * 契约命名冲突决策：只提交服务端下发的 optionId。
+ *
+ * 服务端会校验 optionId 是否属于当前冲突，客户端不能传入自造的
+ * 表名或动作，避免绕过冲突选项直接改契约。
+ */
+export async function fetchArchitectConflictDecision(
+  runId,
+  conflictId,
+  optionId,
+  comment,
+  token,
+) {
+  const response = await fetch(
+    `/api/v1/architect/runs/${encodeURIComponent(runId)}/contract-conflicts/${encodeURIComponent(conflictId)}/decision`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token ?? ''}`,
+      },
+      body: JSON.stringify({
+        optionId,
+        comment: comment || undefined,
       }),
     },
   )

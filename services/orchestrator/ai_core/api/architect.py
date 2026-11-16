@@ -12,6 +12,8 @@ from ai_core.domain.architect import (
     ArchitectAnswersRequest,
     ArchitectCancelRequest,
     ArchitectCancelResponse,
+    ArchitectConflictDecisionRequest,
+    ArchitectConflictDecisionResponse,
     ArchitectDecisionRequest,
     ArchitectDecisionResponse,
     ArchitectHelperRequest,
@@ -100,6 +102,24 @@ def decide_architect_contract(
     service = ArchitectService()
     try:
         return service.decide_contract(run_id, contract_id, request)
+    except Exception as exc:  # noqa: BLE001
+        _raise_http(exc)
+
+
+@router.post(
+    "/runs/{run_id}/contract-conflicts/{conflict_id}/decision",
+    response_model=ArchitectConflictDecisionResponse,
+    status_code=202,
+)
+def decide_architect_contract_conflict(
+    run_id: str,
+    conflict_id: str,
+    request: ArchitectConflictDecisionRequest,
+) -> ArchitectConflictDecisionResponse:
+    """契约与 DDL 命名矛盾：映射已有表 / 新建表 / 取消。"""
+    service = ArchitectService()
+    try:
+        return service.decide_conflict(run_id, conflict_id, request)
     except Exception as exc:  # noqa: BLE001
         _raise_http(exc)
 

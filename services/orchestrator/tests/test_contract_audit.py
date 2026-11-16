@@ -72,6 +72,59 @@ class ContractAuditTest(unittest.TestCase):
         )
         self.assertIn("/api/v1/resumes/missing", problem.message)
 
+    def test_auth_action_routes_map_to_users_table(self) -> None:
+        """登录 / 注册是 users 表上的动作，不得要求 DDL 存在 auth 表。"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="POST", path="/api/v1/auth/login", description="登录"
+                ),
+                ArchitectApiRoute(
+                    method="POST", path="/api/v1/auth/register", description="注册"
+                ),
+                ArchitectApiRoute(
+                    method="GET", path="/api/v1/auth/me", description="当前用户"
+                ),
+                ArchitectApiRoute(
+                    method="GET", path="/api/v1/resumes", description="简历列表"
+                ),
+            ],
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="ResumeList",
+                    event="load",
+                    api_route="GET /api/v1/resumes",
+                    logic="加载简历",
+                )
+            ],
+            databaseDdl=(
+                "CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR(64));"
+                "CREATE TABLE resumes (id BIGINT PRIMARY KEY, user_id BIGINT);"
+            ),
+        )
+
+        audit = audit_contract(contract)
+
+        self.assertTrue(audit.ok, audit.summary())
+
+    def test_auth_only_contract_does_not_fall_back_to_records_table(self) -> None:
+        """只有动作端点时不能把兜底 /records 当成真实集合去报缺表。"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="POST", path="/api/v1/auth/login", description="登录"
+                )
+            ],
+            componentInteractions=[],
+            databaseDdl=(
+                "CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR(64));"
+            ),
+        )
+
+        audit = audit_contract(contract)
+
+        self.assertTrue(audit.ok, audit.summary())
+
     def test_collection_resource_must_exist_in_ddl(self) -> None:
         contract = _contract(
             databaseDdl="CREATE TABLE resumes (id BIGINT PRIMARY KEY, name TEXT);"

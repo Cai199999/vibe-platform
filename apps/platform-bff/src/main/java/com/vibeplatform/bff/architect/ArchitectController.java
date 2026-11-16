@@ -82,6 +82,18 @@ public class ArchitectController {
         return architectService.decideContract(runId, contractId, body);
     }
 
+    /** 契约与 DDL 命名矛盾：映射已有表 / 新建表 / 取消。 */
+    @PostMapping(
+            "/runs/{runId}/contract-conflicts/{conflictId}/decision"
+    )
+    public ResponseEntity<JsonNode> decideContractConflict(
+            @PathVariable String runId,
+            @PathVariable String conflictId,
+            @RequestBody(required = false) JsonNode body
+    ) {
+        return architectService.decideContractConflict(runId, conflictId, body);
+    }
+
     /** 影子 LLM：只读解释架构决策，不推进主状态机。 */
     @PostMapping("/runs/{runId}/helper")
     public ResponseEntity<JsonNode> askHelper(

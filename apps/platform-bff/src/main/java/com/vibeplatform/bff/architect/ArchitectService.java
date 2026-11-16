@@ -27,6 +27,9 @@ public class ArchitectService {
     private static final String CONTRACT_DECISION_PATH =
             "/api/v1/internal/architect/runs/{runId}/contracts/"
                     + "{contractId}/decision";
+    private static final String CONTRACT_CONFLICT_DECISION_PATH =
+            "/api/v1/internal/architect/runs/{runId}/contract-conflicts/"
+                    + "{conflictId}/decision";
     private static final String CANCEL_PATH =
             "/api/v1/internal/architect/runs/{runId}/cancel";
     private static final String HELPER_PATH =
@@ -68,6 +71,21 @@ public class ArchitectService {
                 "architect contract decision",
                 runId,
                 contractId
+        );
+    }
+
+    /** 契约与 DDL 命名冲突：映射已有表 / 新建表 / 取消。 */
+    public ResponseEntity<JsonNode> decideContractConflict(
+            String runId,
+            String conflictId,
+            JsonNode body
+    ) {
+        return postJson(
+                CONTRACT_CONFLICT_DECISION_PATH,
+                body,
+                "architect contract conflict decision",
+                runId,
+                conflictId
         );
     }
 

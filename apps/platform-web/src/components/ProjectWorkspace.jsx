@@ -106,6 +106,7 @@ function ProjectWorkspaceInner({
   onArchitectClose,
   onArchitectAnswer,
   onArchitectDecide,
+  onArchitectDecideConflict,
   onArchitectAskHelper,
   onArchitectCancel,
   onArchitectExport,
@@ -296,6 +297,9 @@ function ProjectWorkspaceInner({
     }
     if (status === 'AWAITING_CONTRACT_CONFIRMATION') {
       return '架构设计尚未完成，请确认实施契约'
+    }
+    if (status === 'AWAITING_DECISION') {
+      return '架构师发现契约与数据库命名冲突，请选择处理方式'
     }
     if (status === 'FAILED') {
       return '架构设计尚未完成：上一次分析失败，请重新发起架构对话'
@@ -1208,6 +1212,7 @@ function ProjectWorkspaceInner({
           onRestart={onArchitectRestart}
           onAnswer={onArchitectAnswer}
           onDecide={onArchitectDecide}
+          onDecideConflict={onArchitectDecideConflict}
           onAskHelper={onArchitectAskHelper}
           onCancel={onArchitectCancel}
           onFullstackGenerate={onFullstackGenerate}

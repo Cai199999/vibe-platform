@@ -5845,6 +5845,7 @@ export default function WorkspacePage() {
       architectClose: architect.closePanel,
       architectAnswer: architect.answer,
       architectDecide: architect.decide,
+      architectDecideConflict: architect.decideConflict,
       architectAskHelper: architect.askHelper,
       architectCancel: architect.cancel,
     }
@@ -5935,6 +5936,12 @@ export default function WorkspacePage() {
             decision,
             comment,
             qualityTier,
+          ),
+        onArchitectDecideConflict: (optionId, comment) =>
+          workspaceActionsRef.current?.architectDecideConflict(
+            projectId,
+            optionId,
+            comment,
           ),
         onArchitectAskHelper: (question) =>
           workspaceActionsRef.current?.architectAskHelper(projectId, question),
