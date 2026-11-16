@@ -4,6 +4,7 @@ import { SettingsProvider } from './settings/SettingsContext.jsx'
 import AdminForbidden from './components/AdminForbidden.jsx'
 import LoginPage from './pages/LoginPage.jsx'
 import AdminPage from './pages/AdminPage.jsx'
+import VisualCanvasPage from './pages/VisualCanvasPage.jsx'
 import WorkspacePage from './pages/WorkspacePage.jsx'
 
 /**
@@ -46,6 +47,14 @@ export default function App() {
               element={
                 <ProtectedRoute>
                   <WorkspacePage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/visual-canvas"
+              element={
+                <ProtectedRoute>
+                  <VisualCanvasPage />
                 </ProtectedRoute>
               }
             />

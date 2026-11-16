@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { Link } from 'react-router-dom'
 import AppHeader from '../components/AppHeader.jsx'
 import AccountDialog from '../components/AccountDialog.jsx'
 import DirectOpsDecisionDialog from '../components/DirectOpsDecisionDialog.jsx'
@@ -6455,6 +6456,14 @@ export default function WorkspacePage() {
               {openTabs.length} / {maxTabs} 个项目
             </span>
             {anyRunning && <span className="chip chip-live">Agent 执行中</span>}
+            <Link
+              className="chip chip-muted"
+              to={`/visual-canvas?project=${encodeURIComponent(
+                activeProject?.id || '',
+              )}&title=${encodeURIComponent(activeProject?.name || '未命名页面')}`}
+            >
+              ✨ 虚拟画布
+            </Link>
             {limitReached && (
               <span className="workspace-limit" role="status">
                 最多只能同时打开 {maxTabs} 个项目，请关闭其他项目后再新建。

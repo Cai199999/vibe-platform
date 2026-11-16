@@ -1,0 +1,668 @@
+/**
+ * VisualDocument：离线优先画布的唯一事实源。
+ *
+ * 这里的操作全部是纯函数，只改内存中的虚拟组件树，不触碰真实
+ * React 源码、沙盒、Git 或任何后端接口。CodeGen 阶段才把冻结后的
+ * 文档编译成源码。
+ */
+
+export const VISUAL_SCHEMA_VERSION = '1.0'
+export const MAX_VISUAL_NODES = 5000
+export const MAX_VISUAL_DEPTH = 20
+
+export const NODE_TYPES = [
+  'page',
+  'section',
+  'container',
+  'grid',
+  'stack',
+  'text',
+  'button',
+  'input',
+  'image',
+  'list',
+  'table',
+  'form',
+  'modal',
+  'component',
+]
+
+export const CONTAINER_TYPES = new Set([
+  'page',
+  'section',
+  'container',
+  'grid',
+  'stack',
+  'list',
+  'table',
+  'form',
+  'modal',
+  'component',
+])
+
+export const REPEAT_TYPES = new Set(['list', 'table'])
+
+export const NODE_LABELS = {
+  page: '页面',
+  section: '区块',
+  container: '容器',
+  grid: '网格',
+  stack: '纵向栈',
+  text: '文本',
+  button: '按钮',
+  input: '输入框',
+  image: '图片',
+  list: '列表',
+  table: '表格',
+  form: '表单',
+  modal: '弹窗',
+  component: '复合组件',
+}
+
+const FORBIDDEN_COORDINATE_KEYS = new Set([
+  'x',
+  'y',
+  'absoluteX',
+  'absoluteY',
+  'absolute_x',
+  'absolute_y',
+])
+const FORBIDDEN_PROP_KEYS = new Set([
+  'dangerouslySetInnerHTML',
+  'dangerously_set_inner_html',
+  '__html',
+])
+const NODE_ID_PATTERN = /^nd_[A-Za-z0-9_-]{3,64}$/
+
+const DEFAULT_TOKENS = {
+  colors: {
+    primary: '#2563eb',
+    primarySoft: '#dbeafe',
+    surface: '#ffffff',
+    canvas: '#f1f5f9',
+    text: '#0f172a',
+    muted: '#64748b',
+    border: '#cbd5e1',
+  },
+  spacing: { xs: '4px', sm: '8px', md: '16px', lg: '24px', xl: '32px' },
+  radius: { sm: '8px', card: '12px', pill: '999px' },
+  typography: { body: '14px', title: '22px', caption: '12px' },
+}
+
+let fallbackSeq = 0
+
+export function newVisualId(prefix = 'nd') {
+  try {
+    return `${prefix}_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`
+  } catch {
+    fallbackSeq += 1
+    return `${prefix}_${Date.now().toString(36)}${fallbackSeq}`
+  }
+}
+
+function nowIso() {
+  return new Date().toISOString()
+}
+
+function defaultLayout(type) {
+  if (type === 'grid') {
+    return {
+      display: 'grid',
+      direction: 'row',
+      gap: '16px',
+      padding: '16px',
+      align: 'stretch',
+      justify: 'start',
+      wrap: true,
+      columns: 3,
+      minWidth: '',
+      maxWidth: '',
+    }
+  }
+  if (type === 'stack') {
+    return {
+      display: 'flex',
+      direction: 'column',
+      gap: '12px',
+      padding: '0px',
+      align: 'stretch',
+      justify: 'start',
+      wrap: false,
+      columns: 1,
+      minWidth: '',
+      maxWidth: '',
+    }
+  }
+  if (CONTAINER_TYPES.has(type)) {
+    return {
+      display: type === 'page' ? 'block' : 'flex',
+      direction: 'column',
+      gap: type === 'page' ? '0px' : '16px',
+      padding: type === 'page' ? '32px' : '16px',
+      align: 'stretch',
+      justify: 'start',
+      wrap: false,
+      columns: 1,
+      minWidth: '',
+      maxWidth: type === 'page' ? '1180px' : '',
+    }
+  }
+  return {
+    display: 'block',
+    direction: 'column',
+    gap: '',
+    padding: '',
+    align: 'stretch',
+    justify: 'start',
+    wrap: false,
+    columns: 1,
+    minWidth: '',
+    maxWidth: '',
+  }
+}
+
+function defaultProps(type) {
+  if (type === 'text') return { text: '在这里输入文本' }
+  if (type === 'button') return { text: '按钮', variant: 'primary' }
+  if (type === 'input') return { placeholder: '请输入内容' }
+  if (type === 'image') {
+    return {
+      src: 'https://placehold.co/640x360/e2e8f0/475569?text=Image',
+      alt: '示例图片',
+    }
+  }
+  if (type === 'table') {
+    return { columns: ['名称', '状态', '操作'] }
+  }
+  return {}
+}
+
+function defaultStyle(type) {
+  if (type === 'page') {
+    return { tokenRefs: [], className: '', tailwind: ['min-h-screen', 'bg-white'] }
+  }
+  if (type === 'section' || type === 'container') {
+    return {
+      tokenRefs: [],
+      className: '',
+      tailwind: ['rounded-xl', 'border', 'bg-white'],
+    }
+  }
+  if (type === 'button') {
+    return {
+      tokenRefs: ['color.primary'],
+      className: '',
+      tailwind: ['rounded-lg', 'bg-blue-600', 'text-white'],
+    }
+  }
+  return { tokenRefs: [], className: '', tailwind: [] }
+}
+
+/** 创建一个带完整默认值的 VisualNode。 */
+export function createVisualNode(type, overrides = {}) {
+  if (!NODE_TYPES.includes(type)) {
+    throw new Error(`未知的 VisualNode 类型: ${type}`)
+  }
+  const base = {
+    id: newVisualId(),
+    type,
+    name: NODE_LABELS[type] || type,
+    componentRef: type === 'button' ? 'Button' : '',
+    props: defaultProps(type),
+    layout: defaultLayout(type),
+    style: defaultStyle(type),
+    children: [],
+    repeat: null,
+    semantics: {
+      role: '',
+      purpose: '',
+      importance: 'normal',
+      businessEntity: '',
+    },
+    a11y: { label: '', description: '' },
+    state: { defaultVisible: true, disabled: false },
+    codegen: {
+      mode: 'primitive',
+      componentName: '',
+      extractComponent: false,
+      imports: [],
+    },
+    provenance: {
+      createdBy: 'user',
+      revision: 1,
+      changeId: '',
+    },
+    locked: false,
+  }
+  return {
+    ...base,
+    ...overrides,
+    layout: { ...base.layout, ...(overrides.layout || {}) },
+    style: { ...base.style, ...(overrides.style || {}) },
+    props: { ...base.props, ...(overrides.props || {}) },
+    semantics: { ...base.semantics, ...(overrides.semantics || {}) },
+    a11y: { ...base.a11y, ...(overrides.a11y || {}) },
+    state: { ...base.state, ...(overrides.state || {}) },
+    codegen: { ...base.codegen, ...(overrides.codegen || {}) },
+    provenance: { ...base.provenance, ...(overrides.provenance || {}) },
+    children: Array.isArray(overrides.children) ? overrides.children : [],
+  }
+}
+
+export function createEmptyVisualDocument({
+  projectId = '',
+  title = '未命名页面',
+  withRoot = true,
+} = {}) {
+  return {
+    schemaVersion: VISUAL_SCHEMA_VERSION,
+    docId: newVisualId('vdoc'),
+    projectId,
+    revision: 0,
+    status: 'DRAFT',
+    title,
+    designTokens: JSON.parse(JSON.stringify(DEFAULT_TOKENS)),
+    root: withRoot ? createVisualNode('page', { name: '页面' }) : null,
+    interactions: [],
+    bindings: [],
+    review: {
+      frozenAt: null,
+      questionRounds: 0,
+      answers: [],
+    },
+    metadata: {
+      createdBy: 'user',
+      createdAt: nowIso(),
+      lastModifiedBy: 'user',
+      contentHash: '',
+    },
+  }
+}
+
+export function cloneVisualNode(node, createdBy = 'user') {
+  return {
+    ...JSON.parse(JSON.stringify(node)),
+    id: newVisualId(),
+    children: (node.children || []).map((child) =>
+      cloneVisualNode(child, createdBy),
+    ),
+    provenance: { createdBy, revision: 1, changeId: '' },
+  }
+}
+
+export function findVisualNode(root, nodeId) {
+  if (!root) return null
+  const walk = (node, parent, index) => {
+    if (node.id === nodeId) return { node, parent, index }
+    for (let childIndex = 0; childIndex < node.children.length; childIndex += 1) {
+      const found = walk(node.children[childIndex], node, childIndex)
+      if (found) return found
+    }
+    return null
+  }
+  return walk(root, null, -1)
+}
+
+export function isVisualDescendant(ancestor, nodeId) {
+  if (!ancestor || !nodeId) return false
+  return ancestor.children.some(
+    (child) => child.id === nodeId || isVisualDescendant(child, nodeId),
+  )
+}
+
+export function replaceVisualNode(root, nodeId, updater) {
+  if (!root) return root
+  if (root.id === nodeId) return updater(root)
+  let changed = false
+  const children = root.children.map((child) => {
+    const next = replaceVisualNode(child, nodeId, updater)
+    if (next !== child) changed = true
+    return next
+  })
+  return changed ? { ...root, children } : root
+}
+
+function removeVisualNode(root, nodeId) {
+  if (!root) return { root, removed: null }
+  if (root.id === nodeId) return { root: null, removed: root }
+  for (let index = 0; index < root.children.length; index += 1) {
+    const child = root.children[index]
+    if (child.id === nodeId) {
+      return {
+        root: {
+          ...root,
+          children: root.children.filter((item) => item.id !== nodeId),
+        },
+        removed: child,
+      }
+    }
+    const nested = removeVisualNode(child, nodeId)
+    if (nested.removed) {
+      const children = [...root.children]
+      children[index] = nested.root
+      return { root: { ...root, children }, removed: nested.removed }
+    }
+  }
+  return { root, removed: null }
+}
+
+function insertVisualNode(root, parentId, node, index = -1) {
+  if (!root) return root
+  if (root.id === parentId) {
+    const nextChildren = [...root.children]
+    const at = index < 0 ? nextChildren.length : Math.min(index, nextChildren.length)
+    nextChildren.splice(at, 0, node)
+    return { ...root, children: nextChildren }
+  }
+  let changed = false
+  const children = root.children.map((child) => {
+    const next = insertVisualNode(child, parentId, node, index)
+    if (next !== child) changed = true
+    return next
+  })
+  return changed ? { ...root, children } : root
+}
+
+function touchDocument(document, editor = 'user') {
+  return {
+    ...document,
+    revision: (document.revision || 0) + 1,
+    status: document.status === 'FROZEN' ? 'DRAFT' : document.status,
+    metadata: {
+      ...document.metadata,
+      lastModifiedBy: editor,
+      contentHash: '',
+    },
+  }
+}
+
+/**
+ * 插入节点。空画布首次添加非 page 节点时，会自动创建一个 page 根。
+ * index < 0 表示追加到父容器末尾。
+ */
+export function insertVisualNodeIntoDocument(
+  document,
+  { parentId, type, index = -1, node, editor = 'user' },
+) {
+  if (!NODE_TYPES.includes(type)) throw new Error(`未知节点类型: ${type}`)
+  let root = document.root
+  if (!root) {
+    if (type === 'page') {
+      root = node || createVisualNode('page')
+      return touchDocument({ ...document, root }, editor)
+    }
+    const page = createVisualNode('page', { name: '页面' })
+    const child = node || createVisualNode(type)
+    page.children = [child]
+    return touchDocument({ ...document, root: page }, editor)
+  }
+  if (type === 'page') {
+    throw new Error('页面根节点已存在；请直接编辑现有 page')
+  }
+  const target = findVisualNode(root, parentId || root.id)
+  if (!target) throw new Error('目标父容器不存在')
+  if (!CONTAINER_TYPES.has(target.node.type)) {
+    throw new Error('目标节点不是容器，不能插入子节点')
+  }
+  if (target.node.locked) throw new Error('目标容器已锁定')
+  const nextNode = node || createVisualNode(type)
+  return touchDocument(
+    {
+      ...document,
+      root: insertVisualNode(root, target.node.id, nextNode, index),
+    },
+    editor,
+  )
+}
+
+/** 删除任意节点；删除根节点会得到合法空白画布。 */
+export function deleteVisualNodeFromDocument(
+  document,
+  nodeId,
+  editor = 'user',
+) {
+  const found = findVisualNode(document.root, nodeId)
+  if (!found) return document
+  if (found.node.locked) return document
+  const { root, removed } = removeVisualNode(document.root, nodeId)
+  if (!removed) return document
+  return touchDocument({ ...document, root }, editor)
+}
+
+/**
+ * 移动 / 换父容器。
+ *
+ * index 使用“移动前”的目标 children 下标；同父容器向后移动时会自动
+ * 扣除被移除节点自身占用的位置。
+ */
+export function moveVisualNodeInDocument(
+  document,
+  { nodeId, parentId, index = -1, editor = 'user' },
+) {
+  const root = document.root
+  const source = findVisualNode(root, nodeId)
+  const target = findVisualNode(root, parentId)
+  if (!source || !target) return document
+  if (source.node.locked || target.node.locked) return document
+  if (source.parent === null) return document
+  if (target.node.id === nodeId || isVisualDescendant(source.node, target.node.id)) {
+    return document
+  }
+  if (!CONTAINER_TYPES.has(target.node.type)) return document
+
+  let insertIndex = index
+  if (insertIndex < 0) insertIndex = target.node.children.length
+  if (source.parent.id === target.node.id && source.index < insertIndex) {
+    insertIndex -= 1
+  }
+  const { root: withoutSource } = removeVisualNode(root, nodeId)
+  const nextRoot = insertVisualNode(withoutSource, target.node.id, source.node, insertIndex)
+  if (nextRoot === withoutSource) return document
+  return touchDocument({ ...document, root: nextRoot }, editor)
+}
+
+/** 更新节点；patch 为浅合并，嵌套字段请自行传入完整对象。 */
+export function updateVisualNodeInDocument(
+  document,
+  nodeId,
+  patch,
+  editor = 'user',
+) {
+  const found = findVisualNode(document.root, nodeId)
+  if (!found || found.node.locked) return document
+  const nextPatch = typeof patch === 'function' ? patch(found.node) : patch
+  if (!nextPatch) return document
+  return touchDocument(
+    {
+      ...document,
+      root: replaceVisualNode(document.root, nodeId, (node) => ({
+        ...node,
+        ...nextPatch,
+        props: { ...node.props, ...(nextPatch.props || {}) },
+        layout: { ...node.layout, ...(nextPatch.layout || {}) },
+        style: { ...node.style, ...(nextPatch.style || {}) },
+        semantics: { ...node.semantics, ...(nextPatch.semantics || {}) },
+        a11y: { ...node.a11y, ...(nextPatch.a11y || {}) },
+        state: { ...node.state, ...(nextPatch.state || {}) },
+        codegen: { ...node.codegen, ...(nextPatch.codegen || {}) },
+      })),
+    },
+    editor,
+  )
+}
+
+export function duplicateVisualNodeInDocument(
+  document,
+  nodeId,
+  editor = 'user',
+) {
+  const found = findVisualNode(document.root, nodeId)
+  if (!found || !found.parent || found.node.locked) return document
+  const copy = cloneVisualNode(found.node, editor)
+  return insertVisualNodeIntoDocument(document, {
+    parentId: found.parent.id,
+    type: found.node.type,
+    index: found.index + 1,
+    node: copy,
+    editor,
+  })
+}
+
+export function validateVisualDocument(document) {
+  const errors = []
+  const warnings = []
+  if (!document || typeof document !== 'object') {
+    return {
+      ok: false,
+      errors: ['VisualDocument 必须是对象'],
+      warnings,
+      nodeCount: 0,
+      maxDepth: 0,
+    }
+  }
+  if (document.schemaVersion !== VISUAL_SCHEMA_VERSION) {
+    errors.push(`schemaVersion 必须是 ${VISUAL_SCHEMA_VERSION}`)
+  }
+  if (!document.docId) errors.push('缺少 docId')
+  if (!Number.isInteger(document.revision) || document.revision < 0) {
+    errors.push('revision 必须是非负整数')
+  }
+  if (!Array.isArray(document.interactions)) {
+    errors.push('interactions 必须是数组')
+  }
+  if (!Array.isArray(document.bindings)) {
+    errors.push('bindings 必须是数组')
+  }
+
+  const nodeIds = new Set()
+  const bindingIds = new Set()
+  let nodeCount = 0
+  let maxDepth = 0
+
+  const walk = (node, depth) => {
+    if (!node || typeof node !== 'object') {
+      errors.push('节点必须是对象')
+      return
+    }
+    nodeCount += 1
+    maxDepth = Math.max(maxDepth, depth)
+    if (nodeCount > MAX_VISUAL_NODES) {
+      errors.push(`节点数超过上限 ${MAX_VISUAL_NODES}`)
+      return
+    }
+    if (depth > MAX_VISUAL_DEPTH) {
+      errors.push(`层级超过上限 ${MAX_VISUAL_DEPTH}`)
+      return
+    }
+    if (!NODE_ID_PATTERN.test(String(node.id || ''))) {
+      errors.push(`非法 nodeId: ${node.id}`)
+    } else if (nodeIds.has(node.id)) {
+      errors.push(`重复 nodeId: ${node.id}`)
+    } else {
+      nodeIds.add(node.id)
+    }
+    if (!NODE_TYPES.includes(node.type)) {
+      errors.push(`未知节点类型: ${node.type}`)
+    }
+    if (!Array.isArray(node.children)) {
+      errors.push(`节点 ${node.id} 的 children 必须是数组`)
+      return
+    }
+    if (node.children.length && !CONTAINER_TYPES.has(node.type)) {
+      errors.push(`节点 ${node.id} 类型 ${node.type} 不能包含子节点`)
+    }
+    const forbidden = Object.keys(node).filter((key) =>
+      FORBIDDEN_COORDINATE_KEYS.has(key),
+    )
+    if (forbidden.length) {
+      errors.push(`节点 ${node.id} 含像素坐标: ${forbidden.join(', ')}`)
+    }
+    const layoutForbidden = Object.keys(node.layout || {}).filter((key) =>
+      FORBIDDEN_COORDINATE_KEYS.has(key),
+    )
+    if (layoutForbidden.length) {
+      errors.push(
+        `节点 ${node.id} 的 layout 含像素坐标: ${layoutForbidden.join(', ')}`,
+      )
+    }
+    const badProps = Object.keys(node.props || {}).filter((key) =>
+      FORBIDDEN_PROP_KEYS.has(key),
+    )
+    if (badProps.length) {
+      errors.push(`节点 ${node.id} 含原始 HTML 注入: ${badProps.join(', ')}`)
+    }
+    if (node.repeat && !REPEAT_TYPES.has(node.type)) {
+      errors.push(`节点 ${node.id} 只有 list/table 支持 repeat`)
+    }
+    node.children.forEach((child) => walk(child, depth + 1))
+  }
+
+  if (document.root) walk(document.root, 1)
+
+  for (const binding of document.bindings || []) {
+    if (!binding?.id) {
+      errors.push('binding 缺少 id')
+      continue
+    }
+    if (bindingIds.has(binding.id)) {
+      errors.push(`重复 bindingId: ${binding.id}`)
+    }
+    bindingIds.add(binding.id)
+    if (document.root && !nodeIds.has(binding.nodeId)) {
+      errors.push(`binding ${binding.id} 指向不存在的节点 ${binding.nodeId}`)
+    }
+  }
+  const interactionIds = new Set()
+  for (const interaction of document.interactions || []) {
+    if (!interaction?.id) {
+      errors.push('interaction 缺少 id')
+      continue
+    }
+    if (interactionIds.has(interaction.id)) {
+      errors.push(`重复 interactionId: ${interaction.id}`)
+    }
+    interactionIds.add(interaction.id)
+    if (document.root && !nodeIds.has(interaction.nodeId)) {
+      errors.push(
+        `interaction ${interaction.id} 指向不存在的节点 ${interaction.nodeId}`,
+      )
+    }
+    if (interaction.bindingId && !bindingIds.has(interaction.bindingId)) {
+      errors.push(
+        `interaction ${interaction.id} 引用不存在的 binding ${interaction.bindingId}`,
+      )
+    }
+  }
+
+  const visit = (node) => {
+    if (!node) return
+    if (node.repeat) {
+      const source = node.repeat.source
+      const matched = (document.bindings || []).some(
+        (binding) => binding.id === source || binding.entity === source,
+      )
+      if (!matched) {
+        errors.push(`节点 ${node.id} 的 repeat.source=${source} 没有 binding`)
+      }
+    }
+    node.children.forEach(visit)
+  }
+  if (document.root) visit(document.root)
+
+  if (document.status === 'FROZEN' && !document.metadata?.contentHash) {
+    warnings.push('FROZEN 文档缺少 contentHash')
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    warnings,
+    nodeCount,
+    maxDepth,
+  }
+}
+
+export function countVisualNodes(root) {
+  if (!root) return 0
+  return 1 + root.children.reduce((sum, child) => sum + countVisualNodes(child), 0)
+}
