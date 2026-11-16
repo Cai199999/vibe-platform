@@ -429,6 +429,24 @@ class DirectOperationAddTest(unittest.TestCase):
         entries = self.store.list_for_project(PROJECT_ID)
         self.assertIn("新增 Button", entries[0].summary)
 
+    def test_add_component_inherits_sibling_class_names(self) -> None:
+        payload = _add_payload(
+            payload={
+                "componentType": "Button",
+                "styleContext": {
+                    "className": "toolbar primary",
+                    "style": "border-radius: 8px",
+                },
+            }
+        )
+
+        self.service.execute(payload)
+
+        jsx = self.sandbox.edits[0]["jsxCode"]
+        self.assertIn("vibe-direct-button", jsx)
+        self.assertIn("toolbar primary", jsx)
+        self.assertIn('style="border-radius: 8px"', jsx)
+
     def test_add_component_rejects_unknown_type(self) -> None:
         with self.assertRaises(ValueError):
             _add_payload(payload={"componentType": "LoginForm"})

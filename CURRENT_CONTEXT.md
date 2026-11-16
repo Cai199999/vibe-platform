@@ -23,9 +23,11 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - ChangeLog 持久化：JSONL 落盘 `data/changelog.jsonl`，重启后 Architect 仍可读取最近记录。
 - DELETE_NODE 闭环：静态分析 safe=false 前端拦截；safe=true 二次 Revision 校验 + AST 删除 + 子树节点数守恒校验 + commit + ChangeLog。Direct Ops 四项动作 ✏️/↕/➕/❌ 全部闭环。
 - 契约审计命名归一化：URL kebab-case 与 DDL snake_case 统一后比对；嵌套路由系统父表补推导 JOIN；repair feedback 明确指出命名规范。
+- 内联 Direct Ops：沙盒 SDK 内联 ➕ / 悬浮 ❌ / 双击文本编辑，平台全局消息直连后端；InspectDraftCard 直操工具栏已移除。新增组件继承同级 className / inline style。
+- 骨架布局：ui.layout 成为必需槽位并提供三选一澄清；Prompt 强制 Grid/Flex 响应式多列，禁止全量 flex-col。
 
 ## 最新验证
-前端 16 项 Vitest、Python 598 项 unittest 通过；BFF 单测通过。kebab/snake 失败用例已复现并收敛到契约确认。终极真实沙盒 E2E（无 LLM）：UPDATE_TEXT 1604ms、ADD_COMPONENT 1523ms、DELETE_NODE 1603ms。ChangeLog 落盘并重启可读；DeepSeek Helper 准确复述三项直接操作。
+前端 16 项 Vitest、Python 599 项 unittest 通过；BFF 单测通过。真实沙盒 Direct Ops（含样式继承 ADD 1559ms）正常；新 SDK 已打入 sandbox 镜像。终极 E2E：UPDATE_TEXT 1604ms、ADD 1523ms、DELETE 1603ms；ChangeLog 重启可读，DeepSeek Helper 可复述直接操作。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 无持久化；沙盒无 gVisor；未云端部署。

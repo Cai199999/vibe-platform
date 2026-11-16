@@ -23,7 +23,11 @@ from ai_core.agent.events import RunEventBuffer
 from ai_core.config import Settings, get_settings
 from ai_core.direct_ops.changelog import get_change_log_store
 from ai_core.direct_ops.static_analysis import analyze_delete_anchor
-from ai_core.direct_ops.templates import COMPONENT_TEMPLATES, ensure_imports
+from ai_core.direct_ops.templates import (
+    COMPONENT_TEMPLATES,
+    apply_style_context,
+    ensure_imports,
+)
 from ai_core.domain.direct_ops import (
     ChangeLogEntry,
     DirectActionPayload,
@@ -653,13 +657,17 @@ class DirectOperationService:
             )
             if position == "inside_index" and index is None:
                 index = 0
+            jsx_code = apply_style_context(
+                template.jsx,
+                payload.payload.get("styleContext"),
+            )
             edit = {
                 "operation": "insert",
                 "file": file,
                 "anchorRange": anchor.get("range") or {},
                 "insertPosition": position,
                 "insertIndex": index,
-                "jsxCode": template.jsx,
+                "jsxCode": jsx_code,
             }
         elif payload.action == "DELETE_NODE":
             edit = {

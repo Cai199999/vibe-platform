@@ -44,6 +44,36 @@ COMPONENT_TEMPLATES: dict[str, ComponentTemplate] = {
 }
 
 
+def apply_style_context(jsx: str, style_context: object) -> str:
+    """把同级兄弟的 className 合并到新组件根节点。
+
+    只接受安全字符，且最多 240 字符；不复制事件属性或任意 HTML。
+    """
+    if not isinstance(style_context, dict):
+        return jsx
+    raw = str(style_context.get("className") or "")
+    extra = " ".join(
+        token for token in re.sub(r"[^A-Za-z0-9_\-\s]", " ", raw).split() if token
+    )[:240]
+    if extra:
+        match = re.search(r'className="([^"]*)"', jsx)
+        if match:
+            merged = f"{match.group(1)} {extra}".strip()
+            start, end = match.span(1)
+            jsx = f"{jsx[:start]}{merged}{jsx[end:]}"
+    inline = re.sub(
+        r"[^A-Za-z0-9#%.,:;\-\s()]",
+        "",
+        str(style_context.get("style") or ""),
+    )[:300]
+    if inline and 'style="' not in jsx:
+        if "/>" in jsx:
+            jsx = jsx.replace("/>", f' style="{inline}"/>', 1)
+        else:
+            jsx = jsx.replace(">", f' style="{inline}">', 1)
+    return jsx
+
+
 def ensure_imports(content: str, imports: tuple[str, ...] | list[str]) -> str:
     """确定性补全 import；已存在（忽略首尾空白）时跳过。
 

@@ -20,7 +20,7 @@ from ai_core.domain.architect import (
 )
 
 REQUIRED_SLOTS: dict[str, list[str]] = {
-    "lightweight_web": ["ui.primary_flow"],
+    "lightweight_web": ["ui.primary_flow", "ui.layout"],
     "script_automation": [
         "script.runtime",
         "script.input",
@@ -32,6 +32,7 @@ REQUIRED_SLOTS: dict[str, list[str]] = {
         "database.engine",
         "business.key_flows",
         "data.entities",
+        "ui.layout",
     ],
 }
 
@@ -40,6 +41,7 @@ REQUIRED_SLOTS: dict[str, list[str]] = {
 SLOT_CAPS: dict[str, float] = {
     "app.shape": 0.42,
     "ui.primary_flow": 0.72,
+    "ui.layout": 0.70,
     "script.runtime": 0.66,
     "script.input": 0.70,
     "script.output": 0.70,
@@ -295,6 +297,32 @@ def question_for_slot(slot: str, shape: str | None = None) -> ArchitectQuestion 
                 "例如：输入待办 -> 标记完成 -> 保存到浏览器。"
             ),
             required=True,
+        )
+    if slot == "ui.layout":
+        return ArchitectQuestion(
+            question_id="q_ui_layout",
+            slot=slot,
+            type="single_choice",
+            prompt=(
+                "页面的基础版式希望采用哪一种？后续骨架会按 Grid / Flex "
+                "栅格化生成，避免所有组件垂直堆叠。"
+            ),
+            required=True,
+            options=[
+                {
+                    "value": "sidebar_main",
+                    "label": "A. 左侧边栏 + 主内容区（适合管理台）",
+                },
+                {
+                    "value": "topnav_main",
+                    "label": "B. 顶部导航 + 主内容区（适合工具页）",
+                },
+                {
+                    "value": "topnav_cards",
+                    "label": "C. 顶部导航 + 响应式三列卡片（适合列表 / 看板）",
+                },
+            ],
+            default_value="topnav_cards",
         )
     if slot == "script.runtime":
         return ArchitectQuestion(

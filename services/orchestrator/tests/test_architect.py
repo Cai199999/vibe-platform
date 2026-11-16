@@ -460,7 +460,7 @@ class ArchitectJsonRepairTest(unittest.TestCase):
                 },
                 {"role": "user", "content": "核心实体是订单和商品表。"},
             ],
-            slots={"app.shape": "full_stack_system"},
+            slots={"app.shape": "full_stack_system", "ui.layout": "topnav_cards"},
             app_shape="full_stack_system",
             round=2,
             threshold=0.85,
@@ -561,8 +561,8 @@ class ConfidenceGuardTest(unittest.TestCase):
             {},
             0.85,
         )
-        self.assertEqual(result.missing_slots, ["ui.primary_flow"])
-        self.assertEqual(guarded.confidence_score, 0.72)
+        self.assertEqual(result.missing_slots, ["ui.primary_flow", "ui.layout"])
+        self.assertEqual(guarded.confidence_score, 0.70)
         self.assertFalse(
             any(
                 slot.startswith(("backend.", "database."))
@@ -603,6 +603,7 @@ class ConfidenceGuardTest(unittest.TestCase):
                 "database.engine",
                 "business.key_flows",
                 "data.entities",
+                "ui.layout",
             ],
         )
         self.assertLess(guarded.confidence_score, 0.85)
@@ -615,7 +616,7 @@ class ConfidenceGuardTest(unittest.TestCase):
             ArchitectAnalysis(
                 app_shape="lightweight_web",
                 confidence_score=0.99,
-                slots={"ui.primary_flow": "输入 -> 勾选 -> 保存"},
+                slots={"ui.primary_flow": "输入 -> 勾选 -> 保存", "ui.layout": "topnav_cards"},
                 assumptions=["假设浏览器支持 localStorage"],
             ),
             {},
@@ -636,6 +637,7 @@ class ConfidenceGuardTest(unittest.TestCase):
                     "database.engine": "mysql",
                     "business.key_flows": "点击 -> 扣库存 -> 跳转",
                     "data.entities": "Order, Product",
+                    "ui.layout": "topnav_cards",
                 },
             ),
             {},

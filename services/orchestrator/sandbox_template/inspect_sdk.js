@@ -2226,6 +2226,421 @@
     navigationType = ''
   }
 
+  // ------------------------------------------------------------
+  // Direct Ops：内联 ➕ / 悬浮 ❌ / 双击文本编辑
+  // ------------------------------------------------------------
+  // 该层不修改 React 源码 DOM，只在 documentElement 上挂 fixed 浮层，
+  // 因此不会触发 HMR，也不会影响组件自身布局。
+  var directEnabled = false
+  var directBound = false
+  var directDeleteBtn = null
+  var directPlusBtn = null
+  var directMenu = null
+  var directConfirm = null
+  var directToast = null
+  var directFormatBar = null
+  var directTarget = null
+  var directContainer = null
+  var directDeleteSource = null
+  var directEdit = null
+  var directLastTextEdit = null
+
+  function directEl(tag, styles, text) {
+    var node = document.createElement(tag)
+    if (styles) node.style.cssText = styles
+    if (text) node.textContent = text
+    node.setAttribute('data-vibe-direct-ui', 'true')
+    document.documentElement.appendChild(node)
+    return node
+  }
+
+  function ensureDirectUi() {
+    if (!directDeleteBtn) {
+      directDeleteBtn = directEl(
+        'button',
+        'position:fixed;display:none;z-index:2147483645;width:22px;height:22px;' +
+          'border-radius:11px;border:1px solid rgba(248,113,113,.65);' +
+          'background:rgba(15,23,42,.92);color:#fca5a5;font-size:12px;' +
+          'line-height:20px;padding:0;cursor:pointer;pointer-events:auto;',
+        '×',
+      )
+      directDeleteBtn.title = '删除组件'
+      directDeleteBtn.addEventListener('click', function (event) {
+        event.preventDefault()
+        event.stopPropagation()
+        if (!directTarget) return
+        directDeleteSource = readSource(directTarget)
+        post('direct-delete-request', { source: directDeleteSource })
+      })
+    }
+    if (!directPlusBtn) {
+      directPlusBtn = directEl(
+        'button',
+        'position:fixed;display:none;z-index:2147483645;width:24px;height:24px;' +
+          'border-radius:12px;border:1px solid rgba(96,165,250,.7);' +
+          'background:rgba(15,23,42,.94);color:#bfdbfe;font-size:15px;' +
+          'line-height:22px;padding:0;cursor:pointer;pointer-events:auto;',
+        '+',
+      )
+      directPlusBtn.title = '新增基础组件'
+      directPlusBtn.addEventListener('click', function (event) {
+        event.preventDefault()
+        event.stopPropagation()
+        if (!directContainer) return
+        openDirectMenu()
+      })
+    }
+  }
+
+  function directStyleContext(node) {
+    var sibling = node && node.previousElementSibling
+    while (sibling) {
+      if (sibling.tagName === node.tagName) break
+      sibling = sibling.previousElementSibling
+    }
+    if (!sibling) sibling = node && node.previousElementSibling
+    if (!sibling) return {}
+    return {
+      className: String(sibling.className || '').slice(0, 240),
+      style: String(sibling.getAttribute('style') || '').slice(0, 300),
+      tag: String(sibling.tagName || '').toLowerCase(),
+    }
+  }
+
+  function hideDirectUi() {
+    if (directDeleteBtn) directDeleteBtn.style.display = 'none'
+    if (directPlusBtn) directPlusBtn.style.display = 'none'
+    if (directMenu) directMenu.style.display = 'none'
+    if (directConfirm) directConfirm.style.display = 'none'
+  }
+
+  function placeAt(node, yOffset) {
+    var rect = node.getBoundingClientRect()
+    return {
+      rect: rect,
+      left: Math.max(2, rect.right - 26),
+      top: Math.max(2, rect.top + (yOffset || 2)),
+    }
+  }
+
+  function onDirectOver(event) {
+    if (!directEnabled || enabled || dragState || directEdit) return
+    var node = event.target
+    if (!node || node.closest?.('[data-vibe-direct-ui]')) return
+    var sourceNode = node.closest?.('[data-source], [data-source-file]')
+    if (!sourceNode || node === document.documentElement) {
+      hideDirectUi()
+      return
+    }
+    var source = readSource(sourceNode)
+    if (!source || !hasSourceAnchor(source)) {
+      hideDirectUi()
+      return
+    }
+    directTarget = sourceNode
+    ensureDirectUi()
+    var placed = placeAt(sourceNode, 2)
+    directDeleteBtn.style.left = placed.left + 'px'
+    directDeleteBtn.style.top = placed.top + 'px'
+    directDeleteBtn.style.display = 'block'
+
+    var isContainer =
+      String(sourceNode.getAttribute('data-source-kind') || '') === 'container' ||
+      CONTAINER_TAGS[String(sourceNode.tagName || '').toLowerCase()] === true
+    if (isContainer) {
+      directContainer = sourceNode
+      var rect = sourceNode.getBoundingClientRect()
+      directPlusBtn.style.left = Math.max(2, rect.right - 26) + 'px'
+      directPlusBtn.style.top = Math.max(2, rect.bottom - 26) + 'px'
+      directPlusBtn.style.display = 'block'
+    } else {
+      directContainer = null
+      directPlusBtn.style.display = 'none'
+    }
+  }
+
+  function closeDirectMenu() {
+    if (directMenu) directMenu.style.display = 'none'
+  }
+
+  function openDirectMenu() {
+    if (!directContainer) return
+    if (!directMenu) {
+      directMenu = directEl(
+        'div',
+        'position:fixed;display:none;z-index:2147483647;padding:6px;' +
+          'border-radius:10px;border:1px solid rgba(148,163,184,.35);' +
+          'background:rgba(15,23,42,.98);box-shadow:0 10px 30px rgba(0,0,0,.4);' +
+          'pointer-events:auto;',
+      )
+      ;['Button', 'Input', 'Text', 'Card'].forEach(function (type) {
+        var item = document.createElement('button')
+        item.type = 'button'
+        item.textContent = type
+        item.style.cssText =
+          'display:block;width:100%;margin:2px 0;padding:5px 10px;border:0;' +
+          'border-radius:6px;background:transparent;color:#e2e8f0;' +
+          'font-size:12px;text-align:left;cursor:pointer;'
+        item.addEventListener('click', function (event) {
+          event.preventDefault()
+          event.stopPropagation()
+          closeDirectMenu()
+          if (!directContainer) return
+          post('direct-add', {
+            source: readSource(directContainer),
+            componentType: type,
+            styleContext: directStyleContext(directContainer),
+          })
+        })
+        directMenu.appendChild(item)
+      })
+    }
+    var rect = directContainer.getBoundingClientRect()
+    directMenu.style.left = Math.max(2, rect.right - 100) + 'px'
+    directMenu.style.top = Math.max(2, rect.top + 26) + 'px'
+    directMenu.style.display = directMenu.style.display === 'block' ? 'none' : 'block'
+  }
+
+  function ensureDirectConfirm() {
+    if (directConfirm) return directConfirm
+    directConfirm = directEl(
+      'div',
+      'position:fixed;display:none;z-index:2147483647;padding:10px 12px;' +
+        'border-radius:10px;border:1px solid rgba(148,163,184,.4);' +
+        'background:rgba(15,23,42,.98);color:#e2e8f0;font-size:12px;' +
+        'pointer-events:auto;box-shadow:0 10px 30px rgba(0,0,0,.45);',
+    )
+    var text = document.createElement('div')
+    text.textContent = '删除这个组件？'
+    text.style.marginBottom = '8px'
+    directConfirm.appendChild(text)
+    var row = document.createElement('div')
+    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;'
+    var ok = document.createElement('button')
+    ok.type = 'button'
+    ok.textContent = '确认删除'
+    ok.style.cssText =
+      'padding:4px 8px;border-radius:6px;border:1px solid rgba(248,113,113,.6);' +
+      'background:rgba(248,113,113,.15);color:#fecaca;cursor:pointer;'
+    ok.addEventListener('click', function (event) {
+      event.preventDefault()
+      event.stopPropagation()
+      directConfirm.style.display = 'none'
+      post('direct-delete-confirmed', { source: directDeleteSource })
+    })
+    var cancel = document.createElement('button')
+    cancel.type = 'button'
+    cancel.textContent = '取消'
+    cancel.style.cssText =
+      'padding:4px 8px;border-radius:6px;border:1px solid rgba(148,163,184,.3);' +
+      'background:transparent;color:#cbd5e1;cursor:pointer;'
+    cancel.addEventListener('click', function () {
+      directConfirm.style.display = 'none'
+    })
+    row.appendChild(ok)
+    row.appendChild(cancel)
+    directConfirm.appendChild(row)
+    return directConfirm
+  }
+
+  function showDirectToast(message) {
+    if (!directToast) {
+      directToast = directEl(
+        'div',
+        'position:fixed;left:50%;bottom:28px;transform:translateX(-50%);' +
+          'z-index:2147483647;padding:8px 14px;border-radius:999px;' +
+          'background:rgba(15,23,42,.96);border:1px solid rgba(148,163,184,.35);' +
+          'color:#e2e8f0;font-size:12px;pointer-events:none;transition:opacity .2s;',
+      )
+    }
+    directToast.textContent = message
+    directToast.style.opacity = '1'
+    window.clearTimeout(directToast._timer)
+    directToast._timer = window.setTimeout(function () {
+      directToast.style.opacity = '0'
+    }, 2200)
+  }
+
+  function textEditable(node) {
+    if (!node || node.children.length > 0) return false
+    return Boolean(String(node.textContent || '').trim())
+  }
+
+  function startDirectTextEdit(node) {
+    if (!directEnabled || enabled || !textEditable(node)) {
+      if (node && !textEditable(node)) {
+        showDirectToast('该组件不是纯文本节点，建议使用 AI 修改')
+      }
+      return
+    }
+    directEdit = {
+      node: node,
+      source: readSource(node),
+      original: node.textContent,
+    }
+    node.setAttribute('contenteditable', 'true')
+    node.style.outline = '2px solid rgba(96,165,250,.8)'
+    node.style.outlineOffset = '2px'
+    node.focus()
+    try {
+      var range = document.createRange()
+      range.selectNodeContents(node)
+      var selection = window.getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+    } catch (error) {
+      // selection 不可用时仍允许直接编辑。
+    }
+    if (!directFormatBar) {
+      directFormatBar = directEl(
+        'div',
+        'position:fixed;display:none;z-index:2147483647;padding:4px 6px;' +
+          'border-radius:8px;border:1px solid rgba(148,163,184,.3);' +
+          'background:rgba(15,23,42,.98);gap:4px;pointer-events:auto;',
+      )
+      ;['B', 'A-', 'A+'].forEach(function (label) {
+        var button = document.createElement('button')
+        button.type = 'button'
+        button.textContent = label
+        button.title = '字体设置即将支持'
+        button.disabled = true
+        button.style.cssText =
+          'min-width:24px;padding:2px 6px;border-radius:4px;border:0;' +
+          'background:rgba(148,163,184,.12);color:#94a3b8;font-size:11px;'
+        directFormatBar.appendChild(button)
+      })
+    }
+    var rect = node.getBoundingClientRect()
+    directFormatBar.style.left = Math.max(2, rect.left) + 'px'
+    directFormatBar.style.top = Math.max(2, rect.top - 30) + 'px'
+    directFormatBar.style.display = 'flex'
+    hideDirectUi()
+  }
+
+  function finishDirectTextEdit(cancel) {
+    var edit = directEdit
+    if (!edit) return
+    directEdit = null
+    if (directFormatBar) directFormatBar.style.display = 'none'
+    var node = edit.node
+    if (!node || !node.isConnected) return
+    node.removeAttribute('contenteditable')
+    node.style.outline = ''
+    node.style.outlineOffset = ''
+    if (cancel) {
+      node.textContent = edit.original
+      return
+    }
+    var text = String(node.textContent || '').trim()
+    if (!text || text === String(edit.original || '').trim()) return
+    directLastTextEdit = {
+      node: node,
+      source: edit.source,
+      originalText: edit.original,
+    }
+    post('direct-text', {
+      source: edit.source,
+      text: text,
+      originalText: edit.original,
+    })
+  }
+
+  function bindDirectEvents() {
+    if (directBound) return
+    directBound = true
+    document.addEventListener('mouseover', onDirectOver, true)
+    document.addEventListener('scroll', hideDirectUi, true)
+    document.addEventListener('click', function (event) {
+      if (!event.target.closest?.('[data-vibe-direct-ui]')) {
+        closeDirectMenu()
+        if (directConfirm) directConfirm.style.display = 'none'
+      }
+    }, true)
+    document.addEventListener('dblclick', function (event) {
+      if (!directEnabled || enabled) return
+      var node = event.target?.closest?.('[data-source], [data-source-file]')
+      if (!node) return
+      event.preventDefault()
+      event.stopPropagation()
+      startDirectTextEdit(node)
+    }, true)
+    document.addEventListener('keydown', function (event) {
+      if (!directEdit) return
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        finishDirectTextEdit(true)
+      } else if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault()
+        finishDirectTextEdit(false)
+      }
+    }, true)
+    document.addEventListener('focusout', function (event) {
+      if (directEdit && event.target === directEdit.node) {
+        finishDirectTextEdit(false)
+      }
+    }, true)
+  }
+
+  function setDirectMode(value) {
+    directEnabled = Boolean(value)
+    if (directEnabled) {
+      ensureDirectUi()
+      bindDirectEvents()
+    } else {
+      hideDirectUi()
+      finishDirectTextEdit(true)
+    }
+  }
+
+  window.addEventListener('message', function (event) {
+    var data = event.data
+    if (!data || data.channel !== CHANNEL) return
+    if (data.type === 'direct-mode') {
+      var directValue = data.enabled
+      if (directValue === undefined && data.payload) {
+        directValue = data.payload.enabled
+      }
+      setDirectMode(directValue !== false)
+      return
+    }
+    if (data.type === 'direct-delete-result') {
+      var result = data.payload || {}
+      if (result.safe) {
+        var panel = ensureDirectConfirm()
+        var node = directDeleteSource && queryNode(directDeleteSource.selector)
+        if (node) {
+          var rect = node.getBoundingClientRect()
+          panel.style.left = Math.max(2, rect.right - 190) + 'px'
+          panel.style.top = Math.max(2, rect.top + 26) + 'px'
+        } else {
+          panel.style.left = '50%'
+          panel.style.top = '30%'
+        }
+        panel.style.display = 'block'
+      } else {
+        showDirectToast(
+          '已拦截：' + ((result.reasons || []).join('；') || '该组件不可直接删除'),
+        )
+      }
+      return
+    }
+    if (data.type === 'direct-result') {
+      showDirectToast(String((data.payload || {}).message || ''))
+      return
+    }
+    if (data.type === 'direct-text-rollback') {
+      var payload = data.payload || {}
+      var target =
+        (directEdit && directEdit.node) ||
+        (directLastTextEdit && directLastTextEdit.node)
+      if (target && payload.originalText !== undefined) {
+        target.textContent = payload.originalText
+      }
+      directLastTextEdit = null
+      return
+    }
+  }, true)
+
   // 通知父页面 SDK 已就绪；父页面收到后再下发 enable，避免首次点击丢失。
   post('ready', {
     url: window.location.href,
