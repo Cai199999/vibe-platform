@@ -1256,6 +1256,82 @@ class ContractConflictDecisionTest(unittest.TestCase):
         self.assertEqual(outcome.state.get("status"), "CANCELLED")
 
 
+class _KebabNestedLLM(MockArchitectLLM):
+    """复现 kebab-case 路由 + snake_case DDL 的契约。"""
+
+    def draft_contract(self, context: ArchitectContext) -> ContractDraft:
+        base = super().draft_contract(context)
+        routes = [
+            ArchitectApiRoute(
+                method="GET", path="/api/v1/users", description="用户列表"
+            ),
+            ArchitectApiRoute(
+                method="GET",
+                path="/api/v1/users/{user_id}/job-descriptions",
+                description="用户职位描述",
+            ),
+        ]
+        interactions = [
+            ArchitectComponentInteraction(
+                component="UserList",
+                event="mount",
+                api_route="GET /api/v1/users",
+                logic="加载用户列表",
+            )
+        ]
+        ddl = (
+            "CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR(64));\n"
+            "CREATE TABLE job_descriptions (\n"
+            "  id BIGINT PRIMARY KEY,\n"
+            "  user_id BIGINT NOT NULL,\n"
+            "  title VARCHAR(128) NOT NULL\n"
+            ");"
+        )
+        return replace(
+            base,
+            api_routes=routes,
+            component_interactions=interactions,
+            database_ddl=ddl,
+        )
+
+    def revise_contract(
+        self,
+        context: ArchitectContext,
+        previous: ContractDraft,
+        feedback: str,
+    ) -> ContractDraft:
+        return self.draft_contract(context)
+
+
+class KebabNestedAuditTest(unittest.TestCase):
+    def test_kebab_nested_route_reaches_confirmation(self) -> None:
+        harness = ArchitectHarness(llm=_KebabNestedLLM())
+        payload = harness.outcome.interrupt or {}
+        for _ in range(10):
+            if payload.get("kind") == "contract_confirmation":
+                break
+            harness.assert_shape_question_or_slots(payload, "full_stack_system")
+            payload = harness.answer(payload, "full_stack_system")
+        self.assertEqual(payload.get("kind"), "contract_confirmation")
+
+    def test_repair_feedback_mentions_naming_convention(self) -> None:
+        from types import SimpleNamespace
+
+        feedback = ArchitectGraphRunner._repair_feedback(
+            ["嵌套路由引用了 DDL 中不存在的子表 job-descriptions"],
+            [
+                SimpleNamespace(
+                    code="nested_table_missing",
+                    hint="在 databaseDdl 中创建 snake_case 子表 job_descriptions",
+                )
+            ],
+        )
+
+        self.assertIn("kebab-case", feedback)
+        self.assertIn("snake_case", feedback)
+        self.assertIn("job_descriptions", feedback)
+
+
 class ContractConflictServiceTest(unittest.TestCase):
     """服务层只接受服务端下发的 optionId，并正确推进状态。"""
 

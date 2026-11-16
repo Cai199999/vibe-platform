@@ -19,11 +19,13 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
 from ai_core.domain.architect import ArchitectContract
 from ai_core.domain.relations import (
+    derive_table_relations,
     normalize_table_relations,
     parse_ddl_table_columns,
     relation_audit_issues,
@@ -145,7 +147,9 @@ def _parse_route_reference(raw: str) -> tuple[str, str]:
 
 
 def _singular(word: str) -> str:
-    value = (word or "").strip().lower()
+    # URL 路由常用 kebab-case，DDL 表名用 snake_case；比对前统一去掉
+    # 分隔符，避免 /tailored-resumes 被误判为缺少 tailored_resumes 表。
+    value = re.sub(r"[^a-z0-9]", "", str(word or "").lower())
     if value.endswith("ies") and len(value) > 3:
         return value[:-3] + "y"
     if value.endswith("ses") and len(value) > 3:
@@ -307,17 +311,29 @@ def _audit_nested_routes(
                         f"嵌套路由引用了 DDL 中不存在的子表 {child_resource}"
                         f"（父资源 {parent_resource}）"
                     ),
-                    hint=f"在 databaseDdl 中创建 {child_resource} 表，并声明外键列",
+                    hint=(
+                        f"在 databaseDdl 中创建 snake_case 子表 "
+                        f"{child_resource.replace('-', '_')}，并声明外键列；"
+                        "URL 用 kebab-case，DDL 表名用 snake_case，二者语义对应"
+                    ),
                 )
             )
             continue
         if not parent:
             continue
-        related = any(
-            relation.parent_table.lower() == parent.lower()
-            and relation.child_table.lower() == child.lower()
-            for relation in relations
-        )
+
+        def _has_relation(candidates: list[Any]) -> bool:
+            return any(
+                relation.parent_table.lower() == parent.lower()
+                and relation.child_table.lower() == child.lower()
+                for relation in candidates
+            )
+
+        related = _has_relation(relations)  # type: ignore[arg-type]
+        if not related:
+            # users 等系统表默认不参与推导；当它作为嵌套路由父资源时，
+            # 需要显式把 parent 当作 core table 再推导一次。
+            related = _has_relation(derive_table_relations(tables, core_table=parent))
         if not related:
             problems.append(
                 ContractProblem(

@@ -72,6 +72,76 @@ class ContractAuditTest(unittest.TestCase):
         )
         self.assertIn("/api/v1/resumes/missing", problem.message)
 
+    def test_kebab_route_matches_snake_case_ddl_table(self) -> None:
+        """REST kebab-case 子资源必须能匹配 DDL 的 snake_case 表。"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="GET", path="/api/v1/users", description="用户列表"
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/users/{user_id}/job-descriptions",
+                    description="用户职位描述",
+                ),
+            ],
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="UserList",
+                    event="load",
+                    api_route="GET /api/v1/users",
+                    logic="加载用户列表",
+                )
+            ],
+            databaseDdl=(
+                "CREATE TABLE users ("
+                "id BIGINT PRIMARY KEY, name VARCHAR(64));"
+                "CREATE TABLE job_descriptions ("
+                "id BIGINT PRIMARY KEY, user_id BIGINT, title VARCHAR(128));"
+            ),
+        )
+
+        audit = audit_contract(contract)
+
+        self.assertTrue(audit.ok, audit.summary())
+
+    def test_snake_case_table_still_required_for_nested_route(self) -> None:
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="GET", path="/api/v1/users", description="用户列表"
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/users/{user_id}/job-descriptions",
+                    description="用户职位描述",
+                ),
+            ],
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="UserList",
+                    event="load",
+                    api_route="GET /api/v1/users",
+                    logic="加载用户列表",
+                )
+            ],
+            databaseDdl=(
+                "CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR(64));"
+            ),
+        )
+
+        audit = audit_contract(contract)
+
+        self.assertFalse(audit.ok)
+        self.assertTrue(
+            any(item.code == "nested_table_missing" for item in audit.problems),
+            audit.summary(),
+        )
+        problem = next(
+            item for item in audit.problems if item.code == "nested_table_missing"
+        )
+        self.assertIn("job_descriptions", problem.hint)
+
     def test_auth_action_routes_map_to_users_table(self) -> None:
         """登录 / 注册是 users 表上的动作，不得要求 DDL 存在 auth 表。"""
         contract = _contract(

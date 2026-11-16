@@ -791,7 +791,7 @@ class ArchitectGraphRunner:
             return {
                 "contract_draft": raw,
                 "contract_issues": issues,
-                "contract_feedback": "；".join(issues),
+                "contract_feedback": self._repair_feedback(issues, audit_problems),
                 "repair_count": repair_count + 1,
                 "status": "REPAIRING_CONTRACT",
             }
@@ -823,6 +823,35 @@ class ArchitectGraphRunner:
             "error": "实施契约未通过分级校验：" + "；".join(issues),
             "error_code": "CONTRACT_VALIDATION_FAILED",
         }
+
+    @staticmethod
+    def _repair_feedback(
+        issues: list[str],
+        audit_problems: list[Any],
+    ) -> str:
+        """把审计 hint 与命名规范一起回灌模型，避免二次修仍然盲目。"""
+        parts = list(dict.fromkeys(str(item) for item in issues if item))
+        hints = [
+            str(problem.hint)
+            for problem in audit_problems
+            if getattr(problem, "hint", "")
+        ]
+        if hints:
+            parts.append("修复提示：" + "；".join(dict.fromkeys(hints)))
+        naming_codes = {
+            "nested_table_missing",
+            "collection_table_missing",
+        }
+        if any(
+            getattr(problem, "code", "") in naming_codes for problem in audit_problems
+        ):
+            parts.append(
+                "命名规范：URL 路由使用 kebab-case，DDL 表名必须使用 "
+                "snake_case，且语义一一对应；例如 /tailored-resumes 对应 "
+                "tailored_resumes，/job-descriptions 对应 job_descriptions。"
+                "请在 DDL 中创建对应子表，或改为父资源详情查询。"
+            )
+        return "；".join(dict.fromkeys(parts))
 
     def _build_contract_conflict(
         self,
