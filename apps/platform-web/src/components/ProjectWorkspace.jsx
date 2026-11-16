@@ -1000,6 +1000,7 @@ function ProjectWorkspaceInner({
               onAnnotationSend={onAnnotationSend}
               onAnnotationMove={onAnnotationMove}
               onClarificationAnswer={onClarificationAnswer}
+              projectId={project.id}
               inspectMode={inspectMode && canvasVisible && !inspectBlocked}
               onInspectPick={handleInspectPick}
               referencePick={referencePick}
@@ -1084,6 +1085,7 @@ function ProjectWorkspaceInner({
           >
             <RuntimePanel
               run={run}
+              projectId={project.id}
               projectName={project.name}
               modelProvider={modelProvider}
               expanded

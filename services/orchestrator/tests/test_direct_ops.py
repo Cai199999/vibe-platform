@@ -263,6 +263,30 @@ class DirectOperationMoveTest(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertIn("移动到", entries[0].summary)
 
+    def test_shared_component_moves_at_call_site(self) -> None:
+        self.sandbox.anchor = {
+            **_anchor(shared=True),
+            "file": "src/components/Card.jsx",
+            "component": "Card",
+            "callSiteFile": "src/Page.jsx",
+            "callSiteAnchor": {
+                "file": "src/Page.jsx",
+                "range": {"startOffset": 10, "endOffset": 40},
+                "component": "Page",
+                "nodeType": "JSXElement",
+            },
+        }
+        self.sandbox.parent_anchor = {
+            **self.sandbox.parent_anchor,
+            "file": "src/Page.jsx",
+        }
+
+        response = self.service.execute(_move_payload())
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(response.risk, "L0_DIRECT")
+        self.assertEqual(self.sandbox.edits[0]["file"], "src/Page.jsx")
+
     def test_cross_file_move_requires_ai(self) -> None:
         self.sandbox.parent_anchor = {
             **self.sandbox.parent_anchor,

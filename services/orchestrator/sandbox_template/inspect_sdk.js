@@ -2312,6 +2312,7 @@
   // 该层不修改 React 源码 DOM，只在 documentElement 上挂 fixed 浮层，
   // 因此不会触发 HMR，也不会影响组件自身布局。
   var directEnabled = false
+  var directProjectId = ''
   var directBound = false
   var directDeleteBtn = null
   var directPlusBtn = null
@@ -2323,6 +2324,7 @@
   var directTarget = null
   var directContainer = null
   var directDeleteSource = null
+  var directDeleteAutoConfirm = false
   var directEdit = null
   var directLastTextEdit = null
 
@@ -2359,7 +2361,18 @@
         event.stopPropagation()
         if (!directTarget) return
         directDeleteSource = readSource(directTarget)
-        post('direct-delete-request', { source: directDeleteSource })
+        if (!directDeleteSource) {
+          showDirectToast('目标已失效，请重新选择组件')
+          return
+        }
+        directDeleteAutoConfirm =
+          directTarget.getAttribute('data-vibe-created') === 'direct' ||
+          Boolean(directTarget.querySelector?.('[data-vibe-created]'))
+        post('direct-delete-request', {
+          projectId: directProjectId,
+          source: directDeleteSource,
+          autoConfirm: directDeleteAutoConfirm,
+        })
       })
     }
     if (!directPlusBtn) {
@@ -2496,6 +2509,7 @@
           closeDirectMenu()
           if (!directContainer) return
           post('direct-add', {
+            projectId: directProjectId,
             source: readSource(directContainer),
             componentType: type,
             styleContext: directStyleContext(directContainer),
@@ -2535,7 +2549,10 @@
       event.preventDefault()
       event.stopPropagation()
       directConfirm.style.display = 'none'
-      post('direct-delete-confirmed', { source: directDeleteSource })
+      post('direct-delete-confirmed', {
+        projectId: directProjectId,
+        source: directDeleteSource,
+      })
     })
     var cancel = document.createElement('button')
     cancel.type = 'button'
@@ -2648,6 +2665,7 @@
       originalText: edit.original,
     }
     post('direct-text', {
+      projectId: directProjectId,
       source: edit.source,
       text: text,
       originalText: edit.original,
@@ -2709,11 +2727,23 @@
       if (directValue === undefined && data.payload) {
         directValue = data.payload.enabled
       }
+      directProjectId =
+        data.projectId ||
+        (data.payload && data.payload.projectId) ||
+        directProjectId
       setDirectMode(directValue !== false)
       return
     }
     if (data.type === 'direct-delete-result') {
       var result = data.payload || {}
+      if (result.safe && directDeleteAutoConfirm) {
+        directDeleteAutoConfirm = false
+        post('direct-delete-confirmed', {
+          projectId: directProjectId,
+          source: directDeleteSource,
+        })
+        return
+      }
       if (result.safe) {
         var panel = ensureDirectConfirm()
         var node = directDeleteSource && queryNode(directDeleteSource.selector)

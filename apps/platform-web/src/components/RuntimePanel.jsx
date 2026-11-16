@@ -675,6 +675,7 @@ function useElapsed(startedAt, running) {
  */
 export default function RuntimePanel({
   run,
+  projectId = '',
   projectName,
   modelProvider = 'auto',
   expanded = false,
@@ -837,6 +838,7 @@ export default function RuntimePanel({
             切换视图（画布 <-> 预览）仍只改 display，不重建 iframe。 */}
         {previewUrl && active && (
           <ScaledPreview
+            projectId={projectId}
             // 快照回滚后工作区文件已变化，但 URL 不变；用 nonce 重建 iframe，
             // 强制浏览器重新加载沙盒的最新构建结果。
             key={`${previewUrl}:${refreshNonce}`}

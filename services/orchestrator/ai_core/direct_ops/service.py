@@ -324,6 +324,11 @@ class DirectOperationService:
                 else None
             )
             timings["resolveMs"] = _elapsed_ms(mark)
+            move_anchor = (
+                self._move_source_anchor(payload, anchor)
+                if payload.action == "MOVE_NODE"
+                else anchor
+            )
             risk = self._risk(payload, anchor, parent)
             resolved_target = {
                 "file": anchor.get("file"),
@@ -362,10 +367,10 @@ class DirectOperationService:
                     diagnostic={"sharedReason": anchor.get("sharedReason") or ""},
                 )
 
-            file = str(anchor.get("file") or "")
+            file = str(move_anchor.get("file") or "")
             mark = time.perf_counter()
             old_content = self._sandbox.read_file(payload.sandbox_id, file)
-            new_content = self._build_new_content(payload, anchor, parent)
+            new_content = self._build_new_content(payload, move_anchor, parent)
             timings["astEditMs"] = _elapsed_ms(mark)
 
             if payload.options.dry_run:
@@ -415,7 +420,7 @@ class DirectOperationService:
             mark = time.perf_counter()
             change = self._write_changelog(
                 payload,
-                anchor,
+                move_anchor,
                 old_content,
                 new_content,
                 commit_hash,
@@ -559,6 +564,23 @@ class DirectOperationService:
         return parent
 
     @staticmethod
+    def _move_source_anchor(
+        payload: DirectActionPayload,
+        anchor: dict[str, Any],
+    ) -> dict[str, Any]:
+        """共享组件的移动必须落在 callSite，不修改公共组件定义本身。"""
+        if payload.action != "MOVE_NODE":
+            return anchor
+        call_site = anchor.get("callSiteAnchor")
+        if not isinstance(call_site, dict):
+            return anchor
+        if not call_site.get("file") or not call_site.get("range"):
+            return anchor
+        merged = dict(call_site)
+        merged.setdefault("component", anchor.get("component") or "")
+        return merged
+
+    @staticmethod
     def _risk(
         payload: DirectActionPayload,
         anchor: dict[str, Any],
@@ -571,6 +593,14 @@ class DirectOperationService:
         if payload.action == "MOVE_NODE":
             if parent is None:
                 return "L3_AI_REQUIRED"
+            call_site = anchor.get("callSiteAnchor")
+            if isinstance(call_site, dict) and call_site.get("file"):
+                # 共享组件只在当前调用点做实例级移动，绝不改定义文件。
+                if parent.get("file") != call_site.get("file"):
+                    return "L3_AI_REQUIRED"
+                if parent.get("isShared") or parent.get("protected"):
+                    return "L2_HITL"
+                return "L0_DIRECT"
             if parent.get("file") != anchor.get("file"):
                 return "L3_AI_REQUIRED"
             if any(

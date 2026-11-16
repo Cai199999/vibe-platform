@@ -53,6 +53,7 @@ export default function ScaledPreview({
   dragCommit = null,
   // iframe 内部路由切换 / 重载：父页面需要清空落在旧页面上的标注。
   onRouteChange,
+  projectId = '',
 }) {
   const screenRef = useRef(null)
   const iframeRef = useRef(null)
@@ -154,7 +155,7 @@ export default function ScaledPreview({
         readyRef.current = true
         scrollStateRef.current = data.payload?.scroll ?? null
         sendInspect(message('enable', { enabled: inspectModeRef.current }))
-        sendInspect(message('direct-mode', { enabled: true }))
+        sendInspect(message('direct-mode', { enabled: true, projectId }))
         // iframe 重载（HMR / 首次加载）后重新测量拖拽目标。
         setMeasurement(null)
         measurementRef.current = null

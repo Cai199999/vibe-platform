@@ -1792,7 +1792,8 @@ export default function WorkspacePage() {
       if (!data || data.channel !== 'vibe-inspect') return
       if (data.type === 'direct-add') {
         const payload = data.payload || {}
-        void handleDirectAction(activeTabId, {
+        const targetProjectId = payload.projectId || activeTabId
+        void handleDirectAction(targetProjectId, {
           action: 'ADD_COMPONENT',
           dryRun: false,
           target: payload.source,
@@ -1810,7 +1811,8 @@ export default function WorkspacePage() {
       }
       if (data.type === 'direct-delete-request') {
         const payload = data.payload || {}
-        void handleAnalyzeDelete(activeTabId, { target: payload.source })
+        const targetProjectId = payload.projectId || activeTabId
+        void handleAnalyzeDelete(targetProjectId, { target: payload.source })
           .then((result) => {
             reply(event.source, 'direct-delete-result', result)
           })
@@ -1824,7 +1826,8 @@ export default function WorkspacePage() {
       }
       if (data.type === 'direct-delete-confirmed') {
         const payload = data.payload || {}
-        void handleDirectAction(activeTabId, {
+        const targetProjectId = payload.projectId || activeTabId
+        void handleDirectAction(targetProjectId, {
           action: 'DELETE_NODE',
           dryRun: false,
           target: payload.source,
@@ -1838,7 +1841,8 @@ export default function WorkspacePage() {
       }
       if (data.type === 'direct-text') {
         const payload = data.payload || {}
-        void handleDirectAction(activeTabId, {
+        const targetProjectId = payload.projectId || activeTabId
+        void handleDirectAction(targetProjectId, {
           action: 'UPDATE_TEXT',
           dryRun: false,
           target: payload.source,

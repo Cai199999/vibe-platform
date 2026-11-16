@@ -1210,6 +1210,7 @@ function CanvasStage({
   // 精准选择（Inspect）：画布模式下也允许透传 hover / pick 给 iframe SDK。
   // 与预览区共用同一套子协议，但高亮框绘制在画布自己的 viewport 坐标里，
   // 因此缩放 / 平移后仍与真实 DOM 严格对齐。
+  projectId = '',
   inspectMode = false,
   onInspectPick,
   // 画布内的页面滚动 / 点击由 SDK 回传，父级据此同步右侧预览。
@@ -1591,7 +1592,12 @@ function CanvasStage({
           )
         // Direct Ops 内联 ➕ / 悬浮 ❌ / 双击文本编辑。
         frame.contentWindow?.postMessage(
-          { channel: 'vibe-inspect', type: 'direct-mode', enabled: true },
+          {
+            channel: 'vibe-inspect',
+            type: 'direct-mode',
+            enabled: true,
+            projectId,
+          },
           '*',
         )
         hideInspectHighlight()
