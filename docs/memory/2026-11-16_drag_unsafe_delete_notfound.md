@@ -123,3 +123,15 @@
 
 - CLONE_SIBLING / iterationGroup；组件下方复制 ➕ 尚未上线。
 - 自定义组件根节点的 data-source 映射仍需单独增强。
+
+
+## 同源码多实例删除与新建容器
+
+- 诊断字段：`instanceCount`、`importerCount`、`sharedByInstance`、
+  `sharedByImport` 已由 Resolver 返回。
+- 仅因“同一源码渲染 N 次”而 shared，且不是 import 定义、不在 map、
+  不是页面根：允许删除源节点（确定性移除全部实例）。
+- import 出来的公共组件仍走 callSite 或 HITL。
+- `Container` 加入基础组件白名单（Button / Input / Text / Card /
+  Container），可在当前容器内新建一个空 div 作为父容器继续组织内容。
+- 前端错误 Toast 会带 resolver/toolCode/file 等 diagnostic。

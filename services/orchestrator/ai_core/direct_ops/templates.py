@@ -41,6 +41,12 @@ COMPONENT_TEMPLATES: dict[str, ComponentTemplate] = {
         "<p>卡片内容</p></div>",
         node_count=2,
     ),
+    "Container": ComponentTemplate(
+        component_type="Container",
+        jsx='<div data-vibe-created="direct" '
+        'className="vibe-direct-container"></div>',
+        node_count=1,
+    ),
 }
 
 

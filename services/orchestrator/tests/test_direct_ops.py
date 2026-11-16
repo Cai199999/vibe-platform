@@ -86,6 +86,10 @@ def _anchor(*, shared: bool = False) -> dict[str, Any]:
         "isRouteRoot": False,
         "deleteSafe": not shared,
         "deleteReasons": ["被 2 个文件引用"] if shared else [],
+        "instanceCount": 1,
+        "importerCount": 0,
+        "sharedByInstance": False,
+        "sharedByImport": False,
     }
 
 
@@ -390,6 +394,21 @@ class DirectOperationDeleteTest(unittest.TestCase):
         self.assertIn("内的节点", entries[0].summary)
         self.assertIn("<h1>", entries[0].summary)
 
+    def test_repeated_instance_delete_removes_source_node(self) -> None:
+        self.sandbox.anchor = {
+            **_anchor(shared=True),
+            "instanceCount": 4,
+            "importerCount": 0,
+            "isRouteRoot": False,
+            "sharedReason": "同源码位置渲染 4 次",
+        }
+
+        response = self.service.execute(_delete_payload())
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(response.risk, "L0_DIRECT")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "delete")
+
     def test_shared_component_deletes_call_site_instance(self) -> None:
         self.sandbox.anchor = {
             **_anchor(shared=True),
@@ -679,6 +698,23 @@ class DeleteStaticAnalysisTest(unittest.TestCase):
         )
         self.assertTrue(result.safe)
         self.assertTrue(result.is_shared)
+
+    def test_repeated_source_instances_can_be_deleted(self) -> None:
+        from ai_core.direct_ops.static_analysis import analyze_delete_anchor
+
+        result = analyze_delete_anchor(
+            {
+                "isShared": True,
+                "instanceCount": 4,
+                "importerCount": 0,
+                "sharedReason": "同源码位置渲染 4 次",
+                "inMap": False,
+                "isRouteRoot": False,
+            }
+        )
+        self.assertTrue(result.safe)
+        self.assertTrue(result.repeated_only)
+        self.assertEqual(result.instance_count, 4)
 
     def test_shared_map_and_route_root_are_unsafe(self) -> None:
         from ai_core.direct_ops.static_analysis import analyze_delete_anchor

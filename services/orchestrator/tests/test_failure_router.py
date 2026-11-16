@@ -29,7 +29,7 @@ from ai_core.domain.agent import ExecuteRunRequest
 
 class FailureRouterTest(unittest.TestCase):
     def test_whitelist_components_stay_deterministic(self) -> None:
-        for component in ("Button", "Input", "Text", "Card"):
+        for component in ("Button", "Input", "Text", "Card", "Container"):
             route = route_add_component(component)
             self.assertEqual(route.route, ROUTE_DIRECT_TEMPLATE, component)
 

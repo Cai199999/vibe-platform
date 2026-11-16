@@ -2521,7 +2521,7 @@
           'background:rgba(15,23,42,.98);box-shadow:0 10px 30px rgba(0,0,0,.4);' +
           'pointer-events:auto;',
       )
-      ;['Button', 'Input', 'Text', 'Card'].forEach(function (type) {
+      ;['Button', 'Input', 'Text', 'Card', 'Container'].forEach(function (type) {
         var item = document.createElement('button')
         item.type = 'button'
         item.textContent = type

@@ -659,6 +659,10 @@ function resolveOne(anchor, parser, workdir) {
   result.isShared = shared
   result.protected = shared
   result.sharedReason = reasons.join('；')
+  result.instanceCount = instanceCount
+  result.importerCount = importerHits.length
+  result.sharedByInstance = instanceCount > 1
+  result.sharedByImport = importerHits.length > 0
   result.componentFile = componentFile
   result.callSiteFile = callSiteFile
   result.allowedFiles = allowedFiles

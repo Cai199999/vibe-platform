@@ -32,7 +32,7 @@ DirectActionRisk = Literal[
 ]
 
 # Direct Ops 白名单基础组件；不含业务组件，避免绕过架构确认。
-ALLOWED_ADD_COMPONENTS = ("Button", "Input", "Text", "Card")
+ALLOWED_ADD_COMPONENTS = ("Button", "Input", "Text", "Card", "Container")
 
 
 class DirectErrorCode:

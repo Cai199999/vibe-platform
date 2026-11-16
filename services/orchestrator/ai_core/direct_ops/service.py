@@ -158,6 +158,10 @@ class DirectOperationService:
             "deleteSafe": bool(anchor.get("deleteSafe")),
             "callSiteFile": anchor.get("callSiteFile") or "",
             "hasCallSite": isinstance(call_site, dict) and bool(call_site.get("file")),
+            "instanceCount": int(anchor.get("instanceCount") or 1),
+            "importerCount": int(anchor.get("importerCount") or 0),
+            "sharedByInstance": bool(anchor.get("sharedByInstance")),
+            "sharedByImport": bool(anchor.get("sharedByImport")),
             "sharedReason": anchor.get("sharedReason") or "",
         }
         return result
@@ -689,6 +693,16 @@ class DirectOperationService:
             call_site = anchor.get("callSiteAnchor")
             if isinstance(call_site, dict) and call_site.get("file"):
                 # 删除的是当前调用点的实例 JSX，不触碰公共组件定义。
+                return "L0_DIRECT"
+            # 仅因同一源码渲染多次：删除源节点会确定性移除全部实例，
+            # 允许用户在确认后执行；import 出来的组件定义仍按 callSite /
+            # HITL 处理。
+            if (
+                int(anchor.get("instanceCount") or 1) > 1
+                and int(anchor.get("importerCount") or 0) == 0
+                and not anchor.get("inMap")
+                and not anchor.get("isRouteRoot")
+            ):
                 return "L0_DIRECT"
             if safe is False:
                 return "L2_HITL"
