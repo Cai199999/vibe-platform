@@ -2322,9 +2322,11 @@
   var directToast = null
   var directFormatBar = null
   var directTarget = null
+  var directTargetSource = null
   var directContainer = null
   var directDeleteSource = null
   var directDeleteAutoConfirm = false
+  var directDeletePending = false
   var directEdit = null
   var directLastTextEdit = null
 
@@ -2359,7 +2361,14 @@
       directDeleteBtn.addEventListener('click', function (event) {
         event.preventDefault()
         event.stopPropagation()
-        if (!directTarget) return
+        if (!directTarget || directDeletePending) return
+        if (!directTarget.isConnected && directTargetSource?.selector) {
+          directTarget = queryNode(directTargetSource.selector)
+        }
+        if (!directTarget || !directTarget.isConnected) {
+          showDirectToast('目标已失效，请重新选择组件')
+          return
+        }
         directDeleteSource = readSource(directTarget)
         if (!directDeleteSource) {
           showDirectToast('目标已失效，请重新选择组件')
@@ -2368,6 +2377,10 @@
         directDeleteAutoConfirm =
           directTarget.getAttribute('data-vibe-created') === 'direct' ||
           Boolean(directTarget.querySelector?.('[data-vibe-created]'))
+        directDeletePending = true
+        window.setTimeout(function () {
+          directDeletePending = false
+        }, 3000)
         post('direct-delete-request', {
           projectId: directProjectId,
           source: directDeleteSource,
@@ -2454,6 +2467,7 @@
       return
     }
     directTarget = sourceNode
+    directTargetSource = source
     ensureDirectUi()
     var outlineRect = sourceNode.getBoundingClientRect()
     directOutline.style.display = 'block'
@@ -2735,6 +2749,7 @@
       return
     }
     if (data.type === 'direct-delete-result') {
+      directDeletePending = false
       var result = data.payload || {}
       if (result.safe && directDeleteAutoConfirm) {
         directDeleteAutoConfirm = false

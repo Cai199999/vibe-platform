@@ -49,12 +49,34 @@
   - file / line / column
   不再把底层 SandboxError 吞成泛化“服务不可用”。
 
+## AST stage 竞态修复（P0）
+
+- 根因日志：
+  `resolver exception: ENOENT ... /tmp/vibe-ast-tool-stage/spec.json`
+- `_run_ast_tool` 每次调用使用唯一目录：
+  `AST_TOOL_STAGE_DIR-<uuid12>`；
+  并发 analyze-delete / resolve / apply 不再互相 `rm -rf`。
+- 20 路并发 analyze-delete（同一沙盒、同一有效锚点）全部 200，
+  不再出现 503 / ENOENT。
+- SDK 删除请求增加 pending 防重（3s 超时），避免快速点击打爆解析器。
+- 删除前若目标已断开，先按 selector 重新查找；仍找不到直接提示
+  “目标已失效”。
+
+## 错误诊断
+
+- Resolver 失败自动重试一次，仍失败返回 `resolverError` +
+  file/line/column。
+- TOOL_FAILED 现在返回异常类型、底层 error、action，
+  前端 `directOps` 会解析 detail 并拼进 Toast。
+- 移动 UNSAFE 返回 source/parent/callSite/parentShared/risk。
+
 ## 验证
 
 - 新增 callSite move 单测；
 - 全量 Python 608 项通过；
 - 前端 16 项 Vitest 与构建通过；
 - sandbox 镜像已重建（包含 projectId 路由、自动确认、锚点保护）。
+- 并发冒烟：20 次 analyze-delete 并发，全部 200；修复前混合 200/404/503。
 
 ## 仍未完成
 

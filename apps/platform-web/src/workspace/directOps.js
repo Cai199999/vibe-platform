@@ -5,7 +5,7 @@
  * 所有请求都携带 baseRevision，服务端项目写锁 + revision 双重校验。
  */
 
-async function responseError(response) {
+async function readApiError(response) {
   let body = null
   try {
     body = await response.json()
@@ -13,16 +13,34 @@ async function responseError(response) {
     // 非 JSON 错误体
   }
   const detail = body?.detail
-  if (detail?.message) {
-    return `${detail.code || response.status} · ${detail.message}`
+  const code = detail?.code || body?.code || String(response.status)
+  const message =
+    detail?.message || body?.userMessage || body?.message || response.statusText
+  let extra = ''
+  if (detail && typeof detail === 'object') {
+    const parts = Object.entries(detail)
+      .filter(([key]) => key !== 'code' && key !== 'message')
+      .map(([key, value]) => {
+        const text =
+          value && typeof value === 'object' ? JSON.stringify(value) : String(value)
+        return `${key}=${text}`
+      })
+    extra = parts.join('; ').slice(0, 500)
   }
-  if (body?.userMessage) {
-    return `${body.code || response.status} · ${body.userMessage}`
+  return {
+    code,
+    detail,
+    message: `${code} · ${message || '请求失败'}${extra ? ` · ${extra}` : ''}`,
   }
-  if (body?.message) {
-    return `${body.code || response.status} · ${body.message}`
-  }
-  return `HTTP ${response.status} ${response.statusText || ''}`.trim()
+}
+
+async function throwApiError(response) {
+  const info = await readApiError(response)
+  const error = new Error(info.message)
+  error.code = info.code
+  error.detail = info.detail
+  error.httpStatus = response.status
+  throw error
 }
 
 export async function fetchDirectRevision(projectId, sandboxId, token) {
@@ -31,7 +49,7 @@ export async function fetchDirectRevision(projectId, sandboxId, token) {
     headers: { Authorization: `Bearer ${token ?? ''}` },
   })
   if (!response.ok) {
-    throw new Error(await responseError(response))
+    await throwApiError(response)
   }
   return response.json()
 }
@@ -46,9 +64,7 @@ export async function submitDirectAction(payload, token) {
     body: JSON.stringify(payload),
   })
   if (!response.ok) {
-    const error = new Error(await responseError(response))
-    error.httpStatus = response.status
-    throw error
+    await throwApiError(response)
   }
   return response.json()
 }
@@ -63,9 +79,7 @@ export async function analyzeDirectDelete(payload, token) {
     body: JSON.stringify(payload),
   })
   if (!response.ok) {
-    const error = new Error(await responseError(response))
-    error.httpStatus = response.status
-    throw error
+    await throwApiError(response)
   }
   return response.json()
 }

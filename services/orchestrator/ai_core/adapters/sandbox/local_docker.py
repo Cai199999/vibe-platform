@@ -1997,7 +1997,9 @@ class LocalDockerSandbox(SandboxProvider):
         错误约定与 AST 门禁一致：退出码 2 = 脚本异常（调用方 fail-closed）；
         其它非 0/2 视为未知错误。业务层错误放在 JSON 的 ``status`` 字段。
         """
-        stage = AST_TOOL_STAGE_DIR
+        # 每次调用使用独立 stage：analyze-delete / resolve / apply 可能并发，
+        # 固定目录会互相 rm -rf，导致 spec.json ENOENT 的假故障。
+        stage = f"{AST_TOOL_STAGE_DIR}-{uuid.uuid4().hex[:12]}"
         try:
             code, output = self._exec(
                 container,

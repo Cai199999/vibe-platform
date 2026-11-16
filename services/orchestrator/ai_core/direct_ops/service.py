@@ -210,8 +210,13 @@ class DirectOperationService:
             logger.exception("direct action failed id=%s", payload.direct_action_id)
             error = DirectActionError(
                 DirectErrorCode.TOOL_FAILED,
-                "直接操作执行失败，已自动回滚。",
+                f"直接操作执行失败（{type(exc).__name__}）：{exc}",
                 status_code=500,
+                diagnostic={
+                    "exceptionType": type(exc).__name__,
+                    "error": str(exc)[:500],
+                    "action": payload.action,
+                },
             )
             envelope = envelope_from_code(
                 error.code,
