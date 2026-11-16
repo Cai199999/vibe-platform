@@ -2315,6 +2315,7 @@
   var directBound = false
   var directDeleteBtn = null
   var directPlusBtn = null
+  var directOutline = null
   var directMenu = null
   var directConfirm = null
   var directToast = null
@@ -2335,6 +2336,14 @@
   }
 
   function ensureDirectUi() {
+    if (!directOutline) {
+      directOutline = directEl(
+        'div',
+        'position:fixed;display:none;z-index:2147483644;pointer-events:none;' +
+          'border:1.5px dashed rgba(96,165,250,.9);border-radius:3px;' +
+          'background:rgba(96,165,250,.06);box-sizing:border-box;',
+      )
+    }
     if (!directDeleteBtn) {
       directDeleteBtn = directEl(
         'button',
@@ -2388,6 +2397,7 @@
   }
 
   function hideDirectUi() {
+    if (directOutline) directOutline.style.display = 'none'
     if (directDeleteBtn) directDeleteBtn.style.display = 'none'
     if (directPlusBtn) directPlusBtn.style.display = 'none'
     if (directMenu) directMenu.style.display = 'none'
@@ -2403,9 +2413,22 @@
     }
   }
 
+  // hover 事件每帧最多处理一次，避免 mouseover 在嵌套 DOM 中抖动。
+  var directHoverFrame = 0
+  var directHoverTarget = null
+
   function onDirectOver(event) {
     if (!directEnabled || enabled || dragState || directEdit) return
-    var node = event.target
+    directHoverTarget = event.target
+    if (directHoverFrame) return
+    directHoverFrame = window.requestAnimationFrame(function () {
+      directHoverFrame = 0
+      applyDirectOver(directHoverTarget)
+    })
+  }
+
+  function applyDirectOver(node) {
+    if (!directEnabled || enabled || dragState || directEdit) return
     if (!node || node.closest?.('[data-vibe-direct-ui]')) return
     var sourceNode = node.closest?.('[data-source], [data-source-file]')
     if (!sourceNode || node === document.documentElement) {
@@ -2419,6 +2442,12 @@
     }
     directTarget = sourceNode
     ensureDirectUi()
+    var outlineRect = sourceNode.getBoundingClientRect()
+    directOutline.style.display = 'block'
+    directOutline.style.left = outlineRect.left + 'px'
+    directOutline.style.top = outlineRect.top + 'px'
+    directOutline.style.width = outlineRect.width + 'px'
+    directOutline.style.height = outlineRect.height + 'px'
     var placed = placeAt(sourceNode, 2)
     directDeleteBtn.style.left = placed.left + 'px'
     directDeleteBtn.style.top = placed.top + 'px'
