@@ -1759,6 +1759,7 @@ export default function WorkspacePage() {
         instance: source.instance,
         instanceCount: source.instanceCount,
         callSiteFile: source.callSite?.file,
+        placement: source.placement,
       },
       payload: {},
       options: { source: 'FLOATING_TOOLBAR', dryRun: true },
@@ -1902,6 +1903,7 @@ export default function WorkspacePage() {
         instance: source.instance,
         instanceCount: source.instanceCount,
         callSiteFile: source.callSite?.file,
+        placement: source.placement,
       },
       payload: request.payload ?? {},
       options: {
@@ -1932,7 +1934,17 @@ export default function WorkspacePage() {
       }
       return result
     } catch (cause) {
-      showToast('error', `直接操作失败：${cause?.message || cause}`)
+      const raw = String(cause?.message || cause)
+      const friendly = raw.includes('DIRECT_REQUIRES_LLM')
+        ? '该组件需要 AI 生成，请使用 Agent 添加'
+        : raw.includes('DIRECT_WRITE_CONFLICT')
+          ? '代码已被其它操作更新，请刷新后重试'
+          : raw.includes('DIRECT_PROJECT_BUSY')
+            ? '项目正在写入，请稍后再试'
+            : raw.includes('DIRECT_TARGET_AMBIGUOUS')
+              ? '该位置有多个实例，请更精确地选择'
+              : `直接操作失败：${raw}`
+      showToast('error', friendly)
       throw cause
     }
   }
