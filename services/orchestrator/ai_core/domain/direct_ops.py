@@ -117,6 +117,11 @@ class DirectActionPayload(CamelModel):
         return self
 
 
+class DirectUndoRequest(CamelModel):
+    project_id: str = Field(min_length=1, max_length=64)
+    sandbox_id: str = Field(min_length=1, max_length=64)
+
+
 class DirectActionResponse(CamelModel):
     direct_action_id: str
     run_id: str | None = None
@@ -149,6 +154,8 @@ class ChangeLogEntry(CamelModel):
     before_hash: str = ""
     after_hash: str = ""
     commit_hash: str = ""
+    # 撤回：该动作执行前的主工作树 HEAD。
+    before_commit: str = ""
     risk: DirectActionRisk = "L0_DIRECT"
     # 视觉占位 / 失败转译：applied=false 且 visual_only=true。
     applied: bool = True
@@ -166,4 +173,5 @@ __all__ = [
     "DirectActionRisk",
     "DirectActionTarget",
     "DirectErrorCode",
+    "DirectUndoRequest",
 ]

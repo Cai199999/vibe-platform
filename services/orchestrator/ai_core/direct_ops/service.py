@@ -166,6 +166,87 @@ class DirectOperationService:
         }
         return result
 
+    def undo_last(self, project_id: str, sandbox_id: str) -> dict[str, Any]:
+        """撤回最近一次已落盘的 Direct Op。
+
+        只允许 HEAD 仍等于该动作的 commit 时执行，避免把用户后续的
+        AI 提交一起 reset 掉。撤回本身也写一条 ChangeLog。
+        """
+        entries = [
+            item
+            for item in self._changelog.list_for_project(project_id, 50)
+            if item.applied
+            and not item.visual_only
+            and item.commit_hash
+            and item.before_commit
+        ]
+        if not entries:
+            raise DirectActionError(
+                DirectErrorCode.TOOL_FAILED,
+                "没有可撤回的直接操作。",
+                status_code=409,
+            )
+        entry = entries[-1]
+        handle = self._sandbox.get(sandbox_id)
+        if handle.project_id != project_id:
+            raise DirectActionError(
+                DirectErrorCode.TARGET_NOT_FOUND,
+                "沙盒不属于当前项目",
+                status_code=404,
+            )
+        try:
+            lease = project_write_lock.acquire(
+                project_id,
+                owner=f"direct-undo:{project_id}",
+                timeout=self._settings.direct_ops_lock_timeout_seconds,
+            )
+        except ProjectBusyError as exc:
+            raise DirectActionError(
+                DirectErrorCode.PROJECT_BUSY,
+                "项目正在写入，请稍后再试。",
+                status_code=409,
+            ) from exc
+        try:
+            head = self._sandbox.git_head(sandbox_id)
+            if head != entry.commit_hash:
+                raise DirectActionError(
+                    DirectErrorCode.REVISION_MISMATCH,
+                    "最近一次修改之后又有新的代码提交，无法安全撤回。",
+                    status_code=409,
+                    diagnostic={
+                        "expectedRevision": entry.commit_hash,
+                        "actualRevision": head,
+                    },
+                )
+            self._sandbox.git_reset_hard(sandbox_id, entry.before_commit)
+            undo_entry = ChangeLogEntry(
+                change_id=f"chg_{uuid.uuid4().hex[:20]}",
+                project_id=project_id,
+                sandbox_id=sandbox_id,
+                run_id=entry.run_id,
+                action=entry.action,
+                target=dict(entry.target),
+                summary=f"撤回：{entry.summary}",
+                diff_summary="",
+                before_hash=entry.after_hash,
+                after_hash=entry.before_hash,
+                commit_hash=entry.before_commit,
+                before_commit=entry.commit_hash,
+                risk="L1_VERIFY_DIRECT",
+                applied=False,
+                visual_only=False,
+                created_at=datetime.now(timezone.utc),
+            )
+            self._changelog.append(undo_entry)
+            return {
+                "undoneChangeId": entry.change_id,
+                "undoChangeId": undo_entry.change_id,
+                "restoredCommit": entry.before_commit,
+                "summary": entry.summary,
+            }
+        finally:
+            project_write_lock.release(lease)
+
     # --------------------------------------------------------
     # 执行
     # --------------------------------------------------------
@@ -464,6 +545,7 @@ class DirectOperationService:
                 new_content,
                 commit_hash,
                 risk,
+                before_commit=current_revision,
             )
             timings["changelogMs"] = _elapsed_ms(mark)
             timings["totalMs"] = _elapsed_ms(started)
@@ -676,6 +758,15 @@ class DirectOperationService:
                 return "L0_DIRECT"
             if parent.get("file") != anchor.get("file"):
                 return "L3_AI_REQUIRED"
+            # 同一源码渲染多次：移动源节点会确定性移动全部实例；
+            # 只要不是 import 定义、不在 map、不是页面根，就允许执行。
+            if (
+                int(anchor.get("instanceCount") or 1) > 1
+                and int(anchor.get("importerCount") or 0) == 0
+                and not anchor.get("inMap")
+                and not anchor.get("isRouteRoot")
+            ):
+                return "L0_DIRECT"
             if any(
                 item.get("isShared") or item.get("protected")
                 for item in (anchor, parent)
@@ -901,6 +992,8 @@ class DirectOperationService:
         after: str,
         commit_hash: str,
         risk: DirectActionRisk,
+        *,
+        before_commit: str = "",
     ) -> ChangeLogEntry:
         file = str(anchor.get("file") or "")
         text = str(payload.payload.get("text") or "")
@@ -948,6 +1041,7 @@ class DirectOperationService:
             before_hash=_sha256(before),
             after_hash=_sha256(after),
             commit_hash=commit_hash,
+            before_commit=before_commit,
             risk=risk,
             created_at=datetime.now(timezone.utc),
         )

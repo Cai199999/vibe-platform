@@ -2329,6 +2329,7 @@
   var directDeleteBtn = null
   var directPlusBtn = null
   var directOutline = null
+  var directUndoBtn = null
   var directMenu = null
   var directConfirm = null
   var directToast = null
@@ -2359,6 +2360,22 @@
           'border:1.5px dashed rgba(96,165,250,.9);border-radius:3px;' +
           'background:rgba(96,165,250,.06);box-sizing:border-box;',
       )
+    }
+    if (!directUndoBtn) {
+      directUndoBtn = directEl(
+        'button',
+        'position:fixed;display:none;left:12px;bottom:12px;z-index:2147483645;' +
+          'height:28px;padding:0 10px;border-radius:14px;' +
+          'border:1px solid rgba(148,163,184,.4);background:rgba(15,23,42,.95);' +
+          'color:#cbd5e1;font-size:12px;cursor:pointer;pointer-events:auto;',
+        '↶ 撤回',
+      )
+      directUndoBtn.title = '撤回最近一次直接操作'
+      directUndoBtn.addEventListener('click', function (event) {
+        event.preventDefault()
+        event.stopPropagation()
+        post('direct-undo', { projectId: directProjectId })
+      })
     }
     if (!directDeleteBtn) {
       directDeleteBtn = directEl(
@@ -2739,8 +2756,10 @@
     if (directEnabled) {
       ensureDirectUi()
       bindDirectEvents()
+      if (directUndoBtn) directUndoBtn.style.display = 'block'
     } else {
       hideDirectUi()
+      if (directUndoBtn) directUndoBtn.style.display = 'none'
       finishDirectTextEdit(true)
     }
   }

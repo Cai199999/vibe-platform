@@ -110,6 +110,7 @@ class _FakeSandbox:
         }
         self.patches: list[dict[str, str]] = []
         self.commits: list[str] = []
+        self.resets: list[str] = []
         self.edits: list[dict[str, Any]] = []
         self.resolutions: list[list[dict[str, Any]]] = []
 
@@ -123,6 +124,10 @@ class _FakeSandbox:
         self.commits.append(message)
         self.head = NEXT_SHA
         return NEXT_SHA
+
+    def git_reset_hard(self, sandbox_id: str, commit_hash: str) -> None:
+        self.resets.append(commit_hash)
+        self.head = commit_hash
 
     def resolve_targets(
         self,
@@ -266,6 +271,26 @@ class DirectOperationMoveTest(unittest.TestCase):
         entries = self.store.list_for_project(PROJECT_ID)
         self.assertEqual(len(entries), 1)
         self.assertIn("移动到", entries[0].summary)
+
+    def test_repeated_instances_move_all_instances(self) -> None:
+        self.sandbox.anchor = {
+            **_anchor(shared=True),
+            "instanceCount": 6,
+            "importerCount": 0,
+            "isRouteRoot": False,
+            "sharedReason": "同源码位置渲染 6 次",
+        }
+        self.sandbox.parent_anchor = {
+            **self.sandbox.parent_anchor,
+            "isShared": True,
+            "protected": True,
+        }
+
+        response = self.service.execute(_move_payload())
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(response.risk, "L0_DIRECT")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "move_node")
 
     def test_shared_component_moves_at_call_site(self) -> None:
         self.sandbox.anchor = {
@@ -762,6 +787,49 @@ class DeleteStaticAnalysisTest(unittest.TestCase):
         self.assertFalse(result["safe"])
         self.assertTrue(result["inMap"])
         self.assertIn("map", "；".join(result["reasons"]))
+
+
+class DirectUndoTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryChangeLogStore(max_entries=20)
+        self.sandbox = _FakeSandbox()
+        self.sandbox.head = NEXT_SHA
+        self.service = DirectOperationService(
+            sandbox=self.sandbox,  # type: ignore[arg-type]
+            settings=_Settings(),  # type: ignore[arg-type]
+        )
+        self.service._changelog = self.store
+        self.store.append(
+            ChangeLogEntry(
+                change_id="chg_undo",
+                project_id=PROJECT_ID,
+                sandbox_id=SANDBOX_ID,
+                action="UPDATE_TEXT",
+                target={"file": "src/App.jsx", "component": "App"},
+                summary="将 App 的文案改为“我的任务”",
+                commit_hash=NEXT_SHA,
+                before_commit=BASE_SHA,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+
+    def test_undo_last_resets_to_before_commit(self) -> None:
+        result = self.service.undo_last(PROJECT_ID, SANDBOX_ID)
+
+        self.assertEqual(result["restoredCommit"], BASE_SHA)
+        self.assertEqual(self.sandbox.resets, [BASE_SHA])
+        entries = self.store.list_for_project(PROJECT_ID)
+        self.assertTrue(entries[-1].summary.startswith("撤回"))
+        self.assertFalse(entries[-1].applied)
+
+    def test_undo_refuses_when_newer_commit_exists(self) -> None:
+        self.sandbox.head = "c" * 40
+
+        with self.assertRaises(DirectActionError) as ctx:
+            self.service.undo_last(PROJECT_ID, SANDBOX_ID)
+
+        self.assertEqual(ctx.exception.code, DirectErrorCode.REVISION_MISMATCH)
+        self.assertEqual(self.sandbox.resets, [])
 
 
 class ComponentTemplateTest(unittest.TestCase):

@@ -23,6 +23,7 @@ public class DirectOpsService {
     private static final String ACTIONS_PATH = "/api/v1/internal/direct-ops/actions";
     private static final String ANALYZE_DELETE_PATH =
             "/api/v1/internal/direct-ops/analyze-delete";
+    private static final String UNDO_PATH = "/api/v1/internal/direct-ops/undo";
     private static final String REVISION_PATH = "/api/v1/internal/direct-ops/revision";
 
     private final RestClient aiCoreRunRestClient;
@@ -42,6 +43,10 @@ public class DirectOpsService {
 
     public ResponseEntity<JsonNode> analyzeDelete(JsonNode body) {
         return postJson(ANALYZE_DELETE_PATH, body, "direct ops delete analysis");
+    }
+
+    public ResponseEntity<JsonNode> undo(JsonNode body) {
+        return postJson(UNDO_PATH, body, "direct ops undo");
     }
 
     private ResponseEntity<JsonNode> postJson(

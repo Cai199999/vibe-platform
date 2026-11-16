@@ -9,7 +9,11 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from ai_core.direct_ops.service import DirectActionError, DirectOperationService
-from ai_core.domain.direct_ops import DirectActionPayload, DirectActionResponse
+from ai_core.domain.direct_ops import (
+    DirectActionPayload,
+    DirectActionResponse,
+    DirectUndoRequest,
+)
 
 router = APIRouter(prefix="/api/v1/internal/direct-ops", tags=["direct-ops"])
 
@@ -37,6 +41,23 @@ def analyze_delete(request: DirectActionPayload) -> dict:
     service = DirectOperationService()
     try:
         return service.analyze_delete(request)
+    except DirectActionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                **(exc.diagnostic or {}),
+            },
+        ) from exc
+
+
+@router.post("/undo")
+def undo_last_direct_action(request: DirectUndoRequest) -> dict:
+    """撤回最近一次 Direct Op；HEAD 已推进时拒绝。"""
+    service = DirectOperationService()
+    try:
+        return service.undo_last(request.project_id, request.sandbox_id)
     except DirectActionError as exc:
         raise HTTPException(
             status_code=exc.status_code,

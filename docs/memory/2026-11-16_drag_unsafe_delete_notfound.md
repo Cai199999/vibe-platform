@@ -135,3 +135,19 @@
 - `Container` 加入基础组件白名单（Button / Input / Text / Card /
   Container），可在当前容器内新建一个空 div 作为父容器继续组织内容。
 - 前端错误 Toast 会带 resolver/toolCode/file 等 diagnostic。
+
+
+## 同源码多实例移动与撤回
+
+- MOVE_NODE 对“同一源码渲染 N 次、非 import、非 map、非根节点”的
+  组件放行：移动源节点会确定性移动全部实例，risk=L0。
+- 删除同样规则；父容器删除时 Babel 的 delete 天然删除整个子树。
+- 新增 Container 基础模板，用于新建空父容器。
+- 新增 `/direct-ops/undo`：
+  - 取最近一条 applied=true 的 Direct Op；
+  - 仅当当前 HEAD == 该动作 commit 时，`git reset --hard before_commit`；
+  - 撤回本身写一条 applied=false 的 ChangeLog；
+  - 前端 SDK 左下角新增“↶ 撤回”按钮。
+- E2E：
+  - UPDATE_TEXT 后 undo，文件恢复“待办”；
+  - instanceCount=6 的 MOVE 返回 SUCCEEDED / L0。

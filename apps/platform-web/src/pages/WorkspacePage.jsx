@@ -29,6 +29,7 @@ import {
   fetchDirectRevision,
   nextDirectActionId,
   submitDirectAction,
+  undoLastDirectAction,
 } from '../workspace/directOps.js'
 import { importProjectFile } from '../workspace/importClient.js'
 import {
@@ -1839,6 +1840,17 @@ export default function WorkspacePage() {
         })
         return
       }
+      if (data.type === 'direct-undo') {
+        const payload = data.payload || {}
+        const targetProjectId = payload.projectId || activeTabId
+        void handleUndoDirect(targetProjectId).catch((cause) => {
+          reply(event.source, 'direct-result', {
+            ok: false,
+            message: `撤回失败：${cause?.message || cause}`,
+          })
+        })
+        return
+      }
       if (data.type === 'direct-text') {
         const payload = data.payload || {}
         const targetProjectId = payload.projectId || activeTabId
@@ -1869,6 +1881,26 @@ export default function WorkspacePage() {
    * - 真正写入前先读取主工作树 revision，服务端做写锁 + 乐观并发校验；
    * - Phase 1 仅 UPDATE_TEXT 会落盘，其余动作返回 dryRun 结果。
    */
+  const handleUndoDirect = async (projectId) => {
+    const run = runStatesRef.current?.[projectId]
+    const sandboxId = run?.result?.sandboxId
+    if (!sandboxId) {
+      showToast('error', '没有可撤回的沙盒')
+      throw new Error('缺少沙盒')
+    }
+    const result = await undoLastDirectAction(
+      projectId,
+      sandboxId,
+      session?.token,
+    )
+    showToast('success', `已撤回：${result.summary || '最近一次修改'}`)
+    setPreviewRefresh((previous) => ({
+      ...previous,
+      [projectId]: (previous[projectId] ?? 0) + 1,
+    }))
+    return result
+  }
+
   const handleDirectAction = async (projectId, request = {}) => {
     const project = projects.find((item) => item.id === projectId)
     const run = runStatesRef.current?.[projectId]

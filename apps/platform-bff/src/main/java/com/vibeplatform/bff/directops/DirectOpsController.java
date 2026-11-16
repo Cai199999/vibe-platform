@@ -40,4 +40,10 @@ public class DirectOpsController {
     public ResponseEntity<JsonNode> analyzeDelete(@RequestBody JsonNode body) {
         return directOpsService.analyzeDelete(body);
     }
+
+    /** 撤回最近一次 Direct Op。 */
+    @PostMapping("/undo")
+    public ResponseEntity<JsonNode> undo(@RequestBody JsonNode body) {
+        return directOpsService.undo(body);
+    }
 }

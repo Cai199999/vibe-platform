@@ -91,6 +91,21 @@ export async function analyzeDirectDelete(payload, token) {
   return response.json()
 }
 
+export async function undoLastDirectAction(projectId, sandboxId, token) {
+  const response = await fetch('/api/v1/direct-ops/undo', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token ?? ''}`,
+    },
+    body: JSON.stringify({ projectId, sandboxId }),
+  })
+  if (!response.ok) {
+    await throwApiError(response)
+  }
+  return response.json()
+}
+
 let seq = 0
 
 export function nextDirectActionId() {
