@@ -65,7 +65,6 @@ export default function ScaledPreview({
   const scrollStateRef = useRef(null)
   const syncScrollRef = useRef(syncScroll)
   syncScrollRef.current = syncScroll
-  const [hover, setHover] = useState(null)
   // 新组件测量结果 + 用户拖拽产生的 iframe 坐标偏移。
   const [measurement, setMeasurement] = useState(null)
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 })
@@ -91,6 +90,16 @@ export default function ScaledPreview({
     contentWidth: designWidth,
     contentHeight: designHeight,
   })
+  // 高亮 rect 直接写 DOM；React 只在目标身份变化时更新 key。
+  const inspectHighlightRef = useRef(null)
+  const inspectHighlightLabelRef = useRef(null)
+  const inspectHoverKeyRef = useRef('')
+  const [inspectHoverKey, setInspectHoverKey] = useState('')
+  const lastInspectHoverRef = useRef(null)
+  const viewportRef = useRef(viewport)
+  viewportRef.current = viewport
+  const inspectMoveFrameRef = useRef(0)
+  const inspectMovePointRef = useRef(null)
 
   useEffect(() => {
     onPickRef.current = onInspectPick
@@ -102,7 +111,7 @@ export default function ScaledPreview({
 
   useEffect(() => {
     inspectModeRef.current = inspectMode
-    if (!inspectMode) setHover(null)
+    if (!inspectMode) hideInspectHighlight()
   }, [inspectMode])
 
   // 拖拽层换了目标 / 消失时，重置测量与位移，避免把上一个组件的坐标
@@ -176,12 +185,11 @@ export default function ScaledPreview({
         return
       }
       if (data.type === 'hover') {
-        const payload = data.payload
-        setHover(payload && payload.ok ? payload : null)
+        paintInspectHighlight(data.payload)
         return
       }
       if (data.type === 'picked') {
-        setHover(null)
+        hideInspectHighlight()
         if (data.payload && data.payload.ok) {
           onPickRef.current?.(data.payload)
         }
@@ -195,7 +203,7 @@ export default function ScaledPreview({
       if (data.type === 'route-change') {
         // 预览与画布是两个独立 React 实例，但共享同一组标注。任一页面
         // 切换路由都意味着标注失效，交给上层统一清空（不回滚代码）。
-        setHover(null)
+        hideInspectHighlight()
         onRouteChangeRef.current?.(data.payload)
       }
     }
@@ -208,7 +216,7 @@ export default function ScaledPreview({
     readyRef.current = false
     scrollStateRef.current = null
     sendInspect(message('enable', { enabled: inspectMode }))
-    if (!inspectMode) setHover(null)
+    if (!inspectMode) hideInspectHighlight()
   }, [inspectMode, src])
 
   // 画布滚动 → 预览同步。nonce 保证相同的滚动位置也会再次下发
@@ -370,6 +378,83 @@ export default function ScaledPreview({
     )
   }
 
+  const paintInspectHighlight = (payload) => {
+    lastInspectHoverRef.current = payload
+    const node = inspectHighlightRef.current
+    if (!node) return
+    if (!payload?.ok || !payload.rect) {
+      node.style.display = 'none'
+      inspectHoverKeyRef.current = ''
+      setInspectHoverKey('')
+      return
+    }
+    const current = viewportRef.current
+    const rect = payload.rect
+    node.style.display = 'block'
+    node.style.left = `${current.translateX + rect.x * current.scale}px`
+    node.style.top = `${current.translateY + rect.y * current.scale}px`
+    node.style.width = `${rect.width * current.scale}px`
+    node.style.height = `${rect.height * current.scale}px`
+    const key = [
+      payload.source?.file || '',
+      payload.source?.line || 0,
+      payload.source?.column || 0,
+      payload.source?.instance || 0,
+    ].join(':')
+    if (key !== inspectHoverKeyRef.current) {
+      inspectHoverKeyRef.current = key
+      setInspectHoverKey(key)
+    }
+    const label = payload.source?.component || payload.tag || '组件'
+    const location = payload.source?.file
+      ? `${payload.source.file}${payload.source.line ? `:${payload.source.line}` : ''}`
+      : ''
+    if (inspectHighlightLabelRef.current) {
+      inspectHighlightLabelRef.current.textContent = location
+        ? `${label} · ${location}`
+        : label
+    }
+  }
+
+  const hideInspectHighlight = () => {
+    lastInspectHoverRef.current = null
+    const node = inspectHighlightRef.current
+    if (node) node.style.display = 'none'
+    if (inspectHoverKeyRef.current) {
+      inspectHoverKeyRef.current = ''
+      setInspectHoverKey('')
+    }
+  }
+
+  const scheduleInspectMove = (point) => {
+    inspectMovePointRef.current = point
+    if (inspectMoveFrameRef.current) return
+    inspectMoveFrameRef.current = window.requestAnimationFrame(() => {
+      inspectMoveFrameRef.current = 0
+      const latest = inspectMovePointRef.current
+      inspectMovePointRef.current = null
+      if (latest) sendInspect(message('move', latest))
+    })
+  }
+
+  // 缩放 / 平移变化时只需重绘当前高亮，不使用 hover React state。
+  useEffect(() => {
+    if (lastInspectHoverRef.current) {
+      paintInspectHighlight(lastInspectHoverRef.current)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewport.translateX, viewport.translateY, viewport.scale])
+
+  useEffect(
+    () => () => {
+      if (inspectMoveFrameRef.current) {
+        window.cancelAnimationFrame(inspectMoveFrameRef.current)
+        inspectMoveFrameRef.current = 0
+      }
+    },
+    [],
+  )
+
   // 新组件刚生成时 HMR 可能还没完成，短轮询 measure 直到 marker 出现。
   // 失败 16 次（约 8 秒）后提示用户检查生成结果，而不是无限静默。
   useEffect(() => {
@@ -454,10 +539,10 @@ export default function ScaledPreview({
     const point = toFramePoint(event)
     if (!point) {
       sendInspect(message('clear'))
-      setHover(null)
+      hideInspectHighlight()
       return
     }
-    sendInspect(message('move', point))
+    scheduleInspectMove(point)
   }
 
   const handleInspectPick = (event) => {
@@ -496,7 +581,7 @@ export default function ScaledPreview({
         title={title}
         sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
         onLoad={() => {
-          setHover(null)
+          hideInspectHighlight()
           sendInspect(message('enable', { enabled: inspectModeRef.current }))
         }}
         style={{
@@ -530,7 +615,7 @@ export default function ScaledPreview({
         }}
         onPointerLeave={() => {
           if (!inspectMode) return
-          setHover(null)
+          hideInspectHighlight()
           sendInspect(message('clear'))
         }}
         onPointerUp={viewport.endPan}
@@ -572,24 +657,18 @@ export default function ScaledPreview({
       )}
 
       {/* 蓝色高亮框按 transform 映射回屏幕坐标，与 iframe 内容严格对齐。 */}
-      {inspectMode && hover?.rect && (
+      {inspectMode && (
         <div
+          ref={inspectHighlightRef}
           className="inspect-highlight"
           data-inspect-highlight
-          style={{
-            left: `${viewport.translateX + hover.rect.x * viewport.scale}px`,
-            top: `${viewport.translateY + hover.rect.y * viewport.scale}px`,
-            width: `${hover.rect.width * viewport.scale}px`,
-            height: `${hover.rect.height * viewport.scale}px`,
-          }}
+          data-inspect-target={inspectHoverKey}
+          style={{ display: 'none' }}
         >
-          <span className="inspect-highlight-label">
-            {hover.source?.component || hover.tag}
-            <em>
-              {hover.source?.file}
-              {hover.source?.line ? `:${hover.source.line}` : ''}
-            </em>
-          </span>
+          <span
+            ref={inspectHighlightLabelRef}
+            className="inspect-highlight-label"
+          />
         </div>
       )}
 

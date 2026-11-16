@@ -5142,6 +5142,18 @@ export default function WorkspacePage() {
       )
       return
     }
+    console.info('[direct-drag] move request', {
+      projectId,
+      selector,
+      source: {
+        file: source.file,
+        line: source.line,
+        column: source.column,
+        instance: source.instance,
+        instanceCount: source.instanceCount,
+      },
+      placement,
+    })
     // 拖拽不走 Agent：松手后直接调用确定性 MOVE_NODE。
     void handleDirectAction(projectId, {
       action: 'MOVE_NODE',
@@ -5159,11 +5171,18 @@ export default function WorkspacePage() {
           },
         }))
       })
-      .catch(() => {
+      .catch((cause) => {
+        console.warn('[direct-drag] move failed', {
+          projectId,
+          selector,
+          source,
+          placement,
+          error: cause,
+        })
         triggerDragRollback(
           projectId,
           [{ token: payload.token, selector }],
-          '移动未写入代码，位置已还原',
+          `移动失败：${cause?.message || cause}`,
         )
       })
   }

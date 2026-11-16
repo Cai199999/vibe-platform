@@ -1310,8 +1310,14 @@ function CanvasStage({
   const livePressRef = useRef(false)
   const inspectModeRef = useRef(inspectMode)
   const onInspectPickRef = useRef(onInspectPick)
-  // 精准选择命中的 iframe 逻辑坐标 rect（SDK 回传，单位 CSS px）。
-  const [inspectHover, setInspectHover] = useState(null)
+  // 精准选择高亮：rect 直接写 DOM，React 只在目标身份变化时更新 key。
+  const inspectHighlightRef = useRef(null)
+  const inspectHighlightLabelRef = useRef(null)
+  const inspectHoverKeyRef = useRef('')
+  const [inspectHoverKey, setInspectHoverKey] = useState('')
+  // hover 坐标 rAF 合并：每帧最多向 iframe 发一次 move。
+  const inspectMoveFrameRef = useRef(0)
+  const inspectMovePointRef = useRef(null)
   // 移动交互：D 键 / 工具栏开启后，拖拽只做 transform 预览，
   // 松手时把位移翻译成自然语言交给 Agent，不直接改 DOM 样式。
   const [movingId, setMovingId] = useState(null)
@@ -1528,12 +1534,22 @@ function CanvasStage({
     }
   }, [activeAnnotationId, movingId])
 
+  useEffect(
+    () => () => {
+      if (inspectMoveFrameRef.current) {
+        window.cancelAnimationFrame(inspectMoveFrameRef.current)
+        inspectMoveFrameRef.current = 0
+      }
+    },
+    [],
+  )
+
   // 开启 Inspect 时强制回到标注态；关闭时清空高亮，避免残留蓝框。
   useEffect(() => {
     inspectModeRef.current = inspectMode
     onInspectPickRef.current = onInspectPick
     if (canvasInspect) setInteractionMode('annotate')
-    if (!canvasInspect) setInspectHover(null)
+    if (!canvasInspect) hideInspectHighlight()
   }, [canvasInspect, inspectMode, onInspectPick])
 
   // Esc 是“退出浏览”的通用快捷键，和预设的「点灰色空白返回标注」互补。
@@ -1578,7 +1594,7 @@ function CanvasStage({
           { channel: 'vibe-inspect', type: 'direct-mode', enabled: true },
           '*',
         )
-        setInspectHover(null)
+        hideInspectHighlight()
         // 旧文档里的圈选 / 拖拽命中请求已经不可能再返回，统一收口。
         liveSelectionSeedRef.current += 1
         pendingAnalysisRef.current.forEach((resolve) => resolve(null))
@@ -1664,11 +1680,11 @@ function CanvasStage({
       }
       if (data.type === 'hover') {
         const payload = data.payload
-        setInspectHover(payload && payload.ok ? payload : null)
+        applyInspectHighlight(payload)
         return
       }
       if (data.type === 'picked') {
-        setInspectHover(null)
+        hideInspectHighlight()
         if (data.payload?.ok) {
           onInspectPickRef.current?.(data.payload)
           // Inspect 的点击同样换算成一次视觉反馈，让预览区知道用户点了哪。
@@ -1822,6 +1838,63 @@ function CanvasStage({
     const frame = liveFrameRef.current
     if (!frame?.contentWindow) return
     frame.contentWindow.postMessage({ channel: 'vibe-inspect', ...payload }, '*')
+  }
+
+  /** 高亮 rect 直接写 DOM；React 仅在目标身份变化时更新。 */
+  const applyInspectHighlight = (payload) => {
+    const node = inspectHighlightRef.current
+    if (!node) return
+    if (!payload?.ok || !payload.rect) {
+      node.style.display = 'none'
+      inspectHoverKeyRef.current = ''
+      setInspectHoverKey('')
+      return
+    }
+    const rect = payload.rect
+    node.style.display = 'block'
+    node.style.left = `${rect.x}px`
+    node.style.top = `${rect.y}px`
+    node.style.width = `${rect.width}px`
+    node.style.height = `${rect.height}px`
+    const key = [
+      payload.source?.file || '',
+      payload.source?.line || 0,
+      payload.source?.column || 0,
+      payload.source?.instance || 0,
+    ].join(':')
+    if (key !== inspectHoverKeyRef.current) {
+      inspectHoverKeyRef.current = key
+      setInspectHoverKey(key)
+    }
+    const label = payload.source?.component || payload.tag || '组件'
+    const location = payload.source?.file
+      ? `${payload.source.file}${payload.source.line ? `:${payload.source.line}` : ''}`
+      : ''
+    if (inspectHighlightLabelRef.current) {
+      inspectHighlightLabelRef.current.textContent = location
+        ? `${label} · ${location}`
+        : label
+    }
+  }
+
+  const hideInspectHighlight = () => {
+    const node = inspectHighlightRef.current
+    if (node) node.style.display = 'none'
+    if (inspectHoverKeyRef.current) {
+      inspectHoverKeyRef.current = ''
+      setInspectHoverKey('')
+    }
+  }
+
+  const scheduleInspectMove = (point) => {
+    inspectMovePointRef.current = point
+    if (inspectMoveFrameRef.current) return
+    inspectMoveFrameRef.current = window.requestAnimationFrame(() => {
+      inspectMoveFrameRef.current = 0
+      const latest = inspectMovePointRef.current
+      inspectMovePointRef.current = null
+      if (latest) sendLiveInspect(message('move', latest))
+    })
   }
 
   /**
@@ -2138,7 +2211,7 @@ function CanvasStage({
   useEffect(() => {
     if (mode !== 'live') return
     sendLiveInspect(message('enable', { enabled: Boolean(inspectMode) }))
-    if (!inspectMode) setInspectHover(null)
+    if (!inspectMode) hideInspectHighlight()
     // sendLiveInspect 只做 postMessage，不需要进入依赖。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inspectMode, liveUrl, refreshNonce, mode, suspended])
@@ -2234,10 +2307,10 @@ function CanvasStage({
     if (canvasInspect) {
       const point = toLiveFramePoint(event)
       if (point) {
-        sendLiveInspect(message('move', point))
+        scheduleInspectMove(point)
       } else {
         sendLiveInspect(message('clear'))
-        setInspectHover(null)
+        hideInspectHighlight()
       }
       return
     }
@@ -2795,30 +2868,20 @@ function CanvasStage({
               })}
           </div>
 
-          {/* 画布模式下的 Inspect 高亮：位于 canvas-viewport 内部，直接使用
-              iframe 逻辑坐标，父层 transform 会自动完成缩放/平移映射。 */}
-          {canvasInspect && inspectHover?.rect && (
+          {/* Inspect 高亮：rect 由 ref 直接写 style，hover 不再触发 React
+              重渲染；只有目标身份变化时才更新 data-inspect-target。 */}
+          {canvasInspect && (
             <div
+              ref={inspectHighlightRef}
               className="canvas-inspect-highlight"
               data-canvas-inspect-highlight
-              style={{
-                left: `${inspectHover.rect.x}px`,
-                top: `${inspectHover.rect.y}px`,
-                width: `${inspectHover.rect.width}px`,
-                height: `${inspectHover.rect.height}px`,
-              }}
+              data-inspect-target={inspectHoverKey}
+              style={{ display: 'none' }}
             >
-              <span className="canvas-inspect-label">
-                {inspectHover.source?.component || inspectHover.tag || '组件'}
-                {inspectHover.source?.file ? (
-                  <em>
-                    {inspectHover.source.file}
-                    {inspectHover.source.line
-                      ? `:${inspectHover.source.line}`
-                      : ''}
-                  </em>
-                ) : null}
-              </span>
+              <span
+                ref={inspectHighlightLabelRef}
+                className="canvas-inspect-label"
+              />
             </div>
           )}
         </div>
