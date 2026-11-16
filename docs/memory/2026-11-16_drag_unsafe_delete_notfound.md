@@ -37,6 +37,20 @@
   - analyze-delete safe 后直接确认删除，不再弹确认框；
   - 原有骨架 / 公共组件仍保留确认与安全分析。
 
+## 共享组件 callSite 删除
+
+- 真实 E2E 复现：Card 在 App.jsx 中渲染 2 次，删除被
+  `isShared + isRouteRoot` 拦截。
+- 修复：
+  - `_delete_source_anchor()` 优先使用 `callSiteAnchor`，实际删除
+    `src/App.jsx` 中的 `<Card />` 实例，不动 `Card.jsx` 定义；
+  - `_risk()` 检测 callSite 后允许 `L0_DIRECT`；
+  - `analyze_delete_anchor()` 存在 callSite 时，不再把定义文件里的
+    “顶层 JSX 根节点”当作删除阻断；
+  - 仍保留 map 内删除拦截。
+- E2E：`analyze-delete` 返回 `safe=true`；执行后 App.jsx 从两个
+  `<Card />` 变为一个，Card.jsx 未被修改。
+
 ## 诊断增强
 
 - MOVE_NODE 的 UNSAFE_OPERATION 现在携带：

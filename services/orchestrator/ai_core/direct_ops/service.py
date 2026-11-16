@@ -334,10 +334,12 @@ class DirectOperationService:
                 if payload.action == "MOVE_NODE"
                 else anchor
             )
+            if payload.action == "DELETE_NODE":
+                move_anchor = self._delete_source_anchor(anchor)
             risk = self._risk(payload, anchor, parent)
             resolved_target = {
-                "file": anchor.get("file"),
-                "component": anchor.get("component"),
+                "file": move_anchor.get("file"),
+                "component": move_anchor.get("component") or anchor.get("component"),
                 "range": anchor.get("range"),
                 "nodeType": anchor.get("nodeType"),
                 "nodeSource": str(anchor.get("nodeSource") or "")[:500],
@@ -627,6 +629,18 @@ class DirectOperationService:
         return merged
 
     @staticmethod
+    def _delete_source_anchor(anchor: dict[str, Any]) -> dict[str, Any]:
+        """共享组件删除当前 callSite 实例，不删除公共组件定义。"""
+        call_site = anchor.get("callSiteAnchor")
+        if not isinstance(call_site, dict):
+            return anchor
+        if not call_site.get("file") or not call_site.get("range"):
+            return anchor
+        merged = dict(call_site)
+        merged.setdefault("component", anchor.get("component") or "")
+        return merged
+
+    @staticmethod
     def _risk(
         payload: DirectActionPayload,
         anchor: dict[str, Any],
@@ -662,6 +676,10 @@ class DirectOperationService:
         if payload.action == "DELETE_NODE":
             safe = anchor.get("deleteSafe")
             if safe is True:
+                return "L0_DIRECT"
+            call_site = anchor.get("callSiteAnchor")
+            if isinstance(call_site, dict) and call_site.get("file"):
+                # 删除的是当前调用点的实例 JSX，不触碰公共组件定义。
                 return "L0_DIRECT"
             if safe is False:
                 return "L2_HITL"

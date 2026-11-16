@@ -36,12 +36,18 @@ def analyze_delete_anchor(anchor: dict[str, Any]) -> DeleteAnalysis:
     is_shared = bool(anchor.get("isShared") or anchor.get("protected"))
     in_map = bool(anchor.get("inMap"))
     is_route_root = bool(anchor.get("isRouteRoot"))
+    call_site = anchor.get("callSiteAnchor")
+    has_call_site = (
+        isinstance(call_site, dict) and bool(call_site.get("file")) and not in_map
+    )
     reasons: list[str] = []
-    if is_shared:
+    if is_shared and not has_call_site:
         reasons.append(str(anchor.get("sharedReason") or "组件被多处引用或渲染"))
     if in_map:
         reasons.append("组件位于 map 循环内，删除会影响多个实例")
-    if is_route_root:
+    # callSite 存在时，删除的是页面中的实例 JSX；组件定义文件里的
+    # “顶层 JSX 根节点”不应阻止删除。
+    if is_route_root and not has_call_site:
         reasons.append("组件是页面顶层 JSX 根节点")
     return DeleteAnalysis(
         safe=not reasons,

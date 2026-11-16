@@ -390,6 +390,25 @@ class DirectOperationDeleteTest(unittest.TestCase):
         self.assertIn("内的节点", entries[0].summary)
         self.assertIn("<h1>", entries[0].summary)
 
+    def test_shared_component_deletes_call_site_instance(self) -> None:
+        self.sandbox.anchor = {
+            **_anchor(shared=True),
+            "file": "src/components/Card.jsx",
+            "callSiteFile": "src/Page.jsx",
+            "callSiteAnchor": {
+                "file": "src/Page.jsx",
+                "range": {"startOffset": 10, "endOffset": 40},
+                "component": "Page",
+                "nodeType": "JSXElement",
+            },
+        }
+
+        response = self.service.execute(_delete_payload())
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(response.risk, "L0_DIRECT")
+        self.assertEqual(self.sandbox.edits[0]["file"], "src/Page.jsx")
+
     def test_unsafe_delete_is_blocked(self) -> None:
         self.sandbox.anchor = {
             **_anchor(),
@@ -643,6 +662,23 @@ class DeleteStaticAnalysisTest(unittest.TestCase):
         )
         self.assertTrue(result.safe)
         self.assertEqual(result.reasons, [])
+
+    def test_shared_component_with_call_site_is_safe_to_delete(self) -> None:
+        from ai_core.direct_ops.static_analysis import analyze_delete_anchor
+
+        result = analyze_delete_anchor(
+            {
+                "isShared": True,
+                "callSiteAnchor": {
+                    "file": "src/Page.jsx",
+                    "range": {"startOffset": 1, "endOffset": 2},
+                },
+                "inMap": False,
+                "isRouteRoot": True,
+            }
+        )
+        self.assertTrue(result.safe)
+        self.assertTrue(result.is_shared)
 
     def test_shared_map_and_route_root_are_unsafe(self) -> None:
         from ai_core.direct_ops.static_analysis import analyze_delete_anchor
