@@ -81,6 +81,13 @@ class Settings(BaseSettings):
     sandbox_draft_root: str = "/app-drafts"
     # 草稿预览启动超时；Vite 首次冷启动可能慢于主预览。
     sandbox_draft_start_timeout_seconds: int = 90
+    # 孤儿草稿回收：python-ai 重启后内存态草稿登记丢失，容器内的 worktree
+    # 与草稿预览进程会残留。只回收“未被当前进程登记且目录 mtime 超过 TTL”
+    # 的草稿，活跃审批永远不碰。TTL <= 0 表示停用回收。
+    sandbox_draft_orphan_ttl_days: int = 7
+    sandbox_draft_gc_enabled: bool = True
+    # 后台回收间隔；启动时会立即执行一次，便于重启后尽快收敛。
+    sandbox_draft_gc_interval_seconds: int = 6 * 3600
 
     # 浏览器访问预览端口时使用的主机名。M1 为单机开发，默认 127.0.0.1。
     sandbox_preview_host: str = "127.0.0.1"

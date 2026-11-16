@@ -213,6 +213,15 @@ class SandboxProvider(ABC):
         """
         raise SandboxError(f"当前 Provider 不支持草稿合并: {sandbox_id}")
 
+    def reap_orphan_drafts(self, ttl_days: int | None = None) -> list[str]:
+        """回收超过 TTL 的孤儿草稿，返回被回收的 draft_id 列表。
+
+        孤儿草稿指容器内仍存在 worktree / 预览进程，但当前进程的草稿
+        登记表里已查不到（典型场景：python-ai 重启导致内存态丢失）。
+        默认实现不做任何事；LocalDockerSandbox 覆盖为真实清理。
+        """
+        return []
+
     @abstractmethod
     def apply_patch(
         self,

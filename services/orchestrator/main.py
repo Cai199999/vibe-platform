@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
+from typing import AsyncIterator
 
 from fastapi import FastAPI
 
@@ -22,6 +24,7 @@ from ai_core.api.sandbox import router as sandbox_router
 from ai_core.api.supervisor import router as supervisor_router
 from ai_core.config import get_settings
 from ai_core.sandbox import get_sandbox_provider
+from ai_core.sandbox_gc import start_draft_gc
 from ai_core.schemas import HealthResponse, PingResponse
 
 settings = get_settings()
@@ -43,6 +46,17 @@ def _package_version(package_name: str) -> str | None:
         return None
 
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """服务生命周期：启动孤儿草稿回收，退出时停止后台线程。"""
+    collector = start_draft_gc(get_sandbox_provider(), settings)
+    try:
+        yield
+    finally:
+        if collector is not None:
+            collector.stop()
+
+
 app = FastAPI(
     title="Vibe Platform AI Core",
     version=settings.service_version,
@@ -50,6 +64,7 @@ app = FastAPI(
         "Python AI Core skeleton: health check, BFF connectivity probe and "
         "Docker sandbox lifecycle API."
     ),
+    lifespan=lifespan,
 )
 
 app.include_router(sandbox_router)

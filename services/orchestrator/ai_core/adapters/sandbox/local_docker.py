@@ -85,6 +85,9 @@ FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 # 草稿 ID 由服务端生成，必须严格校验后才能拼进 shell 命令。
 DRAFT_ID_RE = re.compile(r"^drf_[0-9a-f]{16,32}$")
 DRAFT_GIT_USER = ("Vibe Draft", "draft@vibe.local")
+# 创建新草稿前顺手清理同沙盒的残留草稿。60 秒宽限用于避开“另一个线程
+# 刚创建 worktree、尚未写入 _drafts 登记表”的窗口，杜绝误删并发草稿。
+DRAFT_RECLAIM_GRACE_SECONDS = 60
 logger = logging.getLogger(__name__)
 
 # 写盘前静态门禁：语法错误 / 未绑定的 JSX 组件一律拦截，绝不让坏代码
@@ -916,6 +919,23 @@ class LocalDockerSandbox(SandboxProvider):
         workdir = self.settings.sandbox_workdir
         self._ensure_git_repo(container)
 
+        # 进程重启后草稿登记表为空，旧 worktree 会继续占用 5174 草稿预览
+        # 端口，导致新 Run 的预览起不来。创建新草稿前主动回收同沙盒的
+        # 残留草稿（不区分重启前后，仅保留 60 秒并发宽限）。
+        try:
+            with self._git_lock:
+                self._reclaim_drafts(
+                    container,
+                    sandbox_id,
+                    cutoff=time.time() - DRAFT_RECLAIM_GRACE_SECONDS,
+                )
+        except (DockerException, SandboxError):
+            logger.warning(
+                "reclaim stale drafts before begin failed sandbox=%s",
+                sandbox_id,
+                exc_info=True,
+            )
+
         # 同一沙盒只有一个草稿预览端口；存在未完成草稿时再开新草稿会
         # 抢 5174 并让前一个审批的 iframe 失效。必须显式收敛，不能静默覆盖。
         with self._lock:
@@ -1139,6 +1159,144 @@ class LocalDockerSandbox(SandboxProvider):
             new_head[:12],
         )
         return new_head
+
+    def reap_orphan_drafts(self, ttl_days: int | None = None) -> list[str]:
+        """回收超过 TTL 的孤儿草稿（worktree + 草稿预览进程）。
+
+        判定标准（三者必须同时满足）：
+          - 容器内 ``/app-drafts`` 存在合法 draft 目录；
+          - 当前进程 ``_drafts`` 未登记（重启后登记表为空，即孤儿）；
+          - 目录 mtime 早于 TTL（给人工排障保留现场）。
+
+        任何单个沙盒 / 草稿失败都不能中断整轮回收；异常降级为日志，
+        下次周期继续尝试。
+        """
+        ttl = (
+            self.settings.sandbox_draft_orphan_ttl_days
+            if ttl_days is None
+            else ttl_days
+        )
+        if ttl <= 0:
+            logger.info("orphan draft gc skipped: ttl_days=%s", ttl)
+            return []
+
+        now = time.time()
+        cutoff = now - ttl * 86400
+        reclaimed: list[str] = []
+
+        try:
+            containers = self._require_client().containers.list(
+                filters={"label": f"{LABEL_MANAGED}=true"}
+            )
+        except DockerException:
+            logger.warning("orphan draft gc skipped: docker unavailable", exc_info=True)
+            return []
+
+        for container in containers:
+            labels = getattr(container, "labels", None) or {}
+            sandbox_id = labels.get(LABEL_SANDBOX_ID, "")
+            if not sandbox_id:
+                continue
+
+            try:
+                reclaimed.extend(
+                    self._reclaim_drafts(
+                        container,
+                        sandbox_id,
+                        cutoff=cutoff,
+                    )
+                )
+            except (DockerException, SandboxError):
+                logger.warning(
+                    "orphan draft gc failed sandbox=%s",
+                    sandbox_id,
+                    exc_info=True,
+                )
+
+        return reclaimed
+
+    def _reclaim_drafts(
+        self,
+        container: Any,
+        sandbox_id: str,
+        *,
+        cutoff: float | None,
+    ) -> list[str]:
+        """回收指定沙盒中未被当前进程登记的草稿。
+
+        ``cutoff`` 为 None 表示不看年龄（调用方已确认这些草稿不可能
+        再被任何活跃 Run 引用）；否则只回收 mtime 早于 cutoff 的目录。
+        """
+        candidates = self._list_draft_dirs(container)
+        with self._lock:
+            active = {
+                draft_id
+                for draft_id, meta in self._drafts.items()
+                if meta.get("sandbox_id") == sandbox_id
+            }
+
+        reclaimed: list[str] = []
+        for draft_id, mtime in candidates:
+            # 活跃审批优先级最高：即使超过 TTL 也绝不清理。
+            if draft_id in active:
+                continue
+            if cutoff is not None and mtime > cutoff:
+                continue
+            draft_path = f"{self.settings.sandbox_draft_root}/{draft_id}"
+            try:
+                self._stop_draft_preview(container, draft_id)
+                self._remove_worktree(container, draft_path)
+            except (DockerException, SandboxError):
+                logger.warning(
+                    "orphan draft reclaim failed sandbox=%s draft=%s",
+                    sandbox_id,
+                    draft_id,
+                    exc_info=True,
+                )
+                continue
+            with self._lock:
+                self._drafts.pop(draft_id, None)
+            reclaimed.append(draft_id)
+            logger.info(
+                "orphan draft reclaimed sandbox=%s draft=%s age_days=%.1f",
+                sandbox_id,
+                draft_id,
+                (time.time() - mtime) / 86400,
+            )
+
+        return reclaimed
+
+    def _list_draft_dirs(self, container: Any) -> list[tuple[str, float]]:
+        """列出容器内合法草稿目录及其 mtime 时间戳。
+
+        使用目录 mtime 而不是任何外部记录：草稿元数据是进程内存态，
+        重启后唯一可信的“年龄”来源就是文件系统本身。命令只拼接配置中
+        的根目录（shlex 转义），draft_id 在 Python 侧用正则二次校验。
+        """
+        root = shlex.quote(self.settings.sandbox_draft_root)
+        command = (
+            f"for d in {root}/drf_*; do "
+            '[ -d "$d" ] || continue; '
+            "n=${d##*/}; "
+            't=$(stat -c %Y "$d" 2>/dev/null || echo 0); '
+            'echo "$n $t"; '
+            "done"
+        )
+        code, output = self._exec(
+            container,
+            ["sh", "-lc", command],
+            workdir=self.settings.sandbox_workdir,
+        )
+        if code != 0:
+            raise SandboxError(f"列出草稿目录失败: {self._decode(output)}")
+
+        entries: list[tuple[str, float]] = []
+        for line in self._decode(output).splitlines():
+            name, _, raw_mtime = line.strip().partition(" ")
+            if not DRAFT_ID_RE.fullmatch(name) or not raw_mtime.isdigit():
+                continue
+            entries.append((name, float(raw_mtime)))
+        return entries
 
     def _draft_workdir(self, draft_id: str) -> str:
         """草稿目录必须由服务端 ID 推导，禁止调用方传入任意路径。"""
