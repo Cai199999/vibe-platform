@@ -773,6 +773,7 @@ class ArchitectService:
             source_hash=source_hash,
             project_summary=project_summary,
             latest_changes=latest_changes,
+            direct_changelog=list(state.get("direct_changelog") or []),
             architecture_snapshot=snapshot_text,
         )
         history = [item.model_dump(by_alias=True) for item in request.history]
@@ -1084,6 +1085,7 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         # 已确认的技术选型，不再重复做选型问卷。
         "project_summary": request.project_summary,
         "latest_changes": request.latest_changes,
+        "direct_changelog": _recent_direct_changes(request.project_id),
         # Token 优化：START 节点据此决定是否压缩历史
         "history_summary": "",
         "history_tokens_before": 0,
@@ -1123,6 +1125,20 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         "error": "",
         "error_code": "",
     }
+
+
+def _recent_direct_changes(project_id: str) -> list[dict[str, Any]]:
+    """读取最近 10 条 Direct Ops ChangeLog，供 Architect Prompt 使用。"""
+    try:
+        from ai_core.direct_ops.changelog import get_change_log_store
+
+        entries = get_change_log_store().list_for_project(project_id, 10)
+        return [entry.model_dump(mode="json", by_alias=True) for entry in entries]
+    except Exception:  # noqa: BLE001 - ChangeLog 是增强上下文，不能阻断架构流程
+        logger.warning(
+            "failed to load direct changelog project=%s", project_id, exc_info=True
+        )
+        return []
 
 
 def _architecture_snapshot(active: ActiveArchitectRun) -> str:

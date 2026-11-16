@@ -1948,7 +1948,7 @@ class LocalDockerSandbox(SandboxProvider):
         except SandboxValidationError as exc:
             raise SandboxError(f"AST 编辑目标文件非法: {exc}") from exc
         operation = str(edit.get("operation") or "").lower()
-        if operation not in {"insert", "delete", "modify", "update_text"}:
+        if operation not in {"insert", "delete", "modify", "update_text", "move_node"}:
             raise SandboxError(f"不支持的 AST 编辑操作: {operation or '(空)'}")
 
         container = self._get_container(sandbox_id)

@@ -986,6 +986,27 @@ class ArchitectSubresourcePromptTest(unittest.TestCase):
         self.assertIn("/api/v1/users/login", system)
         self.assertIn("禁止把 /auth", system)
 
+    def test_prompt_injects_recent_direct_changelog(self) -> None:
+        llm, client = self._llm()
+        context = replace(
+            self._context(),
+            direct_changelog=[
+                {
+                    "action": "UPDATE_TEXT",
+                    "summary": "将 App 的文案改为“我的任务”",
+                    "target": {"file": "src/App.jsx", "component": "App"},
+                    "createdAt": "2026-11-16T01:56:00Z",
+                }
+            ],
+        )
+        with self.assertRaises(ArchitectLLMError):
+            llm.analyze(context)
+
+        system = client.calls[0][1]
+        self.assertIn("用户最近直接操作", system)
+        self.assertIn("我的任务", system)
+        self.assertIn("不要当作新需求", system)
+
     def test_revise_prompt_requires_explicit_child_table(self) -> None:
         llm, client = self._llm()
         previous = MockArchitectLLM().draft_contract(self._context())

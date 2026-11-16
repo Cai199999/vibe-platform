@@ -17,9 +17,11 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - Phase1 错误信封：Python ErrorRegistry + 全局异常处理器统一 code/userMessage/errorOptions/traceId；SSE 建连后异常转 terminal 事件；BFF 全局 Advice 透传 + SSE onErrorResume 兜底，禁止堆栈泄漏。
 - Direct Ops 地基：DirectActionPayload / Risk / ErrorCode / ChangeLogEntry；项目写锁覆盖 AI promote+commit、Fullstack、Rollback 与 Direct 写入；baseRevision 乐观校验；direct.* 事件命名空间。
 - UPDATE_TEXT 闭环：服务端 Resolver → 公共组件拦截 → Babel update_text → apply_patch → Git commit → ChangeLog；前端 Inspect 悬浮 ➕❌✏️，Phase1 仅 ✏️ 落盘。
+- ChangeLog → Architect：成功 Direct Op 写入内存 ChangeLog；Architect 初始状态读取最近 10 条并注入 System Prompt，真实 DeepSeek Helper 可正确提及用户刚改的文案。
+- MOVE_NODE：同文件容器内移动，placement.siblingIndex 为移除后的最终序号；节点数量守恒校验；公共组件/跨文件转 HITL/AI；前端 ↕ 移到容器末尾。
 
 ## 最新验证
-前端 16 项 Vitest、Python 572 项 unittest 通过；BFF 单测通过。项目写锁 8 线程并发最大持有数=1；UPDATE_TEXT 真实沙盒 dryRun 680ms / 写入 1673ms。真实服务验证 422/404 信封与 Direct Ops 409 冲突经 BFF 透传一致。真实浏览器 E2E 全绿（Diff 顺序/父容器/无绝对定位、Esc、路由切换）。
+前端 16 项 Vitest、Python 580 项 unittest 通过；BFF 单测通过。真实沙盒 UPDATE_TEXT 1673ms、MOVE_NODE 2448ms；ChangeLog → DeepSeek Helper 已实测能说出“标题改成了待办清单”。真实服务验证信封与 Direct Ops 409 冲突经 BFF 透传一致。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 无持久化；沙盒无 gVisor；未云端部署。

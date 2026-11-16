@@ -64,6 +64,8 @@ class ArchitectContext:
     # 快照保存时生成的项目摘要 + 本次改动说明；两者可为空（首次启动）。
     project_summary: str = ""
     latest_changes: str = ""
+    # 用户最近通过 Direct Ops 手工修改的摘要；由 ChangeLogStore 注入。
+    direct_changelog: list[dict[str, Any]] = field(default_factory=list)
     # 影子 LLM 专用的只读架构快照（包含当前澄清问题 / 契约摘要）。
     # 主流程的 analyze / draft 不读取该字段。
     architecture_snapshot: str = ""
@@ -946,6 +948,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "且已回答的槽位；已确认的槽位必须写入 slots。不要把“怕不确定”"
             "当作全栈的理由。"
         )
+        system += _changelog_block(context)
         human = _analysis_human(context)
 
         def parse(raw: str) -> ArchitectAnalysis:
@@ -1075,6 +1078,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "图片理解等能力时，include_ai_capability 必须为 true，并在契约中"
             "明确 AI 输入、模型处理与输出结构；纯 CRUD / 展示型应用必须为 false。"
         )
+        system += _changelog_block(context)
         human = _contract_human(context)
         return self._generate_with_repair(
             task="architect_contract",
@@ -1118,6 +1122,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "禁止编造 onClick 与请求。include_ai_capability 必须与用户需求一致："
             "AI 对话 / 生成 / 筛选分析为 true，纯 CRUD 为 false。"
         )
+        system += _changelog_block(context)
         human = (
             f"{_contract_human(context)}\n\n"
             f"上一版契约:\n{json.dumps(_draft_to_payload(previous), ensure_ascii=False, default=str)}\n\n"
@@ -1168,6 +1173,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "回答风格：先给结论，再给 1-3 条理由；总长度控制在 300 字以内；"
             "如果引用了知识库，在句末标注 [文档标题]。"
         )
+        system += _changelog_block(context)
         human = _helper_human(context, question, history or [])
         answer = self._invoke("architect_helper", system, human).strip()
         if not answer:
@@ -1274,6 +1280,39 @@ def _shape_question() -> str:
     from ai_core.architect.confidence import APP_SHAPE_PROMPT
 
     return APP_SHAPE_PROMPT
+
+
+def _changelog_block(context: ArchitectContext) -> str:
+    """把最近 Direct Ops 变更注入 System Prompt。
+
+    只保留最近 10 条、总长 1200 字；文本做换行压缩与截断，避免用户
+    输入内容演变成 Prompt 注入。该块是上下文，不是新需求。
+    """
+    entries = list(context.direct_changelog or [])[-10:]
+    if not entries:
+        return ""
+    lines: list[str] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action") or "").strip()
+        target = item.get("target") if isinstance(item.get("target"), dict) else {}
+        component = str(target.get("component") or target.get("file") or "组件")
+        summary = str(item.get("summary") or "").replace("\n", " ").strip()
+        created = str(item.get("createdAt") or item.get("created_at") or "")
+        time_label = created[11:16] if len(created) >= 16 else created[:16]
+        line = f"- {time_label} {action} {component}：{summary}"
+        lines.append(line[:240])
+    if not lines:
+        return ""
+    body = "\n".join(lines)
+    body = body[:1200]
+    return (
+        "\n\n## 用户最近直接操作（仅作上下文，不要当作新需求）\n"
+        f"{body}\n"
+        "如果与当前需求相关，请主动提及用户刚刚的直接修改；"
+        "禁止把用户手改的文案 / 位置回滚或重复生成。"
+    )
 
 
 def _summary_block(context: ArchitectContext) -> str:

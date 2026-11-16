@@ -29,7 +29,12 @@ export default function InspectDraftCard({
   if (!draft) return null
   const source = draft.source ?? {}
 
-  const runDirect = async (action, payload, dryRun = false) => {
+  const runDirect = async (
+    action,
+    payload,
+    dryRun = false,
+    targetOverride = source,
+  ) => {
     if (!onDirectAction || directBusy) return
     setDirectBusy(true)
     setDirectHint('')
@@ -37,7 +42,7 @@ export default function InspectDraftCard({
       const result = await onDirectAction({
         action,
         dryRun,
-        target: source,
+        target: targetOverride,
         payload,
       })
       if (!result) return
@@ -138,6 +143,33 @@ export default function InspectDraftCard({
           }}
         >
           ✏️
+        </button>
+        <button
+          type="button"
+          title="移动到当前容器末尾"
+          disabled={directBusy || !draft.container?.source}
+          onClick={() => {
+            const container = draft.container?.source
+            if (!container) return
+            runDirect(
+              'MOVE_NODE',
+              {},
+              false,
+              {
+                ...source,
+                placement: {
+                  parentFile: container.file,
+                  parentSelector: container.selector,
+                  parentLine: container.line,
+                  parentColumn: container.column,
+                  insertPosition: 'inside_end',
+                  siblingIndex: null,
+                },
+              },
+            )
+          }}
+        >
+          ↕
         </button>
         {directHint && (
           <span className="inspect-direct-hint" data-direct-hint>

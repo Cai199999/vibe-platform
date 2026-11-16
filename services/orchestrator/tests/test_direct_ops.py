@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import threading
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
-from ai_core.direct_ops.changelog import MemoryChangeLogStore
+from ai_core.direct_ops.changelog import (
+    MemoryChangeLogStore,
+    get_change_log_store,
+)
 from ai_core.direct_ops.service import (
     DirectActionError,
     DirectOperationService,
     get_direct_event_buffer,
 )
-from ai_core.domain.direct_ops import DirectActionPayload, DirectErrorCode
+from ai_core.domain.direct_ops import (
+    ChangeLogEntry,
+    DirectActionPayload,
+    DirectErrorCode,
+)
 from ai_core.project_lock import project_write_lock
 
 PROJECT_ID = "proj_direct"
@@ -31,6 +39,16 @@ SOURCE = """export default function App() {
 """
 
 UPDATED = SOURCE.replace("待办", "我的任务")
+
+MOVED = """export default function App() {
+  return (
+    <main>
+      <p>说明</p>
+      <h1>待办</h1>
+    </main>
+  );
+}
+"""
 
 
 def _anchor(*, shared: bool = False) -> dict[str, Any]:
@@ -52,6 +70,17 @@ class _FakeSandbox:
     def __init__(self, anchor: dict[str, Any] | None = None) -> None:
         self.head = BASE_SHA
         self.anchor = anchor or _anchor()
+        self.parent_anchor = {
+            "anchorId": "anc_dact_move_parent",
+            "annotationId": "dact_move_parent",
+            "status": "RESOLVED",
+            "file": "src/App.jsx",
+            "component": "App",
+            "range": {"startOffset": 20, "endOffset": 80},
+            "isShared": False,
+            "protected": False,
+            "sharedReason": "",
+        }
         self.patches: list[dict[str, str]] = []
         self.commits: list[str] = []
         self.edits: list[dict[str, Any]] = []
@@ -75,7 +104,11 @@ class _FakeSandbox:
         draft_id: str | None = None,
     ) -> list[dict[str, Any]]:
         self.resolutions.append(anchors)
-        return [dict(self.anchor)]
+        request = anchors[0] if anchors else {}
+        anchor_id = str(request.get("anchorId") or "")
+        if anchor_id.endswith("_parent"):
+            return [dict(self.parent_anchor, anchorId=anchor_id)]
+        return [dict(self.anchor, anchorId=anchor_id)]
 
     def read_file(self, sandbox_id: str, path: str) -> str:
         return SOURCE
@@ -84,7 +117,8 @@ class _FakeSandbox:
         self, sandbox_id: str, edit: dict[str, Any], draft_id: str | None = None
     ) -> dict[str, Any]:
         self.edits.append(dict(edit))
-        return {"status": "OK", "content": UPDATED}
+        content = MOVED if edit.get("operation") == "move_node" else UPDATED
+        return {"status": "OK", "content": content}
 
     def apply_patch(
         self,
@@ -128,6 +162,93 @@ def _payload(**overrides: Any) -> DirectActionPayload:
     }
     data.update(overrides)
     return DirectActionPayload.model_validate(data)
+
+
+def _move_payload(**overrides: Any) -> DirectActionPayload:
+    data = {
+        "directActionId": "dact_move",
+        "idempotencyKey": "proj_direct:dact_move",
+        "projectId": PROJECT_ID,
+        "sandboxId": SANDBOX_ID,
+        "baseRevision": BASE_SHA,
+        "action": "MOVE_NODE",
+        "target": {
+            "anchorId": "anc_dact_move",
+            "file": "src/App.jsx",
+            "line": 4,
+            "column": 7,
+            "component": "App",
+            "placement": {
+                "parentSelector": "[data-source='main']",
+                "parentFile": "src/App.jsx",
+                "insertPosition": "inside_end",
+                "siblingIndex": 1,
+            },
+        },
+        "payload": {},
+        "options": {"source": "FLOATING_TOOLBAR", "dryRun": False},
+    }
+    data.update(overrides)
+    return DirectActionPayload.model_validate(data)
+
+
+class DirectOperationMoveTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryChangeLogStore(max_entries=50)
+        self.store.clear()
+        self.sandbox = _FakeSandbox()
+        self.service = DirectOperationService(
+            sandbox=self.sandbox,  # type: ignore[arg-type]
+            settings=_Settings(),  # type: ignore[arg-type]
+        )
+        self.service._changelog = self.store
+
+    def tearDown(self) -> None:
+        from ai_core.direct_ops import service as service_module
+
+        with service_module._COMPLETED_LOCK:
+            service_module._COMPLETED.clear()
+
+    def test_move_node_commits_and_changelog(self) -> None:
+        payload = _move_payload()
+
+        response = self.service.execute(payload)
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(response.risk, "L0_DIRECT")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "move_node")
+        self.assertEqual(self.sandbox.edits[0]["insertPosition"], "inside_end")
+        self.assertEqual(len(self.sandbox.commits), 1)
+        entries = self.store.list_for_project(PROJECT_ID)
+        self.assertEqual(len(entries), 1)
+        self.assertIn("移动到", entries[0].summary)
+
+    def test_cross_file_move_requires_ai(self) -> None:
+        self.sandbox.parent_anchor = {
+            **self.sandbox.parent_anchor,
+            "file": "src/Other.jsx",
+        }
+        payload = _move_payload()
+
+        with self.assertRaises(DirectActionError) as ctx:
+            self.service.execute(payload)
+
+        self.assertEqual(ctx.exception.code, DirectErrorCode.UNSAFE_OPERATION)
+        self.assertEqual(self.sandbox.patches, [])
+
+    def test_move_requires_placement(self) -> None:
+        with self.assertRaises(ValueError):
+            DirectActionPayload.model_validate(
+                {
+                    **_move_payload().model_dump(by_alias=True),
+                    "target": {
+                        "anchorId": "anc_dact_move",
+                        "file": "src/App.jsx",
+                        "line": 4,
+                        "column": 7,
+                    },
+                }
+            )
 
 
 class DirectOperationServiceTest(unittest.TestCase):
@@ -242,6 +363,35 @@ class DirectOperationServiceTest(unittest.TestCase):
         self.assertEqual(first.commit_hash, second.commit_hash)
         self.assertEqual(len(self.sandbox.patches), 1)
         self.assertEqual(len(self.sandbox.commits), 1)
+
+
+class ChangeLogArchitectBridgeTest(unittest.TestCase):
+    def test_recent_changelog_is_available_to_architect(self) -> None:
+        from ai_core.architect.service import _recent_direct_changes
+
+        store = get_change_log_store()
+        store.append(
+            ChangeLogEntry(
+                change_id="chg_arch_test",
+                project_id="proj_arch_bridge",
+                sandbox_id=SANDBOX_ID,
+                action="UPDATE_TEXT",
+                target={"file": "src/App.jsx", "component": "App"},
+                summary="将 App 的文案改为“我的任务”",
+                before_hash="sha256:a",
+                after_hash="sha256:b",
+                commit_hash="c" * 40,
+                risk="L0_DIRECT",
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+
+        changes = _recent_direct_changes("proj_arch_bridge")
+
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]["action"], "UPDATE_TEXT")
+        self.assertIn("我的任务", changes[0]["summary"])
+        self.assertIn("createdAt", changes[0])
 
 
 if __name__ == "__main__":

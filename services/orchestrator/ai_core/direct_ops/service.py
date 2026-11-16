@@ -276,8 +276,13 @@ class DirectOperationService:
 
             mark = time.perf_counter()
             anchor = self._resolve(payload)
+            parent = (
+                self._resolve_parent(payload, anchor)
+                if payload.action == "MOVE_NODE"
+                else None
+            )
             timings["resolveMs"] = _elapsed_ms(mark)
-            risk = self._risk(payload, anchor)
+            risk = self._risk(payload, anchor, parent)
             resolved_target = {
                 "file": anchor.get("file"),
                 "component": anchor.get("component"),
@@ -288,6 +293,14 @@ class DirectOperationService:
                 "protected": bool(anchor.get("protected")),
                 "sharedReason": anchor.get("sharedReason") or "",
             }
+            if parent is not None:
+                resolved_target["parent"] = {
+                    "file": parent.get("file"),
+                    "component": parent.get("component"),
+                    "range": parent.get("range"),
+                    "isShared": bool(parent.get("isShared")),
+                    "protected": bool(parent.get("protected")),
+                }
 
             if risk in {"L2_HITL", "L3_AI_REQUIRED"}:
                 if payload.options.dry_run:
@@ -310,7 +323,7 @@ class DirectOperationService:
             file = str(anchor.get("file") or "")
             mark = time.perf_counter()
             old_content = self._sandbox.read_file(payload.sandbox_id, file)
-            new_content = self._build_new_content(payload, anchor)
+            new_content = self._build_new_content(payload, anchor, parent)
             timings["astEditMs"] = _elapsed_ms(mark)
 
             if payload.options.dry_run:
@@ -457,40 +470,135 @@ class DirectOperationService:
             )
         return anchor
 
+    def _resolve_parent(
+        self,
+        payload: DirectActionPayload,
+        source: dict[str, Any],
+    ) -> dict[str, Any]:
+        """按 placement 定位移动目标容器；不再让模型猜测父级。"""
+        placement = payload.target.placement or {}
+        parent_anchor_id = f"anc_{payload.direct_action_id}_parent"
+        request = {
+            "anchorId": parent_anchor_id,
+            "annotationId": f"{payload.direct_action_id}_parent",
+            "file": placement.get("parentFile")
+            or payload.target.file
+            or source.get("file")
+            or "",
+            "selector": placement.get("parentSelector") or "",
+            "line": placement.get("parentLine"),
+            "column": placement.get("parentColumn"),
+            "instance": placement.get("parentInstance"),
+            "instanceCount": placement.get("parentInstanceCount"),
+        }
+        try:
+            results = self._sandbox.resolve_targets(payload.sandbox_id, [request])
+        except SandboxError as exc:
+            raise DirectActionError(
+                DirectErrorCode.RESOLVER_UNAVAILABLE,
+                "目标容器解析服务暂时不可用，请稍后重试。",
+                status_code=503,
+            ) from exc
+        parent = next(
+            (
+                item
+                for item in results or []
+                if isinstance(item, dict)
+                and str(item.get("anchorId") or "") == parent_anchor_id
+            ),
+            None,
+        )
+        if parent is None or str(parent.get("status") or "") != "RESOLVED":
+            raise DirectActionError(
+                DirectErrorCode.TARGET_NOT_FOUND,
+                "没有找到要移动到的容器，请重新拖拽落位。",
+                status_code=404,
+            )
+        return parent
+
     @staticmethod
     def _risk(
         payload: DirectActionPayload,
         anchor: dict[str, Any],
+        parent: dict[str, Any] | None = None,
     ) -> DirectActionRisk:
         if payload.action == "UPDATE_TEXT":
             if anchor.get("isShared") or anchor.get("protected"):
                 return "L2_HITL"
             return "L0_DIRECT"
-        # Phase 1 仅 UPDATE_TEXT 可执行；其它动作在路线图后续阶段实现。
+        if payload.action == "MOVE_NODE":
+            if parent is None:
+                return "L3_AI_REQUIRED"
+            if parent.get("file") != anchor.get("file"):
+                return "L3_AI_REQUIRED"
+            if any(
+                item.get("isShared") or item.get("protected")
+                for item in (anchor, parent)
+            ):
+                return "L2_HITL"
+            return "L0_DIRECT"
+        # ADD_COMPONENT / DELETE_NODE 仍在后续阶段实现。
         return "L3_AI_REQUIRED"
 
     def _build_new_content(
         self,
         payload: DirectActionPayload,
         anchor: dict[str, Any],
+        parent: dict[str, Any] | None = None,
     ) -> str:
-        if payload.action != "UPDATE_TEXT":
-            raise DirectActionError(
-                DirectErrorCode.UNSAFE_OPERATION,
-                "当前版本只支持直接修改文本。",
-                status_code=409,
-            )
         file = str(anchor.get("file") or "")
-        result = self._sandbox.apply_ast_edit(
-            payload.sandbox_id,
-            {
+        if payload.action == "UPDATE_TEXT":
+            edit = {
                 "operation": "update_text",
                 "file": file,
                 "anchorRange": anchor.get("range") or {},
                 "targetRange": anchor.get("range") or {},
                 "text": str(payload.payload.get("text") or ""),
-            },
-        )
+            }
+        elif payload.action == "MOVE_NODE":
+            if parent is None:
+                raise DirectActionError(
+                    DirectErrorCode.UNSAFE_OPERATION,
+                    "没有找到移动目标容器，请重新拖拽落位。",
+                    status_code=409,
+                )
+            if parent.get("file") != file:
+                raise DirectActionError(
+                    DirectErrorCode.UNSAFE_OPERATION,
+                    "暂不支持跨文件移动组件，请改用 AI 修改。",
+                    status_code=409,
+                )
+            placement = payload.target.placement or {}
+            position = str(placement.get("insertPosition") or "inside_index")
+            if position not in {
+                "inside_start",
+                "inside_end",
+                "inside_index",
+            }:
+                position = "inside_end"
+            raw_index = placement.get("siblingIndex")
+            index = (
+                int(raw_index)
+                if isinstance(raw_index, (int, float)) and int(raw_index) >= 0
+                else None
+            )
+            if position == "inside_index" and index is None:
+                index = 0
+            edit = {
+                "operation": "move_node",
+                "file": file,
+                "anchorRange": anchor.get("range") or {},
+                "targetRange": parent.get("range") or {},
+                "insertPosition": position,
+                "insertIndex": index,
+            }
+        else:
+            raise DirectActionError(
+                DirectErrorCode.UNSAFE_OPERATION,
+                "当前版本只支持直接修改文本与移动组件。",
+                status_code=409,
+            )
+        result = self._sandbox.apply_ast_edit(payload.sandbox_id, edit)
         if not result or result.get("status") != "OK":
             code = str((result or {}).get("code") or DirectErrorCode.TOOL_FAILED)
             message = str((result or {}).get("message") or "文本修改失败")
@@ -523,6 +631,17 @@ class DirectOperationService:
     ) -> ChangeLogEntry:
         file = str(anchor.get("file") or "")
         text = str(payload.payload.get("text") or "")
+        component = anchor.get("component") or file
+        placement = payload.target.placement or {}
+        if payload.action == "UPDATE_TEXT":
+            summary = f"将 {component} 的文案改为“{text}”"
+        elif payload.action == "MOVE_NODE":
+            summary = (
+                f"将 {component} 移动到 "
+                f"{placement.get('parentSelector') or placement.get('parentFile') or '新容器'}"
+            )
+        else:
+            summary = f"对 {component} 执行 {payload.action}"
         entry = ChangeLogEntry(
             change_id=f"chg_{uuid.uuid4().hex[:20]}",
             project_id=payload.project_id,
@@ -534,8 +653,9 @@ class DirectOperationService:
                 "component": anchor.get("component") or "",
                 "anchorId": anchor.get("anchorId") or "",
                 "range": anchor.get("range") or {},
+                "placement": placement,
             },
-            summary=f"将 {anchor.get('component') or file} 的文案改为“{text}”",
+            summary=summary,
             diff_summary=_diff_summary(before, after),
             before_hash=_sha256(before),
             after_hash=_sha256(after),

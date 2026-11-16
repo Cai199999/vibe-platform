@@ -96,6 +96,16 @@ class DirectActionPayload(CamelModel):
                 raise ValueError("UPDATE_TEXT 文案不能超过 2000 字符")
             if any(char in text for char in "<>{}\n\r"):
                 raise ValueError("UPDATE_TEXT 文案不能包含 < > { } 或换行")
+        if self.action == "MOVE_NODE":
+            placement = self.target.placement or {}
+            if not isinstance(placement, dict) or not (
+                placement.get("parentSelector")
+                or placement.get("parentFile")
+                or placement.get("parentLine")
+            ):
+                raise ValueError(
+                    "MOVE_NODE 必须在 target.placement 中提供父容器定位信息"
+                )
         return self
 
 

@@ -265,6 +265,14 @@ function meaningfulChildren(node) {
   )
 }
 
+function countJsxNodes(ast) {
+  let count = 0
+  walk(ast, null, (node) => {
+    if (JSX_TYPES.has(node.type)) count += 1
+  })
+  return count
+}
+
 /**
  * inside_* 插入的子节点缩进。
  *
@@ -385,6 +393,98 @@ function main() {
       parseCode(next, file, parser)
     } catch (error) {
       return fail('INVALID_TEXT', `文本替换后文件无法解析: ${error.message}`)
+    }
+    return { status: 'OK', content: next }
+  }
+
+  // ---- Direct Ops：MOVE_NODE ----
+  // 把 source 节点从原位置移除，再按 placement 插入 target 容器。
+  // 只支持同一文件、容器内部移动；跨文件 / 跨路由交给 AI。
+  if (operation === 'move_node') {
+    const source = findExactNode(ast, spec.anchorRange)
+    if (!source || !JSX_TYPES.has(source.type)) {
+      return fail('ANCHOR_RANGE_MISMATCH', '待移动节点区间已失效')
+    }
+    const target = findExactNode(ast, spec.targetRange)
+    if (!target || !JSX_TYPES.has(target.type)) {
+      return fail('ANCHOR_RANGE_MISMATCH', '目标容器区间已失效')
+    }
+    // 禁止把节点移动到自身或自己的子树。
+    if (target.start >= source.start && target.end <= source.end) {
+      return fail('INVALID_MOVE_TARGET', '不能把组件移动到它自身内部')
+    }
+    const parts = jsxContainerParts(target)
+    if (!parts || parts.selfClosing || parts.openEnd < 0 || parts.closeStart < 0) {
+      return fail('INVALID_MOVE_TARGET', '目标不是可容纳子节点的 JSX 容器')
+    }
+    const position = String(spec.insertPosition || 'inside_end').toLowerCase()
+    if (!['inside_start', 'inside_end', 'inside_index'].includes(position)) {
+      return fail('INVALID_MOVE_TARGET', '移动只支持容器内部落位')
+    }
+    const children = meaningfulChildren(target)
+    // placement.siblingIndex 语义：移动完成后目标容器中的最终序号。
+    // 同一父容器内移动时，先从候选列表中剔除 source，再按最终序号落位。
+    const sameParent = parents.get(source) === target
+    const available = sameParent
+      ? children.filter(
+          (child) => !(child.start === source.start && child.end === source.end),
+        )
+      : children
+    let index = available.length
+    if (position === 'inside_index') {
+      const rawIndex = Number(spec.insertIndex)
+      if (!Number.isInteger(rawIndex) || rawIndex < 0 || rawIndex > available.length) {
+        return fail('INVALID_MOVE_TARGET', 'insertIndex 超出子节点范围', {
+          insertIndex: spec.insertIndex,
+          childCount: available.length,
+        })
+      }
+      index = rawIndex
+    } else if (position === 'inside_start') {
+      index = 0
+    }
+    const rawInsertOffset =
+      position === 'inside_start'
+        ? parts.openEnd
+        : index < available.length
+          ? available[index].start
+          : parts.closeStart
+    const slice = deleteSlice(code, source)
+    const removedLength = slice.end - slice.start
+    let insertOffset = rawInsertOffset
+    if (slice.end <= rawInsertOffset) {
+      insertOffset -= removedLength
+    } else if (slice.start < rawInsertOffset && rawInsertOffset < slice.end) {
+      return fail('INVALID_MOVE_TARGET', '落点位于被移动节点内部，已阻断')
+    }
+    const removedCode = `${code.slice(0, slice.start)}${code.slice(slice.end)}`
+    if (insertOffset < 0 || insertOffset > removedCode.length) {
+      return fail('INVALID_MOVE_TARGET', '落点偏移计算失败')
+    }
+    const parentIndent = baseIndentAt(code, target.start)
+    const indent = childIndentFor(code, target)
+    const snippet = reindent(code.slice(source.start, source.end), indent)
+    // 移除落点前已有的缩进 / 换行，避免移动后出现空行或双倍缩进。
+    const before = removedCode
+      .slice(0, insertOffset)
+      .replace(/[ \t]*\n?[ \t]*$/, '')
+    const after = removedCode.slice(insertOffset)
+    let next
+    if (position === 'inside_start') {
+      next = `${before}\n${indent}${snippet}${after}`
+    } else if (index < available.length) {
+      next = `${before}\n${indent}${snippet}\n${indent}${after}`
+    } else {
+      next = `${before}\n${indent}${snippet}\n${parentIndent}${after}`
+    }
+    let nextAst
+    try {
+      nextAst = parseCode(next, file, parser)
+    } catch (error) {
+      return fail('INVALID_MOVE_TARGET', `移动后文件无法解析: ${error.message}`)
+    }
+    if (countJsxNodes(nextAst) !== countJsxNodes(ast)) {
+      return fail('MOVE_SCOPE_MISMATCH', '移动前后 JSX 节点数量不一致，已阻断')
     }
     return { status: 'OK', content: next }
   }

@@ -1416,6 +1416,7 @@ def _context_from_state(state: ArchitectState) -> ArchitectContext:
         source_hash=str(state.get("source_hash") or ""),
         project_summary=str(state.get("project_summary") or ""),
         latest_changes=str(state.get("latest_changes") or ""),
+        direct_changelog=list(state.get("direct_changelog") or []),
     )
 
 

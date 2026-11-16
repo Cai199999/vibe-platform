@@ -253,6 +253,8 @@ class ArchitectState(TypedDict, total=False):
     # 快照保存生成的项目全局摘要 + 本次快照改动说明。
     project_summary: str
     latest_changes: str
+    # 最近 Direct Ops 变更摘要，注入 Architect System Prompt。
+    direct_changelog: list[dict[str, Any]]
     # 历史压缩后的核心需求与约束；超过阈值才写入。
     history_summary: str
     history_tokens_before: int

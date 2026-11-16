@@ -135,7 +135,9 @@ class SseTerminalTest(unittest.TestCase):
         event = json.loads(data_line[len("data: ") :])
         payload = event["payload"]
         self.assertEqual(payload["status"], "FAILED")
-        self.assertEqual(payload["userMessage"], "系统遇到未预期问题，已记录诊断编号，请稍后重试。")
+        self.assertEqual(
+            payload["userMessage"], "系统遇到未预期问题，已记录诊断编号，请稍后重试。"
+        )
         self.assertEqual(payload["errorOptions"], [])
         self.assertEqual(payload["traceId"], "trc_sse_1")
         self.assertEqual(payload["errorEnvelope"]["code"], "INTERNAL_ERROR")

@@ -1661,6 +1661,78 @@ class Phase1GraphE2ETest(unittest.TestCase):
 
 
 @unittest.skipUnless(NODE, "node 不可用，跳过 Babel 脚本测试")
+class AstEditMoveNodeTest(unittest.TestCase):
+    """Direct Ops MOVE_NODE：同文件容器内部移动，节点数量守恒。"""
+
+    def _move(
+        self,
+        code: str,
+        source: dict[str, int],
+        target: dict[str, int],
+        *,
+        position: str = "inside_end",
+        index: int | None = None,
+    ) -> tuple[int, dict[str, Any] | None, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_project(Path(tmp), {"src/App.jsx": code})
+            return _run_script(
+                "apply_ast_edit.mjs",
+                {
+                    "workdir": tmp,
+                    "parserRoot": str(TEMPLATE_DIR),
+                    "file": "src/App.jsx",
+                    "operation": "move_node",
+                    "anchorRange": source,
+                    "targetRange": target,
+                    "insertPosition": position,
+                    "insertIndex": index,
+                },
+            )
+
+    def test_moves_node_between_containers(self) -> None:
+        source = (
+            "<main><section><h1>标题</h1></section>"
+            "<footer><p>说明</p></footer></main>"
+        )
+        code, payload, stderr = self._move(
+            source,
+            _fix_range(source, "<h1>", "</h1>"),
+            _fix_range(source, "<footer>", "</footer>"),
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(payload["status"], "OK")
+        content = payload["content"]
+        self.assertLess(content.index("<footer>"), content.index("<h1>"))
+        self.assertEqual(content.count("<h1>"), 1)
+
+    def test_moves_node_within_same_container(self) -> None:
+        source = "<main><h1>标题</h1><p>说明</p></main>"
+        code, payload, stderr = self._move(
+            source,
+            _fix_range(source, "<h1>", "</h1>"),
+            _fix_range(source, "<main>", "</main>"),
+            position="inside_index",
+            # 同父容器移动语义：siblingIndex 是移除 source 后的最终序号。
+            index=1,
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(payload["status"], "OK")
+        content = payload["content"]
+        self.assertLess(content.index("<p>说明</p>"), content.index("<h1>标题</h1>"))
+
+    def test_rejects_move_into_self(self) -> None:
+        source = "<main><h1>标题</h1></main>"
+        code, payload, stderr = self._move(
+            source,
+            _fix_range(source, "<h1>", "</h1>"),
+            _fix_range(source, "<h1>", "</h1>"),
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(payload["status"], "ERROR")
+        self.assertEqual(payload["code"], "INVALID_MOVE_TARGET")
+
+
+@unittest.skipUnless(NODE, "node 不可用，跳过 Babel 脚本测试")
 class AstEditUpdateTextTest(unittest.TestCase):
     """Direct Ops UPDATE_TEXT：只允许唯一 JSXText 子节点。"""
 
