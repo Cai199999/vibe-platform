@@ -3,6 +3,8 @@ package com.vibeplatform.bff.project;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -13,6 +15,7 @@ import org.springframework.web.multipart.MaxUploadSizeExceededException;
  * 上传超限错误：Spring 在进入 Controller 前就会拒绝超大请求，
  * 这里统一转换为与其它导入错误一致的结构。
  */
+@Order(Ordered.HIGHEST_PRECEDENCE)
 @RestControllerAdvice
 public class ProjectImportExceptionHandler {
 

@@ -34,6 +34,7 @@ from ai_core.agent.service import (
     TargetFileNotFoundError,
 )
 from ai_core.api.errors import sandbox_error_to_http
+from ai_core.error_envelope import stream_event_frames
 from ai_core.ports.sandbox import SandboxError
 
 router = APIRouter(prefix="/api/v1/internal/runs", tags=["runs"])
@@ -268,14 +269,13 @@ def rollback_run(request: RollbackRunRequest) -> RollbackRunResponse:
 # 内部工具
 # ------------------------------------------------------------
 async def _event_frames(buffer: RunEventBuffer, after_seq: int):
-    # SSE 客户端重连间隔；实际重连仍由前端控制。
-    yield "retry: 3000\n\n"
-    async for event in buffer.subscribe(after_seq):
-        if event is None:
-            # 心跳注释不占用 seq，也不会触发客户端 onmessage。
-            yield ": ping\n\n"
-        else:
-            yield event.to_sse()
+    # 流建立后的异常由统一生成器收敛为 run.failed terminal 事件。
+    async for frame in stream_event_frames(
+        buffer,
+        after_seq,
+        terminal_event_type="run.failed",
+    ):
+        yield frame
 
 
 def _sse_response(buffer: RunEventBuffer, *, after_seq: int) -> StreamingResponse:

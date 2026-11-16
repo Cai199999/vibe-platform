@@ -83,6 +83,7 @@ from ai_core.domain.architect import (
     normalize_quality_tier,
 )
 from ai_core.domain.state import ArchitectState
+from ai_core.error_envelope import attach_error_envelope, envelope_from_code
 from ai_core.config import get_settings
 from ai_core.observability.streaming import (
     TokenStreamEmitter,
@@ -1308,15 +1309,26 @@ class ArchitectGraphRunner:
             f"经过 {state.get('max_rounds')} 轮澄清仍未达到置信度阈值 "
             f"{state.get('threshold')}，请补充需求后重新发起"
         )
+        run_id = str(state.get("run_id") or "")
+        envelope = envelope_from_code(
+            "CONFIDENCE_EXHAUSTED",
+            technical_message=error,
+            trace_id=f"trc_{run_id}" if run_id else None,
+            run_id=run_id,
+            stage="architect.confidence_exhausted",
+        )
         self._emit(
             "architect.failed",
-            {
-                "error": error,
-                "errorCode": "CONFIDENCE_EXHAUSTED",
-                "round": state.get("round"),
-                "confidenceScore": state.get("confidence_score"),
-                "missingSlots": state.get("missing_slots") or [],
-            },
+            attach_error_envelope(
+                {
+                    "error": envelope.user_message,
+                    "errorCode": "CONFIDENCE_EXHAUSTED",
+                    "round": state.get("round"),
+                    "confidenceScore": state.get("confidence_score"),
+                    "missingSlots": state.get("missing_slots") or [],
+                },
+                envelope,
+            ),
             dedupe_key=f"architect.failed:{state.get('run_id')}",
         )
         return {
@@ -1328,15 +1340,26 @@ class ArchitectGraphRunner:
     def _failed(self, state: ArchitectState) -> dict[str, Any]:
         error = state.get("error") or "架构澄清失败"
         code = state.get("error_code") or "ARCHITECT_FAILED"
+        run_id = str(state.get("run_id") or "")
+        envelope = envelope_from_code(
+            code,
+            technical_message=error,
+            trace_id=f"trc_{run_id}" if run_id else None,
+            run_id=run_id,
+            stage="architect.failed",
+        )
         self._emit(
             "architect.failed",
-            {
-                "error": error,
-                "errorCode": code,
-                "round": state.get("round"),
-                "confidenceScore": state.get("confidence_score"),
-            },
-            dedupe_key=f"architect.failed:{state.get('run_id')}:{code}",
+            attach_error_envelope(
+                {
+                    "error": envelope.user_message,
+                    "errorCode": code,
+                    "round": state.get("round"),
+                    "confidenceScore": state.get("confidence_score"),
+                },
+                envelope,
+            ),
+            dedupe_key=f"architect.failed:{run_id}:{code}",
         )
         return {"status": "FAILED", "error": error, "error_code": code}
 

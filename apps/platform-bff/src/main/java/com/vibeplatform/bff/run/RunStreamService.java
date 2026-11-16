@@ -2,11 +2,13 @@ package com.vibeplatform.bff.run;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.vibeplatform.bff.admin.AdminMetricsService;
+import com.vibeplatform.bff.common.SseErrorFrames;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -65,7 +67,9 @@ public class RunStreamService {
                 STREAM_START_PATH,
                 request,
                 "RUN_REQUEST_SERIALIZATION_FAILED",
-                AdminMetricsService.UI_AGENT_ID
+                AdminMetricsService.UI_AGENT_ID,
+                "run.failed",
+                request.runId()
         );
     }
 
@@ -78,7 +82,9 @@ public class RunStreamService {
                 FULLSTACK_STREAM_START_PATH,
                 request,
                 "FULLSTACK_REQUEST_SERIALIZATION_FAILED",
-                AdminMetricsService.FULLSTACK_AGENT_ID
+                AdminMetricsService.FULLSTACK_AGENT_ID,
+                "fullstack.failed",
+                request.path("runId").asText("")
         );
     }
 
@@ -86,8 +92,11 @@ public class RunStreamService {
             String upstreamPath,
             Object request,
             String serializationErrorCode,
-            String agentId
+            String agentId,
+            String terminalEventType,
+            String runId
     ) {
+        AtomicBoolean streamStarted = new AtomicBoolean(false);
         final String jsonBody;
         try {
             jsonBody = objectMapper.writeValueAsString(request);
@@ -119,7 +128,10 @@ public class RunStreamService {
                     }
                     return response.bodyToFlux(SSE_TYPE);
                 })
-                .doOnNext(event -> observeEvent(event, agentId))
+                .doOnNext(event -> {
+                    streamStarted.set(true);
+                    observeEvent(event, agentId);
+                })
                 .doOnComplete(() -> log.info(
                         "{} completed elapsedMs={}",
                         upstreamPath,
@@ -134,7 +146,27 @@ public class RunStreamService {
                                         "连接 AI Core 事件流失败: " + ex.getMessage()
                                 )
                         )
-                );
+                )
+                .onErrorResume(ex -> {
+                    // 建流前错误交给 RestControllerAdvice 设置 HTTP 状态。
+                    if (!streamStarted.get() && ex instanceof AiCoreStreamException) {
+                        return Flux.error(ex);
+                    }
+                    log.warn(
+                            "bff stream interrupted path={} runId={} type={} message={}",
+                            upstreamPath,
+                            runId,
+                            ex.getClass().getSimpleName(),
+                            ex.getMessage()
+                    );
+                    return Flux.just(SseErrorFrames.terminal(
+                            objectMapper,
+                            runId,
+                            terminalEventType,
+                            "STREAM_UPSTREAM_ERROR",
+                            "生成服务连接中断，请重试或稍后继续。"
+                    ));
+                });
     }
 
     /**
@@ -154,6 +186,9 @@ public class RunStreamService {
             }
         }
         final int resumeFrom = effectiveAfterSeq;
+        AtomicBoolean streamStarted = new AtomicBoolean(false);
+        AtomicReference<String> terminalEventType =
+                new AtomicReference<>("run.failed");
         return aiCoreStreamWebClient.get()
                 .uri(uriBuilder -> uriBuilder
                         .path(STREAM_EVENTS_PATH)
@@ -172,10 +207,16 @@ public class RunStreamService {
                     }
                     return response.bodyToFlux(SSE_TYPE);
                 })
-                .doOnNext(event -> observeEvent(
-                        event,
-                        AdminMetricsService.UI_AGENT_ID
-                ))
+                .doOnNext(event -> {
+                    streamStarted.set(true);
+                    // 同一重放接口同时服务 UI Run 与全栈 Run；按事件命名
+                    // 空间选择终态类型，避免全栈前端收到 run.failed 后重连。
+                    String data = event.data();
+                    if (data != null && data.contains("\"type\":\"fullstack.")) {
+                        terminalEventType.set("fullstack.failed");
+                    }
+                    observeEvent(event, AdminMetricsService.UI_AGENT_ID);
+                })
                 .onErrorMap(
                         WebClientRequestException.class,
                         ex -> new AiCoreStreamException(
@@ -185,7 +226,25 @@ public class RunStreamService {
                                         "连接 AI Core 事件流失败: " + ex.getMessage()
                                 )
                         )
-                );
+                )
+                .onErrorResume(ex -> {
+                    if (!streamStarted.get() && ex instanceof AiCoreStreamException) {
+                        return Flux.error(ex);
+                    }
+                    log.warn(
+                            "bff replay interrupted runId={} type={} message={}",
+                            runId,
+                            ex.getClass().getSimpleName(),
+                            ex.getMessage()
+                    );
+                    return Flux.just(SseErrorFrames.terminal(
+                            objectMapper,
+                            runId,
+                            terminalEventType.get(),
+                            "STREAM_UPSTREAM_ERROR",
+                            "生成服务连接中断，请重试或稍后继续。"
+                    ));
+                });
     }
 
     /**
@@ -245,10 +304,7 @@ public class RunStreamService {
     }
 
     private String errorJson(String code, String message) {
-        ObjectNode node = objectMapper.createObjectNode();
-        node.put("code", code);
-        node.put("message", message);
-        return node.toString();
+        return SseErrorFrames.httpEnvelope(objectMapper, code, message);
     }
 
     private static long elapsedMillis(long startedAt) {

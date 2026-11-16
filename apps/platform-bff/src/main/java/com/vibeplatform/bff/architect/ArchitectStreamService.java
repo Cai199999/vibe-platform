@@ -2,11 +2,12 @@ package com.vibeplatform.bff.architect;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.vibeplatform.bff.admin.AdminMetricsService;
+import com.vibeplatform.bff.common.SseErrorFrames;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -67,6 +68,7 @@ public class ArchitectStreamService {
         }
 
         long startedAt = System.nanoTime();
+        AtomicBoolean streamStarted = new AtomicBoolean(false);
         return aiCoreStreamWebClient.post()
                 .uri(STREAM_START_PATH)
                 .contentType(MediaType.APPLICATION_JSON)
@@ -84,7 +86,10 @@ public class ArchitectStreamService {
                     }
                     return response.bodyToFlux(SSE_TYPE);
                 })
-                .doOnNext(this::observeEvent)
+                .doOnNext(event -> {
+                    streamStarted.set(true);
+                    observeEvent(event);
+                })
                 .doOnComplete(() -> log.info(
                         "architect stream completed elapsedMs={}",
                         elapsedMillis(startedAt)
@@ -99,7 +104,26 @@ public class ArchitectStreamService {
                                                 + ex.getMessage()
                                 )
                         )
-                );
+                )
+                .onErrorResume(ex -> {
+                    // 建流前错误仍交给全局/局部 RestControllerAdvice。
+                    if (!streamStarted.get() && ex instanceof ArchitectStreamException) {
+                        return Flux.error(ex);
+                    }
+                    log.warn(
+                            "bff architect stream interrupted runId={} type={} message={}",
+                            request.runId(),
+                            ex.getClass().getSimpleName(),
+                            ex.getMessage()
+                    );
+                    return Flux.just(SseErrorFrames.terminal(
+                            objectMapper,
+                            request.runId(),
+                            "architect.failed",
+                            "ARCHITECT_STREAM_UPSTREAM_ERROR",
+                            "架构服务连接中断，请重试或稍后继续。"
+                    ));
+                });
     }
 
     public Flux<ServerSentEvent<String>> replay(
@@ -116,6 +140,7 @@ public class ArchitectStreamService {
             }
         }
         final int resumeFrom = effectiveAfterSeq;
+        AtomicBoolean streamStarted = new AtomicBoolean(false);
         return aiCoreStreamWebClient.get()
                 .uri(uriBuilder -> uriBuilder
                         .path(STREAM_EVENTS_PATH)
@@ -134,7 +159,10 @@ public class ArchitectStreamService {
                     }
                     return response.bodyToFlux(SSE_TYPE);
                 })
-                .doOnNext(this::observeEvent)
+                .doOnNext(event -> {
+                    streamStarted.set(true);
+                    observeEvent(event);
+                })
                 .onErrorMap(
                         WebClientRequestException.class,
                         ex -> new ArchitectStreamException(
@@ -145,7 +173,25 @@ public class ArchitectStreamService {
                                                 + ex.getMessage()
                                 )
                         )
-                );
+                )
+                .onErrorResume(ex -> {
+                    if (!streamStarted.get() && ex instanceof ArchitectStreamException) {
+                        return Flux.error(ex);
+                    }
+                    log.warn(
+                            "bff architect replay interrupted runId={} type={} message={}",
+                            runId,
+                            ex.getClass().getSimpleName(),
+                            ex.getMessage()
+                    );
+                    return Flux.just(SseErrorFrames.terminal(
+                            objectMapper,
+                            runId,
+                            "architect.failed",
+                            "ARCHITECT_STREAM_UPSTREAM_ERROR",
+                            "架构服务连接中断，请重试或稍后继续。"
+                    ));
+                });
     }
 
     /**
@@ -196,10 +242,7 @@ public class ArchitectStreamService {
     }
 
     private String errorJson(String code, String message) {
-        ObjectNode node = objectMapper.createObjectNode();
-        node.put("code", code);
-        node.put("message", message);
-        return node.toString();
+        return SseErrorFrames.httpEnvelope(objectMapper, code, message);
     }
 
     private static long elapsedMillis(long startedAt) {

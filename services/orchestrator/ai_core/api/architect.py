@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 
 from ai_core.agent.events import RunEventBuffer
 from ai_core.architect.llm import ArchitectLLMConfigurationError
+from ai_core.error_envelope import stream_event_frames
 from ai_core.domain.architect import (
     ArchitectAnswerResponse,
     ArchitectAnswersRequest,
@@ -162,12 +163,12 @@ def get_architect_run(run_id: str) -> ArchitectSnapshotResponse:
 
 
 async def _event_frames(buffer: RunEventBuffer, after_seq: int):
-    yield "retry: 3000\n\n"
-    async for event in buffer.subscribe(after_seq):
-        if event is None:
-            yield ": ping\n\n"
-        else:
-            yield event.to_sse()
+    async for frame in stream_event_frames(
+        buffer,
+        after_seq,
+        terminal_event_type="architect.failed",
+    ):
+        yield frame
 
 
 def _sse_response(buffer: RunEventBuffer, *, after_seq: int) -> StreamingResponse:

@@ -28,6 +28,7 @@ from typing import Any
 from ai_core.agent.events import RunEventBuffer, get_event_buffer
 from ai_core.architect.service import find_architect_contract
 from ai_core.domain.architect import ArchitectContract
+from ai_core.error_envelope import attach_error_envelope, envelope_from_code
 from ai_core.domain.fullstack import (
     FullstackRunRequest,
     FullstackRunSnapshot,
@@ -377,6 +378,40 @@ class FullstackService:
         needs_clarification: bool = False,
         clarification: dict[str, Any] | None = None,
     ) -> None:
+        envelope = envelope_from_code(
+            code,
+            technical_message=error,
+            trace_id=getattr(active.buffer, "trace_id", None),
+            run_id=active.run_id,
+            stage=f"fullstack.{node or 'unknown'}",
+        )
+        # 先发终态事件，再改快照状态：测试 / 前端一旦观察到 FAILED，
+        # 就能确定对应的 fullstack.failed 已经在缓冲区内，避免竞态。
+        active.buffer.emit(
+            "fullstack.failed",
+            attach_error_envelope(
+                {
+                    "runId": active.run_id,
+                    "status": "FAILED",
+                    "mode": active.request.options.mode,
+                    "contractId": active.contract.contract_id,
+                    "sandboxId": active.sandbox_id,
+                    "qualityTier": active.quality_tier,
+                    "warnings": list(active.warnings),
+                    "node": node,
+                    "error": envelope.user_message,
+                    "errorCode": code,
+                    # 前端据此决定是“重试生成”还是“回到契约澄清”。
+                    "failureKind": failure_kind,
+                    "defectKind": defect_kind,
+                    "needsClarification": needs_clarification,
+                    "clarification": clarification or {},
+                    "metrics": FULLSTACK_METRICS.snapshot(),
+                },
+                envelope,
+            ),
+            dedupe_key=f"fullstack.failed:{active.run_id}:{code}",
+        )
         with _ACTIVE_LOCK:
             active.status = "FAILED"
             active.error = error
@@ -386,28 +421,6 @@ class FullstackService:
             active.needs_clarification = needs_clarification
             active.clarification = clarification
             active.touch()
-        active.buffer.emit(
-            "fullstack.failed",
-            {
-                "runId": active.run_id,
-                "status": "FAILED",
-                "mode": active.request.options.mode,
-                "contractId": active.contract.contract_id,
-                "sandboxId": active.sandbox_id,
-                "qualityTier": active.quality_tier,
-                "warnings": list(active.warnings),
-                "node": node,
-                "error": error,
-                "errorCode": code,
-                # 前端据此决定是“重试生成”还是“回到契约澄清”。
-                "failureKind": failure_kind,
-                "defectKind": defect_kind,
-                "needsClarification": needs_clarification,
-                "clarification": clarification or {},
-                "metrics": FULLSTACK_METRICS.snapshot(),
-            },
-            dedupe_key=f"fullstack.failed:{active.run_id}:{code}",
-        )
 
     # --------------------------------------------------------
     # 契约 / 沙盒

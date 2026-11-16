@@ -14,9 +14,10 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 暂存组件自由拖拽：视口 clamp、SDK stage-hit 父容器高亮、Drop 写 placement；同父容器连续插入按拖入顺序确定性定序，inside_index 由服务端计算（不采信模型序号）；拖拽中 Esc / 路由切换均清空幽灵。
 - 孤儿 Draft 回收：启动即扫 + 6h 周期，7 天 TTL；begin_draft 前 60s 宽限回收同沙盒残留 worktree，避免重启后 5174 端口被占。
 - 契约资源/动作分离：Prompt 禁止 /auth、/session、/account 作为集合根；审计自动映射 users / 跳过动作端点。修复死锁改为 conflict_gate 中断 → AWAITING_DECISION，前端三选一（映射已有表 / 新建表 / 取消），决策后确定性改写契约并复验。
+- Phase1 错误信封：Python ErrorRegistry + 全局异常处理器统一 code/userMessage/errorOptions/traceId；SSE 建连后异常转 terminal 事件；BFF 全局 Advice 透传 + SSE onErrorResume 兜底，禁止堆栈泄漏。
 
 ## 最新验证
-前端 16 项 Vitest、Python 552 项 unittest 通过；Java BFF 镜像构建通过。真实浏览器 E2E 全绿（Diff 顺序/父容器/无绝对定位、Esc、路由切换），产物在 docs/screenshots/staged-drag-*。
+前端 16 项 Vitest、Python 558 项 unittest 通过；BFF 单测（含信封/SSE 终态）通过。真实服务验证 422/404 信封经 BFF 透传一致。真实浏览器 E2E 全绿（Diff 顺序/父容器/无绝对定位、Esc、路由切换），产物在 docs/screenshots/staged-drag-*。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 无持久化；沙盒无 gVisor；未云端部署。

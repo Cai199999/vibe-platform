@@ -23,6 +23,7 @@ from ai_core.api.runs import router as runs_router
 from ai_core.api.sandbox import router as sandbox_router
 from ai_core.api.supervisor import router as supervisor_router
 from ai_core.config import get_settings
+from ai_core.error_envelope import install_error_handlers
 from ai_core.sandbox import get_sandbox_provider
 from ai_core.sandbox_gc import start_draft_gc
 from ai_core.schemas import HealthResponse, PingResponse
@@ -66,6 +67,9 @@ app = FastAPI(
     ),
     lifespan=lifespan,
 )
+
+# 全局错误信封：所有 JSON 接口统一 code/userMessage/errorOptions/traceId。
+install_error_handlers(app)
 
 app.include_router(sandbox_router)
 app.include_router(runs_router)

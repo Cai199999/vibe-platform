@@ -1,11 +1,14 @@
 package com.vibeplatform.bff.architect;
 
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 /** 只处理 Architect SSE 建流前的 AI Core 错误。 */
+@Order(Ordered.HIGHEST_PRECEDENCE)
 @RestControllerAdvice(assignableTypes = ArchitectController.class)
 public class ArchitectStreamExceptionHandler {
 

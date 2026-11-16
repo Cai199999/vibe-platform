@@ -89,6 +89,7 @@ from ai_core.domain.decision import (
     PendingDecision,
 )
 from ai_core.domain.scope import memory_scope, scoped_checkpoint_key
+from ai_core.error_envelope import attach_error_envelope, envelope_from_code
 from ai_core.config import Settings, get_settings
 from ai_core.adapters.sandbox import get_sandbox_provider
 from ai_core.ports.sandbox import (
@@ -1641,21 +1642,32 @@ class RunExecutionService:
                 dedupe_key=f"run.rejected:{prepared.run_id}",
             )
         else:
+            run_code = error_code or "VERIFY_FAILED"
+            envelope = envelope_from_code(
+                run_code,
+                technical_message=error or "",
+                trace_id=getattr(prepared.event_buffer, "trace_id", None),
+                run_id=prepared.run_id,
+                stage="run.terminal",
+            )
             prepared.event_buffer.emit(
                 "run.failed",
-                {
-                    "code": error_code or "VERIFY_FAILED",
-                    "message": error or "构建验证未通过",
-                    # 可恢复超时不应被前端当成“只能重来”：允许一键转后台。
-                    "retryable": bool(final_state.get("background_available")),
-                    "backgroundAvailable": bool(
-                        final_state.get("background_available")
-                    ),
-                    "retryCount": retry_count,
-                    "sandboxId": prepared.handle.sandbox_id,
-                    "previewUrl": preview_url,
-                    "usage": usage,
-                },
+                attach_error_envelope(
+                    {
+                        "code": run_code,
+                        "message": error or "构建验证未通过",
+                        # 可恢复超时不应被前端当成“只能重来”：允许一键转后台。
+                        "retryable": bool(final_state.get("background_available")),
+                        "backgroundAvailable": bool(
+                            final_state.get("background_available")
+                        ),
+                        "retryCount": retry_count,
+                        "sandboxId": prepared.handle.sandbox_id,
+                        "previewUrl": preview_url,
+                        "usage": usage,
+                    },
+                    envelope,
+                ),
                 dedupe_key=f"run.failed:{prepared.run_id}",
             )
         return response
@@ -1870,17 +1882,27 @@ class RunExecutionService:
             active.response = response
             active.status = "FAILED"
             active.touch()
+        envelope = envelope_from_code(
+            code,
+            technical_message=error,
+            trace_id=getattr(prepared.event_buffer, "trace_id", None),
+            run_id=prepared.run_id,
+            stage="run.pre_prepare",
+        )
         prepared.event_buffer.emit(
             "run.failed",
-            {
-                "code": code,
-                "message": error,
-                "retryable": False,
-                "retryCount": 0,
-                "sandboxId": prepared.handle.sandbox_id,
-                "previewUrl": prepared.handle.preview_url,
-                "usage": prepared.token_usage,
-            },
+            attach_error_envelope(
+                {
+                    "code": code,
+                    "message": error,
+                    "retryable": False,
+                    "retryCount": 0,
+                    "sandboxId": prepared.handle.sandbox_id,
+                    "previewUrl": prepared.handle.preview_url,
+                    "usage": prepared.token_usage,
+                },
+                envelope,
+            ),
             dedupe_key=f"run.failed:{prepared.run_id}",
         )
         return response
@@ -1950,15 +1972,26 @@ class RunExecutionService:
         with _ACTIVE_LOCK:
             active.status = "FAILED"
             active.touch()
+        envelope = envelope_from_code(
+            code,
+            technical_message=str(exc),
+            trace_id=getattr(active.buffer, "trace_id", None),
+            run_id=active.run_id,
+            stage="run.prepare",
+        )
         active.buffer.emit(
             "run.failed",
-            {
-                "code": code,
-                "message": str(exc),
-                "retryable": code in {"SANDBOX_DOCKER_UNAVAILABLE", "INTERNAL_ERROR"},
-                "retryCount": 0,
-                "sandboxId": None,
-            },
+            attach_error_envelope(
+                {
+                    "code": code,
+                    "message": str(exc),
+                    "retryable": code
+                    in {"SANDBOX_DOCKER_UNAVAILABLE", "INTERNAL_ERROR"},
+                    "retryCount": 0,
+                    "sandboxId": None,
+                },
+                envelope,
+            ),
             dedupe_key=f"run.failed:{active.run_id}",
         )
 

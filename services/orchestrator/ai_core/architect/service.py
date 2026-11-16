@@ -54,6 +54,7 @@ from ai_core.domain.architect import (
 )
 from ai_core.architect.source import collect_source
 from ai_core.config import Settings, get_settings
+from ai_core.error_envelope import attach_error_envelope, envelope_from_code
 from ai_core.domain.scope import scoped_checkpoint_key
 from ai_core.observability.fullstack_metrics import FULLSTACK_METRICS
 from ai_core.ports.rag import RAGProviderError
@@ -988,12 +989,22 @@ class ArchitectService:
             active.clarification = None
             active.conflict = None
             active.touch()
+        envelope = envelope_from_code(
+            code,
+            technical_message=message,
+            trace_id=getattr(active.buffer, "trace_id", None),
+            run_id=active.run_id,
+            stage="architect.service",
+        )
         active.buffer.emit(
             "architect.failed",
-            {
-                "error": message,
-                "errorCode": code,
-            },
+            attach_error_envelope(
+                {
+                    "error": envelope.user_message,
+                    "errorCode": code,
+                },
+                envelope,
+            ),
             dedupe_key=f"architect.failed:{active.run_id}:{code}",
         )
 
