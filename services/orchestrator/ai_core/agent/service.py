@@ -91,6 +91,7 @@ from ai_core.domain.decision import (
 from ai_core.domain.scope import memory_scope, scoped_checkpoint_key
 from ai_core.error_envelope import attach_error_envelope, envelope_from_code
 from ai_core.config import Settings, get_settings
+from ai_core.project_lock import ProjectBusyError, project_write_lock
 from ai_core.adapters.sandbox import get_sandbox_provider
 from ai_core.ports.sandbox import (
     SandboxDraft,
@@ -1477,58 +1478,74 @@ class RunExecutionService:
         if status in {"AWAITING_APPROVAL", "SUCCEEDED"}:
             # 审批通过（AWAITING_APPROVAL）或免审批直接成功（SUCCEEDED）：
             # 先 promote 草稿到主工作树，再形成可回滚 checkpoint。
-            # promote 只能在这里发生：模型 / 节点无权调用。
+            # promote + commit 必须持有项目写锁，否则 Direct Ops 可能
+            # 在两者之间插入自己的 commit，造成 AI/Direct 改动混合。
             promote_error: SandboxError | None = None
-            if prepared.draft is not None:
-                try:
-                    self._promote_draft(prepared)
-                except SandboxError as exc:
-                    # 主工作树未发生变化；丢弃草稿避免残留 worktree。
-                    promote_error = exc
-                    self._discard_draft(prepared)
-            if promote_error is not None:
-                logger.error(
-                    "promote draft failed run_id=%s: %s",
-                    prepared.run_id,
-                    promote_error,
-                )
-                status = "FAILED"
-                error = f"草稿合并失败: {promote_error}"
-                error_code = "PROMOTE_FAILED"
-            else:
-                try:
-                    commit_hash = self._sandbox.git_commit(
-                        prepared.handle.sandbox_id,
-                        f"run: {prepared.run_id} - turn: {prepared.run_turn_count}",
-                    )
-                    commits = [
-                        RunCommitRecord(
-                            thread_id=thread_id,
-                            turn_count=prepared.turn_counts[thread_id],
-                            commit_hash=commit_hash,
-                            run_id=prepared.run_id,
-                        )
-                        for thread_id in prepared.thread_ids
-                    ]
-                    try:
-                        baseline_commit = self._sandbox.git_baseline_commit(
-                            prepared.handle.sandbox_id
-                        )
-                    except SandboxError:
-                        logger.warning(
-                            "failed to read git baseline run_id=%s",
+            try:
+                with project_write_lock.lease(
+                    prepared.handle.project_id,
+                    owner=f"ai-run:{prepared.run_id}",
+                    timeout=self._settings.project_write_lock_timeout_seconds,
+                ):
+                    if prepared.draft is not None:
+                        try:
+                            self._promote_draft(prepared)
+                        except SandboxError as exc:
+                            # 主工作树未发生变化；丢弃草稿避免残留 worktree。
+                            promote_error = exc
+                            self._discard_draft(prepared)
+                    if promote_error is not None:
+                        logger.error(
+                            "promote draft failed run_id=%s: %s",
                             prepared.run_id,
-                            exc_info=True,
+                            promote_error,
                         )
-                    status = "SUCCEEDED"
-                except SandboxError as exc:
-                    # 代码已经构建通过，但没有可回滚的 checkpoint 不能宣称成功。
-                    logger.exception("git checkpoint failed run_id=%s", prepared.run_id)
-                    status = "FAILED"
-                    error = f"Git checkpoint 失败: {exc}"
-                    error_code = "COMMIT_FAILED"
-                    commit_hash = None
-                    commits = []
+                        status = "FAILED"
+                        error = f"草稿合并失败: {promote_error}"
+                        error_code = "PROMOTE_FAILED"
+                    else:
+                        try:
+                            commit_hash = self._sandbox.git_commit(
+                                prepared.handle.sandbox_id,
+                                f"run: {prepared.run_id} - turn: "
+                                f"{prepared.run_turn_count}",
+                            )
+                            commits = [
+                                RunCommitRecord(
+                                    thread_id=thread_id,
+                                    turn_count=prepared.turn_counts[thread_id],
+                                    commit_hash=commit_hash,
+                                    run_id=prepared.run_id,
+                                )
+                                for thread_id in prepared.thread_ids
+                            ]
+                            try:
+                                baseline_commit = self._sandbox.git_baseline_commit(
+                                    prepared.handle.sandbox_id
+                                )
+                            except SandboxError:
+                                logger.warning(
+                                    "failed to read git baseline run_id=%s",
+                                    prepared.run_id,
+                                    exc_info=True,
+                                )
+                            status = "SUCCEEDED"
+                        except SandboxError as exc:
+                            # 构建通过但没有可回滚 checkpoint 不能宣称成功。
+                            logger.exception(
+                                "git checkpoint failed run_id=%s", prepared.run_id
+                            )
+                            status = "FAILED"
+                            error = f"Git checkpoint 失败: {exc}"
+                            error_code = "COMMIT_FAILED"
+                            commit_hash = None
+                            commits = []
+            except ProjectBusyError:
+                logger.warning("project write lock busy run_id=%s", prepared.run_id)
+                status = "FAILED"
+                error = "项目正在被其它操作写入，请稍后重试。"
+                error_code = "PROJECT_BUSY"
+                self._discard_draft(prepared)
         elif status == "REJECTED":
             # 用户拒绝：丢弃草稿，不生成 commit，不写 thread 成功记忆。
             preview_url = self._revert_sandbox(prepared)
@@ -2031,7 +2048,13 @@ class RunExecutionService:
                 f"checkpoint={checkpoint.get('commitHash')}"
             )
 
-        self._sandbox.git_reset_hard(request.sandbox_id, request.commit_hash)
+        # 回滚会改写主工作树，必须与 Direct Ops / promote 串行化。
+        with project_write_lock.lease(
+            request.project_id or handle.project_id,
+            owner=f"rollback:{request.run_id}",
+            timeout=self._settings.project_write_lock_timeout_seconds,
+        ):
+            self._sandbox.git_reset_hard(request.sandbox_id, request.commit_hash)
         restored = self._threads.rollback_to_checkpoint(
             request.thread_id,
             run_id=request.run_id,

@@ -1660,5 +1660,80 @@ class Phase1GraphE2ETest(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(NODE, "node 不可用，跳过 Babel 脚本测试")
+class AstEditUpdateTextTest(unittest.TestCase):
+    """Direct Ops UPDATE_TEXT：只允许唯一 JSXText 子节点。"""
+
+    def _edit(
+        self, code: str, range_: dict[str, int], text: str
+    ) -> tuple[int, dict[str, Any] | None, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_project(Path(tmp), {"src/App.jsx": code})
+            return _run_script(
+                "apply_ast_edit.mjs",
+                {
+                    "workdir": tmp,
+                    "parserRoot": str(TEMPLATE_DIR),
+                    "file": "src/App.jsx",
+                    "operation": "update_text",
+                    "anchorRange": range_,
+                    "targetRange": range_,
+                    "text": text,
+                },
+            )
+
+    def test_replaces_leaf_text(self) -> None:
+        code, payload, stderr = self._edit(
+            "<main><h1>待办</h1></main>",
+            _fix_range("<main><h1>待办</h1></main>", "<h1>", "</h1>"),
+            "我的任务",
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(payload["status"], "OK")
+        self.assertIn("<h1>我的任务</h1>", payload["content"])
+
+    def test_preserves_surrounding_whitespace(self) -> None:
+        source = "<main>\n  <h1>\n    待办\n  </h1>\n</main>"
+        code, payload, stderr = self._edit(
+            source,
+            _fix_range(source, "<h1>", "</h1>"),
+            "我的任务",
+        )
+        self.assertEqual(code, 0, stderr)
+        content = payload["content"]
+        self.assertIn("\n    我的任务\n", content)
+
+    def test_rejects_mixed_children(self) -> None:
+        source = "<main><button><Icon />保存</button></main>"
+        code, payload, stderr = self._edit(
+            source,
+            _fix_range(source, "<button>", "</button>"),
+            "提交",
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(payload["status"], "ERROR")
+        self.assertEqual(payload["code"], "TEXT_TARGET_NOT_LEAF")
+
+    def test_rejects_expression_child(self) -> None:
+        source = "<main><p>{title}</p></main>"
+        code, payload, stderr = self._edit(
+            source,
+            _fix_range(source, "<p>", "</p>"),
+            "固定文案",
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(payload["code"], "TEXT_TARGET_NOT_LEAF")
+
+    def test_rejects_jsx_special_chars(self) -> None:
+        source = "<main><p>欢迎</p></main>"
+        code, payload, stderr = self._edit(
+            source,
+            _fix_range(source, "<p>", "</p>"),
+            "<script>",
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(payload["code"], "INVALID_TEXT")
+
+
 if __name__ == "__main__":
     unittest.main()

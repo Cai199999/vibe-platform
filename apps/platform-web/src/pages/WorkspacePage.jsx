@@ -24,6 +24,11 @@ import {
   useArchitect,
 } from '../workspace/useArchitect.js'
 import { createFrameBatcher, streamRun } from '../workspace/runStream.js'
+import {
+  fetchDirectRevision,
+  nextDirectActionId,
+  submitDirectAction,
+} from '../workspace/directOps.js'
 import { importProjectFile } from '../workspace/importClient.js'
 import {
   CREATE_NEW,
@@ -1725,6 +1730,86 @@ export default function WorkspacePage() {
       ...previous,
       [projectId]: (previous[projectId] ?? 0) + 1,
     }))
+  }
+
+  /**
+   * Direct Ops：悬浮工具栏 ➕ ❌ ✏️。
+   *
+   * - dryRun 不写代码，只验证目标解析与契约；
+   * - 真正写入前先读取主工作树 revision，服务端做写锁 + 乐观并发校验；
+   * - Phase 1 仅 UPDATE_TEXT 会落盘，其余动作返回 dryRun 结果。
+   */
+  const handleDirectAction = async (projectId, request = {}) => {
+    const project = projects.find((item) => item.id === projectId)
+    const run = runStatesRef.current?.[projectId]
+    const sandboxId = run?.result?.sandboxId
+    if (!project || !sandboxId) {
+      showToast('error', '请先生成或导入一个可预览项目')
+      throw new Error('缺少沙盒，无法执行直接操作')
+    }
+    const dryRun = Boolean(request.dryRun)
+    let revision = ''
+    if (!dryRun) {
+      const revisionPayload = await fetchDirectRevision(
+        projectId,
+        sandboxId,
+        session?.token,
+      )
+      revision = revisionPayload.revision
+    }
+    const source = request.target ?? {}
+    const directActionId = nextDirectActionId()
+    const payload = {
+      directActionId,
+      idempotencyKey: `${projectId}:${directActionId}`,
+      projectId,
+      sandboxId,
+      baseRevision: revision || undefined,
+      action: request.action,
+      dryRun,
+      target: {
+        anchorId: source.anchorId,
+        selector: source.selector,
+        file: source.file,
+        line: source.line,
+        column: source.column,
+        component: source.component,
+        instance: source.instance,
+        instanceCount: source.instanceCount,
+        callSiteFile: source.callSite?.file,
+      },
+      payload: request.payload ?? {},
+      options: {
+        source: 'FLOATING_TOOLBAR',
+        dryRun,
+      },
+    }
+    try {
+      const result = await submitDirectAction(payload, session?.token)
+      if (result.status === 'SUCCEEDED') {
+        showToast(
+          'success',
+          `直接修改已保存（${result.latencyMs}ms）`,
+        )
+        setPreviewRefresh((previous) => ({
+          ...previous,
+          [projectId]: (previous[projectId] ?? 0) + 1,
+        }))
+      } else if (result.status === 'DRY_RUN') {
+        showToast(
+          'info',
+          `dryRun 通过：${result.risk}${
+            result.resolvedTarget?.wouldChange === false
+              ? '，内容无变化'
+              : ''
+          }`,
+        )
+      }
+      return result
+    } catch (cause) {
+      showToast('error', `直接操作失败：${cause?.message || cause}`)
+      throw cause
+    }
   }
 
   /**
@@ -5843,6 +5928,7 @@ export default function WorkspacePage() {
       handleFullstackGenerate,
       handleReleaseGate,
       architectClose: architect.closePanel,
+      handleDirectAction,
       architectAnswer: architect.answer,
       architectDecide: architect.decide,
       architectDecideConflict: architect.decideConflict,
@@ -5943,6 +6029,8 @@ export default function WorkspacePage() {
             optionId,
             comment,
           ),
+        onDirectAction: (request) =>
+          workspaceActionsRef.current?.handleDirectAction(projectId, request),
         onArchitectAskHelper: (question) =>
           workspaceActionsRef.current?.architectAskHelper(projectId, question),
         onArchitectCancel: () =>

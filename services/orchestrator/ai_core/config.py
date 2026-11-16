@@ -169,6 +169,16 @@ class Settings(BaseSettings):
     agent_event_buffer_size: int = 2000
 
     # ------------------------------------------------------------
+    # 项目级写锁 / Direct Ops
+    # ------------------------------------------------------------
+    # AI Run（promote / fullstack）与 Direct Ops 共享同一把项目写锁。
+    # Direct Ops 追求低延迟，等待超过该时限直接返回 DIRECT_PROJECT_BUSY。
+    project_write_lock_timeout_seconds: float = 30.0
+    direct_ops_lock_timeout_seconds: float = 3.0
+    direct_ops_max_text_chars: int = 2000
+    direct_ops_changelog_limit: int = 200
+
+    # ------------------------------------------------------------
     # Token 成本优化
     # ------------------------------------------------------------
     # 对话历史超过阈值才压缩；摘要长度硬上限，防止压缩本身变成新负担。

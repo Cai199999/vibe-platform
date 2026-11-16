@@ -342,6 +342,53 @@ function main() {
     return fail('ANCHOR_RANGE_MISMATCH', '锚点节点缺少父节点上下文')
   }
 
+  // ---- Direct Ops：UPDATE_TEXT ----
+  // 只允许“唯一 JSXText 子节点”的叶子元素；混合子节点 / 表达式 /
+  // 自闭合元素一律拒绝，交给 HITL 或 AI，不猜测。
+  if (operation === 'update_text') {
+    const target = findExactNode(ast, spec.targetRange || spec.anchorRange)
+    if (!target || !JSX_TYPES.has(target.type)) {
+      return fail('ANCHOR_RANGE_MISMATCH', '目标区间与 AST 节点不匹配')
+    }
+    if (target.start !== anchor.start || target.end !== anchor.end) {
+      return fail(
+        'RANGE_NOT_ALLOWED',
+        '文本修改范围必须与解析锚点完全一致',
+        { anchor: spec.anchorRange, target: spec.targetRange },
+      )
+    }
+    const text = String(spec.text ?? '')
+    if (!text.trim()) {
+      return fail('INVALID_TEXT', '新文案不能为空')
+    }
+    if (/[<>{}\r\n]/.test(text)) {
+      return fail('INVALID_TEXT', '新文案不能包含 < > { } 或换行')
+    }
+    const children = Array.isArray(target.children) ? target.children : []
+    const meaningful = children.filter(
+      (child) => !(child.type === 'JSXText' && !String(child.value || '').trim()),
+    )
+    if (meaningful.length !== 1 || meaningful[0].type !== 'JSXText') {
+      return fail(
+        'TEXT_TARGET_NOT_LEAF',
+        '目标不是纯文本节点（包含子元素或表达式），请改用 AI 修改',
+        { childCount: meaningful.length },
+      )
+    }
+    const textNode = meaningful[0]
+    const raw = code.slice(textNode.start, textNode.end)
+    const leading = raw.match(/^\s*/)?.[0] || ''
+    const trailing = raw.match(/\s*$/)?.[0] || ''
+    const replacement = `${leading}${text.trim()}${trailing}`
+    const next = `${code.slice(0, textNode.start)}${replacement}${code.slice(textNode.end)}`
+    try {
+      parseCode(next, file, parser)
+    } catch (error) {
+      return fail('INVALID_TEXT', `文本替换后文件无法解析: ${error.message}`)
+    }
+    return { status: 'OK', content: next }
+  }
+
   if (operation === 'modify' || operation === 'delete') {
     const target = findExactNode(ast, spec.targetRange || spec.anchorRange)
     if (!target || !JSX_TYPES.has(target.type)) {

@@ -29,6 +29,8 @@ from ai_core.agent.events import RunEventBuffer, get_event_buffer
 from ai_core.architect.service import find_architect_contract
 from ai_core.domain.architect import ArchitectContract
 from ai_core.error_envelope import attach_error_envelope, envelope_from_code
+from ai_core.project_lock import ProjectBusyError, project_write_lock
+from ai_core.config import get_settings
 from ai_core.domain.fullstack import (
     FullstackRunRequest,
     FullstackRunSnapshot,
@@ -170,6 +172,7 @@ class FullstackService:
 
             sandbox = get_sandbox_provider()
         self._sandbox = sandbox
+        self._settings = get_settings()
 
     # --------------------------------------------------------
     # 启动
@@ -249,6 +252,23 @@ class FullstackService:
         return active
 
     def _run_worker(self, active: ActiveFullstackRun) -> None:
+        """Fullstack 全程写主工作树，必须与 Direct Ops / Promote 串行。"""
+        try:
+            with project_write_lock.lease(
+                active.request.project_id,
+                owner=f"fullstack:{active.run_id}",
+                timeout=self._settings.project_write_lock_timeout_seconds,
+            ):
+                self._run_worker_locked(active)
+        except ProjectBusyError:
+            logger.warning("fullstack project lock busy run_id=%s", active.run_id)
+            self._complete_failure(
+                active,
+                "项目正在被其它操作写入，请稍后重试。",
+                "PROJECT_BUSY",
+            )
+
+    def _run_worker_locked(self, active: ActiveFullstackRun) -> None:
         started = time.monotonic()
         policy = quality_policy(active.contract)
         # 契约结构审计先于任何生成节点：矛盾契约即使重跑一百次也会得到

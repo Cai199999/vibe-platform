@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import {
   CREATE_NEW,
   MODIFY_EXISTING,
@@ -10,15 +11,54 @@ import {
  * 与画布圈选浮层不同，这里直接展示 SDK 回传的源码文件 / 行号 / 组件名，
  * 用户只需要补充修改意图。确认后由 ProjectWorkspace 生成一份带
  * inspectSource 的标注草稿，最终进入标准 AnnotationEnvelope。
+ *
+ * 顶部悬浮工具栏（➕ ❌ ✏️）走 Direct Ops：不调用 LLM，由后端 AST
+ * 确定性写入。Phase 1 只有 ✏️ 真正落盘，➕ / ❌ 先发 dryRun 验证契约。
  */
 export default function InspectDraftCard({
   draft,
   onChange,
   onCancel,
   onSubmit,
+  onDirectAction,
 }) {
+  const [textOpen, setTextOpen] = useState(false)
+  const [directText, setDirectText] = useState('')
+  const [directBusy, setDirectBusy] = useState(false)
+  const [directHint, setDirectHint] = useState('')
   if (!draft) return null
   const source = draft.source ?? {}
+
+  const runDirect = async (action, payload, dryRun = false) => {
+    if (!onDirectAction || directBusy) return
+    setDirectBusy(true)
+    setDirectHint('')
+    try {
+      const result = await onDirectAction({
+        action,
+        dryRun,
+        target: source,
+        payload,
+      })
+      if (!result) return
+      if (result.status === 'DRY_RUN') {
+        setDirectHint(
+          `dryRun 通过：${result.risk} · ${
+            result.resolvedTarget?.wouldChange === false
+              ? '内容无变化'
+              : '可以执行'
+          }`,
+        )
+      } else if (result.status === 'SUCCEEDED') {
+        setDirectHint(`已保存 · ${result.latencyMs}ms`)
+        setTextOpen(false)
+      }
+    } catch (cause) {
+      setDirectHint(`操作失败：${cause?.message || cause}`)
+    } finally {
+      setDirectBusy(false)
+    }
+  }
   const container = draft.container?.source
   const ready = Boolean(draft.intent?.trim())
   const fileLabel = source.file || '未知文件'
@@ -58,6 +98,75 @@ export default function InspectDraftCard({
           {source.component ? ` · ${source.component}` : ''}
         </span>
       </div>
+
+      <div
+        className="inspect-direct-toolbar"
+        role="toolbar"
+        aria-label="直接操作"
+        data-direct-toolbar
+      >
+        <button
+          type="button"
+          title="新增（Phase 0 dryRun）"
+          disabled={directBusy}
+          onClick={() =>
+            runDirect(
+              'ADD_COMPONENT',
+              { componentType: 'Button' },
+              true,
+            )
+          }
+        >
+          ➕
+        </button>
+        <button
+          type="button"
+          title="删除（Phase 0 dryRun）"
+          disabled={directBusy}
+          onClick={() => runDirect('DELETE_NODE', {}, true)}
+        >
+          ❌
+        </button>
+        <button
+          type="button"
+          className={textOpen ? 'is-active' : ''}
+          title="直接修改文字"
+          disabled={directBusy}
+          onClick={() => {
+            setTextOpen((previous) => !previous)
+            setDirectHint('')
+          }}
+        >
+          ✏️
+        </button>
+        {directHint && (
+          <span className="inspect-direct-hint" data-direct-hint>
+            {directHint}
+          </span>
+        )}
+      </div>
+
+      {textOpen && (
+        <div className="inspect-direct-text" data-direct-text-editor>
+          <input
+            type="text"
+            maxLength={2000}
+            value={directText}
+            placeholder="输入新的文案，例如：立即体验"
+            onChange={(event) => setDirectText(event.target.value)}
+          />
+          <button
+            type="button"
+            className="primary-button"
+            disabled={directBusy || !directText.trim()}
+            onClick={() =>
+              runDirect('UPDATE_TEXT', { text: directText.trim() }, false)
+            }
+          >
+            直接保存
+          </button>
+        </div>
+      )}
 
       <div className="inspect-draft-actions" role="group" aria-label="操作类型">
         <button

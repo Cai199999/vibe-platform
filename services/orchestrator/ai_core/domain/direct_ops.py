@@ -1,0 +1,147 @@
+"""Direct Ops 领域契约。
+
+Direct Ops 是“用户明确点击、跳过 LLM”的确定性写路径。它仍然必须：
+  - 携带 target / action / payload；
+  - 服务端重新解析 target，不信任前端 selector；
+  - 用 baseRevision 做乐观并发校验；
+  - 成功后写 ChangeLog，供 Architect 回顾。
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Literal
+
+from pydantic import Field, model_validator
+
+from ai_core.domain.common import CamelModel
+
+DirectActionKind = Literal[
+    "UPDATE_TEXT",
+    "DELETE_NODE",
+    "ADD_COMPONENT",
+    "MOVE_NODE",
+    "UPDATE_PROPS",
+]
+
+DirectActionRisk = Literal[
+    "L0_DIRECT",
+    "L1_VERIFY_DIRECT",
+    "L2_HITL",
+    "L3_AI_REQUIRED",
+]
+
+
+class DirectErrorCode:
+    """Direct Ops 稳定错误码；前端与错误注册表共用。"""
+
+    ACTION_INVALID = "DIRECT_ACTION_INVALID"
+    TARGET_NOT_FOUND = "DIRECT_TARGET_NOT_FOUND"
+    TARGET_AMBIGUOUS = "DIRECT_TARGET_AMBIGUOUS"
+    REVISION_MISMATCH = "DIRECT_WRITE_CONFLICT"
+    UNSAFE_OPERATION = "DIRECT_UNSAFE_OPERATION"
+    PROJECT_BUSY = "DIRECT_PROJECT_BUSY"
+    TOOL_FAILED = "DIRECT_TOOL_FAILED"
+    RESOLVER_UNAVAILABLE = "DIRECT_RESOLVER_UNAVAILABLE"
+    ROLLBACK_FAILED = "DIRECT_ROLLBACK_FAILED"
+
+
+class DirectActionTarget(CamelModel):
+    """前端定位线索；服务端会重新用 AST 解析。"""
+
+    anchor_id: str | None = Field(default=None, max_length=128)
+    annotation_id: str | None = Field(default=None, max_length=128)
+    selector: str | None = Field(default=None, max_length=500)
+    file: str | None = Field(default=None, max_length=500)
+    line: int | None = Field(default=None, ge=1)
+    column: int | None = Field(default=None, ge=1)
+    component: str | None = Field(default=None, max_length=200)
+    instance: int | None = Field(default=None, ge=1)
+    instance_count: int | None = Field(default=None, ge=1)
+    call_site_file: str | None = Field(default=None, max_length=500)
+    placement: dict[str, Any] | None = None
+
+
+class DirectActionOptions(CamelModel):
+    source: str = "FLOATING_TOOLBAR"
+    dry_run: bool = False
+    verify_build: bool = False
+
+
+class DirectActionPayload(CamelModel):
+    """一次 Direct Action 的完整请求。"""
+
+    direct_action_id: str = Field(min_length=1, max_length=64)
+    idempotency_key: str | None = Field(default=None, max_length=160)
+    run_id: str | None = Field(default=None, max_length=64)
+    project_id: str = Field(min_length=1, max_length=64)
+    sandbox_id: str = Field(min_length=1, max_length=64)
+    # 非 dryRun 必填；与沙盒当前 HEAD 不一致时拒绝写入。
+    base_revision: str | None = Field(default=None, max_length=128)
+    client_seq: int | None = Field(default=None, ge=0)
+    target: DirectActionTarget
+    action: DirectActionKind
+    payload: dict[str, Any] = Field(default_factory=dict)
+    options: DirectActionOptions = Field(default_factory=DirectActionOptions)
+
+    @model_validator(mode="after")
+    def _validate_action_payload(self) -> "DirectActionPayload":
+        if not self.options.dry_run and not (self.base_revision or "").strip():
+            raise ValueError("非 dryRun 请求必须提供 baseRevision")
+        if self.action == "UPDATE_TEXT":
+            text = str(self.payload.get("text") or "")
+            if not text.strip():
+                raise ValueError("UPDATE_TEXT 必须提供非空 payload.text")
+            if len(text) > 2000:
+                raise ValueError("UPDATE_TEXT 文案不能超过 2000 字符")
+            if any(char in text for char in "<>{}\n\r"):
+                raise ValueError("UPDATE_TEXT 文案不能包含 < > { } 或换行")
+        return self
+
+
+class DirectActionResponse(CamelModel):
+    direct_action_id: str
+    run_id: str | None = None
+    status: Literal["DRY_RUN", "SUCCEEDED", "FAILED"] = "SUCCEEDED"
+    action: DirectActionKind
+    dry_run: bool = False
+    risk: DirectActionRisk = "L0_DIRECT"
+    resolved_target: dict[str, Any] = Field(default_factory=dict)
+    revision_before: str = ""
+    revision_after: str = ""
+    commit_hash: str = ""
+    change_id: str = ""
+    latency_ms: int = 0
+    timings: dict[str, float] = Field(default_factory=dict)
+    error: dict[str, Any] | None = None
+
+
+class ChangeLogEntry(CamelModel):
+    """Direct Ops 成功后的可回放摘要；不存完整源码。"""
+
+    change_id: str
+    project_id: str
+    sandbox_id: str
+    run_id: str | None = None
+    actor: Literal["DIRECT_OP", "AI_RUN"] = "DIRECT_OP"
+    action: DirectActionKind
+    target: dict[str, Any] = Field(default_factory=dict)
+    summary: str = ""
+    diff_summary: str = ""
+    before_hash: str = ""
+    after_hash: str = ""
+    commit_hash: str = ""
+    risk: DirectActionRisk = "L0_DIRECT"
+    created_at: datetime
+
+
+__all__ = [
+    "ChangeLogEntry",
+    "DirectActionKind",
+    "DirectActionOptions",
+    "DirectActionPayload",
+    "DirectActionResponse",
+    "DirectActionRisk",
+    "DirectActionTarget",
+    "DirectErrorCode",
+]

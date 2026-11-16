@@ -114,9 +114,7 @@ class ErrorSpec:
     severity: str
     user_message: str
     retryable: bool = False
-    options_factory: (
-        Callable[[dict[str, Any]], list[ErrorOption]] | None
-    ) = None
+    options_factory: Callable[[dict[str, Any]], list[ErrorOption]] | None = None
 
 
 _SPECS: dict[str, ErrorSpec] = {
@@ -181,9 +179,7 @@ _SPECS: dict[str, ErrorSpec] = {
     "SANDBOX_DOCKER_UNAVAILABLE": ErrorSpec(
         "INFRA", "RECOVERABLE", "沙盒服务暂时不可用，请稍后重试。"
     ),
-    "SANDBOX_ERROR": ErrorSpec(
-        "INFRA", "RECOVERABLE", "预览环境操作失败，可以重试。"
-    ),
+    "SANDBOX_ERROR": ErrorSpec("INFRA", "RECOVERABLE", "预览环境操作失败，可以重试。"),
     "ARCHITECT_LLM_NOT_CONFIGURED": ErrorSpec(
         "CONFIG", "FATAL", "架构模型尚未配置，请联系管理员完成密钥设置。"
     ),
@@ -230,20 +226,47 @@ _SPECS: dict[str, ErrorSpec] = {
     "ARCHITECT_ANSWERS_REQUIRED": ErrorSpec(
         "INPUT", "FATAL", "请至少回答一个问题或补充说明后继续。"
     ),
-    "RUN_NOT_FOUND": ErrorSpec(
-        "RUN", "FATAL", "执行任务不存在或已过期，请重新发起。"
-    ),
+    "RUN_NOT_FOUND": ErrorSpec("RUN", "FATAL", "执行任务不存在或已过期，请重新发起。"),
     "RUN_BUSY": ErrorSpec(
         "RUN", "RECOVERABLE", "当前项目还有未完成的修改，请先处理后再试。"
     ),
-    "RUN_ID_CONFLICT": ErrorSpec(
-        "RUN", "FATAL", "该任务编号已被占用，请刷新后重试。"
-    ),
+    "RUN_ID_CONFLICT": ErrorSpec("RUN", "FATAL", "该任务编号已被占用，请刷新后重试。"),
     "CONTRACT_DRAFT_MISSING": ErrorSpec(
         "CONTRACT", "FATAL", "契约草稿丢失，请重新发起架构澄清。"
     ),
     "STREAM_UPSTREAM_ERROR": ErrorSpec(
         "TRANSPORT", "RECOVERABLE", "生成服务连接中断，请重试或稍后继续。"
+    ),
+    "DIRECT_ACTION_INVALID": ErrorSpec(
+        "INPUT", "FATAL", "这次操作缺少必要信息，请重新选择组件后再试。"
+    ),
+    "DIRECT_TARGET_NOT_FOUND": ErrorSpec(
+        "DIRECT_OP", "RECOVERABLE", "目标组件已失效，请重新选择后再试。"
+    ),
+    "DIRECT_TARGET_AMBIGUOUS": ErrorSpec(
+        "DIRECT_OP",
+        "DECISION_REQUIRED",
+        "这个位置命中了多个组件，需要更精确地选择后再修改。",
+    ),
+    "DIRECT_WRITE_CONFLICT": ErrorSpec(
+        "DIRECT_OP", "RECOVERABLE", "代码已被其它操作更新，请刷新后重试。"
+    ),
+    "DIRECT_UNSAFE_OPERATION": ErrorSpec(
+        "DIRECT_OP",
+        "DECISION_REQUIRED",
+        "该组件被多处使用，直接修改可能影响其它页面，请改用 AI 修改。",
+    ),
+    "DIRECT_PROJECT_BUSY": ErrorSpec(
+        "DIRECT_OP", "RECOVERABLE", "项目正在生成代码，请稍后再试。"
+    ),
+    "DIRECT_TOOL_FAILED": ErrorSpec(
+        "DIRECT_OP", "RECOVERABLE", "这次修改没有完成，代码已保持原样。"
+    ),
+    "DIRECT_RESOLVER_UNAVAILABLE": ErrorSpec(
+        "DIRECT_OP", "RECOVERABLE", "目标解析服务暂时不可用，请稍后重试。"
+    ),
+    "DIRECT_ROLLBACK_FAILED": ErrorSpec(
+        "DIRECT_OP", "FATAL", "修改失败且自动回滚未完成，请刷新页面检查代码。"
     ),
     "BFF_INTERNAL_ERROR": ErrorSpec(
         "INTERNAL", "FATAL", "服务暂时不可用，已记录诊断编号，请稍后重试。"
@@ -525,7 +548,8 @@ async def stream_event_frames(
     """
     resolved_run_id = run_id or getattr(buffer, "run_id", "")
     trace_id = _trace_id(
-        getattr(buffer, "trace_id", None) or f"trc_{resolved_run_id or uuid.uuid4().hex}"
+        getattr(buffer, "trace_id", None)
+        or f"trc_{resolved_run_id or uuid.uuid4().hex}"
     )
     saw_terminal = False
     yield "retry: 3000\n\n"

@@ -40,6 +40,11 @@ TERMINAL_EVENT_TYPES = {
     # 契约确认后的全栈生成：completed / failed 为终态。
     "fullstack.completed",
     "fullstack.failed",
+    # Direct Ops：succeeded / failed 为终态；decision.required 预留给
+    # Phase 2 的 HITL 恢复。
+    "direct.succeeded",
+    "direct.failed",
+    "direct.decision.required",
 }
 SSE_EVENT_NAME = "run.event"
 HEARTBEAT_SECONDS = 15

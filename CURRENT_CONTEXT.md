@@ -15,9 +15,11 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 孤儿 Draft 回收：启动即扫 + 6h 周期，7 天 TTL；begin_draft 前 60s 宽限回收同沙盒残留 worktree，避免重启后 5174 端口被占。
 - 契约资源/动作分离：Prompt 禁止 /auth、/session、/account 作为集合根；审计自动映射 users / 跳过动作端点。修复死锁改为 conflict_gate 中断 → AWAITING_DECISION，前端三选一（映射已有表 / 新建表 / 取消），决策后确定性改写契约并复验。
 - Phase1 错误信封：Python ErrorRegistry + 全局异常处理器统一 code/userMessage/errorOptions/traceId；SSE 建连后异常转 terminal 事件；BFF 全局 Advice 透传 + SSE onErrorResume 兜底，禁止堆栈泄漏。
+- Direct Ops 地基：DirectActionPayload / Risk / ErrorCode / ChangeLogEntry；项目写锁覆盖 AI promote+commit、Fullstack、Rollback 与 Direct 写入；baseRevision 乐观校验；direct.* 事件命名空间。
+- UPDATE_TEXT 闭环：服务端 Resolver → 公共组件拦截 → Babel update_text → apply_patch → Git commit → ChangeLog；前端 Inspect 悬浮 ➕❌✏️，Phase1 仅 ✏️ 落盘。
 
 ## 最新验证
-前端 16 项 Vitest、Python 558 项 unittest 通过；BFF 单测（含信封/SSE 终态）通过。真实服务验证 422/404 信封经 BFF 透传一致。真实浏览器 E2E 全绿（Diff 顺序/父容器/无绝对定位、Esc、路由切换），产物在 docs/screenshots/staged-drag-*。
+前端 16 项 Vitest、Python 572 项 unittest 通过；BFF 单测通过。项目写锁 8 线程并发最大持有数=1；UPDATE_TEXT 真实沙盒 dryRun 680ms / 写入 1673ms。真实服务验证 422/404 信封与 Direct Ops 409 冲突经 BFF 透传一致。真实浏览器 E2E 全绿（Diff 顺序/父容器/无绝对定位、Esc、路由切换）。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 无持久化；沙盒无 gVisor；未云端部署。
