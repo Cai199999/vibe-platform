@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import {
   CREATE_NEW,
   MODIFY_EXISTING,
@@ -8,105 +7,17 @@ import {
 /**
  * Inspect 模式命中组件后的标注输入卡片。
  *
- * 与画布圈选浮层不同，这里直接展示 SDK 回传的源码文件 / 行号 / 组件名，
- * 用户只需要补充修改意图。确认后由 ProjectWorkspace 生成一份带
- * inspectSource 的标注草稿，最终进入标准 AnnotationEnvelope。
- *
- * 顶部悬浮工具栏（➕ ❌ ✏️）走 Direct Ops：不调用 LLM，由后端 AST
- * 确定性写入。Phase 1 只有 ✏️ 真正落盘，➕ / ❌ 先发 dryRun 验证契约。
+ * Direct Ops 已迁移到沙盒内联 UI（➕ / ❌ / 双击文本），本卡片只保留
+ * “向 Agent 描述修改意图”的标注入口，不再承载任何直接操作按钮。
  */
 export default function InspectDraftCard({
   draft,
   onChange,
   onCancel,
   onSubmit,
-  onDirectAction,
-  onAnalyzeDelete,
 }) {
-  const [textOpen, setTextOpen] = useState(false)
-  const [addOpen, setAddOpen] = useState(false)
-  const [deleteConfirm, setDeleteConfirm] = useState(false)
-  const [directText, setDirectText] = useState('')
-  const [directBusy, setDirectBusy] = useState(false)
-  const [directHint, setDirectHint] = useState('')
   if (!draft) return null
   const source = draft.source ?? {}
-
-  const runDirect = async (
-    action,
-    payload,
-    dryRun = false,
-    targetOverride = source,
-  ) => {
-    if (!onDirectAction || directBusy) return
-    setDirectBusy(true)
-    setDirectHint('')
-    try {
-      const result = await onDirectAction({
-        action,
-        dryRun,
-        target: targetOverride,
-        payload,
-      })
-      if (!result) return
-      if (result.status === 'DRY_RUN') {
-        setDirectHint(
-          `dryRun 通过：${result.risk} · ${
-            result.resolvedTarget?.wouldChange === false
-              ? '内容无变化'
-              : '可以执行'
-          }`,
-        )
-      } else if (result.status === 'SUCCEEDED') {
-        setDirectHint(`已保存 · ${result.latencyMs}ms`)
-        setTextOpen(false)
-        setDeleteConfirm(false)
-      }
-      return result
-    } catch (cause) {
-      setDirectHint(`操作失败：${cause?.message || cause}`)
-      throw cause
-    } finally {
-      setDirectBusy(false)
-    }
-  }
-
-  const containerTarget = () => {
-    const container = draft.container?.source
-    if (!container) return null
-    return {
-      ...container,
-      placement: {
-        parentFile: container.file,
-        parentSelector: container.selector,
-        parentLine: container.line,
-        parentColumn: container.column,
-        insertPosition: 'inside_end',
-        siblingIndex: null,
-      },
-    }
-  }
-
-  const analyzeDelete = async () => {
-    if (!onAnalyzeDelete || directBusy) return
-    setDirectBusy(true)
-    setDirectHint('')
-    try {
-      const result = await onAnalyzeDelete({ target: source })
-      if (!result) return
-      setDeleteConfirm(Boolean(result.safe))
-      setDirectHint(
-        result.safe
-          ? '静态判定通过，请确认是否删除'
-          : `已拦截：${(result.reasons || []).join('；')}`,
-      )
-    } catch (cause) {
-      setDeleteConfirm(false)
-      setDirectHint(`删除分析失败：${cause?.message || cause}`)
-    } finally {
-      setDirectBusy(false)
-    }
-  }
   const container = draft.container?.source
   const ready = Boolean(draft.intent?.trim())
   const fileLabel = source.file || '未知文件'
@@ -146,144 +57,6 @@ export default function InspectDraftCard({
           {source.component ? ` · ${source.component}` : ''}
         </span>
       </div>
-
-      <div
-        className="inspect-direct-toolbar"
-        role="toolbar"
-        aria-label="直接操作"
-        data-direct-toolbar
-      >
-        <button
-          type="button"
-          className={addOpen ? 'is-active' : ''}
-          title="新增基础组件"
-          disabled={directBusy || !draft.container?.source}
-          onClick={() => {
-            setAddOpen((previous) => !previous)
-            setDirectHint('')
-          }}
-        >
-          ➕
-        </button>
-        <button
-          type="button"
-          title="检查删除安全性"
-          disabled={directBusy}
-          onClick={analyzeDelete}
-        >
-          ❌
-        </button>
-        <button
-          type="button"
-          className={textOpen ? 'is-active' : ''}
-          title="直接修改文字"
-          disabled={directBusy}
-          onClick={() => {
-            setTextOpen((previous) => !previous)
-            setDirectHint('')
-          }}
-        >
-          ✏️
-        </button>
-        <button
-          type="button"
-          title="移动到当前容器末尾"
-          disabled={directBusy || !draft.container?.source}
-          onClick={() => {
-            const container = draft.container?.source
-            if (!container) return
-            runDirect(
-              'MOVE_NODE',
-              {},
-              false,
-              {
-                ...source,
-                placement: {
-                  parentFile: container.file,
-                  parentSelector: container.selector,
-                  parentLine: container.line,
-                  parentColumn: container.column,
-                  insertPosition: 'inside_end',
-                  siblingIndex: null,
-                },
-              },
-            )
-          }}
-        >
-          ↕
-        </button>
-        {directHint && (
-          <span className="inspect-direct-hint" data-direct-hint>
-            {directHint}
-          </span>
-        )}
-      </div>
-
-      {deleteConfirm && (
-        <div className="inspect-direct-delete-confirm" data-direct-delete-confirm>
-          <span>静态判定通过，确认删除这个组件？</span>
-          <button
-            type="button"
-            className="is-danger"
-            disabled={directBusy}
-            onClick={() => runDirect('DELETE_NODE', {}, false, source)}
-          >
-            确认删除
-          </button>
-          <button
-            type="button"
-            disabled={directBusy}
-            onClick={() => setDeleteConfirm(false)}
-          >
-            取消
-          </button>
-        </div>
-      )}
-
-      {addOpen && draft.container?.source && (
-        <div className="inspect-direct-add-menu" data-direct-add-menu>
-          {['Button', 'Input', 'Text', 'Card'].map((componentType) => (
-            <button
-              key={componentType}
-              type="button"
-              disabled={directBusy}
-              onClick={() => {
-                setAddOpen(false)
-                runDirect(
-                  'ADD_COMPONENT',
-                  { componentType },
-                  false,
-                  containerTarget(),
-                )
-              }}
-            >
-              {componentType}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {textOpen && (
-        <div className="inspect-direct-text" data-direct-text-editor>
-          <input
-            type="text"
-            maxLength={2000}
-            value={directText}
-            placeholder="输入新的文案，例如：立即体验"
-            onChange={(event) => setDirectText(event.target.value)}
-          />
-          <button
-            type="button"
-            className="primary-button"
-            disabled={directBusy || !directText.trim()}
-            onClick={() =>
-              runDirect('UPDATE_TEXT', { text: directText.trim() }, false)
-            }
-          >
-            直接保存
-          </button>
-        </div>
-      )}
 
       <div className="inspect-draft-actions" role="group" aria-label="操作类型">
         <button

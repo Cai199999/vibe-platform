@@ -145,6 +145,7 @@ export default function ScaledPreview({
         readyRef.current = true
         scrollStateRef.current = data.payload?.scroll ?? null
         sendInspect(message('enable', { enabled: inspectModeRef.current }))
+        sendInspect(message('direct-mode', { enabled: true }))
         // iframe 重载（HMR / 首次加载）后重新测量拖拽目标。
         setMeasurement(null)
         measurementRef.current = null

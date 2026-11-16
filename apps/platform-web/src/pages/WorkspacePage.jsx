@@ -1772,6 +1772,92 @@ export default function WorkspacePage() {
   }
 
   /**
+   * 接收沙盒内联 Direct Ops 的消息：
+   *  - direct-add：内联 ➕ 新增基础组件
+   *  - direct-delete-request / confirmed：删除分析 / 确认删除
+   *  - direct-text：双击文本原位修改
+   * 全部直接调用确定性接口，不进入 Agent / LLM。
+   */
+  useEffect(() => {
+    if (!activeTabId) return undefined
+    const reply = (source, type, payload) => {
+      source?.postMessage?.(
+        { channel: 'vibe-inspect', type, payload: payload || {} },
+        '*',
+      )
+    }
+    const handler = (event) => {
+      const data = event.data
+      if (!data || data.channel !== 'vibe-inspect') return
+      if (data.type === 'direct-add') {
+        const payload = data.payload || {}
+        void handleDirectAction(activeTabId, {
+          action: 'ADD_COMPONENT',
+          dryRun: false,
+          target: payload.source,
+          payload: {
+            componentType: payload.componentType,
+            styleContext: payload.styleContext || {},
+          },
+        }).catch((cause) => {
+          reply(event.source, 'direct-result', {
+            ok: false,
+            message: `新增失败：${cause?.message || cause}`,
+          })
+        })
+        return
+      }
+      if (data.type === 'direct-delete-request') {
+        const payload = data.payload || {}
+        void handleAnalyzeDelete(activeTabId, { target: payload.source })
+          .then((result) => {
+            reply(event.source, 'direct-delete-result', result)
+          })
+          .catch((cause) => {
+            reply(event.source, 'direct-delete-result', {
+              safe: false,
+              reasons: [String(cause?.message || cause)],
+            })
+          })
+        return
+      }
+      if (data.type === 'direct-delete-confirmed') {
+        const payload = data.payload || {}
+        void handleDirectAction(activeTabId, {
+          action: 'DELETE_NODE',
+          dryRun: false,
+          target: payload.source,
+        }).catch((cause) => {
+          reply(event.source, 'direct-result', {
+            ok: false,
+            message: `删除失败：${cause?.message || cause}`,
+          })
+        })
+        return
+      }
+      if (data.type === 'direct-text') {
+        const payload = data.payload || {}
+        void handleDirectAction(activeTabId, {
+          action: 'UPDATE_TEXT',
+          dryRun: false,
+          target: payload.source,
+          payload: { text: payload.text },
+        }).catch((cause) => {
+          reply(event.source, 'direct-text-rollback', {
+            originalText: payload.originalText,
+          })
+          reply(event.source, 'direct-result', {
+            ok: false,
+            message: `修改失败：${cause?.message || cause}`,
+          })
+        })
+      }
+    }
+    window.addEventListener('message', handler)
+    return () => window.removeEventListener('message', handler)
+  }, [activeTabId, session?.token])
+
+  /**
    * Direct Ops：悬浮工具栏 ➕ ❌ ✏️。
    *
    * - dryRun 不写代码，只验证目标解析与契约；
@@ -6069,10 +6155,6 @@ export default function WorkspacePage() {
             optionId,
             comment,
           ),
-        onDirectAction: (request) =>
-          workspaceActionsRef.current?.handleDirectAction(projectId, request),
-        onAnalyzeDelete: (request) =>
-          workspaceActionsRef.current?.handleAnalyzeDelete(projectId, request),
         onArchitectAskHelper: (question) =>
           workspaceActionsRef.current?.architectAskHelper(projectId, question),
         onArchitectCancel: () =>

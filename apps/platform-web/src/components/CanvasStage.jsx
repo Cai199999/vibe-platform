@@ -1573,6 +1573,11 @@ function CanvasStage({
             { channel: 'vibe-inspect', type: 'drag-mode', enabled: true },
             '*',
           )
+        // Direct Ops 内联 ➕ / 悬浮 ❌ / 双击文本编辑。
+        frame.contentWindow?.postMessage(
+          { channel: 'vibe-inspect', type: 'direct-mode', enabled: true },
+          '*',
+        )
         setInspectHover(null)
         // 旧文档里的圈选 / 拖拽命中请求已经不可能再返回，统一收口。
         liveSelectionSeedRef.current += 1
