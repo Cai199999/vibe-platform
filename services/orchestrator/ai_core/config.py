@@ -305,6 +305,8 @@ class Settings(BaseSettings):
     # 源码上下文预算：防止超大项目把 Prompt 撑爆。
     architect_source_max_bytes: int = 200_000
     architect_source_max_files: int = 80
+    # 澄清阶段不能被沙盒读取拖死：超时后回退到请求中的 files。
+    architect_source_timeout_seconds: float = 5.0
 
 
 @lru_cache

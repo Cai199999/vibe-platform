@@ -612,11 +612,16 @@ function resolveOne(anchor, parser, workdir) {
   }
 
   const component = componentOf(node, index.parents, anchor.component)
-  const callSiteFile = String(
+  let callSiteFile = String(
     anchor.callSiteFile || anchor.callSite?.file || '',
   ).trim()
   const instanceCount = Number(anchor.instanceCount || 1)
   const importerHits = importersOf(workdir, file, component)
+  // SDK 未提供 callSite 时，用 import 关系兜底：架构师生成的独立组件
+  // 也应当能定位到调用它的页面文件，而不是被当成不可编辑的定义根。
+  if (!callSiteFile && importerHits.length) {
+    callSiteFile = importerHits[0]
+  }
   const shared =
     instanceCount > 1 ||
     (Boolean(callSiteFile) && callSiteFile !== file) ||

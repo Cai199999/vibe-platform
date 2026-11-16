@@ -258,14 +258,48 @@ class ArchitectService:
         ).start()
         return active
 
+    def _collect_source_bounded(self, active: ActiveArchitectRun) -> Any:
+        """限时读取沙盒源码；澄清状态机不能被 Docker / 快照拖死。"""
+        request = active.request
+        timeout = max(0.5, float(self._settings.architect_source_timeout_seconds))
+        holder: dict[str, Any] = {}
+
+        def worker() -> None:
+            try:
+                holder["bundle"] = collect_source(
+                    request.source.sandbox_id,
+                    request.source.files,
+                    sandbox=self._sandbox,
+                    settings=self._settings,
+                )
+            except BaseException as exc:  # noqa: BLE001 - 交给主线程降级
+                holder["error"] = exc
+
+        thread = threading.Thread(
+            target=worker,
+            name=f"architect-source-{active.run_id}",
+            daemon=True,
+        )
+        thread.start()
+        thread.join(timeout=timeout)
+        if "bundle" in holder:
+            return holder["bundle"]
+        logger.warning(
+            "architect source collection timed out run_id=%s timeout=%ss; "
+            "fallback to request files",
+            active.run_id,
+            timeout,
+        )
+        return collect_source(
+            None,
+            request.source.files,
+            sandbox=self._sandbox,
+            settings=self._settings,
+        )
+
     def _run_worker(self, active: ActiveArchitectRun) -> None:
         try:
-            bundle = collect_source(
-                active.request.source.sandbox_id,
-                active.request.source.files,
-                sandbox=self._sandbox,
-                settings=self._settings,
-            )
+            bundle = self._collect_source_bounded(active)
             active.source_hash = bundle.source_hash
             active.source_origin = bundle.origin
             initial_state = _initial_state(active, bundle)

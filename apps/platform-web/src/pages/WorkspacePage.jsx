@@ -1971,14 +1971,14 @@ export default function WorkspacePage() {
         fullstack.sandboxId || currentRun.result?.sandboxId || null
       const isFrontendBootstrap = fullstack.mode === 'frontend'
       const checkpointMessage = isFrontendBootstrap
-        ? '自动存档：初始前端骨架已生成'
+        ? 'v0: Architect Skeleton'
         : '自动存档：全栈代码已生成'
 
       // 先应用生成结果，再执行一次“无感 checkpoint”：
       // 骨架 / 全栈生成都会直接写主工作树，必须在用户发起下一次标注 Run
       // 之前把它提交掉，否则 begin_draft 会因 “主工作树存在未提交修改” 拒绝。
       // 这里复用现有 snapshotClient.createSnapshot，不新增任何接口或按钮。
-      const applyGeneratedResult = () => {
+      const applyGeneratedResult = (markReady = true) => {
         if (!workspaceMountedRef.current) return
         patchRun(projectId, (previous) => {
           // 纯 Architect 流程此前没有 run.result；全栈生成第一次创建沙盒，
@@ -2033,15 +2033,22 @@ export default function WorkspacePage() {
           }
           updateProject(projectId, (project) => ({
             ...project,
-            bootstrap: 'ready',
-            canvasMode: 'live',
-            generated: true,
+            // v0 快照是进入画布交互的前置条件：只有基线成功建立，
+            // 才把 bootstrap 切到 ready。
+            bootstrap: markReady ? 'ready' : 'failed',
+            canvasMode: markReady ? 'live' : 'blank',
+            generated: markReady ? true : project.generated,
             entryFile: 'src/App.jsx',
             files: entrySource
               ? { ...project.files, 'src/App.jsx': entrySource }
               : project.files,
           }))
-          showToast('success', '初始前端页面已生成，画布已切换为实时预览')
+          showToast(
+            markReady ? 'success' : 'error',
+            markReady
+              ? 'v0 基线已建立，画布已切换为实时预览'
+              : 'v0 快照保存失败，请重试后再进入画布编辑',
+          )
         } else {
           focusPreview(projectId)
           showToast('success', '全栈代码已生成，沙盒前后端已重启')
@@ -2055,6 +2062,7 @@ export default function WorkspacePage() {
 
       // 同一项目同一时刻只允许一次自动存档；完成后才放开画布交互。
       autoSnapshotInflightRef.current.add(projectId)
+      let snapshotOk = true
       void (async () => {
         try {
           const payload = await createSnapshot(
@@ -2068,16 +2076,29 @@ export default function WorkspacePage() {
             },
           )
           if (workspaceMountedRef.current) {
-            patchRun(projectId, {
+            patchRun(projectId, (previous) => ({
+              ...previous,
               // 代码已进入 Git，下一步架构 / 标注 Run 可以安全创建 worktree。
               dirty: false,
               projectSummary:
                 payload?.projectSummary || currentRun.projectSummary || '',
               latestChanges:
                 payload?.latestChanges || currentRun.latestChanges || '',
-            })
+              result: previous.result
+                ? {
+                    ...previous.result,
+                    commitHash:
+                      payload?.commitHash || previous.result.commitHash || null,
+                    baselineCommit:
+                      previous.result.baselineCommit ||
+                      payload?.commitHash ||
+                      null,
+                  }
+                : previous.result,
+            }))
           }
         } catch (cause) {
+          snapshotOk = false
           // 自动存档失败不阻断预览，但必须显式标脏并提示用户手动保存，
           // 否则下一次标注 Run 仍会撞上“主工作树存在未提交修改”。
           if (workspaceMountedRef.current) {
@@ -2091,7 +2112,9 @@ export default function WorkspacePage() {
           }
         } finally {
           autoSnapshotInflightRef.current.delete(projectId)
-          applyGeneratedResult()
+          // v0 基线失败时不得把骨架标记为 ready，画布保持 blank，
+          // 用户可重试 bootstrap；全栈生成不阻塞预览。
+          applyGeneratedResult(!isFrontendBootstrap || snapshotOk)
         }
       })()
     })
@@ -3348,6 +3371,35 @@ export default function WorkspacePage() {
       ? [{ role: 'system', content: pendingSummary }]
       : []
 
+    // v0 → 当前快照 Diff：Architect 必须能看到用户后续直接改了什么。
+    let snapshotDiff = ''
+    if (run.result?.sandboxId && run.result.commitHash) {
+      try {
+        const diffPayload = await fetchSnapshotDiff(
+          run.result.sandboxId,
+          run.result.commitHash,
+          session?.token,
+          undefined,
+          'baseline',
+        )
+        snapshotDiff = String(diffPayload?.diff || '')
+      } catch (cause) {
+        console.warn('[architect] snapshot diff unavailable', cause)
+      }
+    }
+    const snapshotContext = snapshotDiff
+      ? [
+          {
+            role: 'system',
+            content:
+              '最近快照 Diff（v0 → 当前）。请结合 ChangeLog 主动识别用户删除/新增/' +
+              '修改的业务组件；在生成后端 API 或契约前，针对新的数据实体主动询问' +
+              '数据源与建表需求。\n' +
+              snapshotDiff.slice(0, 6000),
+          },
+        ]
+      : []
+
     // 新建项目：纯自然语言驱动，不再要求先有画布标注。
     // 直接把用户目标作为首条 user 消息交给 ArchitectGraph。
     const needsConversationFirst =
@@ -3372,9 +3424,12 @@ export default function WorkspacePage() {
         source: run.result?.sandboxId
           ? { sandboxId: run.result.sandboxId, files: {} }
           : { files: {} },
+        projectSummary: run.projectSummary || '',
+        latestChanges: run.latestChanges || '',
         uiHistory: [
           ...history,
           ...pendingContext,
+          ...snapshotContext,
           { role: 'user', content: text },
         ],
         options: { llmProvider: modelProvider },

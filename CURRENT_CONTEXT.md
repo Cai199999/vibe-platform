@@ -34,6 +34,9 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 共享组件 callSite 删除：删除 `<Card />` 实例时改写 App.jsx 调用点，不动 Card.jsx；analyze 不再因定义文件顶层根节点误拦截。真实 E2E 已删除一个实例。
 - 拖拽索引对齐：SDK 改用全部 DOM children 计算 siblingIndex，避免自定义组件/无 data-source 节点导致 Babel insertIndex 越界。错误信封保留 toolCode/resolverError 等 diagnostic，前端 Toast 可显示。
 
+- v0 基线：骨架写入后静默保存 `v0: Architect Skeleton`；快照成功才把 bootstrap 切 ready/进入画布。架构师节点无特殊保护标记，仅按 shared/map/根节点风险分类；Resolver 用 importers 兜底 callSite。
+- 澄清解耦：Architect 源码采集限时 5s，超时回退请求 files；启动 Architect 时前端注入快照 baseline Diff + latestChanges，后端注入 ChangeLog。
+
 ## 最新验证
 前端 16 项 Vitest、Python 606 项 unittest 通过；BFF 单测通过。真实沙盒 Direct Ops（含样式继承 ADD 1559ms）正常；新 SDK 已打入 sandbox 镜像。终极 E2E：UPDATE_TEXT 1604ms、ADD 1523ms、DELETE 1603ms；ChangeLog 重启可读，DeepSeek Helper 可复述直接操作。
 
