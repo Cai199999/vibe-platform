@@ -11,6 +11,7 @@ import AppHeader from '../components/AppHeader.jsx'
 import AccountDialog from '../components/AccountDialog.jsx'
 import DirectOpsDecisionDialog from '../components/DirectOpsDecisionDialog.jsx'
 import DraftLeaveGuard from '../components/DraftLeaveGuard.jsx'
+import NewProjectDialog from '../components/NewProjectDialog.jsx'
 import SettingsDialog from '../components/SettingsDialog.jsx'
 import ProjectSwitcher from '../components/ProjectSwitcher.jsx'
 import ProjectWorkspace from '../components/ProjectWorkspace.jsx'
@@ -71,6 +72,11 @@ import {
   loadFrozenVisualDocument,
   useVisualDocumentStore,
 } from '../visual/visualDocumentStore.js'
+import {
+  PROJECT_MODE,
+  resolveProjectMode,
+  storeImportedSource,
+} from '../workspace/projectMode.js'
 import {
   buildSemanticReviewContext,
   peekSemanticReviewPacket,
@@ -1429,6 +1435,9 @@ export default function WorkspacePage() {
   })
   const [accountOpen, setAccountOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [newProjectOpen, setNewProjectOpen] = useState(false)
+  const [sourceImportBusy, setSourceImportBusy] = useState(false)
+  const [sourceImportError, setSourceImportError] = useState('')
   // 导出状态只保留一个：同时下载多个项目没有意义，且提示条全局唯一。
   const [exportingProjectId, setExportingProjectId] = useState(null)
   const [exportNotice, setExportNotice] = useState(null)
@@ -3461,6 +3470,58 @@ export default function WorkspacePage() {
     })
   }, [architectStates, gateStates])
 
+  /** 新建项目强制分流：先选择从零开始或导入源码。 */
+  const openNewProjectDialog = () => {
+    if (limitReached) {
+      showToast('error', `最多只能同时打开 ${maxTabs} 个项目，请关闭其他项目`)
+      return
+    }
+    setSourceImportError('')
+    setNewProjectOpen(true)
+  }
+
+  const handleCreateBlankProject = () => {
+    setNewProjectOpen(false)
+    createProject()
+  }
+
+  const handleImportSourceFile = async (file) => {
+    if (!file || sourceImportBusy) return
+    setSourceImportError('')
+    if (!/\.(jsx?|tsx?)$/i.test(file.name)) {
+      setSourceImportError('仅支持 .jsx / .tsx / .js / .ts 文件')
+      return
+    }
+    if (file.size > 500 * 1024) {
+      setSourceImportError('文件超过 500KB，请拆分后再导入')
+      return
+    }
+    setSourceImportBusy(true)
+    try {
+      const source = await file.text()
+      // 工作区项目统一落到 Vite 入口，保证后续后端增量绑定有可运行的前端；
+      // 只读投影仍使用原始文件名展示分析来源。
+      const projectId = importProject({
+        name: file.name.replace(/\.(jsx?|tsx?)$/i, '') || '存量项目',
+        files: { 'src/App.jsx': source },
+        entryFile: 'src/App.jsx',
+        kind: 'react',
+        sourceName: file.name,
+      })
+      storeImportedSource(projectId, file.name, source)
+      setNewProjectOpen(false)
+      navigate(
+        `/visual-canvas?project=${encodeURIComponent(
+          projectId,
+        )}&mode=existing`,
+      )
+    } catch (cause) {
+      setSourceImportError(`导入失败：${cause?.message || cause}`)
+    } finally {
+      setSourceImportBusy(false)
+    }
+  }
+
   /**
    * 工具栏主 CTA：已有 Run 时恢复同一面板；否则也走 Supervisor，
    * 由后端决定是纯 Architect 还是 UI + Architect 的 both。
@@ -3468,9 +3529,59 @@ export default function WorkspacePage() {
   const handleStartArchitect = async (projectId, goal = '') => {
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
+    const projectMode = resolveProjectMode(project, {
+      sandboxId: run.result?.sandboxId,
+    })
     // 保存门控：未保存的生成 / 拖拽 / 样式修改绝不能进入全栈澄清。
     if (run.dirty) {
       showToast('info', '请先保存当前修改')
+      return
+    }
+
+    // 存量项目：禁止走虚拟树 / 新建契约。Architect 只做现有源码的
+    // 业务审查与后端增量绑定，System Prompt 由后端按 projectMode 切换。
+    if (projectMode === PROJECT_MODE.EXISTING_SOURCE) {
+      const text = goal.trim()
+      if (!text) {
+        architect.openPanel(projectId)
+        return
+      }
+      const sourceFiles = project?.files || {}
+      if (
+        Object.keys(sourceFiles).length === 0 &&
+        !run.result?.sandboxId
+      ) {
+        showToast('error', '没有找到可分析的源码，请重新导入已有 React 文件')
+        return
+      }
+      const history = (architectStates[projectId]?.messages ?? [])
+        .map((item) => ({ role: item.role, content: item.content }))
+        .filter((item) => item.content)
+        .slice(-20)
+      architect.start(projectId, {
+        runId: newId('arc'),
+        tenantId: user?.tenantId || 'tenant_local',
+        projectId,
+        projectName: project?.name || '存量项目',
+        source: run.result?.sandboxId
+          ? { sandboxId: run.result.sandboxId, files: sourceFiles }
+          : { files: sourceFiles },
+        projectSummary: run.projectSummary || '',
+        latestChanges: run.latestChanges || '',
+        uiHistory: [
+          {
+            role: 'system',
+            content:
+              '【EXISTING_SOURCE】当前项目已有 React 源码，源码是唯一事实源。' +
+              '禁止生成 VisualDocument、整页 JSX 或全量前端代码；' +
+              '只基于现有文件树、组件、路由与交互做业务审查和后端增量绑定。',
+          },
+          ...history,
+          { role: 'user', content: text },
+        ],
+        projectMode,
+        options: { llmProvider: modelProvider },
+      })
       return
     }
 
@@ -3550,6 +3661,7 @@ export default function WorkspacePage() {
           ...snapshotContext,
           { role: 'user', content: text },
         ],
+        projectMode: PROJECT_MODE.NEW_PROJECT,
         options: { llmProvider: modelProvider },
       })
       return
@@ -3614,6 +3726,74 @@ export default function WorkspacePage() {
   }
 
   /**
+   * 存量项目：只做后端 / 数据库增量绑定。
+   *
+   * 绝不运行 FrontendCoder、绝不触发 Visual CodeGen；复用 FullstackGraph
+   * 的 backend 子图（DBACoder → BackendCoder → BuildVerifier → Restart）。
+   */
+  const handleExistingBackendGenerate = async (
+    projectId,
+    { project, contract },
+  ) => {
+    if (!contract?.contractId) {
+      showToast('error', '契约尚未确认，无法生成后端增量')
+      return false
+    }
+    if (contract.status && contract.status !== 'CONFIRMED') {
+      showToast('error', `契约状态为 ${contract.status}，确认后才能生成`)
+      return false
+    }
+    if (contract.visualDocument) {
+      showToast(
+        'error',
+        '存量项目禁止前端 CodeGen；请使用源码直改或仅生成后端增量',
+      )
+      return false
+    }
+    if (contract.appShape !== 'full_stack_system') {
+      showToast('info', '存量项目后端增量需要 full_stack_system 契约')
+      return false
+    }
+    const apiRouteCount = Array.isArray(contract.apiRoutes)
+      ? contract.apiRoutes.length
+      : 0
+    if (apiRouteCount === 0) {
+      showToast('error', '契约缺少 REST 接口（apiRoutes），无法绑定后端')
+      return false
+    }
+
+    const gate = gateStates[projectId]
+    if (
+      gate?.gateId &&
+      (gate.status === 'AWAITING_CONTRACT' || gate.status === 'RELEASING')
+    ) {
+      await releaseGateFor(projectId, gate.gateId, { awaitUi: false })
+    }
+    const run = runStates[projectId] ?? EMPTY_RUN
+    const files = run.result?.sandboxId
+      ? {}
+      : { ...(project?.files || {}) }
+    const started = architect.generateFullstack(projectId, {
+      tenantId: user?.tenantId || 'tenant_local',
+      sandboxId: run.result?.sandboxId,
+      files,
+      contract,
+      contractId: contract.contractId,
+      mode: 'backend',
+      options: { maxOutputChars: 20000 },
+    })
+    if (started) {
+      showToast(
+        'info',
+        '正在基于现有前端生成后端与数据库增量，不会重写前端代码…',
+      )
+    } else {
+      showToast('info', '后端增量正在生成中，请稍候')
+    }
+    return started
+  }
+
+  /**
    * 冻结 VisualDocument -> CodeGen。
    *
    * 只接受浏览器里已冻结（FROZEN + contentHash）的虚拟树；确定性 Compiler
@@ -3621,6 +3801,13 @@ export default function WorkspacePage() {
    * 全栈契约同时具备 API 与 DDL 时走 fullstack，否则只编译前端。
    */
   const handleVisualCodegen = (projectId, { project, contract }) => {
+    if (resolveProjectMode(project) === PROJECT_MODE.EXISTING_SOURCE) {
+      showToast(
+        'error',
+        '存量项目不生成虚拟树 / 前端 CodeGen；请走源码直改或仅生成后端增量',
+      )
+      return false
+    }
     const document = loadFrozenVisualDocument(projectId)
     if (!document) {
       showToast(
@@ -3720,6 +3907,10 @@ export default function WorkspacePage() {
     const project = projects.find((item) => item.id === projectId)
     const architectState = architectStates[projectId]
     const contract = architectState?.contract
+    // 存量项目：不走 FrontendCoder / CodeGen，只做后端与数据库增量。
+    if (resolveProjectMode(project) === PROJECT_MODE.EXISTING_SOURCE) {
+      return handleExistingBackendGenerate(projectId, { project, contract })
+    }
     // 离线优先契约：冻结虚拟树才是前端事实源，不能再走源码暂存 / 旧骨架。
     if (contract?.visualDocument) {
       handleVisualCodegen(projectId, { project, contract })
@@ -3835,6 +4026,10 @@ export default function WorkspacePage() {
     // 手动重试也必须等必答问题解决；自动触发只在 CONFIRMED 后发生。
     if (manual && blockGenerateUntilAnswered(projectId)) return
     const project = projects.find((item) => item.id === projectId)
+    if (resolveProjectMode(project) === PROJECT_MODE.EXISTING_SOURCE) {
+      showToast('info', '存量项目不初始化前端骨架；请走源码直改')
+      return
+    }
     const architectState = architectStates[projectId]
     const contract = architectState?.contract
     const fullstack = architectState?.fullstack
@@ -4041,6 +4236,7 @@ export default function WorkspacePage() {
         source: { files: {} },
         projectSummary: packet.summary,
         latestChanges: packet.summary,
+        projectMode: PROJECT_MODE.NEW_PROJECT,
         uiHistory: [
           {
             role: 'system',
@@ -6749,7 +6945,7 @@ export default function WorkspacePage() {
             )}
             importing={importing}
             onOpenProject={openProject}
-            onNewProject={createProject}
+            onNewProject={openNewProjectDialog}
             onImportFile={handleImportFile}
             onExport={handleExport}
           />
@@ -6788,7 +6984,7 @@ export default function WorkspacePage() {
           onCloseSnapshot={handleCloseSnapshotTab}
           onClose={handleCloseTab}
           onReorder={reorderTabs}
-          onNewProject={createProject}
+          onNewProject={openNewProjectDialog}
           onOpenHistory={openSnapshotDrawer}
           historyAvailable={Boolean(
             activeProject && runStates[activeProject.id]?.result?.sandboxId,
@@ -6813,6 +7009,9 @@ export default function WorkspacePage() {
                 architectState={
                   architectStates[project.id] ?? EMPTY_ARCHITECT
                 }
+                projectMode={resolveProjectMode(project, {
+                  sandboxId: run.result?.sandboxId,
+                })}
                 supervisorGate={gateStates[project.id] ?? null}
                 dragRollback={dragRollbacks[project.id] ?? null}
                 dragCommit={dragCommits[project.id] ?? null}
@@ -6843,9 +7042,21 @@ export default function WorkspacePage() {
           )}
 
           {openProjects.length === 0 &&
-            !activeSnapshotTab && <EmptyWorkspace onNewProject={createProject} />}
+            !activeSnapshotTab && <EmptyWorkspace onNewProject={openNewProjectDialog} />}
         </div>
       </main>
+
+      <NewProjectDialog
+        open={newProjectOpen}
+        busy={sourceImportBusy}
+        error={sourceImportError}
+        onClose={() => {
+          if (sourceImportBusy) return
+          setNewProjectOpen(false)
+        }}
+        onCreateBlank={handleCreateBlankProject}
+        onImportSource={handleImportSourceFile}
+      />
 
       <DirectOpsDecisionDialog
         decision={directDecision}

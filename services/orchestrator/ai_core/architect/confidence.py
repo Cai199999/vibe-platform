@@ -74,10 +74,14 @@ def is_known_shape(value: Any) -> bool:
     return value in REQUIRED_SLOTS
 
 
-def required_slots(shape: str | None) -> list[str]:
+def required_slots(shape: str | None, project_mode: str = "NEW_PROJECT") -> list[str]:
     if not shape:
         return ["app.shape"]
-    return list(REQUIRED_SLOTS.get(shape, []))
+    slots = list(REQUIRED_SLOTS.get(shape, []))
+    # 存量项目已有真实页面：禁止再追问 / 生成 ui.layout。
+    if project_mode == "EXISTING_SOURCE":
+        slots = [slot for slot in slots if slot != "ui.layout"]
+    return slots
 
 
 def slot_is_filled(value: Any) -> bool:
@@ -91,11 +95,17 @@ def slot_is_filled(value: Any) -> bool:
     return True
 
 
-def missing_slots_for(shape: str | None, slots: dict[str, Any]) -> list[str]:
+def missing_slots_for(
+    shape: str | None,
+    slots: dict[str, Any],
+    project_mode: str = "NEW_PROJECT",
+) -> list[str]:
     if not is_known_shape(shape):
         return ["app.shape"]
     return [
-        slot for slot in required_slots(shape) if not slot_is_filled(slots.get(slot))
+        slot
+        for slot in required_slots(shape, project_mode)
+        if not slot_is_filled(slots.get(slot))
     ]
 
 
@@ -103,6 +113,7 @@ def apply_confidence_guard(
     analysis: ArchitectAnalysis,
     slots: dict[str, Any],
     threshold: float,
+    project_mode: str = "NEW_PROJECT",
 ) -> tuple[ArchitectAnalysis, ConfidenceGuardResult]:
     """用动态槽位封顶 LLM 置信度，并补齐需要追问的槽位。
 
@@ -113,8 +124,8 @@ def apply_confidence_guard(
     """
     shape = analysis.app_shape if is_known_shape(analysis.app_shape) else None
     merged_slots = {**slots, **analysis.slots}
-    required = set(required_slots(shape))
-    missing = missing_slots_for(shape, merged_slots)
+    required = set(required_slots(shape, project_mode))
+    missing = missing_slots_for(shape, merged_slots, project_mode)
     # LLM 自报的缺失槽位只保留必需项；可选槽位不参与封顶和路由。
     for slot in analysis.missing_slots:
         if slot in required and slot not in missing:
@@ -153,6 +164,7 @@ def apply_confidence_guard(
         missing,
         shape,
         filled=merged_slots,
+        project_mode=project_mode,
     )
     if effective < threshold and not questions:
         questions = fallback_questions(missing, shape, round_no=1)
@@ -185,6 +197,7 @@ def _normalize_questions(
     shape: str | None,
     *,
     filled: dict[str, Any] | None = None,
+    project_mode: str = "NEW_PROJECT",
 ) -> list[ArchitectQuestion]:
     """优先补齐必需槽位，再补充 LLM 的可选问题。
 
@@ -195,7 +208,9 @@ def _normalize_questions(
     filled = filled or {}
     # 已填写的必需槽位不再重复追问；空字符串 / 空集合视为未填写。
     filled_required = {
-        slot for slot in required_slots(shape) if slot_is_filled(filled.get(slot))
+        slot
+        for slot in required_slots(shape, project_mode)
+        if slot_is_filled(filled.get(slot))
     }
 
     # 先把 LLM 问题按槽位归一化，避免同一槽位重复提问。
@@ -217,7 +232,7 @@ def _normalize_questions(
         )
         if slot in missing:
             llm_questions.setdefault(slot, normalized)
-        elif slot not in required_slots(shape) and slot not in {
+        elif slot not in required_slots(shape, project_mode) and slot not in {
             item.slot for item in extras
         }:
             # 必需槽位要么已填、要么在 missing 中；不再作为“可选问题”重复问。

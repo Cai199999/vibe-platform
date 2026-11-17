@@ -79,8 +79,14 @@ def _visual_title(draft: ContractDraft) -> str:
     return "未命名页面"
 
 
-def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
+def validate_draft(
+    shape: str,
+    draft: ContractDraft,
+    *,
+    project_mode: str = "NEW_PROJECT",
+) -> ContractValidation:
     issues: list[str] = []
+    existing_source = project_mode == "EXISTING_SOURCE"
 
     if len(draft.contract_markdown.strip()) < 200:
         issues.append("contract_markdown 太短，必须包含完整可执行契约")
@@ -191,9 +197,12 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
             issues.append("full_stack_system 必须包含 API 路由")
         elif any(not route.path.startswith("/api/") for route in api_routes):
             issues.append("API 路由必须以 /api/ 开头")
-        if not database_ddl:
+        # 存量项目可能只补接口、不动已有表；不强制凭空生成增量 DDL。
+        if not database_ddl and not existing_source:
             issues.append("full_stack_system 必须包含数据库 DDL")
-        elif not re.search(r"CREATE\s+TABLE", database_ddl, re.IGNORECASE):
+        elif database_ddl and not re.search(
+            r"CREATE\s+TABLE", database_ddl, re.IGNORECASE
+        ):
             issues.append("数据库 DDL 必须包含 CREATE TABLE")
         if re.search(r"FOREIGN\s+KEY", database_ddl, re.IGNORECASE):
             issues.append("数据库 DDL 禁止物理外键，关联字段由业务代码保证")
@@ -205,14 +214,16 @@ def validate_draft(shape: str, draft: ContractDraft) -> ContractValidation:
             draft.relations,
             derive_when_empty=True,
         )
-        if draft.relations and relation_problems:
+        if draft.relations and relation_problems and not existing_source:
             issues.extend(relation_problems)
         relations = normalized_relations
-        if not interactions:
+        # 存量项目前端已经存在；契约只需要描述后端增量，不强制重新
+        # 产出 componentInteractions，也不对 DDL 关系做“凭空自检”。
+        if not interactions and not existing_source:
             issues.append("full_stack_system 必须包含组件交互")
         if not draft.tech_stack.get("backend"):
             issues.append("full_stack_system 技术栈缺少 backend")
-        if not draft.tech_stack.get("database"):
+        if not draft.tech_stack.get("database") and not existing_source:
             issues.append("full_stack_system 技术栈缺少 database")
         script_spec = {}
 
@@ -370,7 +381,9 @@ def assemble_contract(
     draft: ContractDraft,
     citations: list[ArchitectCitation],
     quality_tier: str = "L2_STANDARD",
+    project_mode: str = "NEW_PROJECT",
 ) -> ArchitectContract:
+    existing_source = project_mode == "EXISTING_SOURCE"
     markdown = draft.contract_markdown.strip()
     if citations and "参考规范" not in markdown:
         lines = ["", "", "## 参考规范", ""]
@@ -394,8 +407,9 @@ def assemble_contract(
             or "mysql"
         )
         tech_stack["databaseEngine"] = database_engine
-        if not relations:
+        if not relations and not existing_source:
             # 旧 checkpoint / 模型漏写 relations：按 DDL 外键列确定性推导。
+            # 存量项目已有真实数据库，禁止从增量 DDL 凭空推导全量关系。
             relations, _ = normalize_table_relations(
                 parse_ddl_table_columns(draft.database_ddl),
                 [],
@@ -403,7 +417,11 @@ def assemble_contract(
             )
 
     visual_payload = dict(draft.visual_document or {})
-    if shape in {"lightweight_web", "full_stack_system"} and not visual_payload:
+    if (
+        not existing_source
+        and shape in {"lightweight_web", "full_stack_system"}
+        and not visual_payload
+    ):
         # 旧 checkpoint / 直接调用 assemble 的兼容兜底。
         visual_payload = build_visual_document_from_contract(
             title=_visual_title(draft),
@@ -414,7 +432,11 @@ def assemble_contract(
         )
     visual_document = (
         VisualDocument.model_validate(visual_payload)
-        if shape in {"lightweight_web", "full_stack_system"} and visual_payload
+        if (
+            not existing_source
+            and shape in {"lightweight_web", "full_stack_system"}
+            and visual_payload
+        )
         else None
     )
 
@@ -422,6 +444,7 @@ def assemble_contract(
         contract_id=contract_id,
         run_id=run_id,
         app_shape=shape,  # type: ignore[arg-type]
+        project_mode=project_mode,  # type: ignore[arg-type]
         quality_tier=quality_tier,  # type: ignore[arg-type]
         status="AWAITING_CONFIRMATION",
         confidence_score=confidence_score,

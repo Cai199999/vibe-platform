@@ -273,8 +273,10 @@ function FullstackGeneration({
   onExport,
   onReclarify,
   exporting = false,
+  projectMode = 'NEW_PROJECT',
 }) {
   const state = fullstack ?? {}
+  const existingSource = projectMode === 'EXISTING_SOURCE'
   const status = state.status ?? 'IDLE'
   const running = Boolean(state.starting) || status === 'RUNNING'
   // 契约矛盾与代码缺陷必须分开处理：矛盾时重试生成只会重复失败，
@@ -327,7 +329,8 @@ function FullstackGeneration({
     typeof contract?.databaseDdl === 'string' &&
     contract.databaseDdl.trim().length > 0
   const contractConfirmed = contract?.status === 'CONFIRMED'
-  const contractReady = isFullstack && apiRouteCount > 0 && hasDdl
+  const contractReady =
+    isFullstack && apiRouteCount > 0 && (hasDdl || existingSource)
 
   // 禁用原因必须是“可操作的中文提示”：用原生 title 在 disabled 按钮上
   // 多数浏览器不会触发，因此同时渲染可见文案，方便用户与 E2E 断言。
@@ -339,7 +342,7 @@ function FullstackGeneration({
       ? '契约尚未确认（contract.status 不是 CONFIRMED），暂时无法生成。'
       : apiRouteCount === 0
         ? '契约缺少 REST 接口（apiRoutes 为空），已阻止生成；请修订契约补充接口后重新确认。'
-        : !hasDdl
+        : !hasDdl && !existingSource
           ? '契约缺少数据库 DDL（databaseDdl 为空），已阻止生成；请修订契约补充数据实体后重新确认。'
           : needsClarification
             ? '契约存在结构性矛盾，重试生成不会成功；请先回到契约修改并重新确认。'
@@ -349,7 +352,9 @@ function FullstackGeneration({
   const tooltip = contractReady
     ? running
       ? '生成中，请稍候'
-      : '依据已确认契约生成全栈代码'
+      : existingSource
+        ? '依据已确认契约生成后端与数据库增量'
+        : '依据已确认契约生成全栈代码'
     : disabledReason || '契约未就绪，无法生成'
 
   // 门控诊断：用户反馈“按钮点不动”时，控制台能直接看到每一项判定。
@@ -392,16 +397,21 @@ function FullstackGeneration({
       className="architect-fullstack"
       data-fullstack-status={status}
       data-fullstack-ready={contractReady ? 'true' : 'false'}
-      aria-label="全栈代码生成"
+      data-project-mode={projectMode}
+      aria-label={existingSource ? '后端增量生成' : '全栈代码生成'}
     >
       <div className="architect-fullstack-head">
         <div>
-          <span className="architect-form-eyebrow">CONTRACT → SANDBOX</span>
-          <h3>生成前后端与数据库代码</h3>
+          <span className="architect-form-eyebrow">
+            {existingSource ? 'CONTRACT → BACKEND' : 'CONTRACT → SANDBOX'}
+          </span>
+          <h3>
+            {existingSource ? '生成后端与数据库增量' : '生成前后端与数据库代码'}
+          </h3>
           <p>
-            DBACoder 生成 Sequelize ORM，BackendCoder 提供 Node API，
-            FrontendCoder 接入真实请求，InfraCoder 输出 Dockerfile /
-            render.yaml / .env.example，最后重启沙盒完成联调。
+            {existingSource
+              ? '只运行 DBACoder 与 BackendCoder，为已有前端补充接口和数据表；不运行 FrontendCoder，不重写现有 React 源码。'
+              : 'DBACoder 生成 Sequelize ORM，BackendCoder 提供 Node API，FrontendCoder 接入真实请求，InfraCoder 输出 Dockerfile / render.yaml / .env.example，最后重启沙盒完成联调。'}
           </p>
         </div>
         <div className="architect-fullstack-actions">
@@ -426,9 +436,15 @@ function FullstackGeneration({
                   正在生成…
                 </>
               ) : status === 'SUCCEEDED' ? (
-                '↻ 重新生成全栈代码'
+                existingSource ? '↻ 重新生成后端增量' : '↻ 重新生成全栈代码'
               ) : status === 'FAILED' ? (
-                needsClarification ? '请先修改契约' : '↻ 重试生成全栈代码'
+                needsClarification
+                  ? '请先修改契约'
+                  : existingSource
+                    ? '↻ 重试后端增量'
+                    : '↻ 重试生成全栈代码'
+              ) : existingSource ? (
+                '🚀 生成后端增量'
               ) : (
                 '🚀 开始生成全栈代码'
               )}
@@ -1393,6 +1409,7 @@ export default function ArchitectPanel({
   autoBootstrap = false,
   gate,
   onReleaseGate,
+  projectMode = 'NEW_PROJECT',
 }) {
   const scrollRef = useRef(null)
   const contractRef = useRef(null)
@@ -1518,6 +1535,25 @@ export default function ArchitectPanel({
             </button>
           </div>
         </header>
+
+        {projectMode === 'EXISTING_SOURCE' && (
+          <div
+            className="architect-gate is-released"
+            data-existing-source-mode
+            role="status"
+          >
+            <span className="architect-gate-mark" aria-hidden="true">
+              ◇
+            </span>
+            <div className="architect-gate-copy">
+              <strong>存量源码模式</strong>
+              <p>
+                源码是唯一事实源。这里只做业务审查与后端增量绑定；
+                不生成 VisualDocument、全量前端代码或前端 CodeGen。
+              </p>
+            </div>
+          </div>
+        )}
 
         {gate?.gateId && (
           <div
@@ -1808,6 +1844,7 @@ export default function ArchitectPanel({
                       onExport={onExport}
                       onReclarify={(prompt) => onDecide?.('REVISE', prompt)}
                       exporting={exporting}
+                      projectMode={projectMode}
                     />
                   )}
                 </>

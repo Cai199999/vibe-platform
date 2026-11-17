@@ -142,7 +142,12 @@ function SourceNode({
   )
 }
 
-export default function ReadOnlySourceCanvas({ projection, onBack }) {
+export default function ReadOnlySourceCanvas({
+  projection,
+  onBack,
+  backLabel = '返回虚拟画布',
+  mode = 'PROJECTION',
+}) {
   const [selectedId, setSelectedId] = useState(null)
   const [hover, setHover] = useState(null)
   const nodes = useMemo(
@@ -162,7 +167,7 @@ export default function ReadOnlySourceCanvas({ projection, onBack }) {
             <strong>没有可渲染的源码投影</strong>
             <p>请返回画布重新导入 React 文件。</p>
             <button type="button" className="primary-button" onClick={onBack}>
-              返回虚拟画布
+              {backLabel}
             </button>
           </div>
         </div>
@@ -182,7 +187,11 @@ export default function ReadOnlySourceCanvas({ projection, onBack }) {
     : 0
 
   return (
-    <div className="vc-shell src-projection-shell" data-source-projection>
+    <div
+      className="vc-shell src-projection-shell"
+      data-source-projection
+      data-source-mode={mode}
+    >
       <header className="vc-topbar">
         <div className="vc-title-block">
           <span className="eyebrow">Source Projection · Read Only</span>
@@ -195,7 +204,7 @@ export default function ReadOnlySourceCanvas({ projection, onBack }) {
         <div className="vc-topbar-actions">
           <span className="vc-validate is-ok">只读分析</span>
           <button type="button" className="ghost-button" onClick={onBack}>
-            返回虚拟画布
+            {backLabel}
           </button>
         </div>
       </header>

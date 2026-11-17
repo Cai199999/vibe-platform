@@ -14,6 +14,7 @@ from typing import Any, Literal, Union
 from pydantic import Field, field_validator, model_validator
 
 from ai_core.domain.common import CamelModel
+from ai_core.domain.project_mode import ProjectMode
 from ai_core.domain.visual_document import VisualDocument
 
 AppShape = Literal["lightweight_web", "script_automation", "full_stack_system"]
@@ -151,6 +152,8 @@ class ArchitectRunRequest(CamelModel):
     # Architect 必须基于摘要理解既定技术选型，不得重复询问已确认内容。
     project_summary: str = Field(default="", max_length=12000)
     latest_changes: str = Field(default="", max_length=4000)
+    # 双轨制：前端显式声明，服务端仍会按 source 事实做确定性覆盖。
+    project_mode: ProjectMode | None = None
     options: ArchitectRunOptions = Field(default_factory=ArchitectRunOptions)
 
 
@@ -473,6 +476,8 @@ class ArchitectContract(CamelModel):
     frontend_routes: list[dict[str, Any]] = Field(default_factory=list)
     page_layout: list[dict[str, Any]] = Field(default_factory=list)
     components: list[dict[str, Any]] = Field(default_factory=list)
+    # 双轨制项目模式：存量项目禁止 VisualDocument / 前端 CodeGen。
+    project_mode: ProjectMode = "NEW_PROJECT"
     # 离线优先可视化的唯一前端产物；不得包含 React / JSX 源码。
     visual_document: VisualDocument | None = None
     ui_logic: list[dict[str, Any]] = Field(default_factory=list)
@@ -607,6 +612,7 @@ class ArchitectSnapshotResponse(CamelModel):
     project_id: str
     project_name: str = ""
     status: str
+    project_mode: ProjectMode = "NEW_PROJECT"
     app_shape: AppShape | None = None
     round: int = 0
     max_rounds: int = 10

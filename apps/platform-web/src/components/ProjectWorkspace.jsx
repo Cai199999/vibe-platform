@@ -112,6 +112,7 @@ function ProjectWorkspaceInner({
   onArchitectExport,
   onFullstackGenerate,
   onReleaseGate,
+  projectMode = 'NEW_PROJECT',
 }) {
   const {
     linked,
@@ -1231,6 +1232,7 @@ function ProjectWorkspaceInner({
           autoBootstrap={project.bootstrap !== 'ready'}
           gate={supervisorGate}
           onReleaseGate={onReleaseGate}
+          projectMode={projectMode}
         />
       )}
     </section>

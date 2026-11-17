@@ -24,6 +24,7 @@ from ai_core.architect.graph import (
     ArchitectRunCancelledError,
 )
 from ai_core.adapters.rag import get_rag_provider
+from ai_core.domain.project_mode import resolve_project_mode
 from ai_core.architect.llm import (
     ArchitectContext,
     ArchitectLLM,
@@ -117,6 +118,8 @@ class ActiveArchitectRun:
     state: dict[str, Any] = field(default_factory=dict)
     source_hash: str = ""
     source_origin: str = "request"
+    # 双轨制：由 source 事实确定性判定，前端声明只作回退。
+    project_mode: str = "NEW_PROJECT"
     app_shape: str | None = None
     round: int = 0
     max_rounds: int = 10
@@ -227,12 +230,18 @@ class ArchitectService:
                     )
                 return existing
 
+            mode_decision = resolve_project_mode(
+                declared=request.project_mode,
+                files=request.source.files,
+                sandbox_id=request.source.sandbox_id,
+            )
             active = ActiveArchitectRun(
                 run_id=run_id,
                 fingerprint=fingerprint,
                 request=request,
                 llm=llm,
                 buffer=get_event_buffer(run_id),
+                project_mode=mode_decision.mode,
                 max_rounds=request.options.max_clarification_rounds,
                 threshold=request.options.confidence_threshold,
             )
@@ -247,6 +256,7 @@ class ArchitectService:
                 "threshold": active.threshold,
                 "maxRounds": active.max_rounds,
                 "llmProvider": request.options.llm_provider,
+                "projectMode": active.project_mode,
             },
             dedupe_key=f"architect.started:{run_id}",
         )
@@ -865,6 +875,7 @@ class ArchitectService:
                 project_id=active.request.project_id,
                 project_name=active.request.project_name,
                 status=active.status,
+                project_mode=active.project_mode,  # type: ignore[arg-type]
                 app_shape=active.app_shape,  # type: ignore[arg-type]
                 round=active.round,
                 max_rounds=active.max_rounds,
@@ -1115,6 +1126,7 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         "source_hash": bundle.source_hash,
         "source_origin": bundle.origin,
         "source_warnings": bundle.warnings,
+        "project_mode": active.project_mode,
         "ui_history": list(request.ui_history),
         # 项目摘要 + 本次快照改动：Architect 分析 / 契约草稿必须复用其中
         # 已确认的技术选型，不再重复做选型问卷。

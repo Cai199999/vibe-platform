@@ -355,6 +355,10 @@ def _audit_database(contract: ArchitectContract, mode: str) -> list[ContractProb
     problems: list[ContractProblem] = []
     if mode not in {"fullstack", "dba", "backend"}:
         return problems
+    # 存量项目已有真实数据库：增量 DDL 不允许被当作全量契约自检，
+    # 否则会出现“父键不在父表字段”这类无中生有的错误。
+    if getattr(contract, "project_mode", "NEW_PROJECT") == "EXISTING_SOURCE":
+        return problems
     tables = parse_ddl_table_columns(contract.database_ddl or "")
     if mode in {"fullstack", "dba"} and not tables:
         problems.append(

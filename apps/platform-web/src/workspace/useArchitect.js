@@ -140,6 +140,8 @@ export const EMPTY_ARCHITECT = {
   streamPath: null,
   status: 'IDLE',
   lastSeq: 0,
+  // NEW_PROJECT / EXISTING_SOURCE；由后端 architect.started 事件回填。
+  projectMode: null,
   appShape: null,
   confidenceScore: 0,
   threshold: 0.85,
@@ -268,6 +270,7 @@ export function reduceArchitect(state, event) {
       return {
         ...base,
         status: 'RUNNING',
+        projectMode: payload.projectMode ?? state.projectMode ?? null,
         submitting: true,
         error: null,
       }
@@ -998,7 +1001,9 @@ export function useArchitect({ token } = {}) {
       })
 
       const runId = options.runId || fullstackRunId()
-      const mode = options.mode === 'frontend' ? 'frontend' : 'fullstack'
+      const mode = ['frontend', 'backend', 'dba'].includes(options.mode)
+        ? options.mode
+        : 'fullstack'
       // 先占位再写状态，确保双击 / 门控释放期间的重复点击被同步拦截。
       fullstackStartingRef.current.add(projectId)
       patch(projectId, (previous) => ({
@@ -1009,11 +1014,7 @@ export function useArchitect({ token } = {}) {
           status: 'RUNNING',
           mode,
           starting: true,
-          steps: createFullstackSteps(
-            mode === 'frontend'
-              ? ['FrontendCoder', 'BuildVerifier', 'SandboxRestart']
-              : FULLSTACK_NODES,
-          ),
+          steps: createFullstackSteps(nodesForMode(mode)),
           updatedAt: new Date().toISOString(),
         },
       }))

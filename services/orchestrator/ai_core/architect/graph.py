@@ -590,6 +590,7 @@ class ArchitectGraphRunner:
                 analysis,
                 dict(state.get("slots") or {}),
                 float(state.get("threshold") or 0.85),
+                project_mode=str(state.get("project_mode") or "NEW_PROJECT"),
             )
             reasons = list(guard.reasons)
         shape = analysis.app_shape
@@ -790,14 +791,21 @@ class ArchitectGraphRunner:
             }
         draft = draft_from_dict(raw)
         shape = str(state.get("app_shape") or "")
-        validation = validate_draft(shape, draft)
+        project_mode = str(state.get("project_mode") or "NEW_PROJECT")
+        validation = validate_draft(
+            shape,
+            draft,
+            project_mode=project_mode,
+        )
         issues = list(validation.issues)
         audit_problems: list[Any] = []
         if validation.valid and validation.draft is not None:
             # 契约确认前的最后一道自检：DDL 表、relations、apiRoutes 与
             # 组件交互必须彼此自洽。这里与运行期 audit_contract 共用同一
             # 实现（只读、无副作用），避免把矛盾带进代码生成。
-            if shape == "full_stack_system":
+            # 存量项目：已有真实数据库与前端，跳过“凭空生成 DDL 并自检”，
+            # 否则会把增量 DDL 误判为全量契约（父键不在父表等假错误）。
+            if shape == "full_stack_system" and project_mode != "EXISTING_SOURCE":
                 # 延迟导入：fullstack 包会反向依赖 architect.service，
                 # 顶层导入会造成循环依赖。
                 from ai_core.fullstack.contract_audit import validate_contract
@@ -1187,6 +1195,7 @@ class ArchitectGraphRunner:
             draft=draft,
             citations=_citations(state),
             quality_tier=quality_tier,
+            project_mode=str(state.get("project_mode") or "NEW_PROJECT"),
         )
         contract_payload = contract.model_dump(mode="json", by_alias=True)
         self._emit(
@@ -1496,6 +1505,7 @@ def _context_from_state(state: ArchitectState) -> ArchitectContext:
         source_hash=str(state.get("source_hash") or ""),
         project_summary=str(state.get("project_summary") or ""),
         latest_changes=str(state.get("latest_changes") or ""),
+        project_mode=str(state.get("project_mode") or "NEW_PROJECT"),
         direct_changelog=list(state.get("direct_changelog") or []),
     )
 

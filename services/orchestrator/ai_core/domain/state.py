@@ -254,6 +254,8 @@ class ArchitectState(TypedDict, total=False):
     project_name: str
     source_files: dict[str, str]
     source_hash: str
+    # 双轨制：NEW_PROJECT / EXISTING_SOURCE。
+    project_mode: str
     ui_history: list[dict[str, Any]]
     # 快照保存生成的项目全局摘要 + 本次快照改动说明。
     project_summary: str

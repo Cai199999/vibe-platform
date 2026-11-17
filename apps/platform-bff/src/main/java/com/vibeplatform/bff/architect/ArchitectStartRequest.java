@@ -16,6 +16,7 @@ public record ArchitectStartRequest(
         String projectName,
         JsonNode source,
         JsonNode uiHistory,
-        JsonNode options
+        JsonNode options,
+        String projectMode
 ) {
 }

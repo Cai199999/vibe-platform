@@ -68,6 +68,22 @@ def _is_transient_llm_error(exc: Exception) -> bool:
     return any(marker in text for marker in _TRANSIENT_LLM_MARKERS)
 
 
+def _project_mode_block(mode: str) -> str:
+    """存量项目模式覆盖：严禁虚拟树 / 全量代码，只做增量业务审查。"""
+    if mode != "EXISTING_SOURCE":
+        return ""
+    return (
+        "\n\n【EXISTING_SOURCE 模式 · 最高优先级】\n"
+        "- 当前项目已有 React 源码，源码是唯一事实源；\n"
+        "- 严禁输出 visual_document、整页 JSX/TSX、HTML 或重新设计页面结构；\n"
+        "- 只基于输入中的 source_files（文件树、组件、路由、交互）做业务审查；\n"
+        "- 问题只围绕后端增量绑定：接口、数据库、鉴权、权限、持久化；\n"
+        "- 契约只描述新增/变更的后端接口与数据表，禁止凭空重写已有前端；\n"
+        "- 页面布局已经存在，禁止再询问 ui.layout 或生成前端骨架；\n"
+        "- visual_document 字段必须输出空对象 {}。"
+    )
+
+
 class ArchitectLLMError(Exception):
     """Architect LLM 输出不可用。"""
 
@@ -93,6 +109,8 @@ class ArchitectContext:
     # 快照保存时生成的项目摘要 + 本次改动说明；两者可为空（首次启动）。
     project_summary: str = ""
     latest_changes: str = ""
+    # 双轨制：NEW_PROJECT / EXISTING_SOURCE；决定 System Prompt 与契约产物。
+    project_mode: str = "NEW_PROJECT"
     # 用户最近通过 Direct Ops 手工修改的摘要；由 ChangeLogStore 注入。
     direct_changelog: list[dict[str, Any]] = field(default_factory=list)
     # 影子 LLM 专用的只读架构快照（包含当前澄清问题 / 契约摘要）。
@@ -251,7 +269,7 @@ class MockArchitectLLM(ArchitectLLM):
                 ),
             )
 
-        missing = missing_slots_for(shape, slots)
+        missing = missing_slots_for(shape, slots, context.project_mode)
         if missing:
             return ArchitectAnalysis(
                 app_shape=shape,
@@ -1040,6 +1058,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "且已回答的槽位；已确认的槽位必须写入 slots。不要把“怕不确定”"
             "当作全栈的理由。"
         )
+        system += _project_mode_block(context.project_mode)
         system += _changelog_block(context)
         human = _analysis_human(context)
 
@@ -1209,6 +1228,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "图片理解等能力时，include_ai_capability 必须为 true，并在契约中"
             "明确 AI 输入、模型处理与输出结构；纯 CRUD / 展示型应用必须为 false。"
         )
+        system += _project_mode_block(context.project_mode)
         system += _changelog_block(context)
         human = _contract_human(context)
         return self._generate_with_repair(
@@ -1259,6 +1279,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "禁止编造 onClick 与请求。include_ai_capability 必须与用户需求一致："
             "AI 对话 / 生成 / 筛选分析为 true，纯 CRUD 为 false。"
         )
+        system += _project_mode_block(context.project_mode)
         system += _changelog_block(context)
         human = (
             f"{_contract_human(context)}\n\n"

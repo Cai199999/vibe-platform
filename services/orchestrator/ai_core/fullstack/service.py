@@ -519,6 +519,14 @@ class FullstackService:
             raise FullstackContractNotConfirmedError(
                 f"契约当前状态为 {contract.status}，请先确认后再生成代码"
             )
+        # 存量项目：源码是唯一事实源，绝不能触发前端 CodeGen。
+        if contract.project_mode == "EXISTING_SOURCE" and request.options.mode in {
+            "frontend",
+            "fullstack",
+        }:
+            raise FullstackContractInvalidError(
+                "存量项目禁止前端 CodeGen；请使用 backend 增量模式"
+            )
         if request.options.mode == "frontend":
             # 前端骨架只要求 Web 形态；脚本契约没有可生成的 React 页面。
             if contract.app_shape == "script_automation":

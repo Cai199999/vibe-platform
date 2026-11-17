@@ -6,7 +6,11 @@ import json
 import unittest
 from unittest.mock import patch
 
-from ai_core.architect.llm import ArchitectLLMError, DeepSeekArchitectLLM
+from ai_core.architect.llm import (
+    ArchitectLLMError,
+    DeepSeekArchitectLLM,
+    _project_mode_block,
+)
 from ai_core.config import Settings
 from ai_core.error_envelope import envelope_from_code
 from ai_core.observability.streaming import collect_tokens, reset_token_stream
@@ -114,6 +118,15 @@ class TokenStreamResetTests(unittest.TestCase):
         # 退出上下文后不应再触发旧回调。
         reset_token_stream()
         self.assertEqual(events, ["<reset>"])
+
+
+class ProjectModePromptTests(unittest.TestCase):
+    def test_existing_mode_forbids_visual_document_and_full_code(self) -> None:
+        block = _project_mode_block("EXISTING_SOURCE")
+        self.assertIn("严禁输出 visual_document", block)
+        self.assertIn("整页 JSX", block)
+        self.assertIn("后端增量", block)
+        self.assertEqual(_project_mode_block("NEW_PROJECT"), "")
 
 
 class ArchitectErrorEnvelopeTests(unittest.TestCase):

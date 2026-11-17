@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { INITIAL_APP } from '../mockProject.js'
 
 const STORAGE_KEY = 'vibe.workspace.v1'
@@ -24,6 +24,21 @@ const newId = (prefix) => {
 }
 
 const templateFiles = () => ({ [TARGET_FILE]: INITIAL_APP })
+
+/**
+ * 同步落盘工作区状态。
+ *
+ * 导入项目后页面会立刻 navigate 到只读投影；如果只依赖 useEffect 落盘，
+ * WorkspacePage 可能先卸载，导致新项目丢失。导入流程必须同步写入。
+ */
+function persistWorkspaceState(state) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+  } catch {
+    // 存储配额不足 / 隐私模式：内存状态仍可用。
+  }
+}
 
 /**
  * 创建项目。Phase 2 只支持平台内置 React 模板；
@@ -150,6 +165,10 @@ function loadState() {
  */
 export function useWorkspace() {
   const [state, setState] = useState(loadState)
+  // 同步操作（导入后立即跳转）需要读取最新工作区状态，绕开 setState 的
+  // 异步批处理，确保 localStorage 在 navigate 之前已写入。
+  const stateRef = useRef(state)
+  stateRef.current = state
 
   useEffect(() => {
     try {
@@ -193,39 +212,42 @@ export function useWorkspace() {
    */
   const importProject = useCallback((payload) => {
     const projectId = payload?.id || newId('proj')
-    setState((previous) => {
-      if (previous.openTabs.length >= MAX_OPEN_TABS) {
-        return previous
-      }
-      const kind =
-        payload?.kind === 'html'
-          ? 'html'
-          : payload?.kind === 'fullstack'
-            ? 'fullstack'
-            : 'react'
-      const project = {
-        id: projectId,
-        name: payload?.name || '导入项目',
-        template: kind === 'html' ? 'imported-html' : `imported-${kind}`,
-        kind,
-        entryFile: payload?.entryFile || TARGET_FILE,
-        files: payload?.files || {},
-        services: Array.isArray(payload?.services) ? payload.services : [],
-        dataSourceCount: payload?.dataSourceCount || 0,
-        sourceName: payload?.sourceName || '',
-        imported: true,
-        bootstrap: 'ready',
-        canvasMode: 'mock',
-        generated: false,
-        createdAt: new Date().toISOString(),
-      }
-      return {
-        ...previous,
-        projects: [...previous.projects, project],
-        openTabs: [...previous.openTabs, projectId],
-        activeTabId: projectId,
-      }
-    })
+    const previous = stateRef.current
+    if (!previous || previous.openTabs.length >= MAX_OPEN_TABS) {
+      return projectId
+    }
+    const kind =
+      payload?.kind === 'html'
+        ? 'html'
+        : payload?.kind === 'fullstack'
+          ? 'fullstack'
+          : 'react'
+    const project = {
+      id: projectId,
+      name: payload?.name || '导入项目',
+      template: kind === 'html' ? 'imported-html' : `imported-${kind}`,
+      kind,
+      entryFile: payload?.entryFile || TARGET_FILE,
+      files: payload?.files || {},
+      services: Array.isArray(payload?.services) ? payload.services : [],
+      dataSourceCount: payload?.dataSourceCount || 0,
+      sourceName: payload?.sourceName || '',
+      imported: true,
+      bootstrap: 'ready',
+      canvasMode: 'mock',
+      generated: false,
+      createdAt: new Date().toISOString(),
+    }
+    const next = {
+      ...previous,
+      projects: [...previous.projects, project],
+      openTabs: [...previous.openTabs, projectId],
+      activeTabId: projectId,
+    }
+    // 导入后立即跳转只读投影，必须同步落盘并同步 ref，避免卸载丢项目。
+    stateRef.current = next
+    persistWorkspaceState(next)
+    setState(next)
     return projectId
   }, [])
 
