@@ -126,6 +126,9 @@ class ActiveFullstackRun:
     clarification: dict[str, Any] | None = None
     # 前端骨架模式下生成的完整 src/App.jsx，用于前端把真实源码写回项目。
     frontend_entry: str = ""
+    # 本次是否使用冻结 VisualDocument 做 CodeGen；前端据此切换画布模式。
+    visual_document_id: str = ""
+    visual_node_count: int = 0
     table: str = ""
     collection_path: str = ""
     # 风险自适应门禁：L1 的非阻塞告警 / L3 验收结论随快照返回。
@@ -291,6 +294,11 @@ class FullstackService:
             warnings.append(f"L1 敏捷模式跳过契约审计阻断：{audit.summary()}")
 
         runner = FullstackGraphRunner(self._sandbox, event_sink=active.buffer)
+        visual_document = (
+            active.request.visual_document or active.contract.visual_document
+        )
+        if visual_document is not None:
+            active.visual_document_id = visual_document.doc_id
         initial: FullstackState = {
             "run_id": active.run_id,
             "project_id": active.request.project_id,
@@ -298,6 +306,7 @@ class FullstackService:
             "preview_url": active.preview_url,
             "contract": active.contract,
             "options": active.request.options,
+            "visual_document": visual_document,
             "files": [],
             "quality_tier": policy.tier,
             "warnings": warnings,
@@ -308,6 +317,7 @@ class FullstackService:
             with _ACTIVE_LOCK:
                 active.files = list(outcome.get("files") or [])
                 active.frontend_entry = str(outcome.get("frontend_entry") or "")
+                active.visual_node_count = int(outcome.get("visual_node_count") or 0)
                 active.table = str(outcome.get("table") or "")
                 active.collection_path = str(outcome.get("collection_path") or "")
                 active.preview_url = str(
@@ -350,12 +360,16 @@ class FullstackService:
                     "dbaFiles": list(outcome.get("dba_files") or []),
                     "backendFiles": list(outcome.get("backend_files") or []),
                     "frontendFiles": list(outcome.get("frontend_files") or []),
-                    # 仅前端骨架模式携带；完整源码不受 node.output 截断影响。
+                    # 前端骨架 / Visual CodeGen 携带完整入口源码；
+                    # 源码不受 node.output 截断影响，前端可继续编辑。
                     "frontendEntry": (
                         active.frontend_entry
                         if active.request.options.mode == "frontend"
+                        or active.visual_document_id
                         else ""
                     ),
+                    "visualDocumentId": active.visual_document_id or None,
+                    "visualNodeCount": active.visual_node_count or None,
                     "infraFiles": list(outcome.get("infra_files") or []),
                     # 四个核心指标的当前聚合快照，便于前端 / 监控直接消费。
                     "metrics": FULLSTACK_METRICS.snapshot(),
@@ -463,7 +477,13 @@ class FullstackService:
                 raise FullstackContractInvalidError(
                     "脚本自动化契约不包含前端页面，无法初始化前端骨架"
                 )
-            if not contract.frontend_routes or not contract.components:
+            # 离线优先链路：VisualDocument 就是前端唯一事实源，
+            # frontendRoutes / components 只服务旧骨架生成，不能反过来
+            # 阻断已经冻结的虚拟界面编译。
+            visual = request.visual_document or contract.visual_document
+            if visual is None and (
+                not contract.frontend_routes or not contract.components
+            ):
                 raise FullstackContractInvalidError(
                     "契约缺少 frontendRoutes 或 components，无法生成前端骨架"
                 )

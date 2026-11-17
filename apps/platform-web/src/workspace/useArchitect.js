@@ -1017,6 +1017,8 @@ export function useArchitect({ token } = {}) {
         contractId,
         sandboxId: options.sandboxId || undefined,
         contract,
+        // 离线优先链路：冻结 VisualDocument 是 CodeGen 的唯一前端事实源。
+        visualDocument: options.visualDocument || undefined,
         source: {
           sandboxId: options.sandboxId || undefined,
           files: options.files ?? {},

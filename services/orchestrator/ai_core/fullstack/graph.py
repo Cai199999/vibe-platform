@@ -35,9 +35,16 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from ai_core.agent.events import EventSink, NullEventSink
+from ai_core.codegen.visual import (
+    VisualCodegenError,
+    compile_visual_document,
+    generate_visual_fallback,
+)
+from ai_core.codegen.visual_gate import VisualCodegenGateUnavailable
 from ai_core.config import get_settings
 from ai_core.domain.architect import ArchitectContract
 from ai_core.domain.fullstack import FullstackRunOptions
+from ai_core.domain.visual_document import VisualDocument
 from ai_core.fullstack.coders import (
     GeneratedBundle,
     generate_backend_bundle,
@@ -195,6 +202,10 @@ class FullstackState(TypedDict, total=False):
     preview_url: str
     contract: ArchitectContract
     options: FullstackRunOptions
+    # 离线优先链路：冻结的 VisualDocument 是前端唯一事实源。
+    visual_document: VisualDocument | None
+    visual_fallback_applied: bool
+    visual_node_count: int
     table: str
     collection_path: str
     files: list[str]
@@ -716,7 +727,70 @@ class FullstackGraphRunner:
         started = time.monotonic()
         self._node_started("FrontendCoder", state)
         try:
-            if options.mode == "frontend":
+            visual_document = state.get("visual_document")
+            warnings = list(state.get("warnings") or [])
+            if visual_document is not None:
+                # 离线优先链路：冻结虚拟树一次性确定性编译。
+                # 不调用 LLM、不猜测布局，基础节点全部走硬编码映射。
+                try:
+                    compiled = compile_visual_document(visual_document)
+                except VisualCodegenGateUnavailable as exc:
+                    raise FullstackGenerationError(
+                        f"CodeGen AST 门禁不可用: {exc}", node="FrontendCoder"
+                    ) from exc
+                except VisualCodegenError as exc:
+                    raise FullstackGenerationError(
+                        f"Visual CodeGen 失败: {exc}", node="FrontendCoder"
+                    ) from exc
+
+                for message in compiled.warnings:
+                    if message not in warnings:
+                        warnings.append(message)
+
+                if options.mode == "frontend":
+                    bundle = GeneratedBundle(
+                        files=compiled.files,
+                        summary=compiled.summary,
+                        metadata={**compiled.metadata, "mode": "visual"},
+                    )
+                else:
+                    # 全栈模式下仍保留 api-client / main.jsx / vite 代理注入，
+                    # 只用 Visual CodeGen 覆盖 src/App.jsx 与视觉样式。
+                    base_bundle = generate_frontend_bundle(
+                        contract,
+                        existing_main=self._read_optional(sandbox_id, "src/main.jsx"),
+                        existing_vite=self._read_optional(sandbox_id, "vite.config.js"),
+                        existing_package=self._read_optional(
+                            sandbox_id, "package.json"
+                        ),
+                    )
+                    merged_files = dict(base_bundle.files)
+                    merged_files.update(compiled.files)
+                    bundle = GeneratedBundle(
+                        files=merged_files,
+                        summary=f"{base_bundle.summary}；{compiled.summary}",
+                        metadata={
+                            **base_bundle.metadata,
+                            **compiled.metadata,
+                            "mode": "fullstack+visual",
+                        },
+                    )
+                self._emit(
+                    "fullstack.visual.codegen",
+                    {
+                        "runId": state.get("run_id"),
+                        "node": "FrontendCoder",
+                        "documentId": visual_document.doc_id,
+                        "nodeCount": compiled.metadata.get("nodeCount", 0),
+                        "interactionCount": compiled.metadata.get(
+                            "interactionCount", 0
+                        ),
+                        "customNodeCount": compiled.metadata.get("customNodeCount", 0),
+                        "repaired": compiled.repaired,
+                        "warnings": list(compiled.warnings),
+                    },
+                )
+            elif options.mode == "frontend":
                 # 初始骨架：按契约生成 src/App.jsx，不接后端 API。
                 bundle = generate_frontend_skeleton_bundle(contract)
             else:
@@ -734,8 +808,11 @@ class FullstackGraphRunner:
             result: dict[str, Any] = {
                 "frontend_files": sorted(bundle.files),
                 "files": files,
+                "warnings": warnings,
             }
-            if options.mode == "frontend":
+            if visual_document is not None:
+                result["visual_node_count"] = int(bundle.metadata.get("nodeCount") or 0)
+            if options.mode == "frontend" or visual_document is not None:
                 # 把完整入口源码随图状态返回，完成事件可直接带回前端。
                 # 事件里的 node.output 受 maxOutputChars 限制，若被截断，
                 # 工作区就无法保存可继续编辑的真实源码。
@@ -1141,6 +1218,9 @@ class FullstackGraphRunner:
             return {}
         policy = self._quality(state)
         warnings = list(state.get("warnings") or [])
+        # Visual CodeGen 降级产物必须显式回传给图状态；LangGraph 不会
+        # 自动合并节点函数里对 state 字典的原地修改。
+        visual_updates: dict[str, Any] = {}
         # L1 允许在失败后重试 1 次；L2 / L3 维持一次失败即终止的严格语义。
         max_attempts = 1 + policy.build_retry_limit
 
@@ -1216,6 +1296,55 @@ class FullstackGraphRunner:
                     "quality_tier": policy.tier,
                 }
         result, build_attempts = _run("build", "npm run build")
+        # Visual CodeGen 的构建失败最多修复一次：重写为扁平安全占位页后
+        # 再构建。占位页同样经过 data-node-id 完整性门禁，仍然可继续
+        # Direct Ops 定位；绝不把不可编译源码留在沙盒里。
+        visual_document = state.get("visual_document")
+        if (
+            not result.success
+            and visual_document is not None
+            and not state.get("visual_fallback_applied")
+        ):
+            try:
+                fallback = generate_visual_fallback(
+                    visual_document,
+                    reason=f"npm run build 退出码 {result.exit_code}",
+                )
+                self._write_bundle(
+                    state,
+                    GeneratedBundle(
+                        files=fallback.files,
+                        summary=fallback.summary,
+                        metadata=fallback.metadata,
+                    ),
+                )
+                state["visual_fallback_applied"] = True
+                # 完成事件回传的入口源码必须与沙盒最终内容一致。
+                state["frontend_entry"] = fallback.files.get("src/App.jsx", "")
+                state["visual_node_count"] = len(fallback.node_ids)
+                visual_updates = {
+                    "visual_fallback_applied": True,
+                    "frontend_entry": state["frontend_entry"],
+                    "visual_node_count": len(fallback.node_ids),
+                }
+                self._emit(
+                    "fullstack.visual.codegen.fallback",
+                    {
+                        "runId": state.get("run_id"),
+                        "node": "BuildVerifier",
+                        "documentId": visual_document.doc_id,
+                        "reason": f"npm run build 退出码 {result.exit_code}",
+                        "summary": fallback.summary,
+                    },
+                )
+                warnings = self._warn(state, fallback.summary)
+                result, build_attempts = _run("build", "npm run build")
+            except Exception as exc:  # noqa: BLE001 - 降级失败继续原始失败路径
+                logger.warning(
+                    "Visual CodeGen 安全占位页构建失败 run_id=%s: %s",
+                    state.get("run_id"),
+                    exc,
+                )
         if not result.success:
             logs = result.logs or "构建失败且没有日志"
             if policy.blocking:
@@ -1243,6 +1372,7 @@ class FullstackGraphRunner:
                 "warnings": warnings,
                 "build_retry_count": build_attempts - 1,
                 "quality_tier": policy.tier,
+                **visual_updates,
             }
         self._node_completed(
             "BuildVerifier",
@@ -1255,6 +1385,7 @@ class FullstackGraphRunner:
             "warnings": warnings,
             "build_retry_count": build_attempts - 1,
             "quality_tier": policy.tier,
+            **visual_updates,
         }
 
     # --------------------------------------------------------

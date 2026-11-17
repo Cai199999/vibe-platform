@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { createEmptyVisualDocument, findVisualNode } from '../visualDocument.js'
-import { useVisualDocumentStore } from '../visualDocumentStore.js'
+import {
+  createEmptyVisualDocument,
+  findVisualNode,
+  freezeVisualDocument,
+} from '../visualDocument.js'
+import {
+  VISUAL_DOCUMENT_STORAGE_KEY,
+  loadFrozenVisualDocument,
+  useVisualDocumentStore,
+} from '../visualDocumentStore.js'
 
 function resetStore() {
   const doc = createEmptyVisualDocument({ projectId: 'proj_store' })
@@ -110,5 +118,59 @@ describe('Agent insert 与冻结', () => {
     expect(useVisualDocumentStore.getState().addNode('text')).toBe(false)
     expect(useVisualDocumentStore.getState().undo()).toBe(false)
     expect(useVisualDocumentStore.getState().updateText('nd_x', 'x')).toBe(false)
+  })
+})
+
+describe('loadFrozenVisualDocument', () => {
+  function resetTo(document) {
+    useVisualDocumentStore.setState({
+      doc: document,
+      selectedId: document?.root?.id ?? null,
+      history: [],
+      future: [],
+      lastError: '',
+    })
+  }
+
+  beforeEach(() => {
+    window.localStorage.clear()
+    resetTo(createEmptyVisualDocument({ projectId: 'proj_other' }))
+  })
+
+  it('只返回当前项目的 FROZEN 文档', async () => {
+    const document = await freezeVisualDocument(
+      createEmptyVisualDocument({ projectId: 'proj_a', title: 'A' }),
+    )
+    resetTo(document)
+
+    expect(loadFrozenVisualDocument('proj_a')?.docId).toBe(document.docId)
+    expect(loadFrozenVisualDocument('proj_b')).toBeNull()
+    expect(loadFrozenVisualDocument('')).toBeNull()
+  })
+
+  it('草稿文档不会被当作 CodeGen 输入', () => {
+    resetTo(createEmptyVisualDocument({ projectId: 'proj_a' }))
+    expect(loadFrozenVisualDocument('proj_a')).toBeNull()
+  })
+
+  it('store 尚未切换项目时可回退到 localStorage', async () => {
+    const frozen = await freezeVisualDocument(
+      createEmptyVisualDocument({ projectId: 'proj_a' }),
+    )
+    window.localStorage.setItem(
+      VISUAL_DOCUMENT_STORAGE_KEY,
+      JSON.stringify(frozen),
+    )
+    resetTo(createEmptyVisualDocument({ projectId: 'proj_other' }))
+
+    expect(loadFrozenVisualDocument('proj_a')?.docId).toBe(frozen.docId)
+  })
+
+  it('缺少 contentHash 的 FROZEN 文档被拒绝', () => {
+    const document = createEmptyVisualDocument({ projectId: 'proj_a' })
+    document.status = 'FROZEN'
+    document.metadata.contentHash = ''
+    resetTo(document)
+    expect(loadFrozenVisualDocument('proj_a')).toBeNull()
   })
 })

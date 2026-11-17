@@ -22,6 +22,7 @@ from pydantic import Field, model_validator
 
 from ai_core.domain.architect import ArchitectContract
 from ai_core.domain.common import CamelModel
+from ai_core.domain.visual_document import VisualDocument
 
 FullstackRunStatus = Literal["RUNNING", "SUCCEEDED", "FAILED"]
 
@@ -72,6 +73,9 @@ class FullstackRunRequest(CamelModel):
     contract_id: str = Field(min_length=1, max_length=128)
     sandbox_id: str | None = Field(default=None, max_length=64)
     contract: ArchitectContract | None = None
+    # 离线优先链路：前端把已冻结（FROZEN + contentHash）的 VisualDocument
+    # 随请求回传，CodeGen 以它为准；没有该字段时才回退契约里的草稿树。
+    visual_document: VisualDocument | None = None
     source: FullstackSource = Field(default_factory=FullstackSource)
     options: FullstackRunOptions = Field(default_factory=FullstackRunOptions)
 

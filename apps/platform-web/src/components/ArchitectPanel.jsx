@@ -838,6 +838,130 @@ function FrontendBootstrap({ fullstack, contract, onRetry, onFullstackGenerate }
 }
 
 /**
+ * 冻结 VisualDocument → 确定性 CodeGen 状态卡。
+ *
+ * 生成入口复用 workspace 的 onFullstackGenerate；真正的事实源是浏览器
+ * localStorage 中的冻结树，面板只展示进度，不参与源码拼装。
+ */
+function VisualCodegen({ fullstack, onGenerate }) {
+  const state = fullstack ?? {}
+  const status = state.status ?? 'IDLE'
+  const running = Boolean(state.starting) || status === 'RUNNING'
+  const succeeded = status === 'SUCCEEDED'
+  const failed = status === 'FAILED'
+  const steps = Array.isArray(state.steps) ? state.steps : []
+  const result = state.result ?? {}
+  const visualNodeCount = result.visualDocumentId
+    ? result.visualNodeCount ?? 0
+    : 0
+
+  return (
+    <section
+      className="architect-fullstack architect-visual-codegen"
+      data-visual-codegen-status={status}
+      aria-label="虚拟界面代码生成"
+    >
+      <div className="architect-fullstack-head">
+        <div>
+          <span className="architect-form-eyebrow">VISUAL → REACT</span>
+          <h3>生成应用代码</h3>
+          <p>
+            确定性 Compiler 会把已冻结的虚拟界面编译为 React + CSS，
+            每个节点注入 data-node-id，再通过 Babel AST、构建与沙盒冒烟门禁。
+            不猜布局、不做整页 LLM 生成。
+          </p>
+        </div>
+      </div>
+
+      {running && (
+        <div className="architect-frontend-status is-running" role="status">
+          <span className="mini-spinner" aria-hidden="true" />
+          <div>
+            <strong>正在编译虚拟界面…</strong>
+            <p>冻结树 → JSX → 构建门禁 → 沙盒预览。</p>
+          </div>
+        </div>
+      )}
+
+      {failed && (
+        <div className="architect-fullstack-error" role="alert">
+          <strong>代码生成失败</strong>
+          <span>{state.error || '未知错误，请重试。'}</span>
+          {state.errorCode && <code>{state.errorCode}</code>}
+        </div>
+      )}
+
+      {succeeded && result.visualDocumentId && (
+        <div className="architect-outcome is-success" role="status">
+          <span aria-hidden="true">✓</span>
+          <div>
+            <strong>虚拟界面已编译为真实源码</strong>
+            <p>
+              {visualNodeCount > 0 ? `${visualNodeCount} 个节点` : '冻结树'}已写入
+              src/App.jsx；画布已切换为沙盒实时页面，可继续圈选微调。
+            </p>
+          </div>
+        </div>
+      )}
+
+      {steps.length > 0 && (
+        <ol className="fullstack-steps" data-visual-codegen-progress>
+          {steps.map((step) => (
+            <li
+              key={step.node}
+              className={`fullstack-step is-${String(step.status).toLowerCase()}`}
+              data-fullstack-step={step.node}
+              data-status={step.status}
+            >
+              <span className="fullstack-step-mark" aria-hidden="true">
+                {step.status === 'SUCCEEDED'
+                  ? '✓'
+                  : step.status === 'FAILED'
+                    ? '!'
+                    : step.status === 'RUNNING'
+                      ? '◌'
+                      : '·'}
+              </span>
+              <div className="fullstack-step-body">
+                <div className="fullstack-step-title">
+                  <strong>{step.label || step.node}</strong>
+                  <span>
+                    {step.summary ||
+                      FULLSTACK_STEP_TEXT[step.status] ||
+                      step.status}
+                  </span>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      <div className="architect-fullstack-actions">
+        <button
+          type="button"
+          className="architect-primary architect-fullstack-trigger"
+          data-visual-codegen-generate
+          disabled={running}
+          onClick={() => onGenerate?.()}
+        >
+          {running
+            ? '正在编译…'
+            : succeeded
+              ? '↻ 重新编译冻结界面'
+              : failed
+                ? '↻ 重试编译'
+                : '🚀 生成应用（CodeGen）'}
+        </button>
+        <p className="architect-fullstack-gate-hint">
+          未冻结会拒绝生成；冻结后虚拟树只读。
+        </p>
+      </div>
+    </section>
+  )
+}
+
+/**
  * 契约确认后的持续对话入口。
  *
  * 确认不是终点：架构师面板保持在线，用户可随时把新需求追加到当前
@@ -1628,28 +1752,34 @@ export default function ArchitectPanel({
           {status === 'CONFIRMED' && (
             <>
               {contract?.visualDocument ? (
-                <div className="architect-outcome is-success" role="status">
-                  <span aria-hidden="true">✓</span>
-                  <div>
-                    <strong>虚拟骨架已生成</strong>
-                    <p>
-                      已写入离线画布，可直接增删、拖拽、调整布局。
-                      本阶段不生成 React 源码，也不会启动沙盒。
-                    </p>
-                    <a
-                      className="primary-button"
-                      href={`/visual-canvas?project=${encodeURIComponent(
-                        projectId,
-                      )}&title=${encodeURIComponent(
-                        contract.visualDocument.title ||
-                          projectName ||
-                          '未命名页面',
-                      )}`}
-                    >
-                      打开虚拟画布
-                    </a>
+                <>
+                  <div className="architect-outcome is-success" role="status">
+                    <span aria-hidden="true">✓</span>
+                    <div>
+                      <strong>虚拟骨架已生成</strong>
+                      <p>
+                        已写入离线画布，可直接增删、拖拽、调整布局。
+                        确认视觉后再编译为 React 源码并启动沙盒。
+                      </p>
+                      <a
+                        className="primary-button"
+                        href={`/visual-canvas?project=${encodeURIComponent(
+                          projectId,
+                        )}&title=${encodeURIComponent(
+                          contract.visualDocument.title ||
+                            projectName ||
+                            '未命名页面',
+                        )}`}
+                      >
+                        打开虚拟画布
+                      </a>
+                    </div>
                   </div>
-                </div>
+                  <VisualCodegen
+                    fullstack={state.fullstack}
+                    onGenerate={onFullstackGenerate}
+                  />
+                </>
               ) : (
                 <>
                   <div className="architect-outcome is-success" role="status">

@@ -68,6 +68,7 @@ import {
 } from '../visual/visualDocument.js'
 import {
   VISUAL_DOCUMENT_STORAGE_KEY,
+  loadFrozenVisualDocument,
   useVisualDocumentStore,
 } from '../visual/visualDocumentStore.js'
 import {
@@ -2080,9 +2081,13 @@ export default function WorkspacePage() {
       const sandboxId =
         fullstack.sandboxId || currentRun.result?.sandboxId || null
       const isFrontendBootstrap = fullstack.mode === 'frontend'
-      const checkpointMessage = isFrontendBootstrap
-        ? 'v0: Architect Skeleton'
-        : '自动存档：全栈代码已生成'
+      const isVisualCodegen = Boolean(fullstack.result?.visualDocumentId)
+      const isBootstrapLike = isFrontendBootstrap || isVisualCodegen
+      const checkpointMessage = isVisualCodegen
+        ? 'v0: Visual CodeGen'
+        : isFrontendBootstrap
+          ? 'v0: Architect Skeleton'
+          : '自动存档：全栈代码已生成'
 
       // 先应用生成结果，再执行一次“无感 checkpoint”：
       // 骨架 / 全栈生成都会直接写主工作树，必须在用户发起下一次标注 Run
@@ -2131,14 +2136,15 @@ export default function WorkspacePage() {
           [projectId]: (previous[projectId] ?? 0) + 1,
         }))
 
-        if (isFrontendBootstrap) {
-          // 对话确认后的初始骨架：把真实 App.jsx 写回项目，并把画布从
-          // 空白 / 骨架屏切换为 live。后续标注修改都基于这份源码。
+        if (isBootstrapLike) {
+          // 初始骨架 / Visual CodeGen：把真实 App.jsx 写回项目，并把画布
+          // 从虚拟树切换为 live。后续标注修改都基于这份源码。
           const entrySource = fullstack.result?.frontendEntry || ''
           if (!entrySource) {
-            console.warn('[frontend-bootstrap] 完成事件缺少 frontendEntry', {
+            console.warn('[visual-codegen] 完成事件缺少 frontendEntry', {
               projectId,
               runId: fullstack.runId,
+              mode: fullstack.mode,
             })
           }
           updateProject(projectId, (project) => ({
@@ -2156,7 +2162,9 @@ export default function WorkspacePage() {
           showToast(
             markReady ? 'success' : 'error',
             markReady
-              ? 'v0 基线已建立，画布已切换为实时预览'
+              ? isVisualCodegen
+                ? '虚拟界面已编译为 React 源码，画布已切换为实时预览'
+                : 'v0 基线已建立，画布已切换为实时预览'
               : 'v0 快照保存失败，请重试后再进入画布编辑',
           )
         } else {
@@ -2224,7 +2232,7 @@ export default function WorkspacePage() {
           autoSnapshotInflightRef.current.delete(projectId)
           // v0 基线失败时不得把骨架标记为 ready，画布保持 blank，
           // 用户可重试 bootstrap；全栈生成不阻塞预览。
-          applyGeneratedResult(!isFrontendBootstrap || snapshotOk)
+          applyGeneratedResult(!isBootstrapLike || snapshotOk)
         }
       })()
     })
@@ -3606,6 +3614,102 @@ export default function WorkspacePage() {
   }
 
   /**
+   * 冻结 VisualDocument -> CodeGen。
+   *
+   * 只接受浏览器里已冻结（FROZEN + contentHash）的虚拟树；确定性 Compiler
+   * 会注入 data-node-id，然后复用 FullstackGraph 的构建 / 重启门禁。
+   * 全栈契约同时具备 API 与 DDL 时走 fullstack，否则只编译前端。
+   */
+  const handleVisualCodegen = (projectId, { project, contract }) => {
+    const document = loadFrozenVisualDocument(projectId)
+    if (!document) {
+      showToast(
+        'error',
+        '没有找到已冻结的虚拟界面：请先在虚拟画布中点击“确认视觉，进入业务审查”',
+      )
+      return false
+    }
+    if (
+      contract?.visualDocument?.docId &&
+      document.docId !== contract.visualDocument.docId
+    ) {
+      showToast('error', '冻结界面与当前契约不匹配，请重新打开虚拟画布确认')
+      return false
+    }
+    const report = validateVisualDocument(document)
+    if (!report.ok) {
+      showToast('error', `冻结界面校验失败：${report.errors[0] || '未知错误'}`)
+      return false
+    }
+    if (!contract?.contractId) {
+      showToast('error', '契约尚未确认，无法编译冻结界面')
+      return false
+    }
+    if (contract.status && contract.status !== 'CONFIRMED') {
+      showToast('error', `契约状态为 ${contract.status}，确认后才能生成代码`)
+      return false
+    }
+    if (contract.appShape === 'script_automation') {
+      showToast('info', '脚本类项目不包含前端页面，无法编译虚拟界面')
+      return false
+    }
+    const apiRouteCount = Array.isArray(contract.apiRoutes)
+      ? contract.apiRoutes.length
+      : 0
+    const hasDdl =
+      typeof contract.databaseDdl === 'string' &&
+      contract.databaseDdl.trim().length > 0
+    const mode =
+      contract.appShape === 'full_stack_system' &&
+      apiRouteCount > 0 &&
+      hasDdl
+        ? 'fullstack'
+        : 'frontend'
+    const run = runStates[projectId] ?? EMPTY_RUN
+    // 没有沙盒时至少携带当前入口源码，服务端会在模板沙盒上覆盖它；
+    // fullstack 模式也依赖这份兜底源码通过 _ensure_sandbox 校验。
+    const files = run.result?.sandboxId
+      ? {}
+      : { [projectEntryFile(project)]: projectSource(project) }
+
+    console.info('[visual-codegen] start', {
+      projectId,
+      contractId: contract.contractId,
+      documentId: document.docId,
+      contentHash: document.metadata?.contentHash,
+      nodeCount: report.nodeCount,
+      mode,
+    })
+    updateProject(projectId, {
+      bootstrap: 'bootstrapping',
+      canvasMode: 'bootstrapping',
+    })
+    const started = architect.generateFullstack(projectId, {
+      tenantId: user?.tenantId || 'tenant_local',
+      sandboxId: run.result?.sandboxId,
+      files,
+      contract,
+      contractId: contract.contractId,
+      mode,
+      visualDocument: document,
+      options: { maxOutputChars: 20000 },
+    })
+    if (!started) {
+      updateProject(projectId, {
+        bootstrap: 'failed',
+        canvasMode: 'visual',
+      })
+      showToast('info', '代码生成正在进行中，请稍候')
+      return false
+    }
+    showToast(
+      'info',
+      `正在把 ${report.nodeCount} 个虚拟节点编译为 React 源码…`,
+    )
+    return true
+  }
+
+  /**
    * 契约确认 -> 全栈代码生成。
    *
    * 复用当前项目的沙盒；导入 / 纯前端项目没有 sandboxId 时，把当前入口
@@ -3613,6 +3717,14 @@ export default function WorkspacePage() {
    */
   const handleFullstackGenerate = async (projectId) => {
     if (blockGenerateUntilAnswered(projectId)) return
+    const project = projects.find((item) => item.id === projectId)
+    const architectState = architectStates[projectId]
+    const contract = architectState?.contract
+    // 离线优先契约：冻结虚拟树才是前端事实源，不能再走源码暂存 / 旧骨架。
+    if (contract?.visualDocument) {
+      handleVisualCodegen(projectId, { project, contract })
+      return
+    }
     // 全栈生成会以当前前端为基准推演后端；先统一提交画布暂存，
     // 否则用户刚加的组件不会出现在生成结果里。
     if (describePendingChanges(projectId)) {
@@ -3622,9 +3734,6 @@ export default function WorkspacePage() {
         return
       }
     }
-    const project = projects.find((item) => item.id === projectId)
-    const architectState = architectStates[projectId]
-    const contract = architectState?.contract
     const run = runStates[projectId] ?? EMPTY_RUN
     const sandboxId = run.result?.sandboxId
     const gate = gateStates[projectId]
@@ -3973,21 +4082,32 @@ export default function WorkspacePage() {
     })
   }, [architectStates, projects])
 
-  // 前端初始化失败：把画布置为失败态，展示重试入口（不重新跑架构对话）。
+  // 前端初始化 / Visual CodeGen 失败：把画布置为失败态并保留重试入口。
   useEffect(() => {
     Object.entries(architectStates).forEach(([projectId, state]) => {
       const fullstack = state?.fullstack
       if (!fullstack?.runId) return
-      if (fullstack.status !== 'FAILED' || fullstack.mode !== 'frontend') return
+      const isVisual = Boolean(state?.contract?.visualDocument)
+      if (
+        fullstack.status !== 'FAILED' ||
+        (fullstack.mode !== 'frontend' && !isVisual)
+      ) {
+        return
+      }
       const project = projects.find((item) => item.id === projectId)
       if (!project || project.bootstrap !== 'bootstrapping') return
       if (frontendBootstrapFailureRef.current.get(projectId) === fullstack.runId)
         return
       frontendBootstrapFailureRef.current.set(projectId, fullstack.runId)
-      updateProject(projectId, { bootstrap: 'failed' })
+      updateProject(projectId, {
+        bootstrap: 'failed',
+        canvasMode: isVisual ? 'visual' : 'blank',
+      })
       showToast(
         'error',
-        `初始前端页面生成失败：${fullstack.error || '请重试'}`,
+        `${isVisual ? '虚拟界面编译' : '初始前端页面生成'}失败：${
+          fullstack.error || '请重试'
+        }`,
       )
     })
   }, [architectStates, projects, updateProject])

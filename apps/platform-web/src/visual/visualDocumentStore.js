@@ -304,3 +304,30 @@ export const useVisualDocumentStore = create((set, get) => {
 export function selectVisualNode(state, nodeId) {
   return findVisualNode(state.doc.root, nodeId)?.node ?? null
 }
+
+/**
+ * 读取当前项目已冻结的 VisualDocument。
+ *
+ * 工作台生成入口需要把浏览器里的冻结树回传给 CodeGen；这里同时检查
+ * 内存 store 与 localStorage：store 可能尚未从另一个项目切换过来，
+ * localStorage 也可能因防抖尚未落盘。两者都按 projectId 严格隔离。
+ */
+export function loadFrozenVisualDocument(projectId) {
+  const candidates = [useVisualDocumentStore.getState()?.doc]
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = window.localStorage.getItem(VISUAL_DOCUMENT_STORAGE_KEY)
+      if (raw) candidates.push(JSON.parse(raw))
+    } catch {
+      // 损坏 JSON / 隐私模式：只依赖内存 store。
+    }
+  }
+  for (const document of candidates) {
+    if (!document || document.status !== 'FROZEN') continue
+    if (!document.metadata?.contentHash) continue
+    if (projectId && document.projectId !== projectId) continue
+    if (!projectId && document.projectId) continue
+    return document
+  }
+  return null
+}
