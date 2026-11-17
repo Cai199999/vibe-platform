@@ -25,6 +25,7 @@ from ai_core.architect.confidence import (
 )
 from ai_core.domain.architect import ArchitectAnalysis
 from ai_core.domain.visual_document import VisualDocument, VisualNode
+from ai_core.error_envelope import envelope_from_code
 from ai_core.fullstack.contract_audit import audit_contract
 
 
@@ -118,16 +119,23 @@ class VisualV0Tests(unittest.TestCase):
                     description="用户",
                 )
             ],
+            database_ddl="CREATE TABLE users (id INTEGER PRIMARY KEY);",
         )
         polluted_validation = validate_draft(
             "full_stack_system",
             polluted,
             output_phase="VISUAL_V0",
         )
-        self.assertTrue(
-            any("禁止生成 API" in issue for issue in polluted_validation.issues),
-            polluted_validation.issues,
-        )
+        # 模型多写的后端字段由服务端确定性剥离，不进入 repair。
+        self.assertTrue(polluted_validation.valid, polluted_validation.issues)
+        self.assertEqual(polluted_validation.draft.api_routes, [])
+        self.assertEqual(polluted_validation.draft.database_ddl, "")
+
+    def test_v0_invalid_error_is_not_generic_internal(self) -> None:
+        envelope = envelope_from_code("VISUAL_V0_INVALID")
+        self.assertIn("V0", envelope.user_message)
+        self.assertNotIn("内部问题", envelope.user_message)
+        self.assertTrue(envelope.retryable)
 
     def test_v0_assembly_has_no_backend(self) -> None:
         contract = assemble_contract(

@@ -214,6 +214,12 @@ _SPECS: dict[str, ErrorSpec] = {
     "ARCHITECT_INTERNAL_ERROR": ErrorSpec(
         "ARCHITECT", "FATAL", "架构澄清遇到内部问题，已记录诊断编号，请重新发起。"
     ),
+    "VISUAL_V0_INVALID": ErrorSpec(
+        "ARCHITECT",
+        "RECOVERABLE",
+        "V0 虚拟原型未通过结构校验，请补充页面需求后重新发起。",
+        retryable=True,
+    ),
     "ARCHITECT_INCOMPLETE_STATE": ErrorSpec(
         "ARCHITECT", "FATAL", "架构流程未到达可交付状态，请重新发起。"
     ),

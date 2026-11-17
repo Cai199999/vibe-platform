@@ -12,7 +12,7 @@ LLM 起草的契约必须先通过确定性校验：
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -203,9 +203,8 @@ def validate_draft(
 
     elif shape == "full_stack_system":
         if visual_v0:
-            # V0 只允许虚拟树；任何后端契约字段都视为阶段越界。
-            if api_routes or database_ddl or relations or interactions:
-                issues.append("VISUAL_V0 阶段禁止生成 API / DDL / relations / 交互契约")
+            # V0 的边界由服务端装配保证：模型即使顺手写了后端字段，
+            # 也直接剥离，而不是进入注定不收敛的修复循环。
             api_routes = []
             database_ddl = ""
             relations = []
@@ -416,6 +415,17 @@ def assemble_contract(
     existing_source = project_mode == "EXISTING_SOURCE"
     visual_v0 = output_phase == "VISUAL_V0"
     backend_binding = output_phase == "BACKEND_BINDING"
+    if visual_v0:
+        # 防御性装配：即使调用方跳过了 validate_draft，也绝不把
+        # V0 的后端字段写进契约 / 前端 / 后续 CodeGen。
+        draft = replace(
+            draft,
+            api_routes=[],
+            database_ddl="",
+            relations=[],
+            component_interactions=[],
+            tech_stack={},
+        )
     markdown = draft.contract_markdown.strip()
     if citations and "参考规范" not in markdown:
         lines = ["", "", "## 参考规范", ""]

@@ -883,6 +883,14 @@ class ArchitectGraphRunner:
                     "status": "AWAITING_DECISION",
                 }
 
+        if output_phase == "VISUAL_V0":
+            return {
+                "contract_draft": raw,
+                "contract_issues": issues,
+                "status": "FAILED",
+                "error": "V0 虚拟原型未通过 Schema 校验：" + "；".join(issues),
+                "error_code": "VISUAL_V0_INVALID",
+            }
         return {
             "contract_draft": raw,
             "contract_issues": issues,
