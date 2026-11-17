@@ -15,6 +15,7 @@ const STATUS_LABELS = {
   REPAIRING_CONTRACT: '修复契约',
   AWAITING_CLARIFICATION: '等待回答',
   AWAITING_CONTRACT_CONFIRMATION: '等待确认',
+  AWAITING_VISUAL_EDIT: '等待编辑 v0',
   REVISING_CONTRACT: '修订中',
   CONFIRMING_CONTRACT: '确认中',
   CANCELLING: '取消中',
@@ -31,6 +32,7 @@ const STATUS_TONES = {
   REPAIRING_CONTRACT: 'working',
   AWAITING_CLARIFICATION: 'attention',
   AWAITING_CONTRACT_CONFIRMATION: 'attention',
+  AWAITING_VISUAL_EDIT: 'attention',
   REVISING_CONTRACT: 'working',
   CONFIRMING_CONTRACT: 'working',
   CANCELLING: 'working',
@@ -1783,6 +1785,31 @@ export default function ArchitectPanel({
               submitting={Boolean(state.decisionSubmitting)}
               onDecide={onDecide}
             />
+          )}
+
+          {status === 'AWAITING_VISUAL_EDIT' && (
+            <div className="architect-outcome is-success" role="status">
+              <span aria-hidden="true">✦</span>
+              <div>
+                <strong>v0 虚拟原型已生成</strong>
+                <p>
+                  请在画布中离线调整布局与组件。完成后点击“确认视觉”，
+                  系统只把相对 v0 的增量组件交给架构师做业务确认与后端绑定。
+                </p>
+                <a
+                  className="primary-button"
+                  href={`/visual-canvas?project=${encodeURIComponent(
+                    projectId,
+                  )}&title=${encodeURIComponent(
+                    contract?.visualDocument?.title ||
+                      projectName ||
+                      '未命名页面',
+                  )}`}
+                >
+                  打开虚拟画布继续编辑
+                </a>
+              </div>
+            </div>
           )}
 
           {status === 'CONFIRMED' && (

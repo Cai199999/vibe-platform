@@ -18,6 +18,11 @@ from ai_core.domain.project_mode import ProjectMode
 from ai_core.domain.visual_document import VisualDocument
 
 AppShape = Literal["lightweight_web", "script_automation", "full_stack_system"]
+# Architect 产出阶段：
+#   VISUAL_V0      只产出 VisualDocument 原型，不含后端契约；
+#   BACKEND_BINDING 基于冻结虚拟树 + 增量包，只产出 API/DDL/relations；
+#   FULL           旧行为，一次产出完整契约（兼容旧客户端 / 存量项目）。
+OutputPhase = Literal["VISUAL_V0", "BACKEND_BINDING", "FULL"]
 
 # 风险自适应门禁：质量分级是契约的一等字段，决定 Applier / 一致性校验 /
 # 数据库验收执行到哪一层。默认 L2，保证旧客户端与历史契约行为不变。
@@ -154,6 +159,11 @@ class ArchitectRunRequest(CamelModel):
     latest_changes: str = Field(default="", max_length=4000)
     # 双轨制：前端显式声明，服务端仍会按 source 事实做确定性覆盖。
     project_mode: ProjectMode | None = None
+    # 两阶段产出：V0 虚拟树 → 画布编辑 → 增量后端绑定。
+    output_phase: OutputPhase = "FULL"
+    # 冻结虚拟树与 v0→current 增量包；BACKEND_BINDING 阶段必传。
+    visual_document: VisualDocument | None = None
+    visual_delta: dict[str, Any] = Field(default_factory=dict)
     options: ArchitectRunOptions = Field(default_factory=ArchitectRunOptions)
 
 
@@ -478,6 +488,8 @@ class ArchitectContract(CamelModel):
     components: list[dict[str, Any]] = Field(default_factory=list)
     # 双轨制项目模式：存量项目禁止 VisualDocument / 前端 CodeGen。
     project_mode: ProjectMode = "NEW_PROJECT"
+    # 两阶段产出阶段：最终契约通常来自 BACKEND_BINDING。
+    output_phase: OutputPhase = "FULL"
     # 离线优先可视化的唯一前端产物；不得包含 React / JSX 源码。
     visual_document: VisualDocument | None = None
     ui_logic: list[dict[str, Any]] = Field(default_factory=list)
@@ -613,6 +625,7 @@ class ArchitectSnapshotResponse(CamelModel):
     project_name: str = ""
     status: str
     project_mode: ProjectMode = "NEW_PROJECT"
+    output_phase: OutputPhase = "FULL"
     app_shape: AppShape | None = None
     round: int = 0
     max_rounds: int = 10

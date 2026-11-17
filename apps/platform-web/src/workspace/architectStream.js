@@ -10,6 +10,7 @@ const ARCHITECT_TERMINAL_EVENTS = new Set([
   'architect.clarification.required',
   'architect.contract.conflict',
   'architect.contract.ready',
+  'architect.visual_v0.ready',
   'architect.contract.confirmed',
   'architect.cancelled',
   'architect.failed',

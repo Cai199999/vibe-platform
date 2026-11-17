@@ -17,6 +17,9 @@ public record ArchitectStartRequest(
         JsonNode source,
         JsonNode uiHistory,
         JsonNode options,
-        String projectMode
+        String projectMode,
+        String outputPhase,
+        JsonNode visualDocument,
+        JsonNode visualDelta
 ) {
 }

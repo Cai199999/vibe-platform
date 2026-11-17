@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from ai_core.architect.llm import ContractDraft
 from ai_core.architect.visual import build_visual_document_from_contract
@@ -84,9 +85,12 @@ def validate_draft(
     draft: ContractDraft,
     *,
     project_mode: str = "NEW_PROJECT",
+    output_phase: str = "FULL",
 ) -> ContractValidation:
     issues: list[str] = []
     existing_source = project_mode == "EXISTING_SOURCE"
+    visual_v0 = output_phase == "VISUAL_V0"
+    backend_binding = output_phase == "BACKEND_BINDING"
 
     if len(draft.contract_markdown.strip()) < 200:
         issues.append("contract_markdown 太短，必须包含完整可执行契约")
@@ -110,7 +114,12 @@ def validate_draft(
     visual_document = dict(draft.visual_document or {})
 
     # 前端骨架由 FrontendCoder 直接消费这三项，缺失时不允许进入确认。
-    if shape in {"lightweight_web", "full_stack_system"}:
+    # V0 / BACKEND_BINDING 阶段不生成或重写前端骨架，因此跳过这些检查。
+    if (
+        shape in {"lightweight_web", "full_stack_system"}
+        and not visual_v0
+        and not backend_binding
+    ):
         if not frontend_routes:
             issues.append("前端契约缺少 frontend_routes，无法生成页面路由")
         if not page_layout:
@@ -193,39 +202,58 @@ def validate_draft(
         visual_document = {}
 
     elif shape == "full_stack_system":
-        if not api_routes:
-            issues.append("full_stack_system 必须包含 API 路由")
-        elif any(not route.path.startswith("/api/") for route in api_routes):
-            issues.append("API 路由必须以 /api/ 开头")
-        # 存量项目可能只补接口、不动已有表；不强制凭空生成增量 DDL。
-        if not database_ddl and not existing_source:
-            issues.append("full_stack_system 必须包含数据库 DDL")
-        elif database_ddl and not re.search(
-            r"CREATE\s+TABLE", database_ddl, re.IGNORECASE
-        ):
-            issues.append("数据库 DDL 必须包含 CREATE TABLE")
-        if re.search(r"FOREIGN\s+KEY", database_ddl, re.IGNORECASE):
-            issues.append("数据库 DDL 禁止物理外键，关联字段由业务代码保证")
-        # 主从表关联：显式定义必须与 DDL 严格对齐；漏写时按外键列推导。
-        # 引用不存在的表 / 外键属于契约自相矛盾，必须在确认前修复。
-        tables = parse_ddl_table_columns(database_ddl)
-        normalized_relations, relation_problems = normalize_table_relations(
-            tables,
-            draft.relations,
-            derive_when_empty=True,
-        )
-        if draft.relations and relation_problems and not existing_source:
-            issues.extend(relation_problems)
-        relations = normalized_relations
-        # 存量项目前端已经存在；契约只需要描述后端增量，不强制重新
-        # 产出 componentInteractions，也不对 DDL 关系做“凭空自检”。
-        if not interactions and not existing_source:
-            issues.append("full_stack_system 必须包含组件交互")
-        if not draft.tech_stack.get("backend"):
-            issues.append("full_stack_system 技术栈缺少 backend")
-        if not draft.tech_stack.get("database") and not existing_source:
-            issues.append("full_stack_system 技术栈缺少 database")
-        script_spec = {}
+        if visual_v0:
+            # V0 只允许虚拟树；任何后端契约字段都视为阶段越界。
+            if api_routes or database_ddl or relations or interactions:
+                issues.append("VISUAL_V0 阶段禁止生成 API / DDL / relations / 交互契约")
+            api_routes = []
+            database_ddl = ""
+            relations = []
+            interactions = []
+            script_spec = {}
+        else:
+            if not api_routes:
+                issues.append("full_stack_system 必须包含 API 路由")
+            elif any(not route.path.startswith("/api/") for route in api_routes):
+                issues.append("API 路由必须以 /api/ 开头")
+            # 存量项目可能只补接口、不动已有表；不强制凭空生成增量 DDL。
+            if not database_ddl and not existing_source:
+                issues.append("full_stack_system 必须包含数据库 DDL")
+            elif database_ddl and not re.search(
+                r"CREATE\s+TABLE", database_ddl, re.IGNORECASE
+            ):
+                issues.append("数据库 DDL 必须包含 CREATE TABLE")
+            if re.search(r"FOREIGN\s+KEY", database_ddl, re.IGNORECASE):
+                issues.append("数据库 DDL 禁止物理外键，关联字段由业务代码保证")
+            # 主从表关联：显式定义必须与 DDL 严格对齐；漏写时按外键列推导。
+            # 后端绑定阶段允许模型先写错，再确定性丢弃无效 relation 并推导，
+            # 不再把“父键不存在”变成阻塞错误。
+            tables = parse_ddl_table_columns(database_ddl)
+            normalized_relations, relation_problems = normalize_table_relations(
+                tables,
+                draft.relations,
+                derive_when_empty=True,
+            )
+            if (
+                draft.relations
+                and relation_problems
+                and not existing_source
+                and not backend_binding
+            ):
+                issues.extend(relation_problems)
+            relations = normalized_relations
+            # 存量 / 后端绑定阶段前端已经存在，不强制重新产出交互清单。
+            if not interactions and not existing_source and not backend_binding:
+                issues.append("full_stack_system 必须包含组件交互")
+            if not draft.tech_stack.get("backend"):
+                issues.append("full_stack_system 技术栈缺少 backend")
+            if (
+                not draft.tech_stack.get("database")
+                and not existing_source
+                and not backend_binding
+            ):
+                issues.append("full_stack_system 技术栈缺少 database")
+            script_spec = {}
 
     else:
         issues.append(f"未知应用形态: {shape}")
@@ -382,8 +410,12 @@ def assemble_contract(
     citations: list[ArchitectCitation],
     quality_tier: str = "L2_STANDARD",
     project_mode: str = "NEW_PROJECT",
+    output_phase: str = "FULL",
+    frozen_visual_document: dict[str, Any] | None = None,
 ) -> ArchitectContract:
     existing_source = project_mode == "EXISTING_SOURCE"
+    visual_v0 = output_phase == "VISUAL_V0"
+    backend_binding = output_phase == "BACKEND_BINDING"
     markdown = draft.contract_markdown.strip()
     if citations and "参考规范" not in markdown:
         lines = ["", "", "## 参考规范", ""]
@@ -399,7 +431,7 @@ def assemble_contract(
     # sqlite 仅用于本地测试；生产选型为 mysql / postgresql。
     database_engine = ""
     relations = list(draft.relations)
-    if shape == "full_stack_system":
+    if shape == "full_stack_system" and not visual_v0:
         database_engine = (
             normalize_database_engine(
                 tech_stack.get("databaseEngine") or tech_stack.get("database")
@@ -416,9 +448,15 @@ def assemble_contract(
                 derive_when_empty=True,
             )
 
-    visual_payload = dict(draft.visual_document or {})
+    if backend_binding:
+        # 后端绑定阶段以用户冻结的虚拟树为准，绝不重新生成或覆盖。
+        visual_payload = dict(frozen_visual_document or {})
+    else:
+        visual_payload = dict(draft.visual_document or {})
     if (
         not existing_source
+        and not backend_binding
+        and not visual_v0
         and shape in {"lightweight_web", "full_stack_system"}
         and not visual_payload
     ):
@@ -445,6 +483,7 @@ def assemble_contract(
         run_id=run_id,
         app_shape=shape,  # type: ignore[arg-type]
         project_mode=project_mode,  # type: ignore[arg-type]
+        output_phase=output_phase,  # type: ignore[arg-type]
         quality_tier=quality_tier,  # type: ignore[arg-type]
         status="AWAITING_CONFIRMATION",
         confidence_score=confidence_score,

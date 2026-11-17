@@ -14,7 +14,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from pydantic import ValidationError
@@ -25,6 +25,7 @@ from ai_core.observability.streaming import reset_token_stream
 from ai_core.architect.confidence import is_known_shape, missing_slots_for
 from ai_core.architect.slots import merge_inferred_slots
 from ai_core.architect.source import format_source
+from ai_core.architect.visual import build_visual_document_from_contract
 from ai_core.config import Settings, get_settings
 from ai_core.domain.architect import (
     APP_SHAPE_LABELS,
@@ -66,6 +67,49 @@ _TRANSIENT_LLM_MARKERS = (
 def _is_transient_llm_error(exc: Exception) -> bool:
     text = str(exc).lower()
     return any(marker in text for marker in _TRANSIENT_LLM_MARKERS)
+
+
+def _output_phase_block(phase: str) -> str:
+    """两阶段产出的硬约束。"""
+    if phase == "VISUAL_V0":
+        return (
+            "\n\n【VISUAL_V0 阶段 · 最高优先级】\n"
+            "- 本轮只产出 VisualDocument 虚拟原型，不设计后端；\n"
+            "- api_routes 必须是空数组，database_ddl 必须是空字符串，"
+            "relations / component_interactions 必须是空数组；\n"
+            "- 不要追问后端框架、数据库引擎、接口风格；这些留到"
+            " BACKEND_BINDING 阶段；\n"
+            "- contract_markdown 只描述视觉原型、页面结构与假设，"
+            "禁止写 API / DDL / 数据库技术栈；\n"
+            "- visual_document 必须完整、合法、可离线编辑。"
+        )
+    if phase == "BACKEND_BINDING":
+        return (
+            "\n\n【BACKEND_BINDING 阶段 · 最高优先级】\n"
+            "- 本轮只做后端增量绑定，不重新设计或输出 VisualDocument；\n"
+            "- visual_document 必须输出空对象 {}；\n"
+            "- 只基于输入的冻结 VisualDocument 与 visualDelta 生成 "
+            "api_routes / database_ddl / relations / component_interactions；\n"
+            "- 不要询问页面布局、视觉风格或重新生成前端骨架；\n"
+            "- relations 的 parent_key / foreign_key 必须引用 DDL 中真实存在的列。"
+        )
+    return ""
+
+
+def _visual_review_block(context: ArchitectContext) -> str:
+    """把冻结虚拟树与增量包注入 human 上下文。"""
+    if context.output_phase != "BACKEND_BINDING":
+        return ""
+    payload = {
+        "visualDocument": context.visual_document,
+        "visualDelta": context.visual_delta,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, default=str)
+    return (
+        "\n\n【FROZEN VISUAL DOCUMENT + DELTA】\n"
+        "源码/虚拟树已由用户冻结；只做后端增量绑定。\n"
+        f"{raw[:24000]}"
+    )
 
 
 def _project_mode_block(mode: str) -> str:
@@ -111,6 +155,11 @@ class ArchitectContext:
     latest_changes: str = ""
     # 双轨制：NEW_PROJECT / EXISTING_SOURCE；决定 System Prompt 与契约产物。
     project_mode: str = "NEW_PROJECT"
+    # 两阶段产出：VISUAL_V0 / BACKEND_BINDING / FULL。
+    output_phase: str = "FULL"
+    # 冻结虚拟树与 v0→current 增量包（BACKEND_BINDING 阶段使用）。
+    visual_document: dict[str, Any] = field(default_factory=dict)
+    visual_delta: dict[str, Any] = field(default_factory=dict)
     # 用户最近通过 Direct Ops 手工修改的摘要；由 ChangeLogStore 注入。
     direct_changelog: list[dict[str, Any]] = field(default_factory=list)
     # 影子 LLM 专用的只读架构快照（包含当前澄清问题 / 契约摘要）。
@@ -269,7 +318,12 @@ class MockArchitectLLM(ArchitectLLM):
                 ),
             )
 
-        missing = missing_slots_for(shape, slots, context.project_mode)
+        missing = missing_slots_for(
+            shape,
+            slots,
+            context.project_mode,
+            context.output_phase,
+        )
         if missing:
             return ArchitectAnalysis(
                 app_shape=shape,
@@ -297,12 +351,54 @@ class MockArchitectLLM(ArchitectLLM):
     def draft_contract(self, context: ArchitectContext) -> ContractDraft:
         shape = context.app_shape or context.slots.get("app.shape")
         if shape == "lightweight_web":
-            return self._lightweight_contract(context)
-        if shape == "script_automation":
-            return self._script_contract(context)
-        if shape == "full_stack_system":
-            return self._full_stack_contract(context)
-        raise ArchitectLLMError(f"无法为未知应用形态生成契约: {shape}")
+            draft = self._lightweight_contract(context)
+        elif shape == "script_automation":
+            draft = self._script_contract(context)
+        elif shape == "full_stack_system":
+            draft = self._full_stack_contract(context)
+        else:
+            raise ArchitectLLMError(f"无法为未知应用形态生成契约: {shape}")
+        # 两阶段产出：V0 只保留虚拟树；BACKEND_BINDING 只保留后端字段。
+        if context.output_phase == "VISUAL_V0":
+            visual = build_visual_document_from_contract(
+                title=context.project_name or "未命名页面",
+                page_layout=draft.page_layout,
+                components=draft.components,
+                interactions=draft.component_interactions,
+                api_routes=[],
+            )
+            markdown = (
+                f"# {context.project_name} · V0 虚拟原型\n\n"
+                "## 目标\n\n"
+                "先确认页面结构与交互入口，后端接口与数据库留到"
+                " BACKEND_BINDING 阶段。\n\n"
+                "## 页面结构\n\n"
+                + "\n".join(
+                    f"- {item.get('region')}: {item.get('title')}"
+                    for item in draft.page_layout
+                )
+                + "\n\n## 组件\n\n"
+                + "\n".join(
+                    f"- {item.get('name')}: {item.get('description')}"
+                    for item in draft.components
+                )
+            )
+            return replace(
+                draft,
+                contract_markdown=markdown,
+                api_routes=[],
+                database_ddl="",
+                relations=[],
+                component_interactions=[],
+                tech_stack={},
+                visual_document=visual,
+            )
+        if context.output_phase == "BACKEND_BINDING":
+            return replace(
+                draft,
+                visual_document={},
+            )
+        return draft
 
     def revise_contract(
         self,
@@ -1059,6 +1155,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "当作全栈的理由。"
         )
         system += _project_mode_block(context.project_mode)
+        system += _output_phase_block(context.output_phase)
         system += _changelog_block(context)
         human = _analysis_human(context)
 
@@ -1229,6 +1326,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "明确 AI 输入、模型处理与输出结构；纯 CRUD / 展示型应用必须为 false。"
         )
         system += _project_mode_block(context.project_mode)
+        system += _output_phase_block(context.output_phase)
         system += _changelog_block(context)
         human = _contract_human(context)
         return self._generate_with_repair(
@@ -1280,6 +1378,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             "AI 对话 / 生成 / 筛选分析为 true，纯 CRUD 为 false。"
         )
         system += _project_mode_block(context.project_mode)
+        system += _output_phase_block(context.output_phase)
         system += _changelog_block(context)
         human = (
             f"{_contract_human(context)}\n\n"
@@ -1518,6 +1617,7 @@ def _analysis_human(context: ArchitectContext) -> str:
         f"{_summary_block(context)}\n"
         f"RAG 规范片段：\n{_format_chunks(context.retrieved_chunks)}\n\n"
         f"当前源码：\n{format_source(context.source_files, 42000)}"
+        f"{_visual_review_block(context)}"
     )
 
 
@@ -1561,6 +1661,7 @@ def _contract_human(context: ArchitectContext) -> str:
         f"{_summary_block(context)}\n"
         f"RAG 规范片段：\n{_format_chunks(context.retrieved_chunks)}\n\n"
         f"当前源码：\n{format_source(context.source_files, 36000)}"
+        f"{_visual_review_block(context)}"
     )
 
 

@@ -78,6 +78,11 @@ import {
   storeImportedSource,
 } from '../workspace/projectMode.js'
 import {
+  buildVisualDelta,
+  loadVisualV0Baseline,
+  storeVisualV0Baseline,
+} from '../visual/visualDelta.js'
+import {
   buildSemanticReviewContext,
   peekSemanticReviewPacket,
   takeSemanticReviewPacket,
@@ -3644,6 +3649,8 @@ export default function WorkspacePage() {
         .map((item) => ({ role: item.role, content: item.content }))
         .filter((item) => item.content)
         .slice(-20)
+      const frozenDocument = loadFrozenVisualDocument(projectId)
+      const v0Baseline = loadVisualV0Baseline(projectId)
       architect.start(projectId, {
         runId: newId('arc'),
         tenantId: user?.tenantId || 'tenant_local',
@@ -3662,6 +3669,13 @@ export default function WorkspacePage() {
           { role: 'user', content: text },
         ],
         projectMode: PROJECT_MODE.NEW_PROJECT,
+        // 首次澄清只产出 v0 虚拟树；冻结后再走 BACKEND_BINDING。
+        outputPhase: frozenDocument ? 'BACKEND_BINDING' : 'VISUAL_V0',
+        visualDocument: frozenDocument || undefined,
+        visualDelta:
+          frozenDocument && v0Baseline
+            ? buildVisualDelta(v0Baseline, frozenDocument)
+            : undefined,
         options: { llmProvider: modelProvider },
       })
       return
@@ -4163,6 +4177,10 @@ export default function WorkspacePage() {
       useVisualDocumentStore.getState().replaceDocument(document, {
         resetHistory: true,
       })
+      // V0 是增量审查的基线；后续 BACKEND_BINDING 只传 delta。
+      if ((contract.outputPhase || state.outputPhase) === 'VISUAL_V0') {
+        storeVisualV0Baseline(activeTabId, document)
+      }
       visualDocumentSyncRef.current.set(activeTabId, key)
       try {
         window.localStorage.setItem(syncKeyStorage, key)
@@ -4180,7 +4198,14 @@ export default function WorkspacePage() {
       }
     }
 
-    if (state.status !== 'CONFIRMED') return
+    if (
+      state.status !== 'CONFIRMED' &&
+      state.status !== 'AWAITING_VISUAL_EDIT'
+    ) {
+      return
+    }
+    // 最终后端绑定契约不再自动跳回画布；用户已经完成视觉编辑。
+    if (contract.outputPhase === 'BACKEND_BINDING') return
     const activeDocument = useVisualDocumentStore.getState().doc
     if (activeDocument?.docId !== visual.docId) return
     const autoOpenKey = `vibe.visual.autoOpened.${activeTabId}.${contract.contractId}`
@@ -4227,6 +4252,7 @@ export default function WorkspacePage() {
       if (visualReviewStartedRef.current.has(key)) return
       visualReviewStartedRef.current.add(key)
       const project = projects.find((item) => item.id === activeTabId)
+      const frozenDocument = loadFrozenVisualDocument(activeTabId)
       architect.openPanel(activeTabId)
       architect.start(activeTabId, {
         runId: newId('arc'),
@@ -4237,6 +4263,9 @@ export default function WorkspacePage() {
         projectSummary: packet.summary,
         latestChanges: packet.summary,
         projectMode: PROJECT_MODE.NEW_PROJECT,
+        outputPhase: 'BACKEND_BINDING',
+        visualDocument: frozenDocument || undefined,
+        visualDelta: packet.visualDelta || undefined,
         uiHistory: [
           {
             role: 'system',

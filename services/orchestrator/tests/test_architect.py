@@ -38,6 +38,7 @@ from ai_core.architect.skeleton import (
     should_use_skeleton,
 )
 from ai_core.architect.slots import infer_app_shape, infer_slots
+from ai_core.domain.visual_document import VisualDocument, VisualNode
 from ai_core.architect import service as architect_service_module
 from ai_core.architect.service import ActiveArchitectRun, ArchitectService
 from ai_core.architect.schemas import (
@@ -808,6 +809,106 @@ class SkeletonModeTest(unittest.TestCase):
         self.assertTrue(validation.draft.components[0]["isPlaceholder"])
         self.assertTrue(validation.draft.visual_document)
         self.assertTrue(validate_visual_document(validation.draft.visual_document).ok)
+
+    def test_backend_binding_contract_reuses_frozen_visual_document(self) -> None:
+        run_id = f"test_{uuid.uuid4().hex[:12]}"
+        runner = ArchitectGraphRunner(
+            MockArchitectLLM(),
+            checkpointer_provider=MemoryCheckpointerProvider(),
+        )
+        frozen = VisualDocument(
+            docId="vdoc_frozen",
+            projectId=f"project_{run_id}",
+            root=VisualNode(id="nd_page0001", type="page", name="页面"),
+        ).model_dump(mode="json", by_alias=True)
+        state = _initial_state(run_id)
+        state.update(
+            {
+                "output_phase": "BACKEND_BINDING",
+                "source_files": {},
+                "source_hash": "",
+                "visual_document": frozen,
+                "visual_delta": {"added": [{"id": "nd_new"}]},
+                "slots": {
+                    "app.shape": "full_stack_system",
+                    "backend.framework": "java_spring_boot",
+                    "database.engine": "mysql",
+                    "business.key_flows": ["查看订单", "创建订单"],
+                    "data.entities": ["orders(id, title)"],
+                },
+                "ui_history": [
+                    {
+                        "role": "user",
+                        "content": "为冻结界面补充订单接口与数据库",
+                    }
+                ],
+            }
+        )
+        outcome = runner.run(state, run_id=run_id)
+        self.assertEqual(
+            (outcome.interrupt or {}).get("kind"),
+            "contract_confirmation",
+            outcome.interrupt,
+        )
+        contract = outcome.state.get("contract") or {}
+        self.assertEqual(contract.get("outputPhase"), "BACKEND_BINDING")
+        self.assertEqual(
+            (contract.get("visualDocument") or {}).get("docId"),
+            "vdoc_frozen",
+        )
+        self.assertTrue(contract.get("apiRoutes"))
+        self.assertTrue(contract.get("databaseDdl"))
+
+    def test_visual_v0_stops_before_contract_confirmation(self) -> None:
+        run_id = f"test_{uuid.uuid4().hex[:12]}"
+        runner = ArchitectGraphRunner(
+            MockArchitectLLM(),
+            checkpointer_provider=MemoryCheckpointerProvider(),
+        )
+        state = _initial_state(run_id)
+        state.update(
+            {
+                "output_phase": "VISUAL_V0",
+                "source_files": {},
+                "source_hash": "",
+                "slots": {
+                    "app.shape": "full_stack_system",
+                    "ui.layout": "topnav_cards",
+                    "ui.primary_flow": "查看订单列表 -> 点击新建订单 -> 保存",
+                },
+                "ui_history": [
+                    {
+                        "role": "user",
+                        "content": "订单管理后台，需要订单列表和新建订单按钮",
+                    }
+                ],
+            }
+        )
+        outcome = runner.run(state, run_id=run_id)
+        for _ in range(6):
+            payload = outcome.interrupt or {}
+            questions = payload.get("questions") or []
+            if not questions:
+                break
+            answers = [
+                _answer_for(question, "full_stack_system") for question in questions
+            ]
+            outcome = runner.run(
+                {},
+                run_id=run_id,
+                resume={"answers": answers},
+            )
+
+        self.assertEqual(
+            outcome.state.get("status"),
+            "AWAITING_VISUAL_EDIT",
+            outcome.interrupt,
+        )
+        contract = outcome.state.get("contract") or {}
+        self.assertEqual(contract.get("outputPhase"), "VISUAL_V0")
+        self.assertEqual(contract.get("apiRoutes"), [])
+        self.assertEqual(contract.get("databaseDdl"), "")
+        self.assertTrue(contract.get("visualDocument"))
 
     def test_semantic_review_packet_forces_first_round_business_question(self) -> None:
         run_id = f"test_{uuid.uuid4().hex[:12]}"

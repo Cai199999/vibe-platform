@@ -142,6 +142,8 @@ export const EMPTY_ARCHITECT = {
   lastSeq: 0,
   // NEW_PROJECT / EXISTING_SOURCE；由后端 architect.started 事件回填。
   projectMode: null,
+  // VISUAL_V0 / BACKEND_BINDING / FULL。
+  outputPhase: null,
   appShape: null,
   confidenceScore: 0,
   threshold: 0.85,
@@ -271,6 +273,7 @@ export function reduceArchitect(state, event) {
         ...base,
         status: 'RUNNING',
         projectMode: payload.projectMode ?? state.projectMode ?? null,
+        outputPhase: payload.outputPhase ?? state.outputPhase ?? null,
         submitting: true,
         error: null,
       }
@@ -401,10 +404,13 @@ export function reduceArchitect(state, event) {
           createdAt: new Date().toISOString(),
         }),
       }
-    case 'architect.contract.ready':
+    case 'architect.contract.ready': {
+      const isVisualV0 = payload.contract?.outputPhase === 'VISUAL_V0'
       return {
         ...base,
-        status: 'AWAITING_CONTRACT_CONFIRMATION',
+        status: isVisualV0
+          ? 'AWAITING_VISUAL_EDIT'
+          : 'AWAITING_CONTRACT_CONFIRMATION',
         conflict: null,
         contract: payload.contract ?? state.contract,
         citations: payload.citations ?? state.citations,
@@ -419,13 +425,24 @@ export function reduceArchitect(state, event) {
           id: `contract:${payload.contract?.contractId}:${event.seq}`,
           role: 'assistant',
           kind: 'contract',
-          content: `《全栈实施契约》已生成（应用形态：${
-            payload.contract?.appShape ?? state.appShape
-          }，置信度 ${Math.round(
-            (payload.contract?.confidenceScore ?? 0) * 100,
-          )}%）。请确认、要求修订或取消。`,
+          content: isVisualV0
+            ? 'v0 虚拟原型已生成。请在画布中离线调整，完成后确认视觉，系统只把增量组件交给架构师做后端绑定。'
+            : `《全栈实施契约》已生成（应用形态：${
+                payload.contract?.appShape ?? state.appShape
+              }，置信度 ${Math.round(
+                (payload.contract?.confidenceScore ?? 0) * 100,
+              )}%）。请确认、要求修订或取消。`,
           createdAt: new Date().toISOString(),
         }),
+      }
+    }
+    case 'architect.visual_v0.ready':
+      return {
+        ...base,
+        status: 'AWAITING_VISUAL_EDIT',
+        submitting: false,
+        streamingText: '',
+        streamingNode: null,
       }
     case 'architect.contract.decision.received':
       return {

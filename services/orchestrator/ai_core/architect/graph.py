@@ -295,6 +295,7 @@ class ArchitectGraphRunner:
             "conflict_gate": self._conflict_gate,
             "contract_ready": self._contract_ready,
             "contract_gate": self._contract_gate,
+            "visual_v0_ready": self._visual_v0_ready,
             "confirmed": self._confirmed,
             "cancelled": self._cancelled,
             "confidence_exhausted": self._confidence_exhausted,
@@ -361,17 +362,26 @@ class ArchitectGraphRunner:
                 "failed": "failed",
             },
         )
-        builder.add_edge("contract_ready", "contract_gate")
+        builder.add_conditional_edges(
+            "contract_ready",
+            self._route_after_contract_ready,
+            {
+                "visual_v0_ready": "visual_v0_ready",
+                "contract_gate": "contract_gate",
+            },
+        )
         builder.add_conditional_edges(
             "contract_gate",
             self._route_contract_decision,
             {
                 "confirmed": "confirmed",
                 "revise_contract": "revise_contract",
+                "visual_v0_ready": "visual_v0_ready",
                 "cancelled": "cancelled",
                 "failed": "failed",
             },
         )
+        builder.add_edge("visual_v0_ready", END)
         builder.add_edge("confirmed", END)
         builder.add_edge("cancelled", END)
         builder.add_edge("confidence_exhausted", END)
@@ -591,6 +601,7 @@ class ArchitectGraphRunner:
                 dict(state.get("slots") or {}),
                 float(state.get("threshold") or 0.85),
                 project_mode=str(state.get("project_mode") or "NEW_PROJECT"),
+                output_phase=str(state.get("output_phase") or "FULL"),
             )
             reasons = list(guard.reasons)
         shape = analysis.app_shape
@@ -792,10 +803,12 @@ class ArchitectGraphRunner:
         draft = draft_from_dict(raw)
         shape = str(state.get("app_shape") or "")
         project_mode = str(state.get("project_mode") or "NEW_PROJECT")
+        output_phase = str(state.get("output_phase") or "FULL")
         validation = validate_draft(
             shape,
             draft,
             project_mode=project_mode,
+            output_phase=output_phase,
         )
         issues = list(validation.issues)
         audit_problems: list[Any] = []
@@ -805,7 +818,11 @@ class ArchitectGraphRunner:
             # 实现（只读、无副作用），避免把矛盾带进代码生成。
             # 存量项目：已有真实数据库与前端，跳过“凭空生成 DDL 并自检”，
             # 否则会把增量 DDL 误判为全量契约（父键不在父表等假错误）。
-            if shape == "full_stack_system" and project_mode != "EXISTING_SOURCE":
+            if (
+                shape == "full_stack_system"
+                and project_mode != "EXISTING_SOURCE"
+                and output_phase != "VISUAL_V0"
+            ):
                 # 延迟导入：fullstack 包会反向依赖 architect.service，
                 # 顶层导入会造成循环依赖。
                 from ai_core.fullstack.contract_audit import validate_contract
@@ -1196,6 +1213,8 @@ class ArchitectGraphRunner:
             citations=_citations(state),
             quality_tier=quality_tier,
             project_mode=str(state.get("project_mode") or "NEW_PROJECT"),
+            output_phase=str(state.get("output_phase") or "FULL"),
+            frozen_visual_document=dict(state.get("visual_document") or {}),
         )
         contract_payload = contract.model_dump(mode="json", by_alias=True)
         self._emit(
@@ -1211,11 +1230,37 @@ class ArchitectGraphRunner:
                 f"{int(state.get('contract_revision_count') or 0)}"
             ),
         )
+        output_phase = str(state.get("output_phase") or "FULL")
+        if output_phase == "VISUAL_V0":
+            self._emit(
+                "architect.visual_v0.ready",
+                {
+                    "runId": state.get("run_id"),
+                    "contractId": contract.contract_id,
+                    "visualDocument": contract_payload.get("visualDocument"),
+                    "revision": (contract_payload.get("visualDocument") or {}).get(
+                        "revision", 0
+                    ),
+                },
+                dedupe_key=(
+                    f"architect.visual_v0.ready:{contract.contract_id}:"
+                    f"{int(state.get('contract_revision_count') or 0)}"
+                ),
+            )
+            return {
+                "contract": contract_payload,
+                "quality_tier": quality_tier,
+                "status": "AWAITING_VISUAL_EDIT",
+            }
         return {
             "contract": contract_payload,
             "quality_tier": quality_tier,
             "status": "AWAITING_CONTRACT_CONFIRMATION",
         }
+
+    def _visual_v0_ready(self, state: ArchitectState) -> dict[str, Any]:
+        """V0 虚拟树已产出：本次 Run 结束，等待用户离线编辑。"""
+        return {"status": "AWAITING_VISUAL_EDIT"}
 
     def _contract_gate(self, state: ArchitectState) -> dict[str, Any]:
         self._check_cancelled()
@@ -1321,9 +1366,20 @@ class ArchitectGraphRunner:
             return "failed"
         return "validate_contract"
 
+    @staticmethod
+    def _route_after_contract_ready(state: ArchitectState) -> str:
+        if str(state.get("output_phase") or "FULL") == "VISUAL_V0":
+            return "visual_v0_ready"
+        return "contract_gate"
+
     def _route_contract_decision(self, state: ArchitectState) -> str:
         if state.get("status") == "FAILED":
             return "failed"
+        if (
+            str(state.get("output_phase") or "FULL") == "VISUAL_V0"
+            and state.get("status") == "AWAITING_VISUAL_EDIT"
+        ):
+            return "visual_v0_ready"
         decision = state.get("contract_decision")
         if decision == "CONFIRM":
             return "confirmed"
@@ -1506,6 +1562,9 @@ def _context_from_state(state: ArchitectState) -> ArchitectContext:
         project_summary=str(state.get("project_summary") or ""),
         latest_changes=str(state.get("latest_changes") or ""),
         project_mode=str(state.get("project_mode") or "NEW_PROJECT"),
+        output_phase=str(state.get("output_phase") or "FULL"),
+        visual_document=dict(state.get("visual_document") or {}),
+        visual_delta=dict(state.get("visual_delta") or {}),
         direct_changelog=list(state.get("direct_changelog") or []),
     )
 

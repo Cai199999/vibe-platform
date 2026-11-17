@@ -63,7 +63,13 @@ from ai_core.ports.sandbox import SandboxProvider
 
 logger = logging.getLogger(__name__)
 
-TERMINAL_ARCHITECT_STATUSES = {"CONFIRMED", "CANCELLED", "FAILED"}
+TERMINAL_ARCHITECT_STATUSES = {
+    "CONFIRMED",
+    "CANCELLED",
+    "FAILED",
+    # V0 虚拟树已产出：本次 Run 结束，等待用户离线编辑。
+    "AWAITING_VISUAL_EDIT",
+}
 
 
 # ------------------------------------------------------------
@@ -120,6 +126,7 @@ class ActiveArchitectRun:
     source_origin: str = "request"
     # 双轨制：由 source 事实确定性判定，前端声明只作回退。
     project_mode: str = "NEW_PROJECT"
+    output_phase: str = "FULL"
     app_shape: str | None = None
     round: int = 0
     max_rounds: int = 10
@@ -242,6 +249,7 @@ class ArchitectService:
                 llm=llm,
                 buffer=get_event_buffer(run_id),
                 project_mode=mode_decision.mode,
+                output_phase=request.output_phase,
                 max_rounds=request.options.max_clarification_rounds,
                 threshold=request.options.confidence_threshold,
             )
@@ -257,6 +265,7 @@ class ArchitectService:
                 "maxRounds": active.max_rounds,
                 "llmProvider": request.options.llm_provider,
                 "projectMode": active.project_mode,
+                "outputPhase": active.output_phase,
             },
             dedupe_key=f"architect.started:{run_id}",
         )
@@ -876,6 +885,7 @@ class ArchitectService:
                 project_name=active.request.project_name,
                 status=active.status,
                 project_mode=active.project_mode,  # type: ignore[arg-type]
+                output_phase=active.output_phase,  # type: ignore[arg-type]
                 app_shape=active.app_shape,  # type: ignore[arg-type]
                 round=active.round,
                 max_rounds=active.max_rounds,
@@ -974,6 +984,8 @@ class ArchitectService:
                     elif status == "AWAITING_CONTRACT_CONFIRMATION":
                         # 理论上 contract_gate 一定会 interrupt；防御性收敛。
                         active.status = "AWAITING_CONTRACT_CONFIRMATION"
+                    elif status == "AWAITING_VISUAL_EDIT":
+                        active.status = "AWAITING_VISUAL_EDIT"
                     else:
                         active.status = "FAILED"
                         active.error = active.error or (
@@ -1127,6 +1139,13 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         "source_origin": bundle.origin,
         "source_warnings": bundle.warnings,
         "project_mode": active.project_mode,
+        "output_phase": active.output_phase,
+        "visual_document": (
+            request.visual_document.model_dump(mode="json", by_alias=True)
+            if request.visual_document is not None
+            else {}
+        ),
+        "visual_delta": dict(request.visual_delta or {}),
         "ui_history": list(request.ui_history),
         # 项目摘要 + 本次快照改动：Architect 分析 / 契约草稿必须复用其中
         # 已确认的技术选型，不再重复做选型问卷。

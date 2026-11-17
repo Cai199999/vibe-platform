@@ -24,6 +24,7 @@ from ai_core.architect.confidence import (
     missing_slots_for,
 )
 from ai_core.domain.architect import ArchitectAnalysis
+from ai_core.domain.visual_document import VisualDocument, VisualNode
 from ai_core.fullstack.contract_audit import audit_contract
 
 
@@ -79,6 +80,104 @@ def _existing_draft() -> ContractDraft:
     )
 
 
+def _visual_document() -> dict:
+    document = VisualDocument(
+        docId="vdoc_v0",
+        projectId="proj_v0",
+        root=VisualNode(id="nd_page0001", type="page", name="页面"),
+    )
+    return document.model_dump(mode="json", by_alias=True)
+
+
+def _visual_v0_draft() -> ContractDraft:
+    return ContractDraft(
+        contract_markdown="# V0 虚拟原型\n\n" + ("页面结构说明。" * 60),
+        tech_stack={},
+        visual_document=_visual_document(),
+        implementation_path=[{"phase": "1", "title": "原型", "tasks": []}],
+    )
+
+
+class VisualV0Tests(unittest.TestCase):
+    def test_v0_only_allows_visual_document(self) -> None:
+        validation = validate_draft(
+            "full_stack_system",
+            _visual_v0_draft(),
+            output_phase="VISUAL_V0",
+        )
+        self.assertTrue(validation.valid, validation.issues)
+
+        polluted = replace(
+            _visual_v0_draft(),
+            api_routes=[
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/users",
+                    request="",
+                    response="[]",
+                    description="用户",
+                )
+            ],
+        )
+        polluted_validation = validate_draft(
+            "full_stack_system",
+            polluted,
+            output_phase="VISUAL_V0",
+        )
+        self.assertTrue(
+            any("禁止生成 API" in issue for issue in polluted_validation.issues),
+            polluted_validation.issues,
+        )
+
+    def test_v0_assembly_has_no_backend(self) -> None:
+        contract = assemble_contract(
+            contract_id="contract_v0",
+            run_id="arc_v0",
+            shape="full_stack_system",
+            confidence_score=0.9,
+            threshold=0.85,
+            source_hash="sha256:v0",
+            draft=_visual_v0_draft(),
+            citations=[],
+            output_phase="VISUAL_V0",
+        )
+        self.assertEqual(contract.output_phase, "VISUAL_V0")
+        self.assertIsNotNone(contract.visual_document)
+        self.assertEqual(contract.api_routes, [])
+        self.assertEqual(contract.database_ddl, "")
+
+    def test_backend_binding_reuses_frozen_visual_document(self) -> None:
+        draft = replace(
+            _existing_draft(),
+            visual_document={},
+            database_ddl="CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);",
+        )
+        validation = validate_draft(
+            "full_stack_system",
+            draft,
+            output_phase="BACKEND_BINDING",
+        )
+        self.assertFalse(
+            any("组件交互" in issue for issue in validation.issues),
+            validation.issues,
+        )
+        contract = assemble_contract(
+            contract_id="contract_bind",
+            run_id="arc_bind",
+            shape="full_stack_system",
+            confidence_score=0.9,
+            threshold=0.85,
+            source_hash="sha256:bind",
+            draft=draft,
+            citations=[],
+            output_phase="BACKEND_BINDING",
+            frozen_visual_document=_visual_document(),
+        )
+        self.assertEqual(contract.output_phase, "BACKEND_BINDING")
+        self.assertIsNotNone(contract.visual_document)
+        self.assertEqual(contract.visual_document.doc_id, "vdoc_v0")
+
+
 class ExistingSourceSlotTests(unittest.TestCase):
     def test_ui_layout_is_not_required_for_existing_source(self) -> None:
         slots = {
@@ -95,6 +194,23 @@ class ExistingSourceSlotTests(unittest.TestCase):
             "ui.layout",
             missing_slots_for("full_stack_system", slots, "NEW_PROJECT"),
         )
+        self.assertNotIn(
+            "ui.layout",
+            missing_slots_for(
+                "full_stack_system",
+                slots,
+                "NEW_PROJECT",
+                "BACKEND_BINDING",
+            ),
+        )
+        v0_missing = missing_slots_for(
+            "full_stack_system",
+            {},
+            "NEW_PROJECT",
+            "VISUAL_V0",
+        )
+        self.assertNotIn("backend.framework", v0_missing)
+        self.assertNotIn("database.engine", v0_missing)
 
         analysis = ArchitectAnalysis(
             app_shape="full_stack_system",

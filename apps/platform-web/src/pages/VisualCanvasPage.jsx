@@ -8,6 +8,7 @@ import {
   SourceProjectionError,
 } from '../visual/sourceProjection.js'
 import { analyzeExistingReact } from '../visual/sourceAnalysisClient.js'
+import { loadVisualV0Baseline } from '../visual/visualDelta.js'
 import {
   buildSemanticReviewPacket,
   storeSemanticReviewPacket,
@@ -101,7 +102,9 @@ export default function VisualCanvasPage() {
 
   const handleFrozen = (document) => {
     setHandoffError('')
-    const packet = buildSemanticReviewPacket(document)
+    const packet = buildSemanticReviewPacket(document, {
+      baseline: loadVisualV0Baseline(projectId),
+    })
     if (!storeSemanticReviewPacket(packet)) {
       setHandoffError('无法保存语义审查包，请检查浏览器存储权限后重试')
       return

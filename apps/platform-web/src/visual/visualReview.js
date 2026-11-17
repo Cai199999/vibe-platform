@@ -4,9 +4,11 @@
  * 只传层级、语义、interactions、bindings；不传像素坐标、DOM 或源码。
  */
 
+import { buildVisualDelta } from './visualDelta.js'
+
 export const VISUAL_REVIEW_STORAGE_PREFIX = 'vibe.visual.review.'
 
-export function buildSemanticReviewPacket(document) {
+export function buildSemanticReviewPacket(document, { baseline = null } = {}) {
   const nodes = []
   const walk = (node, parentId, path, depth) => {
     if (!node) return
@@ -41,6 +43,7 @@ export function buildSemanticReviewPacket(document) {
   const unresolvedInteractions = interactions.filter((item) => !item.resolved)
   const unresolvedBindings = bindings.filter((item) => !item.resolved)
   const repeatedNodes = nodes.filter((item) => item.repeat)
+  const visualDelta = baseline ? buildVisualDelta(baseline, document) : null
 
   return {
     schemaVersion: '1.0',
@@ -58,12 +61,14 @@ export function buildSemanticReviewPacket(document) {
     unresolvedInteractions,
     unresolvedBindings,
     repeatedNodes,
+    visualDelta,
     summary: [
       `虚拟界面「${document?.title || '未命名页面'}」已冻结`,
       `节点 ${nodes.length} 个`,
       `交互 ${interactions.length} 个，未解决 ${unresolvedInteractions.length} 个`,
       `数据绑定 ${bindings.length} 个，未解决 ${unresolvedBindings.length} 个`,
       `列表/表格数据源 ${repeatedNodes.length} 个`,
+      ...(visualDelta ? [`相对 v0：${visualDelta.summary}`] : []),
     ].join('；'),
   }
 }
