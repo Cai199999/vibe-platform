@@ -12,7 +12,9 @@
 
 export const SOURCE_PROJECTION_SCHEMA_VERSION = '0.1-projection'
 export const SOURCE_PROJECTION_TIP =
-  '已识别为存量源码，需转为虚拟树才能自由编辑'
+  '当前为只读分析视图。源码直改（AST）能力尚未开放'
+export const SOURCE_PROJECTION_PRINCIPLE =
+  '存量项目不会转换为虚拟树，源码始终是唯一事实源；后续编辑走 AST 直改。'
 const MAX_INLINE_DEPTH = 6
 const MAX_PROJECTION_NODES = 2000
 
@@ -355,6 +357,7 @@ export function buildSourceProjection(analysis) {
       generatedAt: new Date().toISOString(),
     },
     tip: SOURCE_PROJECTION_TIP,
+    principle: SOURCE_PROJECTION_PRINCIPLE,
   }
 }
 

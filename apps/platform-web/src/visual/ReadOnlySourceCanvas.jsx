@@ -5,12 +5,14 @@
  *   - 不读取 visualDocumentStore；
  *   - 不提供任何编辑命令；
  *   - hover 展示组件层级 / className / 源码位置；
- *   - 固定提示“已识别为存量源码，需转为虚拟树才能自由编辑”。
+ *   - 固定提示“当前为只读分析视图。源码直改（AST）能力尚未开放”；
+ *   - 明确说明存量项目不会转换为虚拟树，源码始终是唯一事实源。
  */
 
 import { useMemo, useState } from 'react'
 import { NODE_LABELS } from './visualDocument.js'
 import {
+  SOURCE_PROJECTION_PRINCIPLE,
   SOURCE_PROJECTION_TIP,
   flattenSourceProjection,
   projectionClassName,
@@ -186,7 +188,7 @@ export default function ReadOnlySourceCanvas({ projection, onBack }) {
           <span className="eyebrow">Source Projection · Read Only</span>
           <h1>{projection.title}</h1>
           <p>
-            存量源码只读投影 · 不写回源码 · 不生成虚拟树 · 入口{' '}
+            存量源码只读投影 · 源码是唯一事实源 · 不写回、不转虚拟树 · 入口{' '}
             {projection.entryComponent || '未识别'}
           </p>
         </div>
@@ -198,8 +200,13 @@ export default function ReadOnlySourceCanvas({ projection, onBack }) {
         </div>
       </header>
 
-      <div className="src-projection-banner" role="status">
+      <div
+        className="src-projection-banner"
+        role="status"
+        data-projection-principle={SOURCE_PROJECTION_PRINCIPLE}
+      >
         <strong>{SOURCE_PROJECTION_TIP}</strong>
+        <span>{SOURCE_PROJECTION_PRINCIPLE}</span>
         <span>
           hover 节点查看组件层级、className 与源码位置；当前阶段不提供写回。
         </span>
@@ -279,6 +286,7 @@ export default function ReadOnlySourceCanvas({ projection, onBack }) {
           )}
           <div className="src-projection-hint">
             <strong>{SOURCE_PROJECTION_TIP}</strong>
+            <p>{SOURCE_PROJECTION_PRINCIPLE}</p>
           </div>
         </aside>
       </div>
@@ -293,7 +301,9 @@ export default function ReadOnlySourceCanvas({ projection, onBack }) {
           <strong>{hoverPath || hoverNode.projection?.tag}</strong>
           {hoverClass && <code>{hoverClass}</code>}
           {hoverSource && <span>{hoverSource}</span>}
-          <em>{SOURCE_PROJECTION_TIP}</em>
+          <em>
+            {SOURCE_PROJECTION_TIP}。{SOURCE_PROJECTION_PRINCIPLE}
+          </em>
         </div>
       )}
     </div>

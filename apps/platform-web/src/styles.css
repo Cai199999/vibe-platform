@@ -12463,7 +12463,8 @@ body.is-viewport-panning * {
 .src-projection-banner {
   display: flex;
   align-items: center;
-  gap: 14px;
+  flex-wrap: wrap;
+  gap: 6px 14px;
   padding: 10px 22px;
   border-bottom: 1px solid rgba(56, 189, 248, 0.28);
   background: rgba(56, 189, 248, 0.08);
@@ -12660,6 +12661,12 @@ body.is-viewport-panning * {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.6;
+}
+
+.src-projection-hint p {
+  margin: 6px 0 0;
+  color: inherit;
+  opacity: 0.78;
 }
 
 .src-projection-hint {

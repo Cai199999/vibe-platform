@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  SOURCE_PROJECTION_PRINCIPLE,
   SOURCE_PROJECTION_TIP,
   SourceProjectionError,
   buildSourceProjection,
@@ -18,6 +19,7 @@ describe('存量源码只读投影', () => {
     expect(projection.root.type).toBe('container')
     expect(projection.root.projection.path).toEqual(['Card', 'div'])
     expect(projection.tip).toBe(SOURCE_PROJECTION_TIP)
+    expect(projection.principle).toBe(SOURCE_PROJECTION_PRINCIPLE)
     expect(projection.root.locked).toBe(true)
     expect(projection.componentHierarchies).toContain('Card -> Header -> Text')
   })

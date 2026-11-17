@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createRoot } from 'react-dom/client'
 import ReadOnlySourceCanvas from '../ReadOnlySourceCanvas.jsx'
 import {
+  SOURCE_PROJECTION_PRINCIPLE,
   SOURCE_PROJECTION_TIP,
   buildSourceProjection,
 } from '../sourceProjection.js'
@@ -34,6 +35,8 @@ describe('ReadOnlySourceCanvas', () => {
   it('渲染只读投影与固定提示', () => {
     expect(container.querySelector('[data-source-projection]')).toBeTruthy()
     expect(container.textContent).toContain(SOURCE_PROJECTION_TIP)
+    expect(container.textContent).toContain(SOURCE_PROJECTION_PRINCIPLE)
+    expect(container.querySelector('[data-projection-principle]')).toBeTruthy()
     expect(container.textContent).toContain('Card.jsx')
     expect(container.querySelectorAll('[data-source-projection-node]').length).toBeGreaterThan(
       2,
@@ -61,5 +64,6 @@ describe('ReadOnlySourceCanvas', () => {
     expect(tooltip.textContent).toContain('Card › div › Header › header')
     expect(tooltip.textContent).toContain('items-center')
     expect(tooltip.textContent).toContain(SOURCE_PROJECTION_TIP)
+    expect(tooltip.textContent).toContain(SOURCE_PROJECTION_PRINCIPLE)
   })
 })
