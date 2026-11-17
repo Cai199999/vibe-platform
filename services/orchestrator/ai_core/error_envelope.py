@@ -205,6 +205,15 @@ _SPECS: dict[str, ErrorSpec] = {
     "FULLSTACK_INTERNAL_ERROR": ErrorSpec(
         "INTERNAL", "FATAL", "全栈生成遇到内部问题，已记录诊断编号。"
     ),
+    "ARCHITECT_LLM_ERROR": ErrorSpec(
+        "ARCHITECT",
+        "RECOVERABLE",
+        "架构师模型连接中断，已保留当前进度，请重新发起或稍后重试。",
+        retryable=True,
+    ),
+    "ARCHITECT_INTERNAL_ERROR": ErrorSpec(
+        "ARCHITECT", "FATAL", "架构澄清遇到内部问题，已记录诊断编号，请重新发起。"
+    ),
     "ARCHITECT_INCOMPLETE_STATE": ErrorSpec(
         "ARCHITECT", "FATAL", "架构流程未到达可交付状态，请重新发起。"
     ),

@@ -283,6 +283,9 @@ class Settings(BaseSettings):
     # JSON 结构化输出：DeepSeek JSON Output + Pydantic 校验失败回传重试。
     architect_structured_output: bool = True
     architect_json_retry_limit: int = 1
+    # 连接级瞬态错误（流式连接中断 / 网关 502 / 超时）在每次 JSON
+    # 修复尝试内部最多再重试 N 次；与“格式不合法的修复重试”分开计。
+    architect_llm_retry_limit: int = 2
     architect_graph_recursion_limit: int = 80
     # 混合 RAG：BM25（硬性规范）+ Chroma 向量检索（企业长文档）。
     architect_rag_provider: str = "hybrid"

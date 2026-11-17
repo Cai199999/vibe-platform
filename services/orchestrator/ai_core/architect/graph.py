@@ -242,9 +242,18 @@ class ArchitectGraphRunner:
                             "task": task,
                             "text": text,
                         },
-                    )
+                    ),
+                    reset=lambda task: self._emit(
+                        "architect.token.reset",
+                        {
+                            "runId": state.get("run_id"),
+                            "node": name,
+                            "label": NODE_LABELS.get(name, name),
+                            "task": task,
+                        },
+                    ),
                 )
-                token_scope = collect_tokens(emitter.feed)
+                token_scope = collect_tokens(emitter.feed, emitter.reset)
             try:
                 with token_scope, collect_usage(collector):
                     update = fn(state)

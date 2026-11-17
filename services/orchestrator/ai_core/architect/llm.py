@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -20,6 +21,7 @@ from pydantic import ValidationError
 
 from ai_core.adapters.model.deepseek import DeepSeekClient
 from ai_core.agent.memory import fallback_summary
+from ai_core.observability.streaming import reset_token_stream
 from ai_core.architect.confidence import is_known_shape, missing_slots_for
 from ai_core.architect.slots import merge_inferred_slots
 from ai_core.architect.source import format_source
@@ -37,6 +39,33 @@ from ai_core.domain.architect import (
 from ai_core.ports.model import ModelClient, ModelClientError
 
 logger = logging.getLogger(__name__)
+
+# 只重试“连接级 / 网关级”瞬态错误；鉴权、参数、模型不存在等错误重试
+# 只会浪费时间，必须直接暴露给用户。
+_TRANSIENT_LLM_MARKERS = (
+    "流式调用中断",
+    "peer closed",
+    "incomplete chunked",
+    "remoteprotocol",
+    "apiconnection",
+    "connection reset",
+    "connection aborted",
+    "readtimeout",
+    "connecttimeout",
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "rate limit",
+    "too many requests",
+)
+
+
+def _is_transient_llm_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT_LLM_MARKERS)
 
 
 class ArchitectLLMError(Exception):
@@ -1329,10 +1358,33 @@ class DeepSeekArchitectLLM(ArchitectLLM):
         避免因单个字段类型漂移直接抛 500。
         """
         attempts = max(0, int(self.settings.architect_json_retry_limit))
+        transport_attempts = max(0, int(self.settings.architect_llm_retry_limit))
         current_human = human
         last_error = "未知错误"
         for attempt in range(attempts + 1):
-            raw = self._invoke_json(task, system, current_human, json_schema)
+            raw = ""
+            for transport_try in range(transport_attempts + 1):
+                try:
+                    raw = self._invoke_json(task, system, current_human, json_schema)
+                    break
+                except ArchitectLLMError as exc:
+                    transient = _is_transient_llm_error(exc)
+                    logger.warning(
+                        "architect %s 模型调用失败 attempt=%s/%s transport=%s/%s "
+                        "transient=%s: %s",
+                        label,
+                        attempt + 1,
+                        attempts + 1,
+                        transport_try + 1,
+                        transport_attempts + 1,
+                        transient,
+                        exc,
+                    )
+                    if not transient or transport_try >= transport_attempts:
+                        raise
+                    # 清空前端已展示的半截流式 JSON，避免重试后拼接两份。
+                    reset_token_stream()
+                    time.sleep(min(4.0, 0.8 * (2**transport_try)))
             try:
                 return parse(raw)
             except (

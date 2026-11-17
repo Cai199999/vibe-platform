@@ -287,6 +287,14 @@ export function reduceArchitect(state, event) {
         appShape: payload.appShape ?? state.appShape,
         confidenceScore: payload.confidenceScore ?? state.confidenceScore,
       }
+    // 模型流式连接中断后，后端会清空半截输出并重试；前端同步丢弃
+    // 已展示的片段，避免两份 JSON 拼在一起。
+    case 'architect.token.reset':
+      return {
+        ...base,
+        streamingText: '',
+        streamingNode: payload.node ?? state.streamingNode ?? null,
+      }
     // 轻量 token 流：只保留尾部文本做打字机，最终结构仍以 completed
     // 事件为准。不写入 messages，避免流式片段污染对话历史。
     case 'token': {
