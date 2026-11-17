@@ -4,27 +4,33 @@
 
     FROZEN VisualDocument
       → FullstackService (mode=frontend)
-      → 确定性 Compiler（data-node-id / visual.css）
+      → 确定性 Compiler（Tailwind JSX / data-node-id / data-source）
       → Babel AST 门禁
-      → 真实 Docker 沙盒 npm run build
-      → Vite 重启冒烟
+      → 完整 Vite 工程（package.json / index.html / src/main.jsx）
+      → 真实 Docker 沙盒 npm install + npm run build + npm run dev
+      → Playwright 由宿主机脚本访问预览地址
 
 运行（宿主已启动 Docker，python-ai 镜像可用）：
 
-    docker run --rm \
-      -v "$PWD:/app" -w /app \
+    docker run --rm --group-add "$(stat -c '%g' /var/run/docker.sock)" \
+      -v "$PWD/services/orchestrator:/app" \
+      -v "$PWD/scripts:/e2e:ro" -w /app -e PYTHONPATH=/app \
       -v /var/run/docker.sock:/var/run/docker.sock \
       -e SANDBOX_IMAGE=vibe-platform/sandbox-react:dev \
+      -e DIRECT_OPS_CHANGELOG_PATH=/tmp/visual-codegen-changelog.jsonl \
+      -e KEEP_SANDBOX=1 \
       vibe-platform/python-ai:dev \
-      python scripts/visual_codegen_e2e.py
+      python /e2e/visual_codegen_e2e.py
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 
+from ai_core.direct_ops.changelog import get_change_log_store
 from ai_core.domain.architect import ArchitectContract
 from ai_core.domain.fullstack import FullstackRunRequest
 from ai_core.domain.visual_document import (
@@ -135,6 +141,9 @@ def main() -> int:
     sandbox = service._sandbox
     app = sandbox.read_file(active.sandbox_id, "src/App.jsx")
     css = sandbox.read_file(active.sandbox_id, "src/visual.css")
+    package = sandbox.read_file(active.sandbox_id, "package.json")
+    index_html = sandbox.read_file(active.sandbox_id, "index.html")
+    main_jsx = sandbox.read_file(active.sandbox_id, "src/main.jsx")
     expected = [
         "nd_page0001",
         "nd_title001",
@@ -150,16 +159,64 @@ def main() -> int:
         print(f"[e2e] FAILED: missing data-node-id: {missing}", file=sys.stderr)
         service._destroy_quietly(active.sandbox_id)
         return 1
+    if not re.search(r'data-source="src/App\.jsx:\d+"', app):
+        print("[e2e] FAILED: missing data-source=file:line", file=sys.stderr)
+        service._destroy_quietly(active.sandbox_id)
+        return 1
     if "--color-primary" not in css:
         print("[e2e] FAILED: visual.css missing tokens", file=sys.stderr)
         service._destroy_quietly(active.sandbox_id)
         return 1
-    if active.preview_url:
-        print(f"[e2e] preview: {active.preview_url}")
+    if '"vite"' not in package or '"react"' not in package:
+        print("[e2e] FAILED: package.json missing vite/react", file=sys.stderr)
+        service._destroy_quietly(active.sandbox_id)
+        return 1
+    if "cdn.tailwindcss.com" not in index_html or "src/main.jsx" not in index_html:
+        print("[e2e] FAILED: index.html incomplete", file=sys.stderr)
+        service._destroy_quietly(active.sandbox_id)
+        return 1
+    if "./visual.css" not in main_jsx:
+        print("[e2e] FAILED: main.jsx missing visual.css", file=sys.stderr)
+        service._destroy_quietly(active.sandbox_id)
+        return 1
+
+    # 显式再执行一次 npm install + dev 重启，证明完整工程可安装可启动。
+    install = sandbox.verify(active.sandbox_id, "install")
     print(
-        "[e2e] PASS: " f"{len(expected)} data-node-id, visual.css, build & Vite restart"
+        f"[e2e] npm install: success={install.success} "
+        f"exit={install.exit_code} durationMs={install.duration_ms}"
     )
-    service._destroy_quietly(active.sandbox_id)
+    if not install.success:
+        print(f"[e2e] FAILED: npm install: {install.logs[-2000:]}", file=sys.stderr)
+        service._destroy_quietly(active.sandbox_id)
+        return 1
+    sandbox.restart(active.sandbox_id, ready_path="/")
+    handle = sandbox.get(active.sandbox_id)
+    print(f"[e2e] npm run dev restarted, preview={handle.preview_url}")
+    print(f"[e2e] preview: {handle.preview_url}")
+    print(f"[e2e] port: {handle.host_port}")
+
+    content_hash = document.metadata.content_hash
+    entries = get_change_log_store().list_for_project("proj_codegen_e2e", limit=5)
+    expected_summary = f"成功从冻结版本 {content_hash} 编译生成真实前端工程"
+    if not any(entry.summary == expected_summary for entry in entries):
+        print(
+            f"[e2e] FAILED: ChangeLog missing: {expected_summary} "
+            f"entries={[entry.summary for entry in entries]}",
+            file=sys.stderr,
+        )
+        service._destroy_quietly(active.sandbox_id)
+        return 1
+
+    print(
+        "[e2e] PASS: "
+        f"{len(expected)} data-node-id, data-source, visual.css, "
+        "Tailwind project, npm install, build, npm run dev, ChangeLog"
+    )
+    if os.environ.get("KEEP_SANDBOX", "1").strip() not in {"1", "true", "yes"}:
+        service._destroy_quietly(active.sandbox_id)
+    else:
+        print(f"[e2e] sandbox kept alive: {active.sandbox_id}")
     return 0
 
 

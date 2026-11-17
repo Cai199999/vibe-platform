@@ -115,7 +115,16 @@ function walk(node, visitor) {
 }
 
 function importAllowed(source) {
-  if (source === 'react' || source === 'react-dom' || source === 'react/jsx-runtime') {
+  if (
+    [
+      'react',
+      'react-dom',
+      'react-dom/client',
+      'react/jsx-runtime',
+      'vite',
+      '@vitejs/plugin-react',
+    ].includes(source)
+  ) {
     return true
   }
   // 只允许本地样式与本地模块；第三方包一律拒绝。
@@ -146,6 +155,30 @@ function checkFile(parser, file, source, expectedIds) {
   }
 
   walk(ast, (node) => {
+    if (node.type === 'JSXOpeningElement') {
+      const attributes = Array.isArray(node.attributes) ? node.attributes : []
+      const nodeIdAttribute = attributes.find(
+        (item) =>
+          item.type === 'JSXAttribute' && item.name?.name === 'data-node-id',
+      )
+      if (!nodeIdAttribute) return
+      const sourceAttribute = attributes.find(
+        (item) =>
+          item.type === 'JSXAttribute' && item.name?.name === 'data-source',
+      )
+      if (!sourceAttribute) {
+        fileErrors('含 data-node-id 的元素缺少 data-source', node.loc)
+        return
+      }
+      const sourceValue = stringValue(sourceAttribute.value)
+      if (!sourceValue || !/^[^:\s]+:\d+$/.test(sourceValue)) {
+        fileErrors(
+          `data-source 必须是 "{filePath}:{line}"，当前为 ${sourceValue ?? '空'}`,
+          sourceAttribute.loc,
+        )
+      }
+      return
+    }
     if (node.type === 'ImportDeclaration') {
       const sourceValue = String(node.source?.value || '')
       imports.push(sourceValue)

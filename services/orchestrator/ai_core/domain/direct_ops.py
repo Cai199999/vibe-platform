@@ -22,6 +22,8 @@ DirectActionKind = Literal[
     "ADD_COMPONENT",
     "MOVE_NODE",
     "UPDATE_PROPS",
+    # 冻结 VisualDocument 一次性编译为真实 React 工程。
+    "VISUAL_CODEGEN",
 ]
 
 DirectActionRisk = Literal[

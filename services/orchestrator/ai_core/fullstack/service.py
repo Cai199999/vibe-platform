@@ -27,10 +27,14 @@ from typing import Any
 
 from ai_core.agent.events import RunEventBuffer, get_event_buffer
 from ai_core.architect.service import find_architect_contract
+from ai_core.codegen.visual import VisualCodegenError, compile_visual_document
+from ai_core.codegen.visual_gate import VisualCodegenGateUnavailable
 from ai_core.domain.architect import ArchitectContract
 from ai_core.error_envelope import attach_error_envelope, envelope_from_code
 from ai_core.project_lock import ProjectBusyError, project_write_lock
 from ai_core.config import get_settings
+from ai_core.direct_ops.changelog import get_change_log_store
+from ai_core.domain.direct_ops import ChangeLogEntry
 from ai_core.domain.fullstack import (
     FullstackRunRequest,
     FullstackRunSnapshot,
@@ -83,6 +87,13 @@ class FullstackContractNotConfirmedError(FullstackServiceError):
 
 class FullstackContractInvalidError(FullstackServiceError):
     code = "FULLSTACK_CONTRACT_INVALID"
+    status_code = 422
+
+
+class FullstackVisualCodegenError(FullstackServiceError):
+    """冻结 VisualDocument 无法安全编译为 React 工程。"""
+
+    code = "VISUAL_CODEGEN_FAILED"
     status_code = 422
 
 
@@ -195,7 +206,7 @@ class FullstackService:
                     )
                 return existing
 
-        sandbox_id, preview_url, created = self._ensure_sandbox(request)
+        sandbox_id, preview_url, created = self._ensure_sandbox(request, contract)
         logger.info(
             "fullstack start run_id=%s project_id=%s contract_id=%s "
             "sandbox_id=%s created=%s",
@@ -335,6 +346,7 @@ class FullstackService:
                 active.mysql_check = dict(outcome.get("mysql_check") or {})
                 active.status = "SUCCEEDED"
                 active.touch()
+            self._record_visual_codegen_changelog(active)
             active.buffer.emit(
                 "fullstack.completed",
                 {
@@ -398,6 +410,42 @@ class FullstackService:
                 active,
                 f"全栈生成异常: {exc}",
                 "FULLSTACK_INTERNAL_ERROR",
+            )
+
+    def _record_visual_codegen_changelog(self, active: ActiveFullstackRun) -> None:
+        """CodeGen 成功写入 ChangeLog；失败不能影响已完成的生成。"""
+        if not active.visual_document_id:
+            return
+        document = active.request.visual_document or active.contract.visual_document
+        content_hash = str(document.metadata.content_hash or "") if document else ""
+        try:
+            get_change_log_store().append(
+                ChangeLogEntry(
+                    change_id="chg_" + uuid.uuid4().hex[:20],
+                    project_id=active.request.project_id,
+                    sandbox_id=active.sandbox_id,
+                    run_id=active.run_id,
+                    actor="AI_RUN",
+                    action="VISUAL_CODEGEN",
+                    target={
+                        "type": "VISUAL_DOCUMENT",
+                        "documentId": active.visual_document_id,
+                        "nodeCount": active.visual_node_count,
+                        "mode": active.request.options.mode,
+                    },
+                    summary=(f"成功从冻结版本 {content_hash} 编译生成真实前端工程"),
+                    diff_summary="；".join(active.files[:20]),
+                    after_hash=content_hash,
+                    risk="L1_VERIFY_DIRECT",
+                    applied=True,
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+        except Exception:  # noqa: BLE001 - 日志失败不篡改生成结论
+            logger.warning(
+                "failed to record visual codegen changelog run_id=%s",
+                active.run_id,
+                exc_info=True,
             )
 
     def _complete_failure(
@@ -504,24 +552,47 @@ class FullstackService:
             )
         return contract
 
-    def _ensure_sandbox(self, request: FullstackRunRequest) -> tuple[str, str, bool]:
+    def _ensure_sandbox(
+        self,
+        request: FullstackRunRequest,
+        contract: ArchitectContract,
+    ) -> tuple[str, str, bool]:
         """返回 ``(sandbox_id, preview_url, created)``。
 
         优先复用请求里的 sandboxId / source.sandboxId；容器已不存在时，
         若有源码则回退为新建，保证刷新后的旧页面仍可继续生成。
+
+        离线优先链路：VisualDocument 的完整 Vite 工程必须先于沙盒启动
+        写入容器，否则 package.json / index.html 缺失会让首轮 dev 失败。
         """
+        source_files = dict(request.source.files)
+        visual_document = request.visual_document or contract.visual_document
+        if request.options.mode == "frontend" and visual_document is not None:
+            try:
+                compiled = compile_visual_document(visual_document)
+            except VisualCodegenGateUnavailable as exc:
+                raise FullstackVisualCodegenError(
+                    f"CodeGen AST 门禁不可用: {exc}"
+                ) from exc
+            except VisualCodegenError as exc:
+                raise FullstackVisualCodegenError(
+                    f"Visual CodeGen 失败: {exc}"
+                ) from exc
+            # 生成工程是权威文件：覆盖模板里的旧 App.jsx / package.json。
+            source_files.update(compiled.files)
+
         sandbox_id = request.sandbox_id or request.source.sandbox_id
         if sandbox_id:
             try:
                 handle = self._sandbox.get(sandbox_id)
                 return sandbox_id, handle.preview_url, False
             except SandboxError:
-                if not request.source.files and request.options.mode != "frontend":
+                if not source_files and request.options.mode != "frontend":
                     raise FullstackSandboxRequiredError(
                         f"沙盒不存在: {sandbox_id}，且请求未携带源码"
                     ) from None
 
-        if not request.source.files and request.options.mode != "frontend":
+        if not source_files and request.options.mode != "frontend":
             raise FullstackSandboxRequiredError(
                 "全栈生成需要 sandboxId 或 source.files 中的项目源码"
             )
@@ -530,7 +601,7 @@ class FullstackService:
             # FrontendCoder 会立即写入按契约生成的 src/App.jsx。
             handle = self._sandbox.create(
                 request.project_id,
-                dict(request.source.files),
+                source_files,
             )
         except SandboxError as exc:
             raise FullstackServiceError(f"创建沙盒失败: {exc}") from exc
@@ -598,5 +669,6 @@ __all__ = [
     "FullstackSandboxRequiredError",
     "FullstackService",
     "FullstackServiceError",
+    "FullstackVisualCodegenError",
     "get_active_fullstack_run",
 ]

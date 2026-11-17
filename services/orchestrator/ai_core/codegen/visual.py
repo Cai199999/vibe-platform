@@ -165,6 +165,12 @@ _VALID_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
 _IDENT_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 _CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
 _CSS_UNSAFE_RE = re.compile(r"[;{}<>\n\r]")
+# Tailwind 任意值只接受尺寸 / 百分比 / CSS 变量等确定性字面量；
+# 空格会在生成 class 时转成下划线（Tailwind 任意值语法）。
+_TAILWIND_VALUE_RE = re.compile(r"^[A-Za-z0-9#%.,()/_\- ]+$")
+_TAILWIND_CLASS_RE = re.compile(r"^[A-Za-z0-9:_\-\[\]().,%#/]+$")
+_SOURCE_PLACEHOLDER = "__VISUAL_SOURCE_LINE__"
+SOURCE_FILE = "src/App.jsx"
 
 
 class VisualCodegenError(ValueError):
@@ -676,6 +682,197 @@ def _interaction_index(document: VisualDocument) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _default_tailwind(node_type: str) -> list[str]:
+    """基础节点默认 Tailwind 类；用户 / 画布样式会覆盖同名语义。"""
+    if node_type == "page":
+        return [
+            "min-h-screen",
+            "w-full",
+            "bg-[var(--color-surface)]",
+            "text-[var(--color-text)]",
+        ]
+    if node_type == "text":
+        return [
+            "m-0",
+            "text-[var(--typography-body)]",
+            "leading-relaxed",
+            "text-[var(--color-text)]",
+        ]
+    if node_type == "button":
+        return [
+            "inline-flex",
+            "items-center",
+            "justify-center",
+            "rounded-[var(--radius-sm)]",
+            "border",
+            "border-transparent",
+            "px-4",
+            "py-2",
+            "text-[var(--typography-body)]",
+            "font-semibold",
+            "cursor-pointer",
+        ]
+    if node_type == "input":
+        return [
+            "w-full",
+            "rounded-[var(--radius-sm)]",
+            "border",
+            "border-[var(--color-border)]",
+            "bg-[var(--color-surface)]",
+            "px-3",
+            "py-2",
+            "text-[var(--typography-body)]",
+            "text-[var(--color-text)]",
+        ]
+    if node_type == "image":
+        return ["block", "w-full", "h-auto", "rounded-[var(--radius-card)]"]
+    if node_type == "list":
+        return ["m-0", "list-none", "p-0"]
+    if node_type == "table":
+        return ["w-full", "border-collapse"]
+    if node_type == "modal":
+        return [
+            "rounded-[var(--radius-card)]",
+            "border",
+            "border-[var(--color-border)]",
+            "bg-[var(--color-surface)]",
+            "p-5",
+        ]
+    return []
+
+
+def _safe_tailwind_value(value: Any) -> str:
+    """把布局字段转成 Tailwind 任意值；不安全则返回空串。"""
+    text = str(value or "").strip()
+    if not text or not _TAILWIND_VALUE_RE.fullmatch(text):
+        return ""
+    return text.replace(" ", "_")
+
+
+def _arbitrary(prefix: str, value: Any) -> str:
+    safe = _safe_tailwind_value(value)
+    return f"{prefix}-[{safe}]" if safe else ""
+
+
+def _tailwind_classes(node: VisualNode) -> list[str]:
+    """生成确定性的 Tailwind class 列表（去重、保持顺序）。"""
+    classes: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        if not value or value in seen:
+            return
+        classes.append(value)
+        seen.add(value)
+
+    for item in _default_tailwind(node.type):
+        add(item)
+
+    user_classes: list[str] = []
+    for raw in node.style.tailwind:
+        for token in str(raw or "").split():
+            token = token.strip()
+            if not token:
+                continue
+            probe = token[1:] if token.startswith("-") else token
+            if any(
+                probe == prefix or probe.startswith(prefix)
+                for prefix in FORBIDDEN_TAILWIND_PREFIXES
+            ):
+                raise VisualCodegenError(
+                    f"VisualNode 含绝对定位 Tailwind 类: {token}",
+                    code="VISUAL_CODEGEN_FORBIDDEN_STYLE",
+                )
+            if not _TAILWIND_CLASS_RE.fullmatch(token):
+                raise VisualCodegenError(
+                    f"Tailwind 类包含非法字符: {token}",
+                    code="VISUAL_CODEGEN_FORBIDDEN_STYLE",
+                )
+            user_classes.append(token)
+
+    # 如果用户显式给了背景 / 文字色 / 圆角，不叠加默认值，避免同属性
+    # 两个工具类互相覆盖且结果依赖 Tailwind 内部 CSS 顺序。
+    has_user_bg = any(item.startswith("bg-") for item in user_classes)
+    has_user_text_color = any(
+        item.startswith("text-") and item[5:] in TAILWIND_COLORS
+        for item in user_classes
+    )
+    has_user_radius = any(item.startswith("rounded") for item in user_classes)
+
+    if node.type == "button":
+        if not has_user_bg:
+            add("bg-[var(--color-primary)]")
+        if not has_user_text_color:
+            add("text-white")
+        if has_user_radius:
+            classes[:] = [
+                item for item in classes if item != "rounded-[var(--radius-sm)]"
+            ]
+            seen.discard("rounded-[var(--radius-sm)]")
+    for item in user_classes:
+        add(item)
+
+    for ref in node.style.token_refs:
+        name = str(ref or "").strip()
+        if "." not in name:
+            continue
+        group, key = name.split(".", 1)
+        variable = f"var({_css_var(group, key)})"
+        if group == "color":
+            if key in {"primary", "primarySoft", "surface", "canvas"}:
+                add(f"bg-[{variable}]")
+            elif key == "border":
+                add(f"border-[{variable}]")
+            else:
+                add(f"text-[{variable}]")
+        elif group == "radius":
+            add(f"rounded-[{variable}]")
+        elif group == "typography":
+            add(f"text-[{variable}]")
+
+    layout = node.layout
+    display = layout.display
+    add("inline-flex" if display == "inline-flex" else display)
+    if display in {"flex", "inline-flex"}:
+        add("flex-row" if layout.direction == "row" else "flex-col")
+        add(
+            {
+                "start": "items-start",
+                "center": "items-center",
+                "end": "items-end",
+                "stretch": "items-stretch",
+            }[layout.align]
+        )
+        add(
+            {
+                "start": "justify-start",
+                "center": "justify-center",
+                "between": "justify-between",
+                "end": "justify-end",
+            }[layout.justify]
+        )
+        add("flex-wrap" if layout.wrap else "flex-nowrap")
+    if display == "grid":
+        add(f"grid-cols-{max(1, min(12, int(layout.columns)))}")
+    for prefix, value in (
+        ("gap", layout.gap),
+        ("p", layout.padding),
+        ("min-w", layout.min_width),
+        ("max-w", layout.max_width),
+    ):
+        add(_arbitrary(prefix, value))
+    if layout.max_width:
+        add("mx-auto")
+    if node.codegen.mode == "custom":
+        add("border")
+        add("border-dashed")
+        add("border-[var(--color-border)]")
+        add("rounded-[var(--radius-card)]")
+        add("p-3")
+        add("text-[var(--color-muted)]")
+    return classes
+
+
 def _render_action_runtime(actions: list[dict[str, Any]]) -> list[str]:
     if not actions:
         return []
@@ -710,10 +907,107 @@ def _render_action_runtime(actions: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _slug(value: str, fallback: str = "vibe-visual-app") -> str:
+    slug = re.sub(r"[^a-z0-9-]+", "-", str(value).lower()).strip("-")
+    return slug[:60] or fallback
+
+
+def _render_package_json(document: VisualDocument) -> str:
+    package = {
+        "name": _slug(document.doc_id or document.title),
+        "private": True,
+        "version": "0.0.0",
+        "type": "module",
+        "scripts": {
+            "dev": "vite --host 0.0.0.0",
+            "build": "vite build",
+            "preview": "vite preview --host 0.0.0.0",
+        },
+        "dependencies": {
+            "react": "18.3.1",
+            "react-dom": "18.3.1",
+        },
+        "devDependencies": {
+            "@vitejs/plugin-react": "4.3.4",
+            "vite": "5.4.21",
+        },
+    }
+    return json.dumps(package, ensure_ascii=False, indent=2) + "\n"
+
+
+def _render_vite_config() -> str:
+    return (
+        "import { defineConfig } from 'vite'\n"
+        "import react from '@vitejs/plugin-react'\n"
+        "\n"
+        "export default defineConfig({\n"
+        "  plugins: [react()],\n"
+        "  server: {\n"
+        "    host: '0.0.0.0',\n"
+        "    port: 5173,\n"
+        "    strictPort: true,\n"
+        "  },\n"
+        "})\n"
+    )
+
+
+def _render_index_html(document: VisualDocument) -> str:
+    title = str(document.title or "Vibe Visual App")
+    safe_title = (
+        title.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+    return (
+        "<!doctype html>\n"
+        '<html lang="zh-CN">\n'
+        "  <head>\n"
+        '    <meta charset="UTF-8" />\n'
+        '    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n'
+        f"    <title>{safe_title}</title>\n"
+        '    <link rel="icon" href="data:," />\n'
+        '    <script src="https://cdn.tailwindcss.com"></script>\n'
+        "  </head>\n"
+        "  <body>\n"
+        '    <div id="root"></div>\n'
+        '    <script type="module" src="/src/main.jsx"></script>\n'
+        "  </body>\n"
+        "</html>\n"
+    )
+
+
+def _render_main_jsx() -> str:
+    return (
+        "import React from 'react'\n"
+        "import ReactDOM from 'react-dom/client'\n"
+        "import App from './App.jsx'\n"
+        "import './visual.css'\n"
+        "\n"
+        "ReactDOM.createRoot(document.getElementById('root')).render(\n"
+        "  <React.StrictMode>\n"
+        "    <App />\n"
+        "  </React.StrictMode>,\n"
+        ")\n"
+    )
+
+
+def _fill_source_lines(source: str) -> str:
+    """把每个节点开标签里的占位符替换为它在 App.jsx 的真实行号。"""
+    lines = source.split("\n")
+    for index, line in enumerate(lines, 1):
+        if _SOURCE_PLACEHOLDER in line:
+            lines[index - 1] = line.replace(_SOURCE_PLACEHOLDER, str(index))
+    return "\n".join(lines)
+
+
 class _ReactCompiler:
-    def __init__(self, document: VisualDocument) -> None:
+    def __init__(
+        self, document: VisualDocument, *, include_interactions: bool = False
+    ) -> None:
         self.document = document
-        self.actions = _interaction_index(document)
+        self.include_interactions = include_interactions
+        self.actions = _interaction_index(document) if include_interactions else {}
         self.warnings: list[str] = []
         self.custom_node_ids: list[str] = []
         self.repeat_node_ids: list[str] = []
@@ -725,20 +1019,20 @@ class _ReactCompiler:
             parts.append("visual-custom-placeholder")
         if node.style.class_name:
             parts.append(node.style.class_name)
+        parts.extend(_tailwind_classes(node))
         return " ".join(parts)
 
     def _attrs(
         self,
         node: VisualNode,
-        style: dict[str, str],
         *,
         extra: Iterable[str] = (),
     ) -> str:
         attrs = [
             f"className={{{_js_string(self._class_name(node))}}}",
             f'data-node-id="{node.id}"',
+            f'data-source="{SOURCE_FILE}:{_SOURCE_PLACEHOLDER}"',
             f'data-visual-type="{node.type}"',
-            f"style={{{_js_object(style)}}}",
         ]
         if not node.state.default_visible:
             attrs.append("hidden")
@@ -746,11 +1040,12 @@ class _ReactCompiler:
             attrs.append("disabled={true}")
         if node.a11y.label and node.type in {"button", "input", "image", "modal"}:
             attrs.append(f"aria-label={{{_js_string(node.a11y.label)}}}")
-        action = self.actions.get(node.id)
-        if action:
-            attrs.append(
-                f"onClick={{() => runVisualAction({_js_string(action['id'])})}}"
-            )
+        if self.include_interactions:
+            action = self.actions.get(node.id)
+            if action:
+                attrs.append(
+                    f"onClick={{() => runVisualAction({_js_string(action['id'])})}}"
+                )
         attrs.extend(extra)
         return " ".join(attrs)
 
@@ -822,8 +1117,6 @@ class _ReactCompiler:
 
     def _render_node(self, node: VisualNode, indent: int) -> list[str]:
         tag = TAG_MAP[node.type]
-        style, warnings = _build_style(node)
-        self.warnings.extend(warnings)
         pad = " " * indent
 
         if node.codegen.mode == "custom":
@@ -831,9 +1124,7 @@ class _ReactCompiler:
             self.warnings.append(
                 f"节点 {node.id} 为 custom，CodeGen 生成安全占位组件（不调用 LLM）"
             )
-            style = dict(style)
-            style.setdefault("color", "var(--color-muted)")
-            attrs = self._attrs(node, style, extra=[])
+            attrs = self._attrs(node)
             label = node.name or "自定义组件"
             return [
                 f"{pad}<div {attrs}>",
@@ -855,7 +1146,7 @@ class _ReactCompiler:
                 extra.append(f"defaultValue={{{_js_string(value)}}}")
             if node.props.get("name"):
                 extra.append(f"name={{{_js_string(node.props.get('name'))}}}")
-            return [f"{pad}<input {self._attrs(node, style, extra=extra)} />"]
+            return [f"{pad}<input {self._attrs(node, extra=extra)} />"]
 
         if node.type == "image":
             src = _safe_image_src(node.props.get("src") or node.props.get("url") or "")
@@ -865,9 +1156,9 @@ class _ReactCompiler:
                 f"alt={{{_js_string(alt)}}}",
                 'loading="lazy"',
             ]
-            return [f"{pad}<img {self._attrs(node, style, extra=extra)} />"]
+            return [f"{pad}<img {self._attrs(node, extra=extra)} />"]
 
-        attrs = self._attrs(node, style)
+        attrs = self._attrs(node)
 
         if node.type == "form":
             attrs += " onSubmit={(event) => event.preventDefault()}"
@@ -919,26 +1210,32 @@ class _ReactCompiler:
             lines.extend(self._render_node(root, 4))
         else:
             lines.append(
-                '    <main className="visual-node visual-page" '
-                'style={{ minHeight: "100vh", backgroundColor: '
-                '"var(--color-surface)" }} />'
+                '    <main className="visual-node visual-page min-h-screen '
+                'w-full bg-[var(--color-surface)]" />'
             )
         lines.extend(["  )", "}", ""])
-        files = {
-            "src/App.jsx": "\n".join(lines),
-            "src/visual.css": _render_css(self.document),
-        }
+        app_source = _fill_source_lines("\n".join(lines))
         node_ids = _collect_node_ids(root)
+        files = {
+            "src/App.jsx": app_source,
+            "src/visual.css": _render_css(self.document),
+            "src/main.jsx": _render_main_jsx(),
+            "index.html": _render_index_html(self.document),
+            "package.json": _render_package_json(self.document),
+            "vite.config.js": _render_vite_config(),
+        }
         return VisualCompileResult(
             files=files,
             node_ids=node_ids,
             summary=(
                 "VisualDocument 确定性编译："
-                f"{len(node_ids)} 个节点、{len(self.actions)} 个交互"
+                f"{len(node_ids)} 个静态节点、"
+                f"{len(self.actions)} 个交互、完整 Vite 工程"
             ),
             warnings=tuple(dict.fromkeys(self.warnings)),
             metadata={
                 "codegen": "visual-deterministic",
+                "staticOnly": not self.include_interactions,
                 "nodeCount": len(node_ids),
                 "customNodeCount": len(self.custom_node_ids),
                 "repeatNodeCount": len(self.repeat_node_ids),
@@ -964,28 +1261,30 @@ def _fallback_result(
         "",
         "export default function App() {",
         "  return (",
-        '    <main className="visual-node visual-page" style={{ minHeight: '
-        '"100vh", padding: "24px", backgroundColor: "var(--color-surface)" }}>',
-        '      <h1 style={{ fontSize: "var(--typography-title)", margin: '
-        '"0px 0px 16px" }}>页面已降级为安全占位</h1>',
+        '    <main className="visual-node visual-page min-h-screen '
+        'bg-[var(--color-surface)] p-6">',
+        '      <h1 className="m-0 mb-4 text-[var(--typography-title)]">'
+        "页面已降级为安全占位</h1>",
     ]
     for node in _iter_nodes(document.root):
-        style = (
-            'style={{ padding: "8px 12px", margin: "6px 0px", '
-            'border: "1px solid var(--color-border)", borderRadius: '
-            '"var(--radius-sm)" }}'
-        )
         label = node.name or node.type
         lines.append(
             f'      <div data-node-id="{node.id}" '
-            f'data-visual-type="{node.type}" {style}>'
+            f'data-source="{SOURCE_FILE}:{_SOURCE_PLACEHOLDER}" '
+            f'data-visual-type="{node.type}" '
+            'className="my-1.5 rounded-[var(--radius-sm)] border '
+            'border-[var(--color-border)] px-3 py-2">'
             f"{{{_js_string(f'{label} ({node.type})')}}}</div>"
         )
     lines.extend(["    </main>", "  )", "}", ""])
     return VisualCompileResult(
         files={
-            "src/App.jsx": "\n".join(lines),
+            "src/App.jsx": _fill_source_lines("\n".join(lines)),
             "src/visual.css": _render_fallback_css(document),
+            "src/main.jsx": _render_main_jsx(),
+            "index.html": _render_index_html(document),
+            "package.json": _render_package_json(document),
+            "vite.config.js": _render_vite_config(),
         },
         node_ids=node_ids,
         summary=f"CodeGen 安全占位页（{reason}）：{len(node_ids)} 个节点",
@@ -1045,6 +1344,7 @@ def compile_visual_document(
     *,
     require_frozen: bool = True,
     allow_fallback: bool = True,
+    include_interactions: bool = False,
 ) -> VisualCompileResult:
     """确定性编译，并通过 Babel AST 门禁。
 
@@ -1062,7 +1362,9 @@ def compile_visual_document(
         _assert_frozen(visual)
 
     try:
-        primary = _ReactCompiler(visual).compile()
+        primary = _ReactCompiler(
+            visual, include_interactions=include_interactions
+        ).compile()
     except VisualCodegenError:
         raise
     except Exception as exc:  # noqa: BLE001 - 编译器缺陷不能泄漏堆栈

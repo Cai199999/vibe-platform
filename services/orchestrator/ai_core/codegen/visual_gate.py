@@ -29,7 +29,11 @@ ALLOWED_IMPORTS = frozenset(
     {
         "react",
         "react-dom",
+        "react-dom/client",
         "react/jsx-runtime",
+        # 固定工程脚手架（不是模型产物）。
+        "vite",
+        "@vitejs/plugin-react",
     }
 )
 

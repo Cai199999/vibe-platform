@@ -764,8 +764,11 @@ class FullstackGraphRunner:
                             sandbox_id, "package.json"
                         ),
                     )
-                    merged_files = dict(base_bundle.files)
-                    merged_files.update(compiled.files)
+                    # 全栈工程以 base_bundle 的 package.json / main.jsx /
+                    # vite.config.js 为准；Visual CodeGen 只覆盖 App.jsx、
+                    # visual.css 与 index.html。
+                    merged_files = dict(compiled.files)
+                    merged_files.update(base_bundle.files)
                     bundle = GeneratedBundle(
                         files=merged_files,
                         summary=f"{base_bundle.summary}；{compiled.summary}",
@@ -1266,7 +1269,9 @@ class FullstackGraphRunner:
 
         # 后端依赖可能随契约变化（例如上传需要 multer）。构建前先安装，
         # 否则沙盒重启时 server/index.js 会因缺少模块直接退出。
-        if options.mode != "frontend":
+        # Visual CodeGen 生成的是完整 Vite 工程（含 package.json），
+        # 即使 mode=frontend 也必须执行 npm install，确保依赖与声明一致。
+        if options.mode != "frontend" or state.get("visual_document") is not None:
             install, install_attempts = _run("install", "npm install")
             if not install.success:
                 logs = install.logs or "依赖安装失败且没有日志"

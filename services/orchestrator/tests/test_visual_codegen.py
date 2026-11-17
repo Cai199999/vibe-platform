@@ -156,10 +156,22 @@ class VisualCodegenCompileTests(unittest.TestCase):
         source = result.files["src/App.jsx"]
         for node_id in expected:
             self.assertEqual(source.count(f'data-node-id="{node_id}"'), 1)
+        self.assertRegex(source, r'data-source="src/App\.jsx:\d+"')
         self.assertIn("visual-repeat-item", source)
-        self.assertIn("runVisualAction", source)
+        self.assertNotIn("runVisualAction", source)
+        self.assertIn("bg-[var(--color-primary)]", source)
         self.assertIn('import "./visual.css"', source)
         self.assertIn("--color-primary", result.files["src/visual.css"])
+        self.assertIn('"vite"', result.files["package.json"])
+        self.assertIn('"react"', result.files["package.json"])
+        self.assertIn("cdn.tailwindcss.com", result.files["index.html"])
+        self.assertIn("/src/main.jsx", result.files["index.html"])
+        self.assertIn("./visual.css", result.files["src/main.jsx"])
+
+    def test_interactions_are_opt_in(self) -> None:
+        result = compile_visual_document(_document(), include_interactions=True)
+        self.assertIn("runVisualAction", result.files["src/App.jsx"])
+        self.assertFalse(result.metadata["staticOnly"])
 
     def test_compile_is_deterministic(self) -> None:
         first = compile_visual_document(_document())
@@ -204,6 +216,12 @@ class VisualCodegenCompileTests(unittest.TestCase):
         report = verify_visual_source(fallback.files, fallback.node_ids)
         self.assertTrue(report.ok, report.errors)
         self.assertIn("安全占位", fallback.files["src/App.jsx"])
+        self.assertRegex(
+            fallback.files["src/App.jsx"],
+            r'data-source="src/App\.jsx:\d+"',
+        )
+        self.assertIn("package.json", fallback.files)
+        self.assertIn("index.html", fallback.files)
 
     def test_server_hash_is_stable(self) -> None:
         document = _document()
@@ -275,7 +293,15 @@ class VisualCodegenGraphTests(unittest.TestCase):
         self.assertIn('data-node-id="nd_btn0001"', app)
         self.assertEqual(app, outcome.get("frontend_entry", ""))
         self.assertIn("src/visual.css", sandbox.files)
-        self.assertEqual(sandbox.verified, [(sandbox.handle.sandbox_id, "build")])
+        self.assertIn("package.json", sandbox.files)
+        self.assertIn("index.html", sandbox.files)
+        self.assertEqual(
+            sandbox.verified,
+            [
+                (sandbox.handle.sandbox_id, "install"),
+                (sandbox.handle.sandbox_id, "build"),
+            ],
+        )
         self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/")])
 
     def test_build_failure_repairs_once_with_safe_placeholder(self) -> None:
