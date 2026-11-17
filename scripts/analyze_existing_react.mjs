@@ -127,18 +127,20 @@ function collectStringLiterals(node, output = []) {
   return output
 }
 
-function extractClassName(attribute, source) {
-  if (!attribute) return { className: '', classes: [], expression: '' }
-  if (attribute.type === 'StringLiteral') {
-    const className = attribute.value.trim()
+function extractClassName(jsxAttribute, source) {
+  if (!jsxAttribute) return { className: '', classes: [], expression: '' }
+  const valueNode = jsxAttribute.value
+  if (!valueNode) return { className: '', classes: [], expression: '' }
+  if (valueNode.type === 'StringLiteral') {
+    const className = valueNode.value.trim()
     return {
       className,
       classes: className.split(/\s+/).filter(Boolean),
       expression: '',
     }
   }
-  if (attribute.type === 'JSXExpressionContainer') {
-    const expression = attribute.value.expression
+  if (valueNode.type === 'JSXExpressionContainer') {
+    const expression = valueNode.expression
     const staticValue = staticStringFromExpression(expression)
     if (staticValue.trim()) {
       const className = staticValue.trim()
@@ -158,7 +160,7 @@ function extractClassName(attribute, source) {
   return {
     className: '',
     classes: [],
-    expression: codeOf(source, attribute),
+    expression: codeOf(source, valueNode),
   }
 }
 
@@ -273,7 +275,7 @@ function createJsxConverter({ file, source, nextId }) {
     const classNameAttribute = (opening?.attributes || []).find(
       (item) => item.type === 'JSXAttribute' && item.name?.name === 'className',
     )
-    const className = extractClassName(classNameAttribute?.value, source)
+    const className = extractClassName(classNameAttribute, source)
     const children = (node.children || []).flatMap(convert)
     return [
       {

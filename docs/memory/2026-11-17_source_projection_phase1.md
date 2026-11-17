@@ -47,6 +47,17 @@ React 源码
 - 同文件组件展开，外部组件/循环引用有明确 badge；
 - 不提供任何写回、拖拽或生成入口。
 
+## 示例文件
+
+- `samples/ExistingDashboard.jsx`：SaaS 用户管理后台，覆盖页面壳、侧边栏、
+  顶栏、统计卡片、搜索筛选、表格、空状态、弹窗、表单、map / 条件渲染。
+- 分析结果：入口 `DashboardPage`，13 个组件、119 个元素、61 段文本、
+  133 个投影节点；同文件组件递归展开。
+- 浏览器导入验证：hover 根节点显示
+  `DashboardPage › div`、`min-h-screen bg-slate-50 text-slate-900`、
+  `ExistingDashboard.jsx:488:5` 与只读提示，0 浏览器错误。
+- 截图：`reports/source_projection_sample_e2e.png`。
+
 ## 验证
 
 - Python `tests/test_source_analysis.py` 4 项通过；
