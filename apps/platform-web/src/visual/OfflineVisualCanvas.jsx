@@ -471,6 +471,8 @@ export default function OfflineVisualCanvas({
   title = '未命名页面',
   token = '',
   onFrozen,
+  onAnalyzeSource,
+  analyzeBusy = false,
 }) {
   const store = useVisualDocumentStore()
   const {
@@ -802,6 +804,27 @@ export default function OfflineVisualCanvas({
             {report.ok ? 'Schema 通过' : `${report.errors.length} 个校验错误`}
           </span>
           <span className="vc-revision">r{doc.revision}</span>
+          {onAnalyzeSource && (
+            <label
+              className={`ghost-button vc-source-import${
+                analyzeBusy ? ' is-busy' : ''
+              }`}
+              title="导入 .jsx / .tsx 查看只读源码投影（不写回）"
+            >
+              {analyzeBusy ? '分析中…' : '导入源码分析'}
+              <input
+                type="file"
+                accept=".jsx,.tsx,.js,.ts"
+                hidden
+                disabled={analyzeBusy}
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  event.target.value = ''
+                  if (file) onAnalyzeSource(file)
+                }}
+              />
+            </label>
+          )}
           <button
             type="button"
             className="ghost-button"
