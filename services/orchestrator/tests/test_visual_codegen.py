@@ -204,7 +204,7 @@ class VisualCodegenCompileTests(unittest.TestCase):
         report = verify_visual_source(result.files, result.node_ids)
         self.assertTrue(report.ok, report.errors)
 
-    def test_unbound_repeat_blocks_codegen(self) -> None:
+    def test_unbound_repeat_warns_but_compiles_with_sample_data(self) -> None:
         root = _node(
             "nd_page0001",
             "page",
@@ -222,9 +222,12 @@ class VisualCodegenCompileTests(unittest.TestCase):
             root=root,
         )
         frozen = freeze_visual_document(document)
-        with self.assertRaises(VisualCodegenError) as raised:
-            compile_visual_document(frozen)
-        self.assertEqual(raised.exception.code, "VISUAL_UNBOUND_REPEAT")
+        result = compile_visual_document(frozen)
+        self.assertIn('data-node-id="nd_list001"', result.files["src/App.jsx"])
+        self.assertTrue(
+            any("repeat.source=orders" in item for item in result.warnings),
+            result.warnings,
+        )
 
     def test_interactions_are_opt_in(self) -> None:
         result = compile_visual_document(_document(), include_interactions=True)

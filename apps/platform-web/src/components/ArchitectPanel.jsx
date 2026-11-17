@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import ProjectDocsDrawer from './ProjectDocsDrawer.jsx'
+import { buildProjectDocs } from '../workspace/projectDocs.js'
 import ContractViewer from './ContractViewer.jsx'
 
 const SHAPE_LABELS = {
@@ -1058,36 +1060,52 @@ const QUALITY_TIER_OPTIONS = [
   },
 ]
 
-function ContractActions({ contract, submitting, onDecide }) {
+function ContractActions({
+  contract,
+  submitting,
+  onDecide,
+  qualityTierRequired = true,
+}) {
   const [comment, setComment] = useState('')
   const [cancelConfirm, setCancelConfirm] = useState(false)
-  const [qualityTier, setQualityTier] = useState('')
+  const [qualityTier, setQualityTier] = useState(
+    qualityTierRequired ? '' : contract?.qualityTier || 'L2_STANDARD',
+  )
   const revisionReady = comment.trim().length > 0
-  const confirmReady = Boolean(qualityTier)
+  const confirmReady = qualityTierRequired
+    ? Boolean(qualityTier)
+    : Boolean(contract?.qualityTier || 'L2_STANDARD')
+  const effectiveTier = qualityTier || contract?.qualityTier || 'L2_STANDARD' 
 
   return (
     <div className="architect-contract-actions">
-      <fieldset className="architect-quality-tier" data-quality-tier>
-        <legend>请选择您对本次生成的质量要求：</legend>
-        {QUALITY_TIER_OPTIONS.map((option) => (
-          <label key={option.value} className="architect-quality-option">
-            <input
-              type="radio"
-              name={`quality-tier-${contract.contractId}`}
-              value={option.value}
-              checked={qualityTier === option.value}
-              disabled={submitting}
-              onChange={() => setQualityTier(option.value)}
-            />
-            <span>{option.label}</span>
-          </label>
-        ))}
-        {!confirmReady && (
-          <p className="architect-quality-hint" data-quality-tier-required>
-            该选择不可跳过：确认契约前必须指定质量分级。
-          </p>
-        )}
-      </fieldset>
+      {qualityTierRequired ? (
+        <fieldset className="architect-quality-tier" data-quality-tier>
+          <legend>请选择您对本次生成的质量要求：</legend>
+          {QUALITY_TIER_OPTIONS.map((option) => (
+            <label key={option.value} className="architect-quality-option">
+              <input
+                type="radio"
+                name={`quality-tier-${contract.contractId}`}
+                value={option.value}
+                checked={qualityTier === option.value}
+                disabled={submitting}
+                onChange={() => setQualityTier(option.value)}
+              />
+              <span>{option.label}</span>
+            </label>
+          ))}
+          {!confirmReady && (
+            <p className="architect-quality-hint" data-quality-tier-required>
+              该选择不可跳过：确认契约前必须指定质量分级。
+            </p>
+          )}
+        </fieldset>
+      ) : (
+        <p className="architect-quality-hint" data-quality-tier-locked>
+          质量分级已固定为 {contract?.qualityTier || 'L2_STANDARD'}，后续修订沿用该选择。
+        </p>
+      )}
       <label className="architect-revision">
         <span>修订意见</span>
         <textarea
@@ -1117,7 +1135,13 @@ function ContractActions({ contract, submitting, onDecide }) {
           className="architect-secondary"
           disabled={!revisionReady || submitting}
           title={revisionReady ? '带着修订意见重新生成契约' : '请先填写修订意见'}
-          onClick={() => onDecide('REVISE', comment.trim())}
+          onClick={() =>
+            onDecide(
+              'REVISE',
+              comment.trim(),
+              qualityTierRequired ? qualityTier || undefined : effectiveTier,
+            )
+          }
         >
           要求修订
         </button>
@@ -1130,7 +1154,7 @@ function ContractActions({ contract, submitting, onDecide }) {
               ? '确认契约并进入代码生成'
               : '请先选择本次生成的质量要求'
           }
-          onClick={() => onDecide('CONFIRM', comment.trim(), qualityTier)}
+          onClick={() => onDecide('CONFIRM', comment.trim(), effectiveTier)}
         >
           {submitting ? (
             <>
@@ -1418,6 +1442,7 @@ export default function ArchitectPanel({
   const [confirmCancel, setConfirmCancel] = useState(false)
   // 新建项目的第一条输入：纯自然语言目标，不再要求先做形态选择。
   const [goal, setGoal] = useState('')
+  const [docsOpen, setDocsOpen] = useState(false)
   const status = state?.status ?? 'IDLE'
   const statusTone = STATUS_TONES[status] ?? 'idle'
   const shape = state?.appShape
@@ -1426,6 +1451,15 @@ export default function ArchitectPanel({
   const messages = state?.messages ?? []
   const clarification = state?.clarification
   const contract = state?.contract
+  const projectDocs = useMemo(
+    () =>
+      buildProjectDocs({
+        contract,
+        visualDocument: contract?.visualDocument,
+        projectName,
+      }),
+    [contract, projectName],
+  )
   const helper = state?.helper ?? { messages: [], pending: false, error: null }
 
   /**
@@ -1523,6 +1557,16 @@ export default function ArchitectPanel({
             </div>
           </div>
           <div className="architect-header-right">
+            <button
+              type="button"
+              className="ghost-button"
+              data-project-docs-open
+              disabled={!contract}
+              title={contract ? '查看 01–05 方案文档' : '契约生成后可查看方案文档'}
+              onClick={() => setDocsOpen(true)}
+            >
+              📄 方案文档
+            </button>
             <span className={`architect-status is-${statusTone}`}>
               {WORKING_STATUSES.has(status) && <span className="mini-spinner" />}
               {STATUS_LABELS[status] ?? status}
@@ -1784,6 +1828,7 @@ export default function ArchitectPanel({
               contract={contract}
               submitting={Boolean(state.decisionSubmitting)}
               onDecide={onDecide}
+              qualityTierRequired={state.qualityTierRequired !== false}
             />
           )}
 
@@ -1970,6 +2015,11 @@ export default function ArchitectPanel({
           />
         )}
       </aside>
+      <ProjectDocsDrawer
+        open={docsOpen}
+        docs={projectDocs}
+        onClose={() => setDocsOpen(false)}
+      />
     </div>
   )
 }

@@ -217,6 +217,18 @@ def _normalize_questions(
     必需槽位却一直缺失，最终 CONFIDENCE_EXHAUSTED。
     """
     filled = filled or {}
+    # 质量分级是契约确认 UI 的一次性决策，不是每轮澄清问题。
+    raw_questions = [
+        question
+        for question in raw_questions
+        if str(question.slot or "").strip().lower()
+        not in {"quality", "quality.tier", "quality_tier", "quality_level"}
+        and not (
+            "L1" in str(question.prompt or "")
+            and "L2" in str(question.prompt or "")
+            and "L3" in str(question.prompt or "")
+        )
+    ]
     # 已填写的必需槽位不再重复追问；空字符串 / 空集合视为未填写。
     filled_required = {
         slot

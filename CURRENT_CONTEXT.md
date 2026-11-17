@@ -13,10 +13,11 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 存量只读投影：Babel 分析 → 导入 .jsx/.tsx 只读树；不转虚拟树。
 - 双轨制：前后端分流；新建强制选从零/导入；存量禁止 VisualDocument/前端 CodeGen，只 backend 增量。
 - 两阶段：V0 只出虚拟树（后端字段剥离）→ 画布 delta → BACKEND_BINDING；最终契约带冻结树。
-- 审查门禁：FROZEN repeat 未绑定仅 warning，CodeGen 才阻断；第二次 Architect 全量审查交互/repeat + delta。
+- 审查门禁：FROZEN repeat 未绑定仅 warning；CodeGen 用示例数据并告警；第二次 Architect 全量审查交互/repeat + delta。
+- 方案文档：01–05 模拟投影 + 抽屉查看/导出；质量分级只问一次；全局禁物理外键、前后端分层。
 
 ## 最新验证
-前端 62 项 Vitest、构建通过；Python 全量 676 项仅 7 项环境失败。CodeGen/投影/分流/V0→delta/多页面模拟预览 E2E PASS。
+前端 65 项 Vitest、构建通过；Python 全量 676 项仅 7 项环境失败。CodeGen/投影/分流/V0→delta/多页面模拟预览/真实沙盒多页 E2E PASS。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 无持久化；沙盒无 gVisor；未云端部署。

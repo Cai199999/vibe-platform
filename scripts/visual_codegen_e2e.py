@@ -37,6 +37,7 @@ from ai_core.domain.visual_document import (
     VisualBinding,
     VisualDocument,
     VisualNode,
+    VisualPage,
     VisualRepeat,
     freeze_visual_document,
 )
@@ -83,10 +84,52 @@ def build_document() -> VisualDocument:
             ),
         ],
     )
+    second_root = VisualNode(
+        id="nd_page0002",
+        type="page",
+        name="用户页",
+        children=[
+            VisualNode(
+                id="nd_title002",
+                type="text",
+                name="标题",
+                props={"text": "用户列表"},
+            ),
+            VisualNode(
+                id="nd_list002",
+                type="list",
+                name="职位列表",
+                repeat=VisualRepeat(source="ghost_items", sample_count=2),
+                children=[
+                    VisualNode(
+                        id="nd_item002",
+                        type="text",
+                        name="职位",
+                        props={"text": "示例职位"},
+                    )
+                ],
+            ),
+        ],
+    )
     document = VisualDocument(
         docId="vdoc_codegen_e2e",
         projectId="proj_codegen_e2e",
         title="CodeGen E2E",
+        pages=[
+            VisualPage(
+                pageId="pg_home",
+                path="/",
+                title="首页",
+                root=root,
+            ),
+            VisualPage(
+                pageId="pg_users",
+                path="/users",
+                title="用户页",
+                root=second_root,
+            ),
+        ],
+        activePageId="pg_home",
         root=root,
         bindings=[
             VisualBinding(
@@ -151,10 +194,25 @@ def main() -> int:
         "nd_item001",
         "nd_input001",
         "nd_btn0001",
+        "nd_page0002",
+        "nd_title002",
+        "nd_list002",
+        "nd_item002",
     ]
     missing = [
         node_id for node_id in expected if f'data-node-id="{node_id}"' not in app
     ]
+    if "VISUAL_PAGES" not in app or "visual-page-nav" not in app:
+        print("[e2e] FAILED: multi-page app missing page switcher", file=sys.stderr)
+        service._destroy_quietly(active.sandbox_id)
+        return 1
+    if not any("ghost_items" in item for item in active.warnings):
+        print(
+            f"[e2e] FAILED: unbound repeat warning missing: {active.warnings}",
+            file=sys.stderr,
+        )
+        service._destroy_quietly(active.sandbox_id)
+        return 1
     if missing:
         print(f"[e2e] FAILED: missing data-node-id: {missing}", file=sys.stderr)
         service._destroy_quietly(active.sandbox_id)
@@ -210,8 +268,9 @@ def main() -> int:
 
     print(
         "[e2e] PASS: "
-        f"{len(expected)} data-node-id, data-source, visual.css, "
-        "Tailwind project, npm install, build, npm run dev, ChangeLog"
+        f"{len(expected)} data-node-id, multi-page switcher, unbound-repeat warning, "
+        "data-source, visual.css, Tailwind project, npm install, build, "
+        "npm run dev, ChangeLog"
     )
     if os.environ.get("KEEP_SANDBOX", "1").strip() not in {"1", "true", "yes"}:
         service._destroy_quietly(active.sandbox_id)

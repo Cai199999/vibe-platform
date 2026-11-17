@@ -1445,8 +1445,13 @@ def _coerce_document(document: VisualDocument | Mapping[str, Any]) -> VisualDocu
         ) from exc
 
 
-def _assert_repeats_bound(document: VisualDocument) -> None:
-    """CodeGen 前强制 repeat.source 闭环；冻结阶段只给 warning。"""
+def _unbound_repeat_warnings(document: VisualDocument) -> list[str]:
+    """未绑定 repeat 不再阻断静态 CodeGen，但必须显式告警。
+
+    CodeGen 使用 VisualRepeat.sampleCount 渲染示例数据；真实业务数据仍需
+    通过业务审查 / Direct Ops 绑定。冻结阶段允许进入业务审查。
+    """
+    warnings: list[str] = []
     for _page_id, _path, _title, root in _document_pages(document):
         for node in _iter_nodes(root):
             if not node.repeat:
@@ -1456,11 +1461,26 @@ def _assert_repeats_bound(document: VisualDocument) -> None:
                 binding.id == source or binding.entity == source
                 for binding in document.bindings
             ):
-                raise VisualCodegenError(
-                    f"节点 {node.id} 的 repeat.source={source} 尚未完成业务绑定；"
-                    "请先通过业务审查补齐 binding 再生成代码",
-                    code="VISUAL_UNBOUND_REPEAT",
+                warnings.append(
+                    f"节点 {node.id} 的 repeat.source={source} 未绑定；"
+                    "CodeGen 将使用示例数据渲染，业务数据需后续绑定"
                 )
+    return warnings
+
+
+def _with_extra_warnings(
+    result: VisualCompileResult, warnings: list[str]
+) -> VisualCompileResult:
+    if not warnings:
+        return result
+    return VisualCompileResult(
+        files=result.files,
+        node_ids=result.node_ids,
+        summary=result.summary,
+        warnings=tuple(dict.fromkeys([*result.warnings, *warnings])),
+        metadata=result.metadata,
+        repaired=result.repaired,
+    )
 
 
 def _assert_frozen(document: VisualDocument) -> None:
@@ -1513,7 +1533,7 @@ def compile_visual_document(
         )
     if require_frozen:
         _assert_frozen(visual)
-    _assert_repeats_bound(visual)
+    repeat_warnings = _unbound_repeat_warnings(visual)
 
     try:
         primary = _ReactCompiler(
@@ -1529,18 +1549,21 @@ def compile_visual_document(
             ) from exc
         fallback = _fallback_result(visual, reason=f"编译器异常 {type(exc).__name__}")
         _gate_or_raise(fallback)
-        return VisualCompileResult(
-            files=fallback.files,
-            node_ids=fallback.node_ids,
-            summary=fallback.summary,
-            warnings=fallback.warnings,
-            metadata=fallback.metadata,
-            repaired=True,
+        return _with_extra_warnings(
+            VisualCompileResult(
+                files=fallback.files,
+                node_ids=fallback.node_ids,
+                summary=fallback.summary,
+                warnings=fallback.warnings,
+                metadata=fallback.metadata,
+                repaired=True,
+            ),
+            repeat_warnings,
         )
 
     try:
         _gate_or_raise(primary)
-        return primary
+        return _with_extra_warnings(primary, repeat_warnings)
     except VisualCodegenGateUnavailable:
         raise
     except VisualCodegenGateError as exc:
@@ -1548,17 +1571,23 @@ def compile_visual_document(
             raise
         fallback = _fallback_result(visual, reason=str(exc))
         _gate_or_raise(fallback)
-        return VisualCompileResult(
-            files=fallback.files,
-            node_ids=fallback.node_ids,
-            summary=fallback.summary,
-            warnings=tuple(
-                list(primary.warnings)
-                + list(fallback.warnings)
-                + [f"确定性编译未过门禁：{exc}"]
+        return _with_extra_warnings(
+            VisualCompileResult(
+                files=fallback.files,
+                node_ids=fallback.node_ids,
+                summary=fallback.summary,
+                warnings=tuple(
+                    list(primary.warnings)
+                    + list(fallback.warnings)
+                    + [f"确定性编译未过门禁：{exc}"]
+                ),
+                metadata={
+                    **fallback.metadata,
+                    "primaryErrors": list(exc.errors[:20]),
+                },
+                repaired=True,
             ),
-            metadata={**fallback.metadata, "primaryErrors": list(exc.errors[:20])},
-            repaired=True,
+            repeat_warnings,
         )
 
 

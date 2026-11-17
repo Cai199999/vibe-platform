@@ -144,6 +144,7 @@ export const EMPTY_ARCHITECT = {
   projectMode: null,
   // VISUAL_V0 / BACKEND_BINDING / FULL。
   outputPhase: null,
+  qualityTierRequired: true,
   appShape: null,
   confidenceScore: 0,
   threshold: 0.85,
@@ -413,6 +414,8 @@ export function reduceArchitect(state, event) {
           : 'AWAITING_CONTRACT_CONFIRMATION',
         conflict: null,
         contract: payload.contract ?? state.contract,
+        qualityTierRequired:
+          payload.qualityTierRequired ?? state.qualityTierRequired ?? true,
         citations: payload.citations ?? state.citations,
         confidenceScore:
           payload.contract?.confidenceScore ?? state.confidenceScore,

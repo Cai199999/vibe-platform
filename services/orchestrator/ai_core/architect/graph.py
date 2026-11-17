@@ -1285,7 +1285,7 @@ class ArchitectGraphRunner:
             # 风险自适应门禁：契约确认前必须由用户显式选择质量分级。
             # 该问题不可跳过；前端在未选择时禁用 CONFIRM 按钮，
             # 旧客户端未传时后端按 L2 兜底以保持协议向后兼容。
-            "qualityTierRequired": True,
+            "qualityTierRequired": not bool(state.get("quality_tier_selected")),
             "qualityTierPrompt": QUALITY_TIER_PROMPT,
             "qualityTierOptions": QUALITY_TIER_OPTIONS,
             "qualityTier": contract.get("qualityTier")
@@ -1307,6 +1307,11 @@ class ArchitectGraphRunner:
             or normalize_quality_tier(contract.get("qualityTier"))
             or normalize_quality_tier(state.get("quality_tier"))
             or "L2_STANDARD"
+        )
+        quality_tier_selected = (
+            bool(selected_tier)
+            or bool(state.get("quality_tier_selected"))
+            or decision == "CONFIRM"
         )
         if selected_tier:
             # 把用户选择写回契约快照，_confirmed / 前端事件 / 后续
@@ -1337,6 +1342,7 @@ class ArchitectGraphRunner:
             return {
                 "contract": contract,
                 "quality_tier": quality_tier,
+                "quality_tier_selected": quality_tier_selected,
                 "contract_decision": "REVISE",
                 "contract_feedback": comment,
                 "contract_revision_count": revision_count + 1,
@@ -1346,6 +1352,7 @@ class ArchitectGraphRunner:
         return {
             "contract": contract,
             "quality_tier": quality_tier,
+            "quality_tier_selected": quality_tier_selected,
             "contract_decision": decision,
             "contract_feedback": comment,
             "status": (

@@ -1164,6 +1164,7 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         # 质量分级只在契约确认阶段由用户写入；初值留空，避免把默认值
         # 误当成“用户已选择”。
         "quality_tier": "",
+        "quality_tier_selected": False,
         "skeleton_mode": False,
         "slots": {},
         "confidence_score": 0.0,

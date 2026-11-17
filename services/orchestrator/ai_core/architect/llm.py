@@ -125,6 +125,21 @@ def _visual_review_block(context: ArchitectContext) -> str:
     )
 
 
+def _engineering_standards_block() -> str:
+    return (
+        "\n\n【全局工程规范 · 最高优先级】\n"
+        "- 数据库 DDL 禁止物理外键（FOREIGN KEY）；关联统一使用 "
+        "<parent>_id 业务字段，由应用层事务 / JOIN 保证一致性；\n"
+        "- 模块化分层：前端 feature / shared / hooks / api；后端 "
+        "route / service / repository / dto；禁止把业务逻辑写进路由或页面；\n"
+        "- 依赖必须单向，禁止循环依赖；单文件禁止巨石实现；\n"
+        "- 所有产物必须能通过 AST / 构建 / 契约一致性门禁；\n"
+        "- 方案文档固定命名：01-需求与功能模块清单、02-技术选型与架构设计、"
+        "03-数据库设计文档、04-API接口设计清单、05-最终设计方案与开发规范；"
+        "后续 Agent 按此引用章节，不得另起文档体系。"
+    )
+
+
 def _project_mode_block(mode: str) -> str:
     """存量项目模式覆盖：严禁虚拟树 / 全量代码，只做增量业务审查。"""
     if mode != "EXISTING_SOURCE":
@@ -1170,6 +1185,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
         )
         system += _project_mode_block(context.project_mode)
         system += _output_phase_block(context.output_phase)
+        system += _engineering_standards_block()
         system += _changelog_block(context)
         human = _analysis_human(context)
 
@@ -1341,6 +1357,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
         )
         system += _project_mode_block(context.project_mode)
         system += _output_phase_block(context.output_phase)
+        system += _engineering_standards_block()
         system += _changelog_block(context)
         human = _contract_human(context)
         return self._generate_with_repair(
@@ -1393,6 +1410,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
         )
         system += _project_mode_block(context.project_mode)
         system += _output_phase_block(context.output_phase)
+        system += _engineering_standards_block()
         system += _changelog_block(context)
         human = (
             f"{_contract_human(context)}\n\n"

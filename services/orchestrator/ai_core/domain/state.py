@@ -279,6 +279,8 @@ class ArchitectState(TypedDict, total=False):
     app_shape: str
     # 风险自适应门禁：契约确认时由用户显式选择，修订 / 重新确认时保持。
     quality_tier: str
+    # 用户是否已显式选择质量分级；用于避免每轮重复询问 L1/L2/L3。
+    quality_tier_selected: bool
     # 用户只给出抽象目标时为 True：跳过 LLM，直接产出空白骨架契约。
     skeleton_mode: bool
     slots: dict[str, Any]
