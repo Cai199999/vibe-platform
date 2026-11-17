@@ -14,10 +14,12 @@ import {
   collectVisualNodeIds,
   countVisualNodes,
   createEmptyVisualDocument,
+  ensureVisualPages,
   findVisualNode,
   isVisualDescendant,
   validateVisualDocument,
 } from './visualDocument.js'
+import VisualDocumentPreview from './VisualDocumentPreview.jsx'
 import { useVisualDocumentStore } from './visualDocumentStore.js'
 import { generateVisualNodes } from './visualAgentClient.js'
 
@@ -493,6 +495,8 @@ export default function OfflineVisualCanvas({
     resetDocument,
     replaceDocument,
     freezeDocument,
+    switchPage,
+    addPage,
     clearError,
   } = store
   const [draggingId, setDraggingId] = useState(null)
@@ -506,7 +510,10 @@ export default function OfflineVisualCanvas({
   const [magicNotice, setMagicNotice] = useState('')
   const [reviewBusy, setReviewBusy] = useState(false)
   const [reviewError, setReviewError] = useState('')
+  const [previewOpen, setPreviewOpen] = useState(false)
   const frozen = doc.status === 'FROZEN'
+  const pages = ensureVisualPages(doc)
+  const activePageId = doc.activePageId || pages[0]?.pageId || ''
 
   useEffect(() => {
     if (!projectId) return
@@ -804,6 +811,14 @@ export default function OfflineVisualCanvas({
             {report.ok ? 'Schema 通过' : `${report.errors.length} 个校验错误`}
           </span>
           <span className="vc-revision">r{doc.revision}</span>
+          <button
+            type="button"
+            className="ghost-button"
+            data-visual-preview-open
+            onClick={() => setPreviewOpen(true)}
+          >
+            👁 预览
+          </button>
           {onAnalyzeSource && (
             <label
               className={`ghost-button vc-source-import${
@@ -937,6 +952,33 @@ export default function OfflineVisualCanvas({
 
         <main className="vc-canvas-area">
           <div className="vc-canvas-toolbar">
+            <div className="vc-page-switcher" role="tablist" aria-label="页面">
+              {pages.map((page) => (
+                <button
+                  key={page.pageId}
+                  type="button"
+                  role="tab"
+                  aria-selected={page.pageId === activePageId}
+                  className={
+                    page.pageId === activePageId ? 'is-selected' : ''
+                  }
+                  onClick={() => switchPage(page.pageId)}
+                  title={page.path}
+                >
+                  {page.title || page.path}
+                </button>
+              ))}
+              <button
+                type="button"
+                className="vc-page-add"
+                disabled={frozen}
+                onClick={() =>
+                  addPage({ title: `页面 ${pages.length + 1}` })
+                }
+              >
+                ＋ 页面
+              </button>
+            </div>
             <span>拖拽左上角 ⠿ 换父容器</span>
             <span>{dropHint}</span>
             <span>{doc.status}</span>
@@ -1260,6 +1302,14 @@ export default function OfflineVisualCanvas({
             </form>
           </div>
         </div>
+      )}
+
+      {previewOpen && (
+        <VisualDocumentPreview
+          document={doc}
+          onClose={() => setPreviewOpen(false)}
+          onSwitchPage={(pageId) => switchPage(pageId)}
+        />
       )}
     </div>
   )

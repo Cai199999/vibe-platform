@@ -5,6 +5,8 @@
  * 只审查用户新增 / 删除 / 移动 / 修改的节点及其交互、绑定缺口。
  */
 
+import { ensureVisualPages } from './visualDocument.js'
+
 export const VISUAL_V0_STORAGE_PREFIX = 'vibe.visual.v0.'
 
 const NODE_FIELDS = [
@@ -38,16 +40,26 @@ function serialize(value) {
   return JSON.stringify(stable(value ?? null))
 }
 
-function flattenNodes(root) {
+function flattenNodes(document) {
   const result = []
-  const walk = (node, parentId, index, path) => {
+  const walk = (node, parentId, index, path, page) => {
     if (!node) return
-    result.push({ node, parentId, index, path })
+    result.push({
+      node,
+      parentId,
+      index,
+      path,
+      pageId: page?.pageId || '',
+      pagePath: page?.path || '/',
+      pageTitle: page?.title || '',
+    })
     ;(node.children || []).forEach((child, childIndex) =>
-      walk(child, node.id, childIndex, [...path, node.id]),
+      walk(child, node.id, childIndex, [...path, node.id], page),
     )
   }
-  if (root) walk(root, null, 0, [])
+  ensureVisualPages(document).forEach((page) => {
+    if (page.root) walk(page.root, null, 0, [], page)
+  })
   return result
 }
 
@@ -97,8 +109,8 @@ export function buildVisualDelta(baseline, current) {
       summary: '没有可比较的 v0 基线',
     }
   }
-  const beforeNodes = flattenNodes(baseline.root)
-  const afterNodes = flattenNodes(current.root)
+  const beforeNodes = flattenNodes(baseline)
+  const afterNodes = flattenNodes(current)
   const beforeMap = new Map(beforeNodes.map((item) => [item.node.id, item]))
   const afterMap = new Map(afterNodes.map((item) => [item.node.id, item]))
 
@@ -113,6 +125,9 @@ export function buildVisualDelta(baseline, current) {
         ...nodeSnapshot(item.node),
         parentId: item.parentId,
         path: item.path,
+        pageId: item.pageId,
+        pagePath: item.pagePath,
+        pageTitle: item.pageTitle,
       })
       continue
     }
@@ -126,6 +141,8 @@ export function buildVisualDelta(baseline, current) {
         toParentId: item.parentId,
         fromIndex: previous.index,
         toIndex: item.index,
+        fromPageId: previous.pageId,
+        toPageId: item.pageId,
       })
     }
     const beforePayload = serialize({
@@ -153,6 +170,9 @@ export function buildVisualDelta(baseline, current) {
         ...nodeSnapshot(item.node),
         parentId: item.parentId,
         path: item.path,
+        pageId: item.pageId,
+        pagePath: item.pagePath,
+        pageTitle: item.pageTitle,
       })
     }
   }
@@ -172,11 +192,13 @@ export function buildVisualDelta(baseline, current) {
       docId: baseline.docId,
       revision: baseline.revision,
       contentHash: baseline.metadata?.contentHash || '',
+      pageCount: ensureVisualPages(baseline).length,
     },
     to: {
       docId: current.docId,
       revision: current.revision,
       status: current.status,
+      pageCount: ensureVisualPages(current).length,
     },
     added,
     removed,
@@ -187,6 +209,7 @@ export function buildVisualDelta(baseline, current) {
     newRepeats,
     newInteractive,
     summary: [
+      `页面 ${ensureVisualPages(current).length} 个`,
       `新增 ${added.length} 个节点`,
       `删除 ${removed.length} 个节点`,
       `移动 ${moved.length} 个节点`,

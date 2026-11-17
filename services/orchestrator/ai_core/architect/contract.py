@@ -159,6 +159,7 @@ def validate_draft(
                 components=components,
                 interactions=interactions,
                 api_routes=api_routes,
+                frontend_routes=draft.frontend_routes,
             )
 
     if shape == "lightweight_web":
@@ -477,6 +478,7 @@ def assemble_contract(
             components=draft.components,
             interactions=draft.component_interactions,
             api_routes=draft.api_routes,
+            frontend_routes=draft.frontend_routes,
         )
     visual_document = (
         VisualDocument.model_validate(visual_payload)

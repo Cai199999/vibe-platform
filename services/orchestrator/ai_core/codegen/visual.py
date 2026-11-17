@@ -229,6 +229,32 @@ def _collect_node_ids(root: VisualNode | None) -> tuple[str, ...]:
     return tuple(node.id for node in _iter_nodes(root))
 
 
+def _document_pages(document: VisualDocument):
+    if document.pages:
+        return [
+            (page.page_id, page.path, page.title, page.root) for page in document.pages
+        ]
+    if document.root is not None:
+        return [("", "/", document.title, document.root)]
+    return []
+
+
+def _collect_document_node_ids(document: VisualDocument) -> tuple[str, ...]:
+    return tuple(
+        node.id
+        for _page_id, _path, _title, root in _document_pages(document)
+        for node in _iter_nodes(root)
+    )
+
+
+def _page_component_name(title: str, index: int) -> str:
+    match = re.findall(r"[A-Za-z0-9]+", str(title or ""))
+    name = "".join(part[:1].upper() + part[1:] for part in match[:3])
+    if not name or not name[0].isalpha():
+        name = f"Page{index + 1}"
+    return f"Page{name}"
+
+
 def _node_count(root: VisualNode | None) -> int:
     return sum(1 for _ in _iter_nodes(root))
 
@@ -317,6 +343,30 @@ def _render_css(document: VisualDocument) -> str:
             "  border: 1px solid var(--color-border);",
             "  padding: 8px 12px;",
             "  text-align: left;",
+            "}",
+            "",
+            ".visual-page-nav {",
+            "  display: flex;",
+            "  gap: 8px;",
+            "  flex-wrap: wrap;",
+            "  padding: 10px 16px;",
+            "  border-bottom: 1px solid var(--color-border);",
+            "  background: var(--color-surface);",
+            "}",
+            "",
+            ".visual-page-nav button {",
+            "  padding: 6px 12px;",
+            "  border: 1px solid var(--color-border);",
+            "  border-radius: var(--radius-pill);",
+            "  background: transparent;",
+            "  color: var(--color-muted);",
+            "  cursor: pointer;",
+            "}",
+            "",
+            ".visual-page-nav button.is-active {",
+            "  border-color: var(--color-primary);",
+            "  background: var(--color-primary-soft);",
+            "  color: var(--color-primary);",
             "}",
             "",
             ".visual-custom-placeholder {",
@@ -678,6 +728,7 @@ def _interaction_index(document: VisualDocument) -> dict[str, dict[str, Any]]:
             "action": interaction.action,
             "endpoint": endpoint,
             "method": method,
+            "targetPageId": interaction.target_page_id or "",
         }
     return result
 
@@ -1008,6 +1059,7 @@ class _ReactCompiler:
         self.document = document
         self.include_interactions = include_interactions
         self.actions = _interaction_index(document) if include_interactions else {}
+        self.multi_page = len(document.pages) > 1
         self.warnings: list[str] = []
         self.custom_node_ids: list[str] = []
         self.repeat_node_ids: list[str] = []
@@ -1043,9 +1095,20 @@ class _ReactCompiler:
         if self.include_interactions:
             action = self.actions.get(node.id)
             if action:
-                attrs.append(
-                    f"onClick={{() => runVisualAction({_js_string(action['id'])})}}"
-                )
+                if (
+                    self.multi_page
+                    and action.get("action") == "navigate"
+                    and action.get("targetPageId")
+                ):
+                    attrs.append(
+                        "onClick={() => onNavigate("
+                        + _js_string(action["targetPageId"])
+                        + ")}"
+                    )
+                else:
+                    attrs.append(
+                        f"onClick={{() => runVisualAction({_js_string(action['id'])})}}"
+                    )
         attrs.extend(extra)
         return " ".join(attrs)
 
@@ -1197,25 +1260,95 @@ class _ReactCompiler:
 
     # ---------------- 入口 ----------------
     def compile(self) -> VisualCompileResult:
-        root = self.document.root
-        lines = ['import "./visual.css"', ""]
+        pages = _document_pages(self.document)
+        lines: list[str] = []
+        if self.multi_page:
+            lines.append('import { useState } from "react"')
+        lines.append('import "./visual.css"')
+        lines.append("")
         lines.extend(_render_action_runtime(list(self.actions.values())))
-        lines.extend(
-            [
-                "export default function App() {",
-                "  return (",
-            ]
-        )
-        if root is not None:
-            lines.extend(self._render_node(root, 4))
-        else:
-            lines.append(
-                '    <main className="visual-node visual-page min-h-screen '
-                'w-full bg-[var(--color-surface)]" />'
+
+        if self.multi_page:
+            component_names: list[str] = []
+            used_names: set[str] = set()
+            for index, (_page_id, _path, title, root) in enumerate(pages):
+                name = _page_component_name(title, index)
+                if name in used_names:
+                    name = f"{name}{index + 1}"
+                used_names.add(name)
+                component_names.append(name)
+                lines.extend(
+                    [
+                        f"function {name}({{ onNavigate }}) {{",
+                        "  return (",
+                    ]
+                )
+                lines.extend(self._render_node(root, 4))
+                lines.extend(["  )", "}", ""])
+            lines.append("const VISUAL_PAGES = [")
+            for index, (page_id, path, title, _root) in enumerate(pages):
+                lines.append(
+                    "  { id: "
+                    + _js_string(page_id or f"page_{index + 1}")
+                    + ", path: "
+                    + _js_string(path or "/")
+                    + ", title: "
+                    + _js_string(title or f"页面 {index + 1}")
+                    + f", Component: {component_names[index]} }},"
+                )
+            lines.extend(
+                [
+                    "];",
+                    "",
+                    "export default function App() {",
+                    "  const [activePageId, setActivePageId] = useState(",
+                    "    VISUAL_PAGES[0]?.id || '',",
+                    "  );",
+                    "  const activePage =",
+                    "    VISUAL_PAGES.find((page) => page.id === activePageId) ||",
+                    "    VISUAL_PAGES[0];",
+                    "  if (!activePage) return null;",
+                    "  const ActivePage = activePage.Component;",
+                    "  return (",
+                    "    <>",
+                    '      <nav className="visual-page-nav">',
+                    "        {VISUAL_PAGES.map((page) => (",
+                    "          <button",
+                    "            key={page.id}",
+                    '            type="button"',
+                    "            className={page.id === activePageId ? 'is-active' : ''}",
+                    "            onClick={() => setActivePageId(page.id)}",
+                    "          >",
+                    "            {page.title}",
+                    "          </button>",
+                    "        ))}",
+                    "      </nav>",
+                    "      <ActivePage onNavigate={setActivePageId} />",
+                    "    </>",
+                    "  );",
+                    "}",
+                    "",
+                ]
             )
-        lines.extend(["  )", "}", ""])
+        else:
+            lines.extend(
+                [
+                    "export default function App() {",
+                    "  return (",
+                ]
+            )
+            root = pages[0][3] if pages else None
+            if root is not None:
+                lines.extend(self._render_node(root, 4))
+            else:
+                lines.append(
+                    '    <main className="visual-node visual-page min-h-screen '
+                    'w-full bg-[var(--color-surface)]" />'
+                )
+            lines.extend(["  )", "}", ""])
+
         app_source = _fill_source_lines("\n".join(lines))
-        node_ids = _collect_node_ids(root)
+        node_ids = _collect_document_node_ids(self.document)
         files = {
             "src/App.jsx": app_source,
             "src/visual.css": _render_css(self.document),
@@ -1229,13 +1362,14 @@ class _ReactCompiler:
             node_ids=node_ids,
             summary=(
                 "VisualDocument 确定性编译："
-                f"{len(node_ids)} 个静态节点、"
+                f"{len(pages)} 个页面、{len(node_ids)} 个静态节点、"
                 f"{len(self.actions)} 个交互、完整 Vite 工程"
             ),
             warnings=tuple(dict.fromkeys(self.warnings)),
             metadata={
                 "codegen": "visual-deterministic",
                 "staticOnly": not self.include_interactions,
+                "pageCount": len(pages),
                 "nodeCount": len(node_ids),
                 "customNodeCount": len(self.custom_node_ids),
                 "repeatNodeCount": len(self.repeat_node_ids),
@@ -1255,7 +1389,7 @@ def _fallback_result(
     reason: str,
 ) -> VisualCompileResult:
     """构建失败 / 门禁失败时的最后一次安全产物：扁平占位页。"""
-    node_ids = _collect_node_ids(document.root)
+    node_ids = _collect_document_node_ids(document)
     lines = [
         'import "./visual.css"',
         "",
@@ -1266,16 +1400,17 @@ def _fallback_result(
         '      <h1 className="m-0 mb-4 text-[var(--typography-title)]">'
         "页面已降级为安全占位</h1>",
     ]
-    for node in _iter_nodes(document.root):
-        label = node.name or node.type
-        lines.append(
-            f'      <div data-node-id="{node.id}" '
-            f'data-source="{SOURCE_FILE}:{_SOURCE_PLACEHOLDER}" '
-            f'data-visual-type="{node.type}" '
-            'className="my-1.5 rounded-[var(--radius-sm)] border '
-            'border-[var(--color-border)] px-3 py-2">'
-            f"{{{_js_string(f'{label} ({node.type})')}}}</div>"
-        )
+    for _page_id, _path, _title, root in _document_pages(document):
+        for node in _iter_nodes(root):
+            label = node.name or node.type
+            lines.append(
+                f'      <div data-node-id="{node.id}" '
+                f'data-source="{SOURCE_FILE}:{_SOURCE_PLACEHOLDER}" '
+                f'data-visual-type="{node.type}" '
+                'className="my-1.5 rounded-[var(--radius-sm)] border '
+                'border-[var(--color-border)] px-3 py-2">'
+                f"{{{_js_string(f'{label} ({node.type})')}}}</div>"
+            )
     lines.extend(["    </main>", "  )", "}", ""])
     return VisualCompileResult(
         files={

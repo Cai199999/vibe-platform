@@ -20,6 +20,7 @@ from ai_core.domain.visual_document import (
     VisualInteraction,
     VisualLayout,
     VisualNode,
+    VisualPage,
     VisualRepeat,
     VisualStyle,
     freeze_visual_document,
@@ -167,6 +168,43 @@ class VisualCodegenCompileTests(unittest.TestCase):
         self.assertIn("cdn.tailwindcss.com", result.files["index.html"])
         self.assertIn("/src/main.jsx", result.files["index.html"])
         self.assertIn("./visual.css", result.files["src/main.jsx"])
+
+    def test_multiple_pages_compile_to_page_switcher(self) -> None:
+        first = _node(
+            "nd_home001",
+            "page",
+            name="首页",
+            children=[_node("nd_home_text", "text", props={"text": "首页"})],
+        )
+        second = _node(
+            "nd_users001",
+            "page",
+            name="用户",
+            children=[_node("nd_users_text", "text", props={"text": "用户页"})],
+        )
+        document = VisualDocument(
+            docId="vdoc_pages",
+            projectId="proj_pages",
+            title="多页面",
+            pages=[
+                VisualPage(pageId="pg_home", path="/", title="首页", root=first),
+                VisualPage(
+                    pageId="pg_users", path="/users", title="用户", root=second
+                ),
+            ],
+            activePageId="pg_home",
+            root=first,
+        )
+        frozen = freeze_visual_document(document)
+        result = compile_visual_document(frozen)
+        app = result.files["src/App.jsx"]
+        self.assertIn("VISUAL_PAGES", app)
+        self.assertIn("visual-page-nav", app)
+        self.assertIn('data-node-id="nd_users001"', app)
+        self.assertIn('data-node-id="nd_users_text"', app)
+        self.assertEqual(result.metadata["pageCount"], 2)
+        report = verify_visual_source(result.files, result.node_ids)
+        self.assertTrue(report.ok, report.errors)
 
     def test_interactions_are_opt_in(self) -> None:
         result = compile_visual_document(_document(), include_interactions=True)

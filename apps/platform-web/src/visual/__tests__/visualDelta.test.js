@@ -8,6 +8,7 @@ import {
 import {
   createEmptyVisualDocument,
   createVisualNode,
+  deleteVisualNodeFromDocument,
   insertVisualNodeIntoDocument,
   moveVisualNodeInDocument,
   updateVisualNodeInDocument,
@@ -77,8 +78,7 @@ describe('buildVisualDelta', () => {
 
   it('识别删除节点', () => {
     const { doc, buttonId } = baselineDoc()
-    const current = JSON.parse(JSON.stringify(doc))
-    current.root.children[0].children = []
+    const current = deleteVisualNodeFromDocument(doc, buttonId)
     const delta = buildVisualDelta(doc, current)
     expect(delta.removed.map((item) => item.id)).toContain(buttonId)
   })

@@ -255,6 +255,17 @@ export function createEmptyVisualDocument({
   title = '未命名页面',
   withRoot = true,
 } = {}) {
+  const root = withRoot ? createVisualNode('page', { name: '页面' }) : null
+  const pages = root
+    ? [
+        {
+          pageId: newVisualId('pg'),
+          path: '/',
+          title,
+          root,
+        },
+      ]
+    : []
   return {
     schemaVersion: VISUAL_SCHEMA_VERSION,
     docId: newVisualId('vdoc'),
@@ -263,7 +274,9 @@ export function createEmptyVisualDocument({
     status: 'DRAFT',
     title,
     designTokens: JSON.parse(JSON.stringify(DEFAULT_TOKENS)),
-    root: withRoot ? createVisualNode('page', { name: '页面' }) : null,
+    pages,
+    activePageId: pages[0]?.pageId || '',
+    root,
     interactions: [],
     bindings: [],
     review: {
@@ -277,6 +290,113 @@ export function createEmptyVisualDocument({
       lastModifiedBy: 'user',
       contentHash: '',
     },
+  }
+}
+
+/** 返回文档的页面列表；旧单页文档自动归一为一页。 */
+export function ensureVisualPages(document) {
+  if (!document) return []
+  if (Array.isArray(document.pages) && document.pages.length > 0) {
+    return document.pages
+  }
+  if (!document.root) return []
+  return [
+    {
+      pageId: document.activePageId || 'pg_default',
+      path: '/',
+      title: document.title || '页面',
+      root: document.root,
+    },
+  ]
+}
+
+export function activePageIdOf(document) {
+  const pages = ensureVisualPages(document)
+  if (!pages.length) return ''
+  if (
+    document?.activePageId &&
+    pages.some((page) => page.pageId === document.activePageId)
+  ) {
+    return document.activePageId
+  }
+  return pages[0].pageId
+}
+
+export function activePageRoot(document) {
+  const pages = ensureVisualPages(document)
+  const activeId = activePageIdOf(document)
+  return pages.find((page) => page.pageId === activeId)?.root || null
+}
+
+/** 把 document.root 同步回当前页面，保持 pages 为权威事实源。 */
+export function withActivePageRoot(document, root = document?.root) {
+  if (!document) return document
+  const pages = ensureVisualPages(document)
+  if (!pages.length) return { ...document, root: root ?? null }
+  const activeId = activePageIdOf(document)
+  if (!root) {
+    // 删除当前页根节点：移除该页面；若还有其它页面则切到第一页，
+    // 否则得到合法空白画布（pages=[] / root=null）。
+    const remaining = pages.filter((page) => page.pageId !== activeId)
+    const nextActive = remaining[0] || null
+    return {
+      ...document,
+      pages: remaining,
+      activePageId: nextActive?.pageId || '',
+      root: nextActive?.root || null,
+    }
+  }
+  return {
+    ...document,
+    pages: pages.map((page) =>
+      page.pageId === activeId ? { ...page, root } : page,
+    ),
+    activePageId: activeId,
+    root,
+  }
+}
+
+export function switchVisualPage(document, pageId) {
+  if (!document) return document
+  const pages = ensureVisualPages(document)
+  const target = pages.find((page) => page.pageId === pageId)
+  if (!target) return document
+  const synced = withActivePageRoot(document, document.root)
+  return {
+    ...synced,
+    activePageId: pageId,
+    root: target.root,
+  }
+}
+
+export function addVisualPage(
+  document,
+  { title = '新页面', path = '' } = {},
+) {
+  const pages = ensureVisualPages(document)
+  const usedPaths = new Set(pages.map((page) => page.path))
+  let routePath = path || `/page-${pages.length + 1}`
+  if (!routePath.startsWith('/')) routePath = `/${routePath}`
+  while (usedPaths.has(routePath)) {
+    routePath = `${routePath}-${pages.length + 1}`
+  }
+  const root = createVisualNode('page', { name: title })
+  root.props = { title }
+  const page = {
+    pageId: newVisualId('pg'),
+    path: routePath,
+    title,
+    root,
+  }
+  const synced = withActivePageRoot(document, document.root)
+  return {
+    document: {
+      ...synced,
+      pages: [...ensureVisualPages(synced), page],
+      activePageId: page.pageId,
+      root,
+    },
+    page,
   }
 }
 
@@ -365,8 +485,9 @@ function insertVisualNode(root, parentId, node, index = -1) {
 }
 
 function touchDocument(document, editor = 'user') {
+  const synced = withActivePageRoot(document, document.root)
   return {
-    ...document,
+    ...synced,
     revision: (document.revision || 0) + 1,
     status: document.status === 'FROZEN' ? 'DRAFT' : document.status,
     metadata: {
@@ -535,6 +656,27 @@ export function validateVisualDocument(document) {
     errors.push('bindings 必须是数组')
   }
 
+  const pages = ensureVisualPages(document)
+  const pageIds = new Set()
+  const pagePaths = new Set()
+  pages.forEach((page) => {
+    if (!page?.pageId) {
+      errors.push('页面缺少 pageId')
+      return
+    }
+    if (pageIds.has(page.pageId)) errors.push(`重复 pageId: ${page.pageId}`)
+    pageIds.add(page.pageId)
+    const path = page.path || '/'
+    if (pagePaths.has(path)) errors.push(`重复页面路径: ${path}`)
+    pagePaths.add(path)
+    if (!page.root || page.root.type !== 'page') {
+      errors.push(`页面 ${page.pageId} 的 root 必须是 page 节点`)
+    }
+  })
+  if (document.activePageId && !pageIds.has(document.activePageId)) {
+    errors.push(`activePageId ${document.activePageId} 不在 pages 中`)
+  }
+
   const nodeIds = new Set()
   const bindingIds = new Set()
   let nodeCount = 0
@@ -603,7 +745,9 @@ export function validateVisualDocument(document) {
     node.children.forEach((child) => walk(child, depth + 1))
   }
 
-  if (document.root) walk(document.root, 1)
+  pages.forEach((page) => {
+    if (page?.root) walk(page.root, 1)
+  })
 
   for (const binding of document.bindings || []) {
     if (!binding?.id) {
@@ -614,7 +758,7 @@ export function validateVisualDocument(document) {
       errors.push(`重复 bindingId: ${binding.id}`)
     }
     bindingIds.add(binding.id)
-    if (document.root && !nodeIds.has(binding.nodeId)) {
+    if (pages.length > 0 && !nodeIds.has(binding.nodeId)) {
       errors.push(`binding ${binding.id} 指向不存在的节点 ${binding.nodeId}`)
     }
   }
@@ -628,7 +772,7 @@ export function validateVisualDocument(document) {
       errors.push(`重复 interactionId: ${interaction.id}`)
     }
     interactionIds.add(interaction.id)
-    if (document.root && !nodeIds.has(interaction.nodeId)) {
+    if (pages.length > 0 && !nodeIds.has(interaction.nodeId)) {
       errors.push(
         `interaction ${interaction.id} 指向不存在的节点 ${interaction.nodeId}`,
       )
@@ -636,6 +780,15 @@ export function validateVisualDocument(document) {
     if (interaction.bindingId && !bindingIds.has(interaction.bindingId)) {
       errors.push(
         `interaction ${interaction.id} 引用不存在的 binding ${interaction.bindingId}`,
+      )
+    }
+    if (
+      interaction.targetPageId &&
+      pageIds.size > 0 &&
+      !pageIds.has(interaction.targetPageId)
+    ) {
+      errors.push(
+        `interaction ${interaction.id} 指向不存在的页面 ${interaction.targetPageId}`,
       )
     }
   }
@@ -660,7 +813,9 @@ export function validateVisualDocument(document) {
     }
     node.children.forEach(visit)
   }
-  if (document.root) visit(document.root)
+  pages.forEach((page) => {
+    if (page?.root) visit(page.root)
+  })
 
   if (document.status === 'FROZEN' && !document.metadata?.contentHash) {
     warnings.push('FROZEN 文档缺少 contentHash')

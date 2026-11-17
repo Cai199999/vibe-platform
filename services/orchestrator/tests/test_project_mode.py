@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 
+from ai_core.architect.visual import build_visual_document_from_contract
 from ai_core.architect.contract import (
     ContractDraft,
     assemble_contract,
@@ -24,7 +25,11 @@ from ai_core.architect.confidence import (
     missing_slots_for,
 )
 from ai_core.domain.architect import ArchitectAnalysis
-from ai_core.domain.visual_document import VisualDocument, VisualNode
+from ai_core.domain.visual_document import (
+    VisualDocument,
+    VisualNode,
+    validate_visual_document,
+)
 from ai_core.error_envelope import envelope_from_code
 from ai_core.fullstack.contract_audit import audit_contract
 
@@ -97,6 +102,32 @@ def _visual_v0_draft() -> ContractDraft:
         visual_document=_visual_document(),
         implementation_path=[{"phase": "1", "title": "原型", "tasks": []}],
     )
+
+
+class MultiPageBuilderTests(unittest.TestCase):
+    def test_frontend_routes_create_switchable_pages(self) -> None:
+        payload = build_visual_document_from_contract(
+            title="管理后台",
+            page_layout=[
+                {"region": "header", "title": "顶部导航"},
+                {"region": "main", "title": "主内容"},
+            ],
+            components=[
+                {"name": "UserList", "role": "list", "description": "用户列表"}
+            ],
+            frontend_routes=[
+                {"path": "/", "name": "首页", "description": "总览"},
+                {"path": "/users", "name": "用户管理", "description": "用户列表"},
+            ],
+        )
+        document = VisualDocument.model_validate(payload)
+        self.assertEqual(len(document.pages), 2)
+        self.assertEqual(
+            {page.path for page in document.pages}, {"/", "/users"}
+        )
+        self.assertEqual(document.active_page_id, document.pages[0].page_id)
+        report = validate_visual_document(document)
+        self.assertTrue(report.ok, report.errors)
 
 
 class VisualV0Tests(unittest.TestCase):

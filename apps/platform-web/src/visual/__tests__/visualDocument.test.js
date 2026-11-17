@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  addVisualPage,
   createEmptyVisualDocument,
   createVisualNode,
   deleteVisualNodeFromDocument,
@@ -8,6 +9,7 @@ import {
   insertVisualNodeIntoDocument,
   insertVisualNodesIntoDocument,
   moveVisualNodeInDocument,
+  switchVisualPage,
   updateVisualNodeInDocument,
   validateVisualDocument,
   visualDocumentFromContract,
@@ -216,5 +218,28 @@ describe('Agent 节点插入', () => {
     const childIds = form.children.map((child) => child.id)
     expect(new Set(childIds).size).toBe(2)
     expect(validateVisualDocument(result.document).ok).toBe(true)
+  })
+})
+
+describe('VisualDocument 多页面', () => {
+  it('新增 / 切换页面并保持 root 镜像与校验通过', () => {
+    let doc = createEmptyVisualDocument({ projectId: 'proj_pages' })
+    const added = addVisualPage(doc, { title: '用户管理', path: '/users' })
+    doc = added.document
+    expect(doc.pages).toHaveLength(2)
+    expect(doc.activePageId).toBe(added.page.pageId)
+    expect(doc.root.id).toBe(added.page.root.id)
+    expect(validateVisualDocument(doc).ok).toBe(true)
+
+    const home = doc.pages.find((page) => page.path === '/')
+    const switched = switchVisualPage(doc, home.pageId)
+    expect(switched.activePageId).toBe(home.pageId)
+    expect(switched.root.id).toBe(home.root.id)
+    expect(validateVisualDocument(switched).ok).toBe(true)
+  })
+
+  it('页面 root 必须存在，空页面列表表示空白画布', () => {
+    const doc = { ...emptyDoc(), pages: [], activePageId: '', root: null }
+    expect(validateVisualDocument(doc).ok).toBe(true)
   })
 })

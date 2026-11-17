@@ -16,8 +16,12 @@ import {
   insertVisualNodeIntoDocument,
   insertVisualNodesIntoDocument,
   moveVisualNodeInDocument,
+  switchVisualPage,
   updateVisualNodeInDocument,
   validateVisualDocument,
+  withActivePageRoot,
+  addVisualPage,
+  activePageIdOf,
 } from './visualDocument.js'
 
 export const VISUAL_DOCUMENT_STORAGE_KEY = 'vibe.visualDocument.v1'
@@ -69,8 +73,9 @@ function selectedStillExists(document, selectedId) {
 function initialState() {
   const document = readStoredDocument()
   return {
-    doc: document,
+    doc: withActivePageRoot(document, document.root),
     selectedId: document.root?.id ?? null,
+    activePageId: activePageIdOf(document),
     history: [],
     future: [],
     lastError: '',
@@ -87,17 +92,19 @@ export const useVisualDocumentStore = create((set, get) => {
     if (!editable()) return false
     if (!nextDocument || nextDocument === get().doc) return false
     const previous = get().doc
+    const synced = withActivePageRoot(nextDocument, nextDocument.root)
     set((state) => ({
-      doc: nextDocument,
+      doc: synced,
       selectedId:
-        selectedId && findVisualNode(nextDocument.root, selectedId)
+        selectedId && findVisualNode(synced.root, selectedId)
           ? selectedId
-          : nextDocument.root?.id ?? null,
+          : synced.root?.id ?? null,
+      activePageId: activePageIdOf(synced),
       history: [...state.history, previous].slice(-HISTORY_LIMIT),
       future: [],
       lastError: '',
     }))
-    persistDocument(nextDocument)
+    persistDocument(synced)
     return true
   }
 
@@ -106,6 +113,29 @@ export const useVisualDocumentStore = create((set, get) => {
 
     selectNode: (nodeId) => {
       set({ selectedId: nodeId || null })
+    },
+
+    switchPage: (pageId) => {
+      const state = get()
+      const next = switchVisualPage(state.doc, pageId)
+      if (next === state.doc) return false
+      set({
+        doc: next,
+        activePageId: pageId,
+        selectedId: next.root?.id ?? null,
+        history: [],
+        future: [],
+        lastError: '',
+      })
+      persistDocument(next)
+      return true
+    },
+
+    addPage: ({ title = '新页面', path = '' } = {}) => {
+      if (!editable()) return false
+      const state = get()
+      const result = addVisualPage(state.doc, { title, path })
+      return commit(result.document, result.page.root.id)
     },
 
     addNode: (type, parentId = null, index = -1) => {
@@ -191,13 +221,14 @@ export const useVisualDocumentStore = create((set, get) => {
       }
       const frozen = await freezeVisualDocument(state.doc)
       set({
-        doc: frozen,
+        doc: withActivePageRoot(frozen, frozen.root),
         selectedId: frozen.root?.id ?? null,
+        activePageId: activePageIdOf(frozen),
         history: [],
         future: [],
         lastError: '',
       })
-      persistDocument(frozen)
+      persistDocument(withActivePageRoot(frozen, frozen.root))
       return frozen
     },
 
@@ -248,14 +279,16 @@ export const useVisualDocumentStore = create((set, get) => {
 
     replaceDocument: (document, { resetHistory = true } = {}) => {
       if (resetHistory) {
+        const synced = withActivePageRoot(document, document?.root ?? null)
         set({
-          doc: document,
-          selectedId: document?.root?.id ?? null,
+          doc: synced,
+          selectedId: synced?.root?.id ?? null,
+          activePageId: activePageIdOf(synced),
           history: [],
           future: [],
           lastError: '',
         })
-        persistDocument(document)
+        persistDocument(synced)
         return
       }
       return commit(document)
@@ -286,6 +319,7 @@ export const useVisualDocumentStore = create((set, get) => {
       const next = state.future[0]
       set({
         doc: next,
+        activePageId: activePageIdOf(next),
         history: [...state.history, state.doc].slice(-HISTORY_LIMIT),
         future: state.future.slice(1),
         selectedId: selectedStillExists(next, state.selectedId)

@@ -67,6 +67,7 @@ CONTAINER_NODE_TYPES = frozenset(
 )
 REPEAT_NODE_TYPES = frozenset({"list", "table"})
 _NODE_ID_RE = re.compile(r"^nd_[A-Za-z0-9_-]{3,64}$")
+_PAGE_ID_RE = re.compile(r"^pg_[A-Za-z0-9_-]{3,64}$")
 _FORBIDDEN_COORDINATE_KEYS = frozenset(
     {"x", "y", "absoluteX", "absoluteY", "absolute_x", "absolute_y"}
 )
@@ -213,6 +214,21 @@ class VisualNode(CamelModel):
 VisualNode.model_rebuild()
 
 
+class VisualPage(CamelModel):
+    """一个可路由页面；root 必须是 type=page 的 VisualNode。"""
+
+    page_id: str = Field(pattern=_PAGE_ID_RE.pattern, max_length=80)
+    path: str = Field(default="/", max_length=200)
+    title: str = Field(default="页面", max_length=200)
+    root: VisualNode
+
+    @model_validator(mode="after")
+    def _root_is_page(self) -> "VisualPage":
+        if self.root.type != "page":
+            raise ValueError(f"页面 {self.page_id} 的 root 必须是 page 节点")
+        return self
+
+
 class VisualInteraction(CamelModel):
     id: str = Field(min_length=1, max_length=80)
     node_id: str = Field(min_length=1, max_length=80)
@@ -227,6 +243,8 @@ class VisualInteraction(CamelModel):
     ] = "custom"
     intent: str = Field(default="", max_length=2000)
     binding_id: str = Field(default="", max_length=80)
+    # navigate 交互的目标页面；为空表示非页面跳转。
+    target_page_id: str = Field(default="", max_length=80)
     status: Literal["UNRESOLVED", "CONFIRMED"] = "UNRESOLVED"
 
 
@@ -266,6 +284,9 @@ class VisualDocument(CamelModel):
     status: VisualDocumentStatus = "DRAFT"
     title: str = Field(default="未命名页面", max_length=200)
     design_tokens: VisualDesignTokens = Field(default_factory=VisualDesignTokens)
+    # 多页面：pages 为权威列表；root 保持与第一页同步，兼容旧客户端 / CodeGen。
+    pages: list[VisualPage] = Field(default_factory=list, max_length=20)
+    active_page_id: str = Field(default="", max_length=80)
     root: VisualNode | None = None
     interactions: list[VisualInteraction] = Field(default_factory=list, max_length=2000)
     bindings: list[VisualBinding] = Field(default_factory=list, max_length=2000)
@@ -277,6 +298,28 @@ class VisualDocument(CamelModel):
         node_ids: set[str] = set()
         node_count = 0
         max_depth = 0
+
+        page_roots: list[VisualNode] = []
+        if self.pages:
+            page_ids: set[str] = set()
+            page_paths: set[str] = set()
+            for page in self.pages:
+                if page.page_id in page_ids:
+                    raise ValueError(f"重复的 pageId: {page.page_id}")
+                page_ids.add(page.page_id)
+                path = page.path or "/"
+                if path in page_paths:
+                    raise ValueError(f"重复的页面路径: {path}")
+                page_paths.add(path)
+                page_roots.append(page.root)
+            if not self.active_page_id:
+                self.active_page_id = self.pages[0].page_id
+            elif self.active_page_id not in page_ids:
+                raise ValueError(
+                    f"activePageId {self.active_page_id} 不在 pages 中"
+                )
+        elif self.root is not None:
+            page_roots.append(self.root)
 
         def walk(node: VisualNode, depth: int) -> None:
             nonlocal node_count, max_depth
@@ -292,16 +335,19 @@ class VisualDocument(CamelModel):
             for child in node.children:
                 walk(child, depth + 1)
 
-        if self.root is not None:
-            walk(self.root, 1)
+        for root in page_roots:
+            if root.type != "page":
+                raise ValueError(f"页面根节点 {root.id} 必须是 page 类型")
+            walk(root, 1)
 
         interaction_ids: set[str] = set()
         binding_ids: set[str] = set()
+        page_ids = {page.page_id for page in self.pages}
         for binding in self.bindings:
             if binding.id in binding_ids:
                 raise ValueError(f"重复的 bindingId: {binding.id}")
             binding_ids.add(binding.id)
-            if self.root is not None and binding.node_id not in node_ids:
+            if page_roots and binding.node_id not in node_ids:
                 raise ValueError(
                     f"binding {binding.id} 指向不存在的节点 {binding.node_id}"
                 )
@@ -309,7 +355,7 @@ class VisualDocument(CamelModel):
             if interaction.id in interaction_ids:
                 raise ValueError(f"重复的 interactionId: {interaction.id}")
             interaction_ids.add(interaction.id)
-            if self.root is not None and interaction.node_id not in node_ids:
+            if page_roots and interaction.node_id not in node_ids:
                 raise ValueError(
                     f"interaction {interaction.id} 指向不存在的节点 "
                     f"{interaction.node_id}"
@@ -319,20 +365,31 @@ class VisualDocument(CamelModel):
                     f"interaction {interaction.id} 引用了不存在的 binding "
                     f"{interaction.binding_id}"
                 )
+            if (
+                interaction.target_page_id
+                and page_ids
+                and interaction.target_page_id not in page_ids
+            ):
+                raise ValueError(
+                    f"interaction {interaction.id} 指向不存在的页面 "
+                    f"{interaction.target_page_id}"
+                )
 
         # 业务审查前允许列表数据源暂时未绑定；冻结 / 编译阶段必须闭环。
         if self.status in {"FROZEN", "COMPILED"}:
-            for node in _iter_nodes(self.root):
-                if not node.repeat:
-                    continue
-                source = node.repeat.source
-                if not any(
-                    binding.id == source or binding.entity == source
-                    for binding in self.bindings
-                ):
-                    raise ValueError(
-                        f"节点 {node.id} 的 repeat.source={source} " "没有对应 binding"
-                    )
+            for root in page_roots:
+                for node in _iter_nodes(root):
+                    if not node.repeat:
+                        continue
+                    source = node.repeat.source
+                    if not any(
+                        binding.id == source or binding.entity == source
+                        for binding in self.bindings
+                    ):
+                        raise ValueError(
+                            f"节点 {node.id} 的 repeat.source={source} "
+                            "没有对应 binding"
+                        )
         return self
 
 
@@ -402,7 +459,12 @@ def validate_visual_document(
     except ValueError as exc:
         return VisualValidationReport(ok=False, errors=[str(exc)])
 
-    nodes = list(_iter_nodes(document.root))
+    roots = (
+        [page.root for page in document.pages]
+        if document.pages
+        else ([document.root] if document.root is not None else [])
+    )
+    nodes = [node for root in roots for node in _iter_nodes(root)]
     warnings: list[str] = []
     if document.status == "DRAFT":
         for node in nodes:
@@ -421,7 +483,7 @@ def validate_visual_document(
         ok=True,
         warnings=warnings,
         node_count=len(nodes),
-        max_depth=_tree_depth(document.root),
+        max_depth=max((_tree_depth(root) for root in roots), default=0),
     )
 
 
@@ -448,6 +510,7 @@ __all__ = [
     "VisualMetadata",
     "VisualNode",
     "VisualNodeType",
+    "VisualPage",
     "VisualProvenance",
     "VisualRepeat",
     "VisualReview",

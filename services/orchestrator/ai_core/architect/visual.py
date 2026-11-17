@@ -23,6 +23,7 @@ from ai_core.domain.visual_document import (
     VisualLayout,
     VisualMetadata,
     VisualNode,
+    VisualPage,
     VisualProvenance,
     VisualSemantics,
     VisualStyle,
@@ -293,6 +294,7 @@ def build_visual_document_from_contract(
     project_id: str = "",
     interactions: list[ArchitectComponentInteraction] | None = None,
     api_routes: list[ArchitectApiRoute] | None = None,
+    frontend_routes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """确定性生成无 JSX 的 VisualDocument。"""
     safe_title = str(title or "未命名页面").strip() or "未命名页面"
@@ -477,6 +479,97 @@ def build_visual_document_from_contract(
             )
         )
 
+    first_page_id = _stable_id("pg", f"{project_id}:{page_seed}:home")
+    visual_pages = [
+        VisualPage(
+            pageId=first_page_id,
+            path="/",
+            title=safe_title,
+            root=page,
+        )
+    ]
+    # 多路由应用：为每个额外路由生成可切换页面。第一页承载完整组件，
+    # 其余页面先给出 header + main 占位，后续可在画布/增量审查中补齐。
+    seen_paths = {"/"}
+    for index, route in enumerate(frontend_routes or [], start=1):
+        if not isinstance(route, dict):
+            continue
+        route_path = str(route.get("path") or "").strip()
+        if not route_path:
+            route_path = f"/page-{index}"
+        if not route_path.startswith("/"):
+            route_path = "/" + route_path
+        if route_path in seen_paths:
+            continue
+        seen_paths.add(route_path)
+        if len(visual_pages) >= 6:
+            break
+        route_title = (
+            str(route.get("name") or "").strip()
+            or str(route.get("description") or "").strip()
+            or f"页面 {index + 1}"
+        )
+        route_seed = f"{project_id}:{page_seed}:route:{route_path}"
+        route_page = VisualNode(
+            id=_stable_id("nd", f"{route_seed}:root"),
+            type="page",
+            name=route_title,
+            props={"title": route_title, "path": route_path},
+            layout=VisualLayout(
+                display="block",
+                direction="column",
+                padding="32px",
+                max_width="1180px",
+            ),
+            style=_style("bg-white", "min-h-screen"),
+            children=[
+                _container(
+                    name="顶部导航",
+                    seed=f"{route_seed}:header",
+                    children=[
+                        _text("品牌", safe_title, f"{route_seed}:brand"),
+                        _text(
+                            "页面说明",
+                            str(route.get("description") or route_title),
+                            f"{route_seed}:subtitle",
+                        ),
+                    ],
+                    display="flex",
+                    direction="row",
+                    gap="16px",
+                    padding="20px",
+                    tailwind=("rounded-xl", "border", "bg-white"),
+                    role="header",
+                    purpose="品牌与页面标题",
+                ),
+                _container(
+                    name="主内容区",
+                    seed=f"{route_seed}:main",
+                    children=[
+                        _text("页面标题", route_title, f"{route_seed}:title"),
+                        _text(
+                            "页面占位",
+                            "该路由已创建，业务内容等待增量审查补充",
+                            f"{route_seed}:placeholder",
+                        ),
+                    ],
+                    tailwind=(),
+                    role="main",
+                    purpose=str(route.get("description") or route_title),
+                ),
+            ],
+            semantics=VisualSemantics(role="page", purpose=route_title),
+            provenance=VisualProvenance(created_by="architect"),
+        )
+        visual_pages.append(
+            VisualPage(
+                pageId=_stable_id("pg", f"{route_seed}:id"),
+                path=route_path,
+                title=route_title,
+                root=route_page,
+            )
+        )
+
     document = VisualDocument(
         docId=_stable_id("vdoc", f"{project_id}:{safe_title}:{page_seed}"),
         projectId=project_id,
@@ -495,6 +588,8 @@ def build_visual_document_from_contract(
             radius={"card": "12px"},
             typography={"body": "14px", "title": "22px"},
         ),
+        pages=visual_pages,
+        activePageId=first_page_id,
         root=page,
         interactions=visual_interactions,
         bindings=visual_bindings,

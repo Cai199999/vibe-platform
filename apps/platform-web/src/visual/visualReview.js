@@ -5,17 +5,21 @@
  */
 
 import { buildVisualDelta } from './visualDelta.js'
+import { ensureVisualPages } from './visualDocument.js'
 
 export const VISUAL_REVIEW_STORAGE_PREFIX = 'vibe.visual.review.'
 
 export function buildSemanticReviewPacket(document, { baseline = null } = {}) {
   const nodes = []
-  const walk = (node, parentId, path, depth) => {
+  const walk = (node, parentId, path, depth, page) => {
     if (!node) return
     const currentPath = `${path}/${node.name || node.type}`
     nodes.push({
       nodeId: node.id,
       parentId: parentId || null,
+      pageId: page?.pageId || '',
+      pagePath: page?.path || '/',
+      pageTitle: page?.title || '',
       path: currentPath,
       type: node.type,
       name: node.name || '',
@@ -27,10 +31,11 @@ export function buildSemanticReviewPacket(document, { baseline = null } = {}) {
       depth,
     })
     ;(node.children || []).forEach((child) =>
-      walk(child, node.id, currentPath, depth + 1),
+      walk(child, node.id, currentPath, depth + 1, page),
     )
   }
-  walk(document?.root, null, '', 1)
+  const pages = ensureVisualPages(document)
+  pages.forEach((page) => walk(page.root, null, '', 1, page))
 
   const interactions = (document?.interactions || []).map((item) => ({
     ...item,
@@ -64,7 +69,7 @@ export function buildSemanticReviewPacket(document, { baseline = null } = {}) {
     visualDelta,
     summary: [
       `虚拟界面「${document?.title || '未命名页面'}」已冻结`,
-      `节点 ${nodes.length} 个`,
+      `页面 ${pages.length} 个，节点 ${nodes.length} 个`,
       `交互 ${interactions.length} 个，未解决 ${unresolvedInteractions.length} 个`,
       `数据绑定 ${bindings.length} 个，未解决 ${unresolvedBindings.length} 个`,
       `列表/表格数据源 ${repeatedNodes.length} 个`,

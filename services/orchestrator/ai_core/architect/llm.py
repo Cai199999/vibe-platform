@@ -81,7 +81,13 @@ def _output_phase_block(phase: str) -> str:
             " BACKEND_BINDING 阶段；\n"
             "- contract_markdown 只描述视觉原型、页面结构与假设，"
             "禁止写 API / DDL / 数据库技术栈；\n"
-            "- visual_document 必须完整、合法、可离线编辑。"
+            "- visual_document 必须完整、合法、可离线编辑；\n"
+            "- 多路由应用必须输出 pages 数组（pageId 以 pg_ 开头、path、"
+            "title、root）；root 镜像第一页，页面节点 ID 全局唯一；\n"
+            "- 首页必须包含 header + main + 至少 3 个业务区块，使用真实文案"
+            "与示例数据，禁止全部占位；\n"
+            '- 页面跳转 interaction 使用 action="navigate"，targetPageId '
+            "指向 pages[].pageId。"
         )
     if phase == "BACKEND_BINDING":
         return (
@@ -366,6 +372,7 @@ class MockArchitectLLM(ArchitectLLM):
                 components=draft.components,
                 interactions=draft.component_interactions,
                 api_routes=[],
+                frontend_routes=draft.frontend_routes,
             )
             markdown = (
                 f"# {context.project_name} · V0 虚拟原型\n\n"
