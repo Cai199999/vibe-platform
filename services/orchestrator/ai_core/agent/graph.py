@@ -425,10 +425,36 @@ class AgentGraphRunner:
             initial_state.get("sandbox_id"),
             resume is not None,
         )
-        if resume is None:
-            self._graph.invoke(dict(initial_state), config=config)
-        else:
-            self._graph.invoke(Command(resume=resume), config=config)
+        # 前端语义工具（update_text / move_node / insert_component 等）
+        # 复用 Direct Ops，但需要当前 Run 的项目 / 沙盒上下文。这里绑定
+        # ContextVar，工具调用结束后在 finally 中恢复，避免串到其它 Run。
+        frontend_context_token = None
+        project_id = str(initial_state.get("project_id") or "").strip()
+        sandbox_id = str(initial_state.get("sandbox_id") or "").strip()
+        if project_id and sandbox_id:
+            from ai_core.direct_ops.service import DirectOperationService
+            from ai_core.tools.frontend_visual_tools import (
+                bind_frontend_tool_context,
+            )
+
+            frontend_context_token = bind_frontend_tool_context(
+                DirectOperationService(self._sandbox, self._settings),
+                project_id,
+                sandbox_id,
+                run_id=str(initial_state.get("run_id") or "") or None,
+            )
+        try:
+            if resume is None:
+                self._graph.invoke(dict(initial_state), config=config)
+            else:
+                self._graph.invoke(Command(resume=resume), config=config)
+        finally:
+            if frontend_context_token is not None:
+                from ai_core.tools.frontend_visual_tools import (
+                    reset_frontend_tool_context,
+                )
+
+                reset_frontend_tool_context(frontend_context_token)
 
         snapshot = self._graph.get_state(config)
         state = dict(snapshot.values or {})

@@ -566,12 +566,21 @@
     var line = Number(node.getAttribute('data-source-line') || 0)
     var column = Number(node.getAttribute('data-source-column') || 0)
     var component = node.getAttribute('data-source-component') || ''
-    var marker =
+    var dataSource =
       node.getAttribute('data-source') ||
       node.getAttribute('data-vibe-target') ||
       ''
-    if (!file && marker) {
-      var generated = /^(.+?):(\d+):(\d+)$/.exec(marker)
+    // CodeGen 会同时写 data-node-id 与 data-source；AI 新增节点可能只有
+    // data-node-id，因此选择器必须支持两种主键。
+    var nodeId = node.getAttribute('data-node-id') || ''
+    var marker = dataSource || nodeId
+    var selector = dataSource
+      ? '[data-source="' + dataSource + '"]'
+      : nodeId
+        ? '[data-node-id="' + nodeId + '"]'
+        : ''
+    if (!file && dataSource) {
+      var generated = /^(.+?):(\d+):(\d+)$/.exec(dataSource)
       if (generated) {
         file = generated[1]
         line = Number(generated[2])
@@ -591,7 +600,7 @@
       line: line,
       column: column,
       component: component || 'Component',
-      selector: marker ? '[data-source="' + marker + '"]' : '',
+      selector: selector,
       instance: instanceInfo.instance,
       instanceCount: instanceInfo.instanceCount,
       callSiteFile: (instanceInfo.callSite && instanceInfo.callSite.file) || '',
@@ -608,7 +617,7 @@
       sourceKind: sourceKindFor(file),
       kind: kind,
       tag: String(node.tagName || '').toLowerCase(),
-      selector: marker ? '[data-source="' + marker + '"]' : '',
+      selector: selector,
       instance: instanceInfo.instance,
       instanceCount: instanceInfo.instanceCount,
       instanceId: instanceInfo.instanceId,
@@ -825,7 +834,7 @@
     // 节点参与命中（列表里的多个按钮会被静默丢掉）。
     var seen = new Set()
     var candidates = document.querySelectorAll(
-      '[data-source], [data-vibe-target]',
+      '[data-source], [data-vibe-target], [data-node-id]',
     )
     for (var i = 0; i < candidates.length; i += 1) {
       // 内层文字 / 图标提升到可交互祖先后再参与覆盖面积计算。
@@ -1102,13 +1111,13 @@
    */
   /** 页面最顶层 JSX 源码节点；用于 root-level 重排兜底。 */
   function topLevelSourceNode() {
-    var nodes = document.querySelectorAll('[data-source], [data-source-file]')
+    var nodes = document.querySelectorAll('[data-source], [data-source-file], [data-node-id]')
     var root = null
     for (var i = 0; i < nodes.length; i += 1) {
       var current = nodes[i]
       var parent = current.parentElement
       var nested = parent
-        ? parent.closest?.('[data-source], [data-source-file]')
+        ? parent.closest?.('[data-source], [data-source-file], [data-node-id]')
         : null
       if (!nested) root = current
     }
@@ -1228,7 +1237,7 @@
   function resolveDragTarget(node) {
     if (!node || typeof node.closest !== 'function') return null
     var current = node.closest(
-      '[data-source-file], [data-source], [data-vibe-target]',
+      '[data-source-file], [data-source], [data-vibe-target], [data-node-id]',
     )
     if (!current) return null
     var first = current
@@ -1240,7 +1249,7 @@
       var parent = current.parentElement
       current = parent
         ? parent.closest(
-            '[data-source-file], [data-source], [data-vibe-target]',
+            '[data-source-file], [data-source], [data-vibe-target], [data-node-id]',
           )
         : null
     }
@@ -1253,7 +1262,7 @@
     var style = document.createElement('style')
     style.id = 'vibe-drag-style'
     style.textContent = [
-      'html.vibe-drag-enabled [data-source],html.vibe-drag-enabled [data-source-file],html.vibe-drag-enabled [data-vibe-target]{cursor:grab !important;}',
+      'html.vibe-drag-enabled [data-source],html.vibe-drag-enabled [data-source-file],html.vibe-drag-enabled [data-vibe-target],html.vibe-drag-enabled [data-node-id]{cursor:grab !important;}',
       'html.vibe-drag-enabled.vibe-drag-active,html.vibe-drag-enabled.vibe-drag-active *{cursor:grabbing !important;user-select:none !important;-webkit-user-select:none !important;}',
     ].join('')
     document.documentElement.appendChild(style)
@@ -1463,7 +1472,7 @@
     // 最近的 data-source，再回退到容器。
     var target = element.closest
       ? element.closest(
-          '[data-source-file], [data-source], [data-vibe-target]',
+          '[data-source-file], [data-source], [data-vibe-target], [data-node-id]',
         )
       : null
     if (!target) {
@@ -1826,7 +1835,7 @@
       if (!target || typeof target.getBoundingClientRect !== 'function') return
       var sourceNode = target.closest
         ? target.closest(
-            '[data-source-file], [data-source], [data-vibe-target]',
+            '[data-source-file], [data-source], [data-vibe-target], [data-node-id]',
           )
         : null
       var rect = rectOf(sourceNode || target)
@@ -2518,7 +2527,7 @@
   function applyDirectOver(node) {
     if (!directEnabled || enabled || dragState || directEdit) return
     if (!node || node.closest?.('[data-vibe-direct-ui]')) return
-    var sourceNode = node.closest?.('[data-source], [data-source-file]')
+    var sourceNode = node.closest?.('[data-source], [data-source-file], [data-node-id]')
     if (!sourceNode || node === document.documentElement) {
       hideDirectUi()
       return
@@ -2761,7 +2770,7 @@
     }, true)
     document.addEventListener('dblclick', function (event) {
       if (!directEnabled || enabled) return
-      var node = event.target?.closest?.('[data-source], [data-source-file]')
+      var node = event.target?.closest?.('[data-source], [data-source-file], [data-node-id]')
       if (!node) return
       event.preventDefault()
       event.stopPropagation()

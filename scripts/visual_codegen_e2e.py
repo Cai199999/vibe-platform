@@ -187,6 +187,7 @@ def main() -> int:
     package = sandbox.read_file(active.sandbox_id, "package.json")
     index_html = sandbox.read_file(active.sandbox_id, "index.html")
     main_jsx = sandbox.read_file(active.sandbox_id, "src/main.jsx")
+    vite_config = sandbox.read_file(active.sandbox_id, "vite.config.js")
     expected = [
         "nd_page0001",
         "nd_title001",
@@ -233,6 +234,14 @@ def main() -> int:
         print("[e2e] FAILED: index.html incomplete", file=sys.stderr)
         service._destroy_quietly(active.sandbox_id)
         return 1
+    if "inspect_sdk.js" not in index_html:
+        print("[e2e] FAILED: index.html missing inspect_sdk.js", file=sys.stderr)
+        service._destroy_quietly(active.sandbox_id)
+        return 1
+    if "'/api'" not in vite_config or "127.0.0.1:3000" not in vite_config:
+        print("[e2e] FAILED: vite.config.js missing /api proxy", file=sys.stderr)
+        service._destroy_quietly(active.sandbox_id)
+        return 1
     if "./visual.css" not in main_jsx:
         print("[e2e] FAILED: main.jsx missing visual.css", file=sys.stderr)
         service._destroy_quietly(active.sandbox_id)
@@ -254,6 +263,29 @@ def main() -> int:
     print(f"[e2e] preview: {handle.preview_url}")
     print(f"[e2e] port: {handle.host_port}")
 
+    # E2E 运行在 python-ai 容器内，127.0.0.1 不是宿主；直接进沙盒容器
+    # 请求 Vite，验证 public/inspect_sdk.js 已挂载且可被 iframe 加载。
+    container = sandbox._get_container(active.sandbox_id)
+    sdk_code, sdk_output = container.exec_run(
+        [
+            "wget",
+            "-q",
+            "-T",
+            "2",
+            "-O",
+            "-",
+            "http://127.0.0.1:5173/inspect_sdk.js",
+        ]
+    )
+    sdk_body = sdk_output.decode("utf-8", "replace") if sdk_output else ""
+    if sdk_code != 0 or "vibe-inspect" not in sdk_body:
+        print(
+            f"[e2e] FAILED: inspect sdk not served code={sdk_code}",
+            file=sys.stderr,
+        )
+        service._destroy_quietly(active.sandbox_id)
+        return 1
+
     content_hash = document.metadata.content_hash
     entries = get_change_log_store().list_for_project("proj_codegen_e2e", limit=5)
     expected_summary = f"成功从冻结版本 {content_hash} 编译生成真实前端工程"
@@ -269,8 +301,8 @@ def main() -> int:
     print(
         "[e2e] PASS: "
         f"{len(expected)} data-node-id, multi-page switcher, unbound-repeat warning, "
-        "data-source, visual.css, Tailwind project, npm install, build, "
-        "npm run dev, ChangeLog"
+        "data-source, inspect_sdk, /api proxy, visual.css, Tailwind project, "
+        "npm install, build, npm run dev, ChangeLog"
     )
     if os.environ.get("KEEP_SANDBOX", "1").strip() not in {"1", "true", "yes"}:
         service._destroy_quietly(active.sandbox_id)

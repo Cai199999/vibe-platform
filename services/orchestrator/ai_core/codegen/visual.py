@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from ai_core.codegen.visual_gate import (
@@ -26,6 +28,7 @@ from ai_core.codegen.visual_gate import (
     verify_visual_source,
 )
 from ai_core.domain.visual_document import (
+    CONTAINER_NODE_TYPES,
     VisualDocument,
     VisualNode,
     compute_content_hash,
@@ -171,6 +174,34 @@ _TAILWIND_VALUE_RE = re.compile(r"^[A-Za-z0-9#%.,()/_\- ]+$")
 _TAILWIND_CLASS_RE = re.compile(r"^[A-Za-z0-9:_\-\[\]().,%#/]+$")
 _SOURCE_PLACEHOLDER = "__VISUAL_SOURCE_LINE__"
 SOURCE_FILE = "src/App.jsx"
+_INSPECT_SDK_FILE = "inspect_sdk.js"
+
+
+@lru_cache(maxsize=1)
+def _inspect_sdk_source() -> str:
+    """读取沙盒模板里的只读选择 SDK。
+
+    生成的 Vite 工程通过 ``public/inspect_sdk.js`` 自带这份 SDK，避免
+    依赖 ``inspect_plugin.js`` 的 Babel / Vue 依赖，也保证导出包可独立运行。
+    """
+    candidates = (
+        Path(__file__).resolve().parents[2] / "sandbox_template" / _INSPECT_SDK_FILE,
+        Path("/app/sandbox_template") / _INSPECT_SDK_FILE,
+        Path("/app") / _INSPECT_SDK_FILE,
+    )
+    for path in candidates:
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return ""
+
+
+def _with_inspect_sdk(files: dict[str, str]) -> dict[str, str]:
+    sdk = _inspect_sdk_source()
+    if sdk:
+        files["public/inspect_sdk.js"] = sdk
+    return files
 
 
 class VisualCodegenError(ValueError):
@@ -997,6 +1028,14 @@ def _render_vite_config() -> str:
         "    host: '0.0.0.0',\n"
         "    port: 5173,\n"
         "    strictPort: true,\n"
+        "    // 同源 /api 请求转发到沙盒内 Node 后端；纯前端项目没有后端时\n"
+        "    // 不会主动请求 /api，代理配置本身无副作用。\n"
+        "    proxy: {\n"
+        "      '/api': {\n"
+        "        target: process.env.FULLSTACK_API_URL || 'http://127.0.0.1:3000',\n"
+        "        changeOrigin: true,\n"
+        "      },\n"
+        "    },\n"
         "  },\n"
         "})\n"
     )
@@ -1023,7 +1062,12 @@ def _render_index_html(document: VisualDocument) -> str:
         "  <body>\n"
         '    <div id="root"></div>\n'
         '    <script type="module" src="/src/main.jsx"></script>\n'
-        "  </body>\n"
+        + (
+            '    <script type="module" src="/inspect_sdk.js"></script>\n'
+            if _inspect_sdk_source()
+            else ""
+        )
+        + "  </body>\n"
         "</html>\n"
     )
 
@@ -1080,10 +1124,12 @@ class _ReactCompiler:
         *,
         extra: Iterable[str] = (),
     ) -> str:
+        source_kind = "container" if node.type in CONTAINER_NODE_TYPES else "element"
         attrs = [
             f"className={{{_js_string(self._class_name(node))}}}",
             f'data-node-id="{node.id}"',
             f'data-source="{SOURCE_FILE}:{_SOURCE_PLACEHOLDER}"',
+            f'data-source-kind="{source_kind}"',
             f'data-visual-type="{node.type}"',
         ]
         if not node.state.default_visible:
@@ -1349,14 +1395,16 @@ class _ReactCompiler:
 
         app_source = _fill_source_lines("\n".join(lines))
         node_ids = _collect_document_node_ids(self.document)
-        files = {
-            "src/App.jsx": app_source,
-            "src/visual.css": _render_css(self.document),
-            "src/main.jsx": _render_main_jsx(),
-            "index.html": _render_index_html(self.document),
-            "package.json": _render_package_json(self.document),
-            "vite.config.js": _render_vite_config(),
-        }
+        files = _with_inspect_sdk(
+            {
+                "src/App.jsx": app_source,
+                "src/visual.css": _render_css(self.document),
+                "src/main.jsx": _render_main_jsx(),
+                "index.html": _render_index_html(self.document),
+                "package.json": _render_package_json(self.document),
+                "vite.config.js": _render_vite_config(),
+            }
+        )
         return VisualCompileResult(
             files=files,
             node_ids=node_ids,
@@ -1413,14 +1461,16 @@ def _fallback_result(
             )
     lines.extend(["    </main>", "  )", "}", ""])
     return VisualCompileResult(
-        files={
-            "src/App.jsx": _fill_source_lines("\n".join(lines)),
-            "src/visual.css": _render_fallback_css(document),
-            "src/main.jsx": _render_main_jsx(),
-            "index.html": _render_index_html(document),
-            "package.json": _render_package_json(document),
-            "vite.config.js": _render_vite_config(),
-        },
+        files=_with_inspect_sdk(
+            {
+                "src/App.jsx": _fill_source_lines("\n".join(lines)),
+                "src/visual.css": _render_fallback_css(document),
+                "src/main.jsx": _render_main_jsx(),
+                "index.html": _render_index_html(document),
+                "package.json": _render_package_json(document),
+                "vite.config.js": _render_vite_config(),
+            }
+        ),
         node_ids=node_ids,
         summary=f"CodeGen 安全占位页（{reason}）：{len(node_ids)} 个节点",
         warnings=tuple([f"CodeGen 已降级为安全占位页：{reason}"]),

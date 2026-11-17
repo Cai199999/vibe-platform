@@ -192,6 +192,7 @@ def build_default_toolbox(
     可用，不能让一个挂掉的外部进程拖垮整个 Agent。
     """
     from ai_core.tools.ast_edit_tool import register_apply_ast_edit_tool
+    from ai_core.tools.frontend_visual_tools import register_frontend_visual_tools
     from ai_core.tools.move_component_tool import register_move_component_tool
     from ai_core.tools.web_search_tool import register_web_search
 
@@ -201,6 +202,8 @@ def build_default_toolbox(
     register_web_search(registry, settings)
     # Phase 1：Coder 唯一写权限。未绑定沙盒上下文时调用会 fail-closed。
     register_apply_ast_edit_tool(registry)
+    # 前端 Agent 语义门面：全部复用 Direct Ops，不新增执行器。
+    register_frontend_visual_tools(registry)
     if include_mcp and settings.mcp_enabled:
         try:
             from ai_core.mcp.tools import register_mcp_tools

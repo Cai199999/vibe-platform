@@ -158,6 +158,8 @@ class VisualCodegenCompileTests(unittest.TestCase):
         for node_id in expected:
             self.assertEqual(source.count(f'data-node-id="{node_id}"'), 1)
         self.assertRegex(source, r'data-source="src/App\.jsx:\d+"')
+        self.assertIn('data-source-kind="container"', source)
+        self.assertIn('data-source-kind="element"', source)
         self.assertIn("visual-repeat-item", source)
         self.assertNotIn("runVisualAction", source)
         self.assertIn("bg-[var(--color-primary)]", source)
@@ -167,7 +169,11 @@ class VisualCodegenCompileTests(unittest.TestCase):
         self.assertIn('"react"', result.files["package.json"])
         self.assertIn("cdn.tailwindcss.com", result.files["index.html"])
         self.assertIn("/src/main.jsx", result.files["index.html"])
+        self.assertIn("/inspect_sdk.js", result.files["index.html"])
+        self.assertIn("vibe-inspect", result.files["public/inspect_sdk.js"])
         self.assertIn("./visual.css", result.files["src/main.jsx"])
+        self.assertIn("'/api'", result.files["vite.config.js"])
+        self.assertIn("127.0.0.1:3000", result.files["vite.config.js"])
 
     def test_multiple_pages_compile_to_page_switcher(self) -> None:
         first = _node(
