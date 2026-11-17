@@ -13,6 +13,10 @@ import {
   activePageIdOf,
   ensureVisualPages,
 } from './visualDocument.js'
+import {
+  buildPreviewSimulation,
+  shouldSimulatePage,
+} from './visualPreview.js'
 
 function tokensStyle(document) {
   const tokens = document?.designTokens || {}
@@ -367,6 +371,165 @@ function PreviewNode({ node, document, onSwitchPage, depth = 0 }) {
   )
 }
 
+function PreviewSimulation({ model }) {
+  if (!model) return null
+  return (
+    <section className="vp-sim-page" data-preview-simulation>
+      <div className="vp-sim-intro">
+        <div>
+          <span className="vp-sim-eyebrow">SIMULATED PAGE</span>
+          <h1>{model.title}</h1>
+          <p>{model.description}</p>
+        </div>
+        <span className="vp-sim-badge">模拟数据 · 仅预览</span>
+      </div>
+
+      {Array.isArray(model.stats) && (
+        <div className="vp-sim-stats">
+          {model.stats.map((item) => (
+            <article key={item.label} className="vp-sim-stat">
+              <span>{item.label}</span>
+              <strong>{item.value}</strong>
+              <em>{item.delta}</em>
+            </article>
+          ))}
+        </div>
+      )}
+
+      {model.toolbar && (
+        <div className="vp-sim-toolbar">
+          <div className="vp-sim-search">
+            <span aria-hidden="true">⌕</span>
+            <input placeholder={model.toolbar.search} readOnly />
+          </div>
+          <div className="vp-sim-filters">
+            {model.toolbar.filters.map((filter, index) => (
+              <button
+                key={filter}
+                type="button"
+                className={index === 0 ? 'is-active' : ''}
+              >
+                {filter}
+              </button>
+            ))}
+          </div>
+          <button type="button" className="vp-sim-primary">
+            {model.toolbar.action}
+          </button>
+        </div>
+      )}
+
+      {Array.isArray(model.columns) && (
+        <div className="vp-sim-table-wrap">
+          <table className="vp-sim-table">
+            <thead>
+              <tr>
+                {model.columns.map((column) => (
+                  <th key={column}>{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {model.rows.map((row, rowIndex) => (
+                <tr key={rowIndex}>
+                  {row.map((cell, cellIndex) => (
+                    <td key={cellIndex}>
+                      {cellIndex === 0 ? (
+                        <span className="vp-sim-person">
+                          <span className="vp-sim-avatar">
+                            {String(cell).slice(0, 1)}
+                          </span>
+                          {cell}
+                        </span>
+                      ) : cellIndex === 3 ? (
+                        <span
+                          className={`vp-sim-status is-${String(cell)
+                            .replace('在线', 'active')
+                            .replace('待激活', 'invited')
+                            .replace('已停用', 'disabled')}`}
+                        >
+                          {cell}
+                        </span>
+                      ) : (
+                        cell
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="vp-sim-pagination">
+            <span>共 {model.rows.length} 位成员</span>
+            <div>
+              <button type="button">上一页</button>
+              <button type="button" className="is-active">
+                1
+              </button>
+              <button type="button">下一页</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {Array.isArray(model.cards) && (
+        <div className="vp-sim-cards">
+          {model.cards.map((card) => (
+            <article key={card.title} className="vp-sim-card">
+              <h3>{card.title}</h3>
+              <p>{card.description}</p>
+              <button type="button">{card.action}</button>
+            </article>
+          ))}
+        </div>
+      )}
+
+      {Array.isArray(model.fields) && (
+        <form className="vp-sim-form" onSubmit={(event) => event.preventDefault()}>
+          {model.fields.map((field) => (
+            <label key={field.label}>
+              <span>{field.label}</span>
+              {field.type === 'textarea' ? (
+                <textarea rows={3} placeholder={field.placeholder} />
+              ) : field.type === 'select' ? (
+                <select defaultValue="">
+                  <option value="">{field.placeholder}</option>
+                  <option value="admin">管理员</option>
+                  <option value="member">普通成员</option>
+                </select>
+              ) : (
+                <input type={field.type} placeholder={field.placeholder} />
+              )}
+            </label>
+          ))}
+          <div className="vp-sim-form-actions">
+            {model.actions.map((action, index) => (
+              <button
+                key={action}
+                type={index === model.actions.length - 1 ? 'submit' : 'button'}
+                className={index === model.actions.length - 1 ? 'vp-sim-primary' : ''}
+              >
+                {action}
+              </button>
+            ))}
+          </div>
+        </form>
+      )}
+
+      <footer className="vp-sim-footer">
+        <span>{model.footer.copyright}</span>
+        <div>
+          {model.footer.links.map((link) => (
+            <a key={link} href="#preview">
+              {link}
+            </a>
+          ))}
+        </div>
+      </footer>
+    </section>
+  )
+}
+
 export default function VisualDocumentPreview({
   document,
   onClose,
@@ -377,6 +540,13 @@ export default function VisualDocumentPreview({
   const activePage =
     pages.find((page) => page.pageId === activePageId) || pages[0]
   const tokenStyle = useMemo(() => tokensStyle(document), [document])
+  const simulation = useMemo(
+    () =>
+      shouldSimulatePage(activePage, document)
+        ? buildPreviewSimulation(activePage, document)
+        : null,
+    [activePage, document],
+  )
 
   return (
     <div
@@ -417,6 +587,7 @@ export default function VisualDocumentPreview({
             document={document}
             onSwitchPage={onSwitchPage}
           />
+          <PreviewSimulation model={simulation} />
         </div>
       </div>
     </div>

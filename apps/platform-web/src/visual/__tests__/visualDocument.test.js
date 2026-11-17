@@ -243,3 +243,26 @@ describe('VisualDocument 多页面', () => {
     expect(validateVisualDocument(doc).ok).toBe(true)
   })
 })
+
+describe('业务审查前的 repeat 校验', () => {
+  it('FROZEN 且 repeat 未绑定只给 warning，不阻止进入业务审查', () => {
+    let doc = createEmptyVisualDocument({ projectId: 'proj_review' })
+    doc = insertVisualNodeIntoDocument(doc, {
+      parentId: doc.root.id,
+      type: 'list',
+      node: createVisualNode('list', {
+        repeat: {
+          source: 'job_descriptions',
+          itemAlias: 'item',
+          keyField: 'id',
+          sampleCount: 2,
+          emptyText: '',
+        },
+      }),
+    })
+    const frozen = { ...doc, status: 'FROZEN', metadata: { ...doc.metadata, contentHash: 'sha256:test' } }
+    const report = validateVisualDocument(frozen)
+    expect(report.ok).toBe(true)
+    expect(report.warnings.join('\n')).toContain('job_descriptions')
+  })
+})

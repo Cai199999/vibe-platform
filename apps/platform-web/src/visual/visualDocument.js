@@ -801,10 +801,7 @@ export function validateVisualDocument(document) {
         (binding) => binding.id === source || binding.entity === source,
       )
       if (!matched) {
-        const target =
-          document.status === 'FROZEN' || document.status === 'COMPILED'
-            ? errors
-            : warnings
+        const target = document.status === 'COMPILED' ? errors : warnings
         target.push(
           `节点 ${node.id} 的 repeat.source=${source} 尚未绑定` +
             (target === warnings ? '，将在业务审查阶段补齐' : ''),

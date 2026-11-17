@@ -181,8 +181,31 @@ class VisualDocumentSchemaTest(unittest.TestCase):
                 status="FROZEN",
             )
         )
-        self.assertFalse(report.ok)
-        self.assertTrue(any("repeat.source" in item for item in report.errors))
+        # 冻结允许带未绑定 repeat 进入业务审查。
+        self.assertTrue(report.ok)
+        self.assertTrue(any("repeat.source" in item for item in report.warnings))
+
+        compiled = validate_visual_document(
+            _document(
+                root={
+                    "id": "nd_root",
+                    "type": "page",
+                    "children": [
+                        {
+                            "id": "nd_list",
+                            "type": "list",
+                            "repeat": {"source": "orders"},
+                            "children": [],
+                        }
+                    ],
+                },
+                interactions=[],
+                bindings=[],
+                status="COMPILED",
+            )
+        )
+        self.assertFalse(compiled.ok)
+        self.assertTrue(any("repeat.source" in item for item in compiled.errors))
 
     def test_draft_repeat_without_binding_is_warning_only(self) -> None:
         report = validate_visual_document(

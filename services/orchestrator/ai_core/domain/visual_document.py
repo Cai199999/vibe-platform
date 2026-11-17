@@ -375,8 +375,9 @@ class VisualDocument(CamelModel):
                     f"{interaction.target_page_id}"
                 )
 
-        # 业务审查前允许列表数据源暂时未绑定；冻结 / 编译阶段必须闭环。
-        if self.status in {"FROZEN", "COMPILED"}:
+        # 业务审查前允许列表数据源暂时未绑定；冻结允许带 warning 进入
+        # 业务审查，只有真正编译生成前（COMPILED）才必须闭环。
+        if self.status == "COMPILED":
             for root in page_roots:
                 for node in _iter_nodes(root):
                     if not node.repeat:
@@ -466,7 +467,7 @@ def validate_visual_document(
     )
     nodes = [node for root in roots for node in _iter_nodes(root)]
     warnings: list[str] = []
-    if document.status == "DRAFT":
+    if document.status in {"DRAFT", "FROZEN"}:
         for node in nodes:
             if not node.repeat:
                 continue

@@ -188,9 +188,7 @@ class VisualCodegenCompileTests(unittest.TestCase):
             title="多页面",
             pages=[
                 VisualPage(pageId="pg_home", path="/", title="首页", root=first),
-                VisualPage(
-                    pageId="pg_users", path="/users", title="用户", root=second
-                ),
+                VisualPage(pageId="pg_users", path="/users", title="用户", root=second),
             ],
             activePageId="pg_home",
             root=first,
@@ -205,6 +203,28 @@ class VisualCodegenCompileTests(unittest.TestCase):
         self.assertEqual(result.metadata["pageCount"], 2)
         report = verify_visual_source(result.files, result.node_ids)
         self.assertTrue(report.ok, report.errors)
+
+    def test_unbound_repeat_blocks_codegen(self) -> None:
+        root = _node(
+            "nd_page0001",
+            "page",
+            children=[
+                _node(
+                    "nd_list001",
+                    "list",
+                    repeat=VisualRepeat(source="orders", sample_count=2),
+                )
+            ],
+        )
+        document = VisualDocument(
+            docId="vdoc_unbound",
+            projectId="proj_unbound",
+            root=root,
+        )
+        frozen = freeze_visual_document(document)
+        with self.assertRaises(VisualCodegenError) as raised:
+            compile_visual_document(frozen)
+        self.assertEqual(raised.exception.code, "VISUAL_UNBOUND_REPEAT")
 
     def test_interactions_are_opt_in(self) -> None:
         result = compile_visual_document(_document(), include_interactions=True)

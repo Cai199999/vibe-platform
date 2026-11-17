@@ -48,6 +48,15 @@ export function buildSemanticReviewPacket(document, { baseline = null } = {}) {
   const unresolvedInteractions = interactions.filter((item) => !item.resolved)
   const unresolvedBindings = bindings.filter((item) => !item.resolved)
   const repeatedNodes = nodes.filter((item) => item.repeat)
+  const interactiveComponents = nodes.filter((item) =>
+    ['button', 'input', 'form', 'list', 'table'].includes(item.type),
+  )
+  const repeatsWithoutBinding = repeatedNodes.filter((item) => {
+    const source = item.repeat?.source
+    return !(document?.bindings || []).some(
+      (binding) => binding.id === source || binding.entity === source,
+    )
+  })
   const visualDelta = baseline ? buildVisualDelta(baseline, document) : null
 
   return {
@@ -66,13 +75,16 @@ export function buildSemanticReviewPacket(document, { baseline = null } = {}) {
     unresolvedInteractions,
     unresolvedBindings,
     repeatedNodes,
+    interactiveComponents,
+    repeatsWithoutBinding,
     visualDelta,
     summary: [
       `虚拟界面「${document?.title || '未命名页面'}」已冻结`,
       `页面 ${pages.length} 个，节点 ${nodes.length} 个`,
       `交互 ${interactions.length} 个，未解决 ${unresolvedInteractions.length} 个`,
       `数据绑定 ${bindings.length} 个，未解决 ${unresolvedBindings.length} 个`,
-      `列表/表格数据源 ${repeatedNodes.length} 个`,
+      `列表/表格数据源 ${repeatedNodes.length} 个，未绑定 ${repeatsWithoutBinding.length} 个`,
+      `交互组件 ${interactiveComponents.length} 个`,
       ...(visualDelta ? [`相对 v0：${visualDelta.summary}`] : []),
     ].join('；'),
   }
@@ -122,8 +134,10 @@ export function buildSemanticReviewContext(packet) {
     '【SEMANTIC_REVIEW_PACKET】',
     '这是用户在离线画布中确认并冻结的虚拟界面。',
     '请不要重新询问页面布局、视觉风格或要求上传源码。',
-    '请只针对 interactions / bindings 中尚未解决、且直接影响后端接口、',
-    '数据库、鉴权或业务动作的节点发起最多 2 个澄清问题。',
+    '必须审查全部 UNRESOLVED interactions、未绑定 repeat.source、',
+    '所有 button/input/form/list/table 交互组件，以及 visualDelta 新增组件；',
+    '不能只审查增量。V0 阶段只生成 JSON，不了解业务语义。',
+    '请针对直接影响后端接口、数据库、鉴权或业务动作的节点发起最多 2 个澄清问题。',
     '问题必须引用具体组件名/动作，并给出至少 A/B/C 选项。',
     '',
     JSON.stringify(packet).slice(0, 12000),

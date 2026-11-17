@@ -36,6 +36,29 @@
   - 覆盖 page/section/container/grid/stack/text/button/input/image/
     list/table/form/modal。
 
+## 网页模拟预览
+
+- `visualPreview.js`：
+  - 按 path/title 选择 dashboard / table / form / cards 模板；
+  - 提供统计卡、工具栏、表格、卡片、表单、页脚与示例数据；
+  - `shouldSimulatePage`：页面已有 >=7 个有效业务节点时不叠加模板。
+- `VisualDocumentPreview` 在真实节点后追加模拟页面，仅预览、不写回；
+- 解决 V0 JSON 稀疏时预览像白纸的问题。
+
+## 冻结与业务审查顺序
+
+- FROZEN 的 repeat.source 未绑定改为 warning，不再阻止进入业务审查；
+- 只有 COMPILED / CodeGen 前才强制 binding 闭环；
+- CodeGen 新增 `VISUAL_UNBOUND_REPEAT` 错误码；
+- 第二次 Architect 审查范围扩大：
+  - 全部 UNRESOLVED interactions；
+  - 全部未绑定 repeat.source；
+  - 全部 button/input/form/list/table；
+  - 再处理 visualDelta；
+  - 不假设 V0 了解业务语义。
+- semantic review packet 新增 `interactiveComponents` /
+  `repeatsWithoutBinding`。
+
 ## Architect V0
 
 - `frontendRoutes` 多路由时，确定性 builder 生成多页：

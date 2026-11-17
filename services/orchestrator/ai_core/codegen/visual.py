@@ -1445,6 +1445,24 @@ def _coerce_document(document: VisualDocument | Mapping[str, Any]) -> VisualDocu
         ) from exc
 
 
+def _assert_repeats_bound(document: VisualDocument) -> None:
+    """CodeGen 前强制 repeat.source 闭环；冻结阶段只给 warning。"""
+    for _page_id, _path, _title, root in _document_pages(document):
+        for node in _iter_nodes(root):
+            if not node.repeat:
+                continue
+            source = node.repeat.source
+            if not any(
+                binding.id == source or binding.entity == source
+                for binding in document.bindings
+            ):
+                raise VisualCodegenError(
+                    f"节点 {node.id} 的 repeat.source={source} 尚未完成业务绑定；"
+                    "请先通过业务审查补齐 binding 再生成代码",
+                    code="VISUAL_UNBOUND_REPEAT",
+                )
+
+
 def _assert_frozen(document: VisualDocument) -> None:
     if document.status not in {"FROZEN", "COMPILED"}:
         raise VisualCodegenError(
@@ -1495,6 +1513,7 @@ def compile_visual_document(
         )
     if require_frozen:
         _assert_frozen(visual)
+    _assert_repeats_bound(visual)
 
     try:
         primary = _ReactCompiler(
