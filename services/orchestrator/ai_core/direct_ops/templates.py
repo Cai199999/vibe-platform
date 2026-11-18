@@ -19,31 +19,48 @@ class ComponentTemplate:
     node_count: int = 1
 
 
+# 直接新增的节点必须立即拥有源码身份。占位符由 DirectOperationService
+# 在生成动作时替换为唯一 oid / node-id / 插入文件；否则新节点会成为
+# 没有 data-oid 的孤儿，删除 / 移动只能靠行号猜测。
+_IDENTITY = (
+    'data-oid="__VIBE_OID__" '
+    'data-node-id="__VIBE_NODE_ID__" '
+    'data-source-file="__VIBE_SOURCE_FILE__" '
+    'data-vibe-created="direct"'
+)
+_IDENTITY_CHILD = (
+    'data-oid="__VIBE_OID___child1" '
+    'data-node-id="__VIBE_NODE_ID___child1" '
+    'data-source-file="__VIBE_SOURCE_FILE__" '
+    'data-vibe-created="direct"'
+)
+
 COMPONENT_TEMPLATES: dict[str, ComponentTemplate] = {
     "Button": ComponentTemplate(
         component_type="Button",
-        jsx='<button type="button" data-vibe-created="direct" '
+        jsx=f'<button type="button" {_IDENTITY} '
         'className="vibe-direct-button">按钮</button>',
     ),
     "Input": ComponentTemplate(
         component_type="Input",
-        jsx='<input data-vibe-created="direct" className="vibe-direct-input" '
+        jsx=f'<input {_IDENTITY} className="vibe-direct-input" '
         'placeholder="请输入" />',
     ),
     "Text": ComponentTemplate(
         component_type="Text",
-        jsx='<p data-vibe-created="direct" className="vibe-direct-text">'
-        "文本内容</p>",
+        jsx=f'<p {_IDENTITY} className="vibe-direct-text">' "文本内容</p>",
     ),
     "Card": ComponentTemplate(
         component_type="Card",
-        jsx='<div data-vibe-created="direct" className="vibe-direct-card">'
-        "<p>卡片内容</p></div>",
+        jsx=f'<div {_IDENTITY} data-source-kind="container" '
+        'className="vibe-direct-card">'
+        f'<p {_IDENTITY_CHILD} className="vibe-direct-text">'
+        "卡片内容</p></div>",
         node_count=2,
     ),
     "Container": ComponentTemplate(
         component_type="Container",
-        jsx='<div data-vibe-created="direct" '
+        jsx=f'<div {_IDENTITY} data-source-kind="container" '
         'className="vibe-direct-container"></div>',
         node_count=1,
     ),

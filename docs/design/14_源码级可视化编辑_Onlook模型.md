@@ -69,15 +69,19 @@ L1 工具是 `DirectOperationService` 的门面，不新增执行器。新增能
 ## 5. 身份模型
 
 ```text
-data-node-id   稳定源码节点 ID（CodeGen 注入）
-data-source    file:line:column，仅作临时/调试锚点
+data-oid       构建期稳定源码身份（inspect_plugin / CodeGen 注入）
+vibe-source-map.json  oid -> {file,start,end,line,column,parentOid,container,...}
+data-node-id   VisualDocument 逻辑节点 ID（CodeGen 同时注入）
+data-source    file:line:column，仅作旧项目兜底 / 调试
 instancePath   同一源码多实例的渲染路径（后续补齐）
 ```
 
 约束：
 
-- 写操作主键是 `data-node-id`，不是行列；
+- 写操作主键是 `data-oid`（旧项目可用 `data-node-id`），不是行列；
 - `data-source` 在编辑后可能失效，只用于投影与兜底；
+- 构建期插件按「文件 + 组件 + JSX 结构路径」生成 oid，行号只写进地图；
+- resolver 优先 oid → 地图区间；地图与 AST 不一致时 fail-closed，不再猜；
 - 同一源码多实例、循环项、共享组件继续走 ScopePolicy / HITL。
 
 ## 6. 前端 Agent 工具契约
@@ -123,8 +127,10 @@ Agent 只能根据 `code` / `requiresHuman` / `retryable` 决定重试、换工�
   - `public/inspect_sdk.js` 与 `index.html` 注入；
   - `/api -> 127.0.0.1:3000` 代理；
   - 否则选择按钮与真实 API 会同时失效；
-- 项目源码持久化；
-- `data-node-id` → AST 索引与实例路径。
+- 项目源码持久化（MySQL 元数据 + MinIO 正文，已落地）；
+- 构建期 `data-oid` 与 `vibe-source-map.json`（插件 + CodeGen 已落地）；
+- Direct Ops `oid → 源码区间` 解析（已落地，旧 file/line 仅兜底）；
+- `instancePath` 与跨文件组件边界（后续）。
 
 ### P1
 

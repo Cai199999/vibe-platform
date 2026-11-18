@@ -762,6 +762,8 @@ class DirectOperationService:
         request = {
             "anchorId": anchor_id,
             "annotationId": target.annotation_id or payload.direct_action_id,
+            "oid": target.oid or "",
+            "sourceRange": dict(target.source_range or {}) or None,
             "file": target.file or "",
             "selector": target.selector or "",
             "line": target.line,
@@ -1072,6 +1074,16 @@ class DirectOperationService:
             jsx_code = apply_style_context(
                 template.jsx,
                 payload.payload.get("styleContext"),
+            )
+            # 新节点必须立刻拥有可回解的身份：oid 给 SDK / source map，
+            # node-id 给生成工程 resolver；两者都由本次动作唯一派生。
+            identity = hashlib.sha256(
+                f"{payload.project_id}:{payload.direct_action_id}".encode()
+            ).hexdigest()[:16]
+            jsx_code = (
+                jsx_code.replace("__VIBE_OID__", f"oid_direct_{identity}")
+                .replace("__VIBE_NODE_ID__", f"nd_direct_{identity}")
+                .replace("__VIBE_SOURCE_FILE__", file)
             )
             edit = {
                 "operation": "insert",

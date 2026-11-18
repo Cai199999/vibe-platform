@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -175,6 +176,16 @@ _TAILWIND_CLASS_RE = re.compile(r"^[A-Za-z0-9:_\-\[\]().,%#/]+$")
 _SOURCE_PLACEHOLDER = "__VISUAL_SOURCE_LINE__"
 SOURCE_FILE = "src/App.jsx"
 _INSPECT_SDK_FILE = "inspect_sdk.js"
+_SOURCE_MAP_FILE = "vibe-source-map.json"
+
+
+def _oid_for_node(node_id: str) -> str:
+    """生成节点与构建期 oid 的稳定映射。
+
+    Visual CodeGen 已经有全局唯一 ``data-node-id``；oid 只是把同一身份
+    暴露给 source map / SDK，不另造第二套节点身份。
+    """
+    return f"oid_{node_id}"
 
 
 @lru_cache(maxsize=1)
@@ -276,6 +287,73 @@ def _collect_document_node_ids(document: VisualDocument) -> tuple[str, ...]:
         for _page_id, _path, _title, root in _document_pages(document)
         for node in _iter_nodes(root)
     )
+
+
+def _render_source_map(document: VisualDocument, app_source: str) -> str:
+    """生成 ``public/vibe-source-map.json``。
+
+    CodeGen 已知完整虚拟树，不需要 Babel 反推：oid、父容器与兄弟顺序
+    直接来自 VisualNode。``nodeId`` 让 resolver 在生成工程里用
+    ``[data-node-id="..."]`` 精确定位，不再依赖 file:line。
+    """
+    nodes: dict[str, dict[str, Any]] = {}
+    pages = list(_document_pages(document))
+    multi_page = len(pages) > 1
+
+    def walk(
+        node: VisualNode,
+        parent_oid: str | None,
+        sibling_index: int,
+        sibling_count: int,
+        component: str,
+        depth: int,
+    ) -> None:
+        oid = _oid_for_node(node.id)
+        marker = f'data-oid="{oid}"'
+        offset = app_source.find(marker)
+        line = app_source.count("\n", 0, offset) + 1 if offset >= 0 else 0
+        nodes[oid] = {
+            "oid": oid,
+            "nodeId": node.id,
+            "file": SOURCE_FILE,
+            "line": line,
+            "component": component,
+            "tag": TAG_MAP[node.type],
+            "isContainer": node.type in CONTAINER_NODE_TYPES,
+            "parentOid": parent_oid,
+            "siblingIndex": sibling_index,
+            "siblingCount": sibling_count,
+            "depth": depth,
+        }
+        for index, child in enumerate(node.children):
+            walk(
+                child,
+                oid,
+                index,
+                len(node.children),
+                component,
+                depth + 1,
+            )
+
+    for page_index, (_page_id, _path, title, root) in enumerate(pages):
+        component = _page_component_name(title, page_index) if multi_page else "App"
+        walk(root, None, 0, 1, component, 0)
+
+    source_hash = hashlib.sha256(app_source.encode("utf-8")).hexdigest()
+    payload = {
+        "version": 1,
+        # revision 只由源码正文决定：contentHash 含 frozenAt 时间戳，
+        # 用它会令同一份源码两次编译产生不同 manifest。
+        "revision": source_hash[:16],
+        "files": {
+            SOURCE_FILE: {
+                "hash": source_hash,
+                "oids": sorted(nodes),
+            }
+        },
+        "nodes": nodes,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
 def _page_component_name(title: str, index: int) -> str:
@@ -1127,6 +1205,7 @@ class _ReactCompiler:
         source_kind = "container" if node.type in CONTAINER_NODE_TYPES else "element"
         attrs = [
             f"className={{{_js_string(self._class_name(node))}}}",
+            f'data-oid="{_oid_for_node(node.id)}"',
             f'data-node-id="{node.id}"',
             f'data-source="{SOURCE_FILE}:{_SOURCE_PLACEHOLDER}"',
             f'data-source-kind="{source_kind}"',
@@ -1403,6 +1482,9 @@ class _ReactCompiler:
                 "index.html": _render_index_html(self.document),
                 "package.json": _render_package_json(self.document),
                 "vite.config.js": _render_vite_config(),
+                "public/vibe-source-map.json": _render_source_map(
+                    self.document, app_source
+                ),
             }
         )
         return VisualCompileResult(
@@ -1452,7 +1534,8 @@ def _fallback_result(
         for node in _iter_nodes(root):
             label = node.name or node.type
             lines.append(
-                f'      <div data-node-id="{node.id}" '
+                f'      <div data-oid="{_oid_for_node(node.id)}" '
+                f'data-node-id="{node.id}" '
                 f'data-source="{SOURCE_FILE}:{_SOURCE_PLACEHOLDER}" '
                 f'data-visual-type="{node.type}" '
                 'className="my-1.5 rounded-[var(--radius-sm)] border '
@@ -1460,15 +1543,19 @@ def _fallback_result(
                 f"{{{_js_string(f'{label} ({node.type})')}}}</div>"
             )
     lines.extend(["    </main>", "  )", "}", ""])
+    fallback_source = _fill_source_lines("\n".join(lines))
     return VisualCompileResult(
         files=_with_inspect_sdk(
             {
-                "src/App.jsx": _fill_source_lines("\n".join(lines)),
+                "src/App.jsx": fallback_source,
                 "src/visual.css": _render_fallback_css(document),
                 "src/main.jsx": _render_main_jsx(),
                 "index.html": _render_index_html(document),
                 "package.json": _render_package_json(document),
                 "vite.config.js": _render_vite_config(),
+                "public/vibe-source-map.json": _render_source_map(
+                    document, fallback_source
+                ),
             }
         ),
         node_ids=node_ids,

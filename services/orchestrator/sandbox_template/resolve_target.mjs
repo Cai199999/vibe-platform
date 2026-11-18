@@ -45,6 +45,43 @@ function loadParser(workdir) {
   throw new Error(`Babel parser 依赖缺失：${lastError?.message || lastError}`)
 }
 
+const SOURCE_MAP_CANDIDATES = [
+  'vibe-source-map.json',
+  '.vibe/vibe-source-map.json',
+  'public/vibe-source-map.json',
+]
+const SOURCE_MAP_CACHE = new Map()
+
+/**
+ * 构建期 source map：oid -> 源码范围。
+ * 解析器优先查这张表；查不到才回退 selector / file:line。
+ */
+function loadSourceMap(workdir) {
+  const root = workdir || '/app'
+  if (SOURCE_MAP_CACHE.has(root)) return SOURCE_MAP_CACHE.get(root)
+  for (const relative of SOURCE_MAP_CANDIDATES) {
+    const candidate = path.join(root, relative)
+    try {
+      const raw = fs.readFileSync(candidate, 'utf8')
+      const parsed = JSON.parse(raw)
+      if (parsed && parsed.nodes && typeof parsed.nodes === 'object') {
+        SOURCE_MAP_CACHE.set(root, parsed)
+        return parsed
+      }
+    } catch {
+      // 继续尝试下一个位置。
+    }
+  }
+  SOURCE_MAP_CACHE.set(root, null)
+  return null
+}
+
+function sourceMapNodeForOid(workdir, oid) {
+  if (!oid) return null
+  const map = loadSourceMap(workdir)
+  return map?.nodes?.[oid] || null
+}
+
 const JSX_TYPES = new Set(['JSXElement', 'JSXFragment'])
 const FUNCTION_TYPES = new Set([
   'FunctionDeclaration',
@@ -527,17 +564,24 @@ function isTopLevelJsxRoot(node, parents) {
 }
 
 function resolveOne(anchor, parser, workdir) {
-  const file = String(anchor.file || '').trim()
+  const oid = String(anchor.oid || '').trim()
+  const oidNode = sourceMapNodeForOid(workdir, oid)
+  // source map 是构建期事实：oid 命中时文件以地图为准，不被旧 file:line
+  // 覆盖；地图缺失时才退回前端携带的 file。
+  const file = String((oidNode && oidNode.file) || anchor.file || '').trim()
   const result = {
     anchorId: anchor.anchorId,
     annotationId: anchor.annotationId,
+    oid,
     status: 'TARGET_NOT_FOUND',
     file,
     reason: '',
     candidates: [],
   }
   if (!file) {
-    result.reason = '标注缺少目标文件'
+    result.reason = oid
+      ? `oid 未命中源码地图且缺少目标文件: ${oid}`
+      : '标注缺少目标文件'
     return result
   }
   let parsed
@@ -549,7 +593,11 @@ function resolveOne(anchor, parser, workdir) {
   }
   const { code, ast } = parsed
   const index = buildIndex(ast)
-  const selector = parseSelector(anchor.selector)
+  // oid 是构建期唯一主键；没有显式 selector 时用 [data-oid="..."] 兜底，
+  // 生成工程（无 start/end）也能通过 oid 精确命中。
+  const selector = parseSelector(
+    anchor.selector || (oid ? `[data-oid="${oid}"]` : ''),
+  )
   const matches = selector
     ? index.jsxNodes.filter((node) => matchesSelector(node, selector))
     : []
@@ -567,9 +615,31 @@ function resolveOne(anchor, parser, workdir) {
       (offsets[1] !== undefined ? innermostAt(index.jsxNodes, offsets[1]) : null)
     : null
 
-  let node = anchor.selectedRange
-    ? findExactNode(index.jsxNodes, anchor.selectedRange)
-    : null
+  const oidRange =
+    oidNode && Number.isFinite(Number(oidNode.start))
+      ? {
+          startOffset: Number(oidNode.start),
+          endOffset: Number(oidNode.end),
+        }
+      : anchor.sourceRange &&
+          Number.isFinite(Number(anchor.sourceRange.startOffset))
+        ? anchor.sourceRange
+        : null
+  let node = oidRange ? findExactNode(index.jsxNodes, oidRange) : null
+  if (!node && anchor.selectedRange) {
+    node = findExactNode(index.jsxNodes, anchor.selectedRange)
+  }
+  // oid 已命中地图且带精确区间，却找不到对应 AST：说明地图与源码
+  // revision 不一致。此时必须 fail-closed，绝不能再退回 selector / 行列
+  // 猜一个“看起来像”的节点。生成工程的 manifest 只有 nodeId、没有区间，
+  // 允许继续走 [data-oid] / [data-node-id] selector。
+  const oidHasRange = Boolean(
+    oidNode && Number.isFinite(Number(oidNode.start)),
+  )
+  if (!node && oid && oidHasRange) {
+    result.reason = `oid 源码区间未命中当前 AST，source map 可能已过期: ${oid}`
+    return result
+  }
   let ambiguityReason = ''
   // 用户已在上一次中断中选择候选时，优先采用服务端回填的精确区间。
   if (!node && matches.length === 1) {

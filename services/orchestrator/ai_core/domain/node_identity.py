@@ -43,6 +43,7 @@ class NodeIdentity:
     file: str
     line: int
     column: int
+    oid: str = ""
     component: str = ""
     node_type: str = ""
     kind: NodeKind = "unknown"
@@ -79,6 +80,7 @@ class NodeIdentity:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "oid": self.oid,
             "file": self.file,
             "line": self.line,
             "column": self.column,
@@ -139,6 +141,7 @@ def identity_from_anchor(anchor: dict[str, Any]) -> NodeIdentity:
 
     return NodeIdentity(
         file=str(anchor.get("file") or ""),
+        oid=str(anchor.get("oid") or ""),
         line=int((anchor.get("range") or {}).get("startLine") or 0),
         column=int((anchor.get("range") or {}).get("startColumn") or 0),
         component=str(anchor.get("component") or ""),

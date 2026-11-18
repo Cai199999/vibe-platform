@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import datetime, timezone
 
@@ -171,6 +172,22 @@ class VisualCodegenCompileTests(unittest.TestCase):
         self.assertIn("/src/main.jsx", result.files["index.html"])
         self.assertIn("/inspect_sdk.js", result.files["index.html"])
         self.assertIn("vibe-inspect", result.files["public/inspect_sdk.js"])
+        self.assertIn(
+            'data-oid="oid_nd_page0001"',
+            source,
+        )
+        source_map = json.loads(result.files["public/vibe-source-map.json"])
+        self.assertEqual(source_map["version"], 1)
+        self.assertIn("oid_nd_page0001", source_map["nodes"])
+        page = source_map["nodes"]["oid_nd_page0001"]
+        self.assertEqual(page["nodeId"], "nd_page0001")
+        self.assertEqual(page["file"], "src/App.jsx")
+        self.assertTrue(page["isContainer"])
+        self.assertGreater(page["line"], 0)
+        self.assertEqual(
+            source_map["nodes"]["oid_nd_title001"]["parentOid"],
+            "oid_nd_page0001",
+        )
         self.assertIn("./visual.css", result.files["src/main.jsx"])
         self.assertIn("'/api'", result.files["vite.config.js"])
         self.assertIn("127.0.0.1:3000", result.files["vite.config.js"])

@@ -15,6 +15,7 @@
  * data-*，React 与 Vue 都会原样落到 DOM。
  */
 
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -42,9 +43,25 @@ const CONTAINER_TAGS = new Set([
 ])
 const SKIP_TAGS = new Set(['template', 'slot', 'component', 'transition'])
 const SCRIPT_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx'])
+const SOURCE_MAP_FILE = 'vibe-source-map.json'
+const SOURCE_MAP_VERSION = 1
 
 let projectRoot = process.cwd()
 let sdkCache = ''
+
+/**
+ * 构建期源码地图。
+ *
+ * oid -> { file, start, end, line, column, component, tag, isContainer,
+ *          parentOid, siblingIndex, siblingCount, depth }
+ *
+ * oid 由「文件 + 组件 + JSX 结构路径」确定性生成，不依赖行号；行号只
+ * 作为调试信息写入地图，写操作以 oid + start/end 为准。
+ */
+const sourceMapNodes = new Map()
+const sourceMapFiles = new Map()
+let sourceMapJson = ''
+let sourceMapTimer = null
 
 function readSdk() {
   if (!sdkCache) sdkCache = fs.readFileSync(SDK_FILE, 'utf8')
@@ -81,6 +98,167 @@ function escapeAttribute(value) {
     .replace(/"/g, '&quot;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+}
+
+function hashText(value) {
+  return createHash('sha256').update(String(value)).digest('hex')
+}
+
+/** 稳定 oid：文件 + 组件 + JSX 结构路径，不包含行号。 */
+function oidFor(file, component, signature) {
+  return `oid_${hashText(`${file}|${component}|${signature}`).slice(0, 16)}`
+}
+
+function jsxTagName(node) {
+  const name = node?.openingElement?.name
+  if (!name) return ''
+  if (name.type === 'JSXIdentifier') return name.name
+  if (name.type === 'JSXMemberExpression') {
+    return `${jsxTagName({ openingElement: { name: name.object } })}.${name.property.name}`
+  }
+  return ''
+}
+
+function jsxAttributeNames(node) {
+  return new Set(
+    (node?.openingElement?.attributes || [])
+      .filter((item) => item.type === 'JSXAttribute')
+      .map((item) => item.name && item.name.name)
+      .filter(Boolean),
+  )
+}
+
+function jsxStringAttribute(node, name) {
+  const attribute = (node?.openingElement?.attributes || []).find(
+    (item) =>
+      item.type === 'JSXAttribute' &&
+      item.name &&
+      item.name.name === name,
+  )
+  return attribute && attribute.value && attribute.value.type === 'StringLiteral'
+    ? attribute.value.value
+    : ''
+}
+
+function jsxSiblingInfo(elementPath) {
+  const parent = elementPath.parentPath
+  const children = parent?.node?.children
+  if (!Array.isArray(children)) return { index: 0, count: 1 }
+  const elements = children.filter(
+    (child) =>
+      child && (child.type === 'JSXElement' || child.type === 'JSXFragment'),
+  )
+  return {
+    index: Math.max(0, elements.indexOf(elementPath.node)),
+    count: Math.max(1, elements.length),
+  }
+}
+
+/**
+ * 同一组件函数内的 JSX 祖先链（含自身）。
+ * 遇到函数边界即停止：跨组件调用点由 callSite / importer 信息处理，
+ * 不能把另一个函数的 AST 结构硬拼进当前 oid。
+ */
+function jsxAncestorChain(openingPath) {
+  const chain = []
+  let current = openingPath.parentPath
+  while (current && !current.isFunction?.()) {
+    if (current.node?.type === 'JSXElement') {
+      const tag = jsxTagName(current.node)
+      if (tag) {
+        const sibling = jsxSiblingInfo(current)
+        chain.unshift({
+          tag,
+          index: sibling.index,
+          count: sibling.count,
+        })
+      }
+    }
+    current = current.parentPath
+  }
+  return chain
+}
+
+function signatureOf(chain) {
+  return chain.map((item) => `${item.tag}:${item.index}`).join('/')
+}
+
+/**
+ * 函数作用域签名：避免同一组件内多个匿名 map 回调产生相同结构路径。
+ * 使用 AST 祖先 key 而不是行号，保证纯换行 / 空行不影响 oid。
+ */
+function jsxScopeSignature(openingPath) {
+  const functionPath = openingPath.getFunctionParent?.()
+  if (!functionPath) return ''
+  const ancestry = functionPath.getAncestry?.() || []
+  return ancestry
+    .map((item) => `${item.node?.type || ''}:${item.key ?? ''}`)
+    .join('/')
+}
+
+function recordSourceMapNode(record) {
+  sourceMapNodes.set(record.oid, record)
+  const file = sourceMapFiles.get(record.file) || {
+    file: record.file,
+    hash: '',
+    oids: new Set(),
+  }
+  file.oids.add(record.oid)
+  sourceMapFiles.set(record.file, file)
+}
+
+function forgetFile(file) {
+  const previous = sourceMapFiles.get(file)
+  if (previous) {
+    for (const oid of previous.oids) sourceMapNodes.delete(oid)
+  }
+  sourceMapFiles.delete(file)
+}
+
+function buildSourceMap() {
+  const files = {}
+  const entries = [...sourceMapFiles.entries()].sort(([a], [b]) =>
+    a.localeCompare(b),
+  )
+  for (const [file, meta] of entries) {
+    files[file] = { hash: meta.hash || '', oids: [...meta.oids].sort() }
+  }
+  const nodes = {}
+  for (const [oid, record] of [...sourceMapNodes.entries()].sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    nodes[oid] = record
+  }
+  const revision = hashText(
+    JSON.stringify({ files, oids: Object.keys(nodes) }),
+  ).slice(0, 16)
+  return JSON.stringify(
+    {
+      version: SOURCE_MAP_VERSION,
+      revision,
+      generatedAt: new Date().toISOString(),
+      files,
+      nodes,
+    },
+    null,
+    2,
+  )
+}
+
+function writeSourceMap() {
+  sourceMapTimer = null
+  sourceMapJson = buildSourceMap()
+  try {
+    fs.writeFileSync(path.join(projectRoot, SOURCE_MAP_FILE), sourceMapJson)
+  } catch {
+    // 只读文件系统 / 构建容器没有写权限时，中间件仍然可以用内存地图。
+  }
+}
+
+function scheduleSourceMapWrite() {
+  if (sourceMapTimer) return
+  sourceMapTimer = setTimeout(writeSourceMap, 80)
+  if (typeof sourceMapTimer.unref === 'function') sourceMapTimer.unref()
 }
 
 /**
@@ -150,14 +328,8 @@ function buildJsxPlugin(filename) {
           const tag = nameNode.name
           // 组件（大写开头）的属性可能不会落到 DOM，只标记原生标签。
           if (!tag || /^[A-Z]/.test(tag)) return
-          const attributes = pathNode.node.attributes || []
-          const names = new Set(
-            attributes
-              .filter((item) => item.type === 'JSXAttribute')
-              .map((item) => item.name && item.name.name)
-              .filter(Boolean),
-          )
-          if (names.has('data-source-file')) return
+          const elementNode = pathNode.parentPath?.node
+          if (!elementNode || elementNode.type !== 'JSXElement') return
 
           const loc = pathNode.node.loc && pathNode.node.loc.start
           if (!loc) return
@@ -165,28 +337,74 @@ function buildJsxPlugin(filename) {
           const line = loc.line
           const column = loc.column + 1
           const component = componentNameFor(pathNode, filename)
-          const kindAttribute = attributes.find(
-            (item) =>
-              item.type === 'JSXAttribute' &&
-              item.name &&
-              item.name.name === 'data-source-kind',
-          )
-          const existingKind =
-            kindAttribute && kindAttribute.value && kindAttribute.value.value
+          const names = jsxAttributeNames(elementNode)
+          const existingOid = jsxStringAttribute(elementNode, 'data-oid')
 
-          const injection = sourceAttributes({
+          const chain = jsxAncestorChain(pathNode)
+          const signature = signatureOf(chain)
+          const scope = jsxScopeSignature(pathNode)
+          const parentChain = chain.length >= 2 ? chain.slice(0, -1) : []
+          const parent = parentChain.length
+            ? parentChain[parentChain.length - 1]
+            : null
+          const parentOid = parent
+            ? oidFor(
+                file,
+                component,
+                `${scope}|${signatureOf(parentChain)}|${parent.tag}`,
+              )
+            : null
+          const oid =
+            existingOid ||
+            oidFor(file, component, `${scope}|${signature}|${tag}`)
+
+          recordSourceMapNode({
+            oid,
             file,
+            start: Number.isFinite(elementNode.start) ? elementNode.start : 0,
+            end: Number.isFinite(elementNode.end) ? elementNode.end : 0,
             line,
             column,
             component,
             tag,
-            hasSource:
-              names.has('data-source') || names.has('data-vibe-target'),
-            hasKind: names.has('data-source-kind'),
-            existingKind,
+            isContainer: CONTAINER_TAGS.has(String(tag).toLowerCase()),
+            parentOid,
+            siblingIndex: chain.length ? chain[chain.length - 1].index : 0,
+            siblingCount: chain.length ? chain[chain.length - 1].count : 1,
+            depth: Math.max(0, chain.length - 1),
           })
+
+          const injection = []
+          if (!existingOid) {
+            injection.push(`data-oid="${escapeAttribute(oid)}"`)
+          }
+          // 已有 data-source-file 时只补 oid，不重复写整套出处属性。
+          if (!names.has('data-source-file')) {
+            const kindAttribute = (pathNode.node.attributes || []).find(
+              (item) =>
+                item.type === 'JSXAttribute' &&
+                item.name &&
+                item.name.name === 'data-source-kind',
+            )
+            const existingKind =
+              kindAttribute && kindAttribute.value && kindAttribute.value.value
+            injection.push(
+              ...sourceAttributes({
+                file,
+                line,
+                column,
+                component,
+                tag,
+                hasSource:
+                  names.has('data-source') || names.has('data-vibe-target'),
+                hasKind: names.has('data-source-kind'),
+                existingKind,
+              }),
+            )
+          }
           for (const attribute of injection) {
             const separator = attribute.indexOf('=')
+            if (separator < 0) continue
             const attrName = attribute.slice(0, separator)
             const rawValue = attribute.slice(separator + 2, -1)
             pathNode.node.attributes.push(
@@ -203,6 +421,8 @@ function buildJsxPlugin(filename) {
 }
 
 function transformReact(code, filename) {
+  const file = relativeFile(filename)
+  forgetFile(file)
   const result = transformSync(code, {
     filename,
     babelrc: false,
@@ -223,28 +443,64 @@ function transformReact(code, filename) {
     },
     plugins: [buildJsxPlugin(filename)],
   })
-  if (!result || !result.code) return null
+  if (!result || !result.code) {
+    scheduleSourceMapWrite()
+    return null
+  }
+  const current = sourceMapFiles.get(file) || { file, hash: '', oids: new Set() }
+  current.hash = hashText(code)
+  sourceMapFiles.set(file, current)
+  scheduleSourceMapWrite()
   return { code: result.code, map: result.map || null }
 }
 
 // ------------------------------------------------------------
 // Vue SFC
 // ------------------------------------------------------------
-function walkTemplate(node, visit) {
-  if (!node) return
-  visit(node)
-  if (Array.isArray(node.children)) {
-    for (const child of node.children) walkTemplate(child, visit)
-  }
-}
-
 function hasVueAttribute(node, name) {
   return (node.props || []).some(
     (prop) => prop.type === 6 && prop.name === name,
   )
 }
 
+function vueAttributeValue(node, name) {
+  const prop = (node.props || []).find(
+    (item) => item.type === 6 && item.name === name,
+  )
+  return prop && prop.value && typeof prop.value.content === 'string'
+    ? prop.value.content
+    : ''
+}
+
+/** 递归收集模板元素，并携带「元素在父级中的 JSX/模板结构路径」。 */
+function collectVueElements(node, ancestors, parentChildren, output) {
+  if (!node) return
+  if (node.type === 1 && node.tag) {
+    const siblings = (parentChildren || []).filter(
+      (child) => child && child.type === 1 && child.tag,
+    )
+    const chain = [
+      ...ancestors,
+      {
+        tag: String(node.tag),
+        index: Math.max(0, siblings.indexOf(node)),
+        count: Math.max(1, siblings.length),
+      },
+    ]
+    output.push({ node, chain })
+    for (const child of node.children || []) {
+      collectVueElements(child, chain, node.children, output)
+    }
+    return
+  }
+  for (const child of node.children || []) {
+    collectVueElements(child, ancestors, node.children, output)
+  }
+}
+
 function transformVue(code, filename) {
+  const file = relativeFile(filename)
+  forgetFile(file)
   let descriptor
   try {
     descriptor = parseSfc(code, { filename }).descriptor
@@ -257,7 +513,6 @@ function transformVue(code, filename) {
 
   const content = template.content
   const baseOffset = template.loc.start.offset
-  const file = relativeFile(filename)
   const component = fileComponent(filename)
   const insertions = []
 
@@ -268,41 +523,85 @@ function transformVue(code, filename) {
     return null
   }
 
-  walkTemplate(ast, (node) => {
-    if (node.type !== 1 || !node.tag) return
+  const elements = []
+  collectVueElements(ast, [], ast.children, elements)
+
+  for (const { node, chain } of elements) {
     const tag = String(node.tag)
-    if (SKIP_TAGS.has(tag) || /^[A-Z]/.test(tag)) return
-    if (!node.loc || !node.loc.start) return
-    if (hasVueAttribute(node, 'data-source-file')) return
+    if (SKIP_TAGS.has(tag) || /^[A-Z]/.test(tag)) continue
+    if (!node.loc || !node.loc.start) continue
 
-    const targetOffset = node.loc.start.offset
-    const header = content.slice(targetOffset)
-    const match = /^<[^\s/>]+/.exec(header)
-    if (!match) return
-    const insertAt = targetOffset + match[0].length
-    const absoluteOffset = baseOffset + insertAt
-    const { line, column } = lineColumnAt(code, absoluteOffset)
+    const existingOid = vueAttributeValue(node, 'data-oid')
+    const parentChain = chain.length >= 2 ? chain.slice(0, -1) : []
+    const parent = parentChain.length
+      ? parentChain[parentChain.length - 1]
+      : null
+    const parentOid = parent
+      ? oidFor(
+          file,
+          component,
+          `${signatureOf(parentChain)}|${parent.tag}`,
+        )
+      : null
+    const oid =
+      existingOid ||
+      oidFor(file, component, `${signatureOf(chain)}|${tag}`)
 
-    const hasSource =
-      hasVueAttribute(node, 'data-source') ||
-      hasVueAttribute(node, 'data-vibe-target')
-    const hasKind = hasVueAttribute(node, 'data-source-kind')
-    const attributes = sourceAttributes({
+    const start = baseOffset + node.loc.start.offset
+    const end = baseOffset + (node.loc.end?.offset ?? node.loc.start.offset)
+    const { line, column } = lineColumnAt(code, start)
+    recordSourceMapNode({
+      oid,
       file,
+      start,
+      end,
       line,
       column,
       component,
       tag,
-      hasSource,
-      hasKind,
-      existingKind: null,
+      isContainer: CONTAINER_TAGS.has(tag.toLowerCase()),
+      parentOid,
+      siblingIndex: chain.length ? chain[chain.length - 1].index : 0,
+      siblingCount: chain.length ? chain[chain.length - 1].count : 1,
+      depth: Math.max(0, chain.length - 1),
     })
-    insertions.push({
-      offset: baseOffset + insertAt,
-      text: ` ${attributes.join(' ')}`,
-    })
-  })
 
+    const targetOffset = node.loc.start.offset
+    const header = content.slice(targetOffset)
+    const match = /^<[^\s/>]+/.exec(header)
+    if (!match) continue
+    const insertAt = targetOffset + match[0].length
+
+    const attributes = []
+    if (!existingOid) attributes.push(`data-oid="${escapeAttribute(oid)}"`)
+    if (!hasVueAttribute(node, 'data-source-file')) {
+      attributes.push(
+        ...sourceAttributes({
+          file,
+          line,
+          column,
+          component,
+          tag,
+          hasSource:
+            hasVueAttribute(node, 'data-source') ||
+            hasVueAttribute(node, 'data-vibe-target'),
+          hasKind: hasVueAttribute(node, 'data-source-kind'),
+          existingKind: null,
+        }),
+      )
+    }
+    if (attributes.length) {
+      insertions.push({
+        offset: baseOffset + insertAt,
+        text: ` ${attributes.join(' ')}`,
+      })
+    }
+  }
+
+  const current = sourceMapFiles.get(file) || { file, hash: '', oids: new Set() }
+  current.hash = hashText(code)
+  sourceMapFiles.set(file, current)
+  scheduleSourceMapWrite()
   if (insertions.length === 0) return null
   insertions.sort((a, b) => b.offset - a.offset)
   let output = code
@@ -330,9 +629,21 @@ export function sourceInspectPlugin() {
     configResolved(config) {
       projectRoot = config.root || process.cwd()
     },
+    buildStart() {
+      sourceMapNodes.clear()
+      sourceMapFiles.clear()
+      sourceMapJson = ''
+    },
     configureServer(server) {
       server.middlewares.use((request, response, next) => {
         const pathname = String(request.url || '').split('?')[0]
+        if (pathname === `/${SOURCE_MAP_FILE}` || pathname === '/__vibe_source_map.json') {
+          if (!sourceMapJson) writeSourceMap()
+          response.setHeader('Content-Type', 'application/json; charset=utf-8')
+          response.setHeader('Cache-Control', 'no-store')
+          response.end(sourceMapJson || buildSourceMap())
+          return
+        }
         if (pathname !== SDK_PATH) {
           next()
           return
@@ -341,6 +652,33 @@ export function sourceInspectPlugin() {
         response.setHeader('Cache-Control', 'no-store')
         response.end(readSdk())
       })
+    },
+    watchChange(id, change) {
+      if (change?.event !== 'delete') return
+      const cleanId = String(id || '').split('?')[0]
+      if (!cleanId) return
+      forgetFile(relativeFile(cleanId))
+      scheduleSourceMapWrite()
+    },
+    generateBundle() {
+      sourceMapJson = buildSourceMap()
+      this.emitFile({
+        type: 'asset',
+        fileName: SOURCE_MAP_FILE,
+        source: sourceMapJson,
+      })
+    },
+    writeBundle(options) {
+      const outDir = options?.dir || options?.file
+      if (!outDir) return
+      try {
+        const target = options.dir
+          ? path.join(options.dir, SOURCE_MAP_FILE)
+          : path.join(path.dirname(outDir), SOURCE_MAP_FILE)
+        fs.writeFileSync(target, sourceMapJson || buildSourceMap())
+      } catch {
+        // 产物目录只读时忽略；generateBundle 仍会通过 emitFile 输出。
+      }
     },
     transformIndexHtml(html) {
       return {
@@ -368,11 +706,18 @@ export function sourceInspectPlugin() {
       if (/^vite\.config\.|^postcss\.config\.|^tailwind\.config\./.test(base)) {
         return null
       }
-      if (!/[<]/.test(code)) return null
+      if (!/[<]/.test(code)) {
+        // 文件从 JSX 改成纯 JS / 被清空时，必须移除旧 oid，避免地图过期。
+        forgetFile(relativeFile(cleanId))
+        scheduleSourceMapWrite()
+        return null
+      }
       try {
         return transformReact(code, cleanId)
       } catch {
-        // 解析失败时交给后续插件 / Vite 原生错误处理，绝不阻断启动。
+        // 解析失败时交给后续插件 / Vite 原生错误处理，绝不阻断启动；
+        // 文件节点已被 forget，地图也要同步刷新，避免残留旧 oid。
+        scheduleSourceMapWrite()
         return null
       }
     },

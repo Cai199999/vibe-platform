@@ -138,17 +138,23 @@ const StagedDragGhost = memo(function StagedDragGhost({
 /** 把一个带标记的 DOM 节点转换为可序列化的目标描述。 */
 function targetForNode(node) {
   if (!node) return null
+  const oid = node.getAttribute?.('data-oid') || ''
   const sourceMarker = node.getAttribute?.('data-source')
   const legacyMarker = node.getAttribute?.('data-vibe-target')
-  const marker = sourceMarker || legacyMarker
+  const marker = oid || sourceMarker || legacyMarker
   if (!marker) return null
-  const attr = sourceMarker ? 'data-source' : 'data-vibe-target'
-  const meta = TARGET_META[marker] ?? {
+  const attr = oid
+    ? 'data-oid'
+    : sourceMarker
+      ? 'data-source'
+      : 'data-vibe-target'
+  const meta = TARGET_META[sourceMarker || legacyMarker || marker] ?? {
     label: marker,
     role: node.tagName?.toLowerCase() || 'element',
-    component: 'App',
+    component: node.getAttribute?.('data-source-component') || 'App',
   }
   return {
+    oid: oid || undefined,
     marker,
     selector: `[${attr}="${marker}"]`,
     label: meta.label,
@@ -156,11 +162,17 @@ function targetForNode(node) {
     component: meta.component,
     tag: node.tagName?.toLowerCase() || '',
     kind: node.getAttribute?.('data-source-kind') || 'element',
+    file: node.getAttribute?.('data-source-file') || '',
+    line: Number(node.getAttribute?.('data-source-line') || 0) || undefined,
+    column:
+      Number(node.getAttribute?.('data-source-column') || 0) || undefined,
   }
 }
 
 function readTarget(element) {
-  const node = element?.closest?.('[data-source], [data-vibe-target]')
+  const node = element?.closest?.(
+    '[data-oid], [data-source], [data-vibe-target]',
+  )
   return targetForNode(node)
 }
 
@@ -190,7 +202,7 @@ function measureCoverage(pageRoot, selectionRect) {
   const seen = new Set()
   const nodes = []
   pageRoot
-    .querySelectorAll('[data-source], [data-vibe-target]')
+    .querySelectorAll('[data-oid], [data-source], [data-vibe-target]')
     .forEach((node) => {
       if (seen.has(node)) return
       seen.add(node)

@@ -116,7 +116,9 @@ def _node_selector(node_id: str) -> str:
             "DIRECT_TARGET_INVALID",
             "node_id 含非法字符，只允许字母、数字、_ . : -",
         )
-    return f'[data-node-id="{value}"]'
+    # 构建期 oid 与 CodeGen data-node-id 都是稳定身份；Agent 可以传任意一种。
+    attr = "data-oid" if value.startswith("oid_") else "data-node-id"
+    return f'[{attr}="{value}"]'
 
 
 def _target(

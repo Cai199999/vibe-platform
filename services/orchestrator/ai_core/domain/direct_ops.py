@@ -57,6 +57,9 @@ class DirectActionTarget(CamelModel):
 
     anchor_id: str | None = Field(default=None, max_length=128)
     annotation_id: str | None = Field(default=None, max_length=128)
+    # 构建期 source map 的稳定身份；有 oid 时解析器必须优先走 oid 映射。
+    oid: str | None = Field(default=None, max_length=80)
+    source_range: dict[str, int] | None = None
     selector: str | None = Field(default=None, max_length=500)
     file: str | None = Field(default=None, max_length=500)
     line: int | None = Field(default=None, ge=1)

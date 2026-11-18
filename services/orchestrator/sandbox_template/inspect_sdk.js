@@ -35,6 +35,46 @@
   // 拖拽松手后浏览器仍会补发一次 click；这里吞掉它，避免误触按钮。
   var suppressClick = false
   var dragTokenSeed = 0
+  // 构建期源码地图：oid -> { file, start, end, line, column, component,
+  // isContainer, parentOid, ... }。DOM 只认 data-oid，不再靠 file:line 猜。
+  var sourceMap = { nodes: {} }
+  var sourceMapLoading = null
+  var lastSourceMapRefresh = 0
+
+  function loadSourceMap() {
+    if (sourceMapLoading) return sourceMapLoading
+    sourceMapLoading = fetch('/vibe-source-map.json', { cache: 'no-store' })
+      .then(function (response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status)
+        return response.json()
+      })
+      .then(function (data) {
+        if (data && data.nodes && typeof data.nodes === 'object') {
+          sourceMap = data
+        }
+        return sourceMap
+      })
+      .catch(function () {
+        return sourceMap
+      })
+    return sourceMapLoading
+  }
+
+  function refreshSourceMap() {
+    sourceMapLoading = null
+    return loadSourceMap()
+  }
+
+  function sourceMapNodeForOid(oid) {
+    if (!oid) return null
+    var mapped = sourceMap.nodes && sourceMap.nodes[oid]
+    // HMR 后插件会重写地图；遇到未知 oid 时限频刷新一次。
+    if (!mapped && Date.now() - lastSourceMapRefresh > 2000) {
+      lastSourceMapRefresh = Date.now()
+      refreshSourceMap()
+    }
+    return mapped || null
+  }
   var INLINE_TAGS = {
     span: true,
     p: true,
@@ -562,10 +602,17 @@
    */
   function readSource(node, withStyles) {
     if (!node || typeof node.getAttribute !== 'function') return null
-    var file = node.getAttribute('data-source-file') || ''
-    var line = Number(node.getAttribute('data-source-line') || 0)
-    var column = Number(node.getAttribute('data-source-column') || 0)
-    var component = node.getAttribute('data-source-component') || ''
+    var oid = node.getAttribute('data-oid') || ''
+    var mapped = sourceMapNodeForOid(oid)
+    var file = (mapped && mapped.file) || node.getAttribute('data-source-file') || ''
+    var line = Number(
+      (mapped && mapped.line) || node.getAttribute('data-source-line') || 0,
+    )
+    var column = Number(
+      (mapped && mapped.column) || node.getAttribute('data-source-column') || 0,
+    )
+    var component =
+      (mapped && mapped.component) || node.getAttribute('data-source-component') || ''
     var dataSource =
       node.getAttribute('data-source') ||
       node.getAttribute('data-vibe-target') ||
@@ -573,12 +620,14 @@
     // CodeGen 会同时写 data-node-id 与 data-source；AI 新增节点可能只有
     // data-node-id，因此选择器必须支持两种主键。
     var nodeId = node.getAttribute('data-node-id') || ''
-    var marker = dataSource || nodeId
-    var selector = dataSource
-      ? '[data-source="' + dataSource + '"]'
-      : nodeId
-        ? '[data-node-id="' + nodeId + '"]'
-        : ''
+    var marker = oid || dataSource || nodeId
+    var selector = oid
+      ? '[data-oid="' + oid + '"]'
+      : dataSource
+        ? '[data-source="' + dataSource + '"]'
+        : nodeId
+          ? '[data-node-id="' + nodeId + '"]'
+          : ''
     if (!file && dataSource) {
       var generated = /^(.+?):(\d+):(\d+)$/.exec(dataSource)
       if (generated) {
@@ -588,14 +637,25 @@
       }
     }
     var kind =
+      (mapped && mapped.isContainer ? 'container' : '') ||
       node.getAttribute('data-source-kind') ||
       (CONTAINER_TAGS[String(node.tagName || '').toLowerCase()]
         ? 'container'
         : 'element')
+    var sourceRange =
+      mapped && Number.isFinite(Number(mapped.start))
+        ? {
+            startOffset: Number(mapped.start),
+            endOffset: Number(mapped.end),
+          }
+        : null
     // 实例定位：同一份源码可能渲染多个 DOM 节点，必须把“第几个”与
     // 父级 JSX 调用位置一并回传，否则 Coder 只能改基础组件造成全局污染。
     var instanceInfo = instanceInfoFor(node, file, line, column)
     var identity = {
+      oid: oid,
+      sourceRange: sourceRange,
+      parentOid: (mapped && mapped.parentOid) || '',
       file: file,
       line: line,
       column: column,
@@ -608,6 +668,9 @@
       domKind: kind,
     }
     return {
+      oid: oid,
+      sourceRange: sourceRange,
+      parentOid: (mapped && mapped.parentOid) || '',
       file: file,
       line: line,
       column: column,
@@ -745,6 +808,9 @@
         ? source.component
         : source.tag
     return {
+      oid: source.oid || '',
+      sourceRange: source.sourceRange || null,
+      parentOid: source.parentOid || '',
       marker: source.marker,
       selector: source.selector,
       label: label,
@@ -771,6 +837,9 @@
   /** 页面根目标：所有组件都没带 data-source 时的兜底插入容器。 */
   function pageTarget() {
     return {
+      oid: '',
+      sourceRange: null,
+      parentOid: '',
       marker: 'page',
       selector: '',
       label: '页面',
@@ -962,7 +1031,19 @@
   // ------------------------------------------------------------
   /** readSource 永远返回对象；只有 marker / file 才代表“可定位源码”。 */
   function hasSourceAnchor(source) {
-    return Boolean(source && (source.marker || source.file))
+    return Boolean(source && (source.oid || source.marker || source.file))
+  }
+
+  /** 从节点向上找最近的 oid 容器；这是父容器解析的第一优先级。 */
+  function findOidContainer(node) {
+    var current = node
+    while (current && current !== document.documentElement) {
+      var oid = current.getAttribute && current.getAttribute('data-oid')
+      var mapped = oid ? sourceMapNodeForOid(oid) : null
+      if (mapped && mapped.isContainer) return current
+      current = current.parentElement
+    }
+    return null
   }
 
   /**
@@ -976,6 +1057,10 @@
    * 绝不返回 body / html：它们的源码位置没有意义，会让 Resolver 迷路。
    */
   function stageParentOf(node) {
+    // 1. 构建期 oid 地图命中容器：确定性查表，不做标签 / class 猜测。
+    var oidContainer = node ? findOidContainer(node) : null
+    if (oidContainer) return { node: oidContainer, confidence: 'oid' }
+    // 2. 旧项目兜底：已有 data-source-kind 容器标记。
     var container = node ? findContainer(node) : null
     if (container) return { node: container, confidence: 'exact' }
     var current = node
@@ -2898,16 +2983,32 @@
     }
   }, true)
 
-  // 通知父页面 SDK 已就绪；父页面收到后再下发 enable，避免首次点击丢失。
-  post('ready', {
-    url: window.location.href,
-    route: routeKey(),
-    navigationType: navigationType,
-    scroll: scrollSnapshot(),
-  })
-  if (navigationType === 'reload') {
-    announceRoute('reload', true)
+  // 通知父页面 SDK 已就绪；先等构建期 source map 就绪，避免第一次
+  // 选择 / 删除拿到只有 data-oid、没有源码范围的半成品目标。
+  var readyAnnounced = false
+  function announceReady() {
+    if (readyAnnounced) return
+    readyAnnounced = true
+    post('ready', {
+      url: window.location.href,
+      route: routeKey(),
+      navigationType: navigationType,
+      scroll: scrollSnapshot(),
+    })
+    if (navigationType === 'reload') {
+      announceRoute('reload', true)
+    }
   }
+  loadSourceMap().then(function (map) {
+    announceReady()
+    // 首次加载时 App 模块可能还没被 Vite transform，地图暂时为空；
+    // 稍后重拉一次，避免第一轮 hover / 删除拿不到源码范围。
+    if (!map || !map.nodes || Object.keys(map.nodes).length === 0) {
+      window.setTimeout(refreshSourceMap, 400)
+    }
+  })
+  // 地图接口异常 / 慢请求时不能让画布一直转圈。
+  window.setTimeout(announceReady, 1200)
   // 首次绘制完成后再补几次滚动快照，覆盖字体 / 图片 / 异步渲染撑开
   // 文档的情况。每次 publishScroll 内部会做指纹去重。
   ;[0, 60, 300, 1000, 2500].forEach(function (delay) {

@@ -525,7 +525,12 @@ class DirectOperationAddTest(unittest.TestCase):
         self.assertEqual(response.status, "SUCCEEDED")
         self.assertEqual(response.risk, "L0_DIRECT")
         self.assertEqual(self.sandbox.edits[0]["operation"], "insert")
-        self.assertIn("<button", self.sandbox.edits[0]["jsxCode"])
+        jsx = self.sandbox.edits[0]["jsxCode"]
+        self.assertIn("<button", jsx)
+        self.assertIn('data-oid="oid_direct_', jsx)
+        self.assertIn('data-node-id="nd_direct_', jsx)
+        self.assertIn('data-source-file="src/App.jsx"', jsx)
+        self.assertNotIn("__VIBE_", jsx)
         self.assertEqual(self.sandbox.patches, [{"src/App.jsx": ADDED}])
         self.assertEqual(len(self.sandbox.commits), 1)
         entries = self.store.list_for_project(PROJECT_ID)
