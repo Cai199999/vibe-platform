@@ -224,11 +224,81 @@ async function main() {
       timeout: 60000,
     })
     const previewHost = new URL(imported.previewUrl).host
-    const frame = page
-      .frames()
-      .find((item) => item.url().includes(previewHost))
+    const findPreviewFrame = () =>
+      page.frames().find((item) => item.url().includes(previewHost))
+    let frame = findPreviewFrame()
     await frame.waitForSelector('text=可删除节点', { timeout: 60000 })
 
+    // 画布样式类面板：先把 p 的 className 改掉。
+    await frame.evaluate(() => {
+      const node = [...document.querySelectorAll('p')].find((item) =>
+        item.textContent.includes('可删除节点'),
+      )
+      if (!node) throw new Error('target node not found')
+      node.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, cancelable: true }),
+      )
+    })
+    await frame.waitForFunction(
+      () => {
+        const button = document.querySelector('button[title="编辑样式类"]')
+        return Boolean(button && button.style.display !== 'none')
+      },
+      null,
+      { timeout: 20000 },
+    )
+    await frame.evaluate(() => {
+      document.querySelector('button[title="编辑样式类"]').click()
+    })
+    await frame.waitForFunction(
+      () => {
+        const panel = document.querySelector('[data-vibe-class-panel]')
+        return Boolean(panel && panel.style.display !== 'none')
+      },
+      null,
+      { timeout: 10000 },
+    )
+    await frame.evaluate(() => {
+      const input = document.querySelector('[data-vibe-class-input]')
+      input.value = 'text-red-600 font-bold'
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const classResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        response.url().includes('/api/v1/direct-ops/actions'),
+      { timeout: 60000 },
+    )
+    await frame.evaluate(() => {
+      document.querySelector('[data-vibe-class-save]').click()
+    })
+    const classResponse = await classResponsePromise
+    const classBody = await classResponse.json()
+    if (classResponse.status() !== 200 || classBody.status !== 'SUCCEEDED') {
+      throw new Error(`class update failed: ${JSON.stringify(classBody)}`)
+    }
+    let classPersisted = false
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const response = await fetch(
+        `${BFF}/api/v1/project-sources/${projectId}?tenantId=tenant_local`,
+      )
+      if (response.ok) {
+        const body = await response.json()
+        if ((body.files?.['src/App.jsx'] || '').includes('text-red-600 font-bold')) {
+          classPersisted = true
+          break
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    if (!classPersisted) throw new Error('class change was not persisted')
+    log('class panel updated', {
+      totalMs: classBody.timings?.totalMs,
+    })
+
+    // HMR 后 iframe 会重建，重新绑定 frame 再操作删除。
+    frame = findPreviewFrame()
+    await frame.waitForSelector('text=可删除节点', { timeout: 60000 })
     await frame.evaluate(() => {
       const node = [...document.querySelectorAll('p')].find((item) =>
         item.textContent.includes('可删除节点'),

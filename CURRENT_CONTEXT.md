@@ -23,6 +23,7 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 构建期身份：inspect_plugin / CodeGen 注入 data-oid + vibe-source-map.json；SDK 与 resolver oid 优先，旧 file/line 仅兜底，地图过期 fail-closed。
 - 跨文件调用点：importerGraph + callSiteOid 双索引；UPDATE_PROPS 只改调用点 JSX（App.jsx），不触碰组件定义（UserCard.jsx）。
 - Props 面板：画布 ⚙ 直接编辑唯一调用点的 Props，支持新增/修改/删除；表达式 Props 只提示去源码改。
+- 样式类：画布 🎨 修改 className；UPDATE_CLASS 复用 AST 属性编辑，动态表达式/多实例走 HITL 或拒绝。
 - 多调用点消歧：优先 React dev `_debugSource` 精确定位；无 Fiber 时按源码顺序 + 运行时实例序号，仍不确定保持 HITL。
 - 多实例：SDK 上报 instancePath（父 oid 链 + 同模板序号）；模板/重复实例修改返回 HITL_REQUIRED + 范围选项。
 - 数据源删除：静态数组（字面量/同文件变量）可确定性删除对应元素；动态数据仍明确 HANDOFF_TO_AI。
@@ -34,7 +35,7 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 旧工程兼容：SDK 支持 `file:line` / `file:line:column` 两段与三段锚点，缺失时向上找源码祖先；页面根兜底取真实容器，不再报“标注缺少目标文件”。
 
 ## 最新验证
-前端 68 项 Vitest；Python 730 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除无 422、异步同步后删除响应 2.1s、刷新回灌 2.3s；跨文件 Props E2E 命中 App.jsx 调用点、UserCard.jsx 未改；多实例/组件定义落点返回 HITL 范围选择。
+前端 68 项 Vitest；Python 732 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、样式类 1.8s、删除 1.9s、刷新回灌 2.2s；跨文件 Props E2E 命中 App.jsx 调用点、UserCard.jsx 未改；多实例/组件定义落点返回 HITL 范围选择。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 仅源码快照持久化（Run/指标仍无持久化）；沙盒无 gVisor；未云端部署。

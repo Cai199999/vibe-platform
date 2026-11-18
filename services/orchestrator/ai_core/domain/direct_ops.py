@@ -19,6 +19,7 @@ from ai_core.domain.common import CamelModel
 DirectActionKind = Literal[
     "UPDATE_TEXT",
     "UPDATE_PROPS",
+    "UPDATE_CLASS",
     "DELETE_NODE",
     "DELETE_DATA_ITEM",
     "ADD_COMPONENT",
@@ -139,6 +140,14 @@ class DirectActionPayload(CamelModel):
                     raise ValueError(f"prop {name} 超过 2000 字符")
                 if any(char in value for char in "<>{}\n\r"):
                     raise ValueError(f"prop {name} 不能包含 < > {{ }} 或换行")
+        if self.action == "UPDATE_CLASS":
+            class_name = self.payload.get("className")
+            if not isinstance(class_name, str):
+                raise ValueError("UPDATE_CLASS 必须提供字符串 payload.className")
+            if len(class_name) > 500:
+                raise ValueError("className 不能超过 500 字符")
+            if any(char in class_name for char in "<>{}\n\r"):
+                raise ValueError("className 不能包含 < > { } 或换行")
         if self.action == "MOVE_NODE":
             placement = self.target.placement or {}
             if not isinstance(placement, dict) or not (

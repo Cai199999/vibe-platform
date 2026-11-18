@@ -637,6 +637,40 @@ class DirectOperationPropsTest(unittest.TestCase):
         entries = self.store.list_for_project(PROJECT_ID)
         self.assertIn("调用点 Props", entries[0].summary)
 
+    def test_update_class_rewrites_class_name(self) -> None:
+        payload = DirectActionPayload.model_validate(
+            {
+                "directActionId": "dact_class",
+                "idempotencyKey": "proj_direct:dact_class",
+                "projectId": PROJECT_ID,
+                "sandboxId": SANDBOX_ID,
+                "tenantId": "tenant_local",
+                "baseRevision": BASE_SHA,
+                "action": "UPDATE_CLASS",
+                "target": {
+                    "anchorId": "anc_class",
+                    "file": "src/App.jsx",
+                    "selector": "[data-oid='oid_title']",
+                    "instance": 1,
+                    "instanceCount": 1,
+                },
+                "payload": {"className": "text-red-600 font-bold"},
+                "options": {"source": "FLOATING_TOOLBAR", "dryRun": False},
+            }
+        )
+
+        response = self.service.execute(payload)
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "update_props")
+        self.assertEqual(
+            self.sandbox.edits[0]["props"],
+            {"className": "text-red-600 font-bold"},
+        )
+        self.assertEqual(self.sandbox.patches, [{"src/App.jsx": UPDATED}])
+        entries = self.store.list_for_project(PROJECT_ID)
+        self.assertIn("样式类", entries[0].summary)
+
     def test_update_props_call_site_in_map_requires_hitl(self) -> None:
         anchor = dict(_anchor())
         anchor.update(

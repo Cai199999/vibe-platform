@@ -1314,6 +1314,13 @@ class DirectOperationService:
                 "anchorRange": anchor.get("range") or {},
                 "props": dict(payload.payload.get("props") or {}),
             }
+        elif payload.action == "UPDATE_CLASS":
+            edit = {
+                "operation": "update_props",
+                "file": file,
+                "anchorRange": anchor.get("range") or {},
+                "props": {"className": str(payload.payload.get("className") or "")},
+            }
         elif payload.action == "DELETE_DATA_ITEM":
             map_source = anchor.get("mapSource") or {}
             if map_source.get("kind") not in {
@@ -1560,6 +1567,8 @@ class DirectOperationService:
                 if node_preview
                 else f"删除 {component} 内的节点"
             )
+        elif payload.action == "UPDATE_CLASS":
+            summary = f"更新 {component} 的样式类"
         elif payload.action == "DELETE_DATA_ITEM":
             summary = (
                 f"删除 {component} 对应数据源的第 "

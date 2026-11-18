@@ -242,6 +242,24 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
             reasons=["没有解析到组件调用点，不能修改 Props"],
         )
 
+    if action == "UPDATE_CLASS":
+        if identity.kind == "map_item" or _repeated_instances(identity) > 1:
+            return _template_hitl(identity, "修改样式类")
+        if identity.is_protected or identity.is_shared:
+            return ScopeDecision(
+                allowed=False,
+                scope="definition",
+                strategy="hitl",
+                reasons=["共享组件的样式类修改会影响全部实例"],
+                options=[
+                    _option(
+                        "edit_definition", "修改组件定义（影响全部）", "DEFINITION"
+                    ),
+                    _option("cancel", "取消", "CANCEL"),
+                ],
+            )
+        return ScopeDecision(True, "instance", "direct")
+
     if action == "UPDATE_TEXT":
         if identity.kind == "map_item":
             return ScopeDecision(

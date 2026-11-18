@@ -605,6 +605,16 @@ function main() {
         attribute.type === 'JSXAttribute' &&
         updated.has(attribute.name?.name)
       ) {
+        const nextValue = props[attribute.name.name]
+        if (
+          attribute.value?.type === 'JSXExpressionContainer' &&
+          nextValue !== null
+        ) {
+          return fail(
+            'INVALID_PROPS',
+            `表达式属性 ${attribute.name.name} 不能直接覆盖`,
+          )
+        }
         continue
       }
       attributes.push(code.slice(attribute.start, attribute.end))
