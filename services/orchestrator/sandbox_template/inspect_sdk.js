@@ -2652,6 +2652,7 @@
   var directDeleteNode = null
   var directDeleteAutoConfirm = false
   var directDeletePending = false
+  var directDeletePreviousDisplay = ''
   var directEdit = null
   var directLastTextEdit = null
 
@@ -2720,15 +2721,13 @@
         directDeleteAutoConfirm =
           directTarget.getAttribute('data-vibe-created') === 'direct' ||
           Boolean(directTarget.querySelector?.('[data-vibe-created]'))
-        directDeletePending = true
-        window.setTimeout(function () {
-          directDeletePending = false
-        }, 3000)
-        post('direct-delete-request', {
-          projectId: directProjectId,
-          source: directDeleteSource,
-          autoConfirm: directDeleteAutoConfirm,
-        })
+        // 快路径：本地立即弹确认，不再先走 analyze-delete。
+        // 安全叶子确认后直接执行；不安全情况由 execute 返回 HITL。
+        if (directDeleteAutoConfirm) {
+          commitDirectDelete()
+        } else {
+          showDirectConfirmPanel()
+        }
       })
     }
     if (!directPlusBtn) {
@@ -2881,6 +2880,47 @@
     directMenu.style.display = directMenu.style.display === 'block' ? 'none' : 'block'
   }
 
+  function restoreDirectDeleteNode() {
+    if (directDeleteNode && directDeleteNode.isConnected) {
+      directDeleteNode.style.display = directDeletePreviousDisplay || ''
+    }
+    directDeletePreviousDisplay = ''
+  }
+
+  /** 确认后立即乐观隐藏 + 直接执行 DELETE_NODE（不再先 analyze）。 */
+  function commitDirectDelete() {
+    if (!directDeleteSource || directDeletePending) return
+    directDeletePending = true
+    window.setTimeout(function () {
+      directDeletePending = false
+    }, 10000)
+    if (directDeleteNode && directDeleteNode.isConnected) {
+      directDeletePreviousDisplay = directDeleteNode.style.display || ''
+      directDeleteNode.style.display = 'none'
+    }
+    post('direct-delete-confirmed', {
+      projectId: directProjectId,
+      source: directDeleteSource,
+    })
+  }
+
+  function showDirectConfirmPanel() {
+    var panel = ensureDirectConfirm()
+    var node =
+      directDeleteNode && directDeleteNode.isConnected
+        ? directDeleteNode
+        : resolveSourceInstance(directDeleteSource)
+    if (node) {
+      var rect = node.getBoundingClientRect()
+      panel.style.left = Math.max(2, rect.right - 190) + 'px'
+      panel.style.top = Math.max(2, rect.top + 26) + 'px'
+    } else {
+      panel.style.left = '50%'
+      panel.style.top = '30%'
+    }
+    panel.style.display = 'block'
+  }
+
   function ensureDirectConfirm() {
     if (directConfirm) return directConfirm
     directConfirm = directEl(
@@ -2906,10 +2946,7 @@
       event.preventDefault()
       event.stopPropagation()
       directConfirm.style.display = 'none'
-      post('direct-delete-confirmed', {
-        projectId: directProjectId,
-        source: directDeleteSource,
-      })
+      commitDirectDelete()
     })
     var cancel = document.createElement('button')
     cancel.type = 'button'
@@ -3096,9 +3133,17 @@
     if (data.type === 'direct-delete-result') {
       directDeletePending = false
       var result = data.payload || {}
-      if (result.handled) {
-        // 父页面已弹出 HITL 决策面板，SDK 不再重复提示。
+      if (result.ok || result.status === 'SUCCEEDED') {
+        // 快路径成功：节点已被乐观隐藏，等待 HMR 移除。
         return
+      }
+      if (result.handled || result.status === 'HITL_REQUIRED') {
+        // 父页面已弹出 HITL 决策面板，恢复节点显示。
+        restoreDirectDeleteNode()
+        return
+      }
+      if (result.safe === false) {
+        restoreDirectDeleteNode()
       }
       if (result.safe && directDeleteAutoConfirm) {
         directDeleteAutoConfirm = false

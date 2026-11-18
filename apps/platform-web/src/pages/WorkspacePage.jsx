@@ -2017,16 +2017,42 @@ export default function WorkspacePage() {
       if (data.type === 'direct-delete-confirmed') {
         const payload = data.payload || {}
         const targetProjectId = payload.projectId || activeTabId
+        // 快路径：本地确认后直接执行；HITL 由 execute 返回后再弹面板。
+        directDecisionSourceRef.current = event.source
         void handleDirectAction(targetProjectId, {
           action: 'DELETE_NODE',
           dryRun: false,
           target: payload.source,
-        }).catch((cause) => {
-          reply(event.source, 'direct-result', {
-            ok: false,
-            message: `删除失败：${cause?.message || cause}`,
-          })
         })
+          .then((result) => {
+            if (result?.status === 'HITL_REQUIRED') {
+              reply(event.source, 'direct-delete-result', {
+                ...result,
+                handled: true,
+              })
+              return
+            }
+            if (result?.status === 'SUCCEEDED') {
+              directDecisionSourceRef.current = null
+              reply(event.source, 'direct-delete-result', {
+                ok: true,
+                status: 'SUCCEEDED',
+              })
+              return
+            }
+            directDecisionSourceRef.current = null
+            reply(event.source, 'direct-delete-result', {
+              safe: false,
+              reasons: [result?.status || '删除未完成'],
+            })
+          })
+          .catch((cause) => {
+            directDecisionSourceRef.current = null
+            reply(event.source, 'direct-delete-result', {
+              safe: false,
+              reasons: [String(cause?.message || cause)],
+            })
+          })
         return
       }
       if (data.type === 'direct-undo') {
