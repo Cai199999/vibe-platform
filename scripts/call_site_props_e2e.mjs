@@ -139,6 +139,7 @@ async function main() {
   try {
     await page.goto(`${WEB}/workspace`, { waitUntil: 'domcontentloaded' })
     const demo = page.getByRole('button', { name: '一键体验（推荐）' })
+    await demo.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {})
     if (await demo.isVisible().catch(() => false)) await demo.click()
     await page.locator('.project-switcher-button').waitFor({ timeout: 30000 })
 

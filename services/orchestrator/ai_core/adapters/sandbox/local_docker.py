@@ -385,24 +385,24 @@ class LocalDockerSandbox(SandboxProvider):
         container = self._get_container(sandbox_id)
         with self._git_lock:
             self._ensure_git_repo(container)
-            self._git_add_all(container, "git add 失败")
-
+            # add / commit / rev-parse 合并为一次容器执行，减少两次
+            # docker exec 往返。message 只做 shell 引用，不拼接其它输入。
+            command = (
+                "git add -A && "
+                f"git commit --allow-empty -m {shlex.quote(message)} && "
+                "git rev-parse HEAD"
+            )
             code, output = self._exec(
                 container,
-                ["git", "commit", "--allow-empty", "-m", message],
+                ["sh", "-lc", command],
                 workdir=self.settings.sandbox_workdir,
             )
+            text = self._decode(output)
             if code != 0:
-                raise SandboxGitError(f"git commit 失败: {self._decode(output)}")
-
-            code, output = self._exec(
-                container,
-                ["git", "rev-parse", "HEAD"],
-                workdir=self.settings.sandbox_workdir,
-            )
-            commit_hash = self._extract_commit_hash(self._decode(output))
-            if code != 0 or commit_hash is None:
-                raise SandboxGitError(f"读取 commit hash 失败: {self._decode(output)}")
+                raise SandboxGitError(f"git commit 失败: {text}")
+            commit_hash = self._extract_commit_hash(text)
+            if commit_hash is None:
+                raise SandboxGitError(f"读取 commit hash 失败: {text}")
             return commit_hash
 
     def git_reset_hard(self, sandbox_id: str, commit_hash: str) -> None:
