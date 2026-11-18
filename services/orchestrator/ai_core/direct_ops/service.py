@@ -27,6 +27,7 @@ from ai_core.direct_ops.failure_router import (
     route_add_component,
 )
 from ai_core.direct_ops.scope_policy import ScopeDecision, decide_scope
+from ai_core.direct_ops.source_sync import SourceSnapshotSync
 from ai_core.direct_ops.static_analysis import analyze_delete_anchor
 from ai_core.direct_ops.templates import (
     COMPONENT_TEMPLATES,
@@ -160,6 +161,23 @@ class DirectOperationService:
         self._sandbox = sandbox or get_sandbox_provider()
         self._settings = settings or get_settings()
         self._changelog = get_change_log_store()
+        self._source_sync = SourceSnapshotSync(
+            base_url=getattr(self._settings, "bff_base_url", ""),
+            timeout_seconds=float(
+                getattr(
+                    self._settings,
+                    "source_snapshot_sync_timeout_seconds",
+                    3.0,
+                )
+            ),
+            enabled=bool(
+                getattr(
+                    self._settings,
+                    "source_snapshot_sync_enabled",
+                    True,
+                )
+            ),
+        )
 
     # --------------------------------------------------------
     # 查询
@@ -730,6 +748,18 @@ class DirectOperationService:
                 before_commit=current_revision,
             )
             timings["changelogMs"] = _elapsed_ms(mark)
+
+            # Git commit 已成功：立即把最新源码同步到 BFF 快照。
+            # 同步失败不回滚用户修改，但在响应中给出可观测状态。
+            mark = time.perf_counter()
+            source_sync = self._source_sync.sync(
+                project_id=payload.project_id,
+                sandbox_id=payload.sandbox_id,
+                tenant_id=payload.tenant_id,
+                touched_file=file,
+                sandbox=self._sandbox,
+            )
+            timings["sourceSyncMs"] = _elapsed_ms(mark)
             timings["totalMs"] = _elapsed_ms(started)
             return self._response(
                 payload,
@@ -740,6 +770,7 @@ class DirectOperationService:
                 revision_after=commit_hash,
                 commit_hash=commit_hash,
                 change_id=change.change_id,
+                source_sync=source_sync,
                 timings=timings,
                 started=started,
             )
@@ -1268,6 +1299,7 @@ class DirectOperationService:
         revision_after: str = "",
         commit_hash: str = "",
         change_id: str = "",
+        source_sync: dict[str, Any] | None = None,
         wouldChange: bool = True,
     ) -> DirectActionResponse:
         resolved = dict(resolved)
@@ -1284,6 +1316,7 @@ class DirectOperationService:
             revision_after=revision_after or revision,
             commit_hash=commit_hash,
             change_id=change_id,
+            source_sync=source_sync,
             latency_ms=int(_elapsed_ms(started)),
             timings={key: round(value, 2) for key, value in timings.items()},
         )

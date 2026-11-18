@@ -1883,6 +1883,7 @@ export default function WorkspacePage() {
       directActionId,
       projectId,
       sandboxId,
+      tenantId: user?.tenantId || 'tenant_local',
       action: 'DELETE_NODE',
       baseRevision: 'analysis-only',
       target: {
@@ -2113,6 +2114,7 @@ export default function WorkspacePage() {
       idempotencyKey: `${projectId}:${directActionId}`,
       projectId,
       sandboxId,
+      tenantId: user?.tenantId || 'tenant_local',
       baseRevision: revision || undefined,
       action: request.action,
       dryRun,

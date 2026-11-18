@@ -188,6 +188,9 @@ class _Settings:
     direct_ops_lock_timeout_seconds = 0.05
     project_write_lock_timeout_seconds = 1.0
     direct_ops_changelog_limit = 20
+    bff_base_url = ""
+    source_snapshot_sync_enabled = False
+    source_snapshot_sync_timeout_seconds = 1.0
 
 
 def _payload(**overrides: Any) -> DirectActionPayload:

@@ -87,6 +87,8 @@ class DirectActionPayload(CamelModel):
     run_id: str | None = Field(default=None, max_length=64)
     project_id: str = Field(min_length=1, max_length=64)
     sandbox_id: str = Field(min_length=1, max_length=64)
+    # 源码快照同步到 BFF 时用于租户隔离；缺省 tenant_local。
+    tenant_id: str | None = Field(default=None, max_length=64)
     # 非 dryRun 必填；与沙盒当前 HEAD 不一致时拒绝写入。
     base_revision: str | None = Field(default=None, max_length=128)
     client_seq: int | None = Field(default=None, ge=0)
@@ -151,6 +153,8 @@ class DirectActionResponse(CamelModel):
     change_id: str = ""
     latency_ms: int = 0
     timings: dict[str, float] = Field(default_factory=dict)
+    # 源码快照同步结果：SYNCED / SKIPPED / FAILED / DISABLED。
+    source_sync: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
 
 

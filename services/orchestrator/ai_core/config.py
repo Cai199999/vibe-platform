@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     service_name: str = "python-ai"
     service_version: str = "0.1.0"
 
+    # Direct Ops 提交后把最新源码同步到 BFF 持久化快照。
+    bff_base_url: str = "http://java-bff:8080"
+    source_snapshot_sync_enabled: bool = True
+    source_snapshot_sync_timeout_seconds: float = 3.0
+
     # M1 只做占位；M2 由 ModelRouter 统一读取。
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"

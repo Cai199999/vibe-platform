@@ -128,6 +128,7 @@ Agent 只能根据 `code` / `requiresHuman` / `retryable` 决定重试、换工�
   - `/api -> 127.0.0.1:3000` 代理；
   - 否则选择按钮与真实 API 会同时失效；
 - 项目源码持久化（MySQL 元数据 + MinIO 正文，已落地）；
+- Direct Ops commit → BFF 快照同步（已落地，失败不回滚用户修改）；
 - 构建期 `data-oid` 与 `vibe-source-map.json`（插件 + CodeGen 已落地）；
 - Direct Ops `oid → 源码区间` 解析（已落地，旧 file/line 仅兜底）；
 - `instancePath` 与跨文件组件边界（后续）。
