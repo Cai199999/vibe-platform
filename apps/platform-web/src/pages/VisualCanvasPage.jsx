@@ -19,7 +19,9 @@ import {
   readImportedSource,
   readStoredProject,
   resolveProjectMode,
+  storeImportedSource,
 } from '../workspace/projectMode.js'
+import { loadProjectSource } from '../workspace/projectSourceClient.js'
 
 const MAX_SOURCE_BYTES = 500 * 1024
 
@@ -33,7 +35,7 @@ const MAX_SOURCE_BYTES = 500 * 1024
  */
 export default function VisualCanvasPage() {
   const [params] = useSearchParams()
-  const { session } = useAuth()
+  const { session, user } = useAuth()
   const navigate = useNavigate()
   const [handoffError, setHandoffError] = useState('')
   const [analysisError, setAnalysisError] = useState('')
@@ -55,24 +57,40 @@ export default function VisualCanvasPage() {
   }, [params, storedProject])
 
   // 存量项目：进入页面即从项目源码生成只读投影，不渲染可编辑虚拟画布。
+  // 本地缓存缺失时（刷新 / 换浏览器 / 直接打开链接）从 BFF 回灌。
   useEffect(() => {
     if (!existingMode || sourceProjection) return undefined
-    const imported = readImportedSource(projectId)
-    const entry = imported || projectEntrySource(storedProject)
-    if (!entry?.source) {
-      setAnalysisError('未找到可分析的源码；请返回工作台重新导入 .jsx / .tsx')
-      return undefined
-    }
     // StrictMode 会执行两次 effect：用递增 requestId 只采纳最后一次结果，
     // 不依赖 cleanup 取消（cleanup 会把唯一一次请求标记为已取消）。
     const requestId = analysisRequestRef.current + 1
     analysisRequestRef.current = requestId
     setAnalysisBusy(true)
     setAnalysisError('')
-    void analyzeExistingReact(
-      { fileName: entry.fileName, source: entry.source },
-      session?.token,
-    )
+
+    const resolveEntry = async () => {
+      const local = readImportedSource(projectId) || projectEntrySource(storedProject)
+      if (local?.source) return local
+      const remote = await loadProjectSource(projectId, {
+        tenantId: user?.tenantId || 'tenant_local',
+        token: session?.token,
+      })
+      const files = remote?.files || {}
+      const entryFile = remote?.entryFile || Object.keys(files)[0] || ''
+      const source = files[entryFile] || Object.values(files)[0] || ''
+      if (!source) {
+        throw new Error('服务端也没有找到可分析的源码')
+      }
+      storeImportedSource(projectId, remote.sourceName || entryFile, source)
+      return { fileName: entryFile || 'App.jsx', source }
+    }
+
+    void resolveEntry()
+      .then((entry) =>
+        analyzeExistingReact(
+          { fileName: entry.fileName, source: entry.source },
+          session?.token,
+        ),
+      )
       .then((report) => {
         if (analysisRequestRef.current !== requestId) return
         setSourceProjection(buildSourceProjection(report))
@@ -98,6 +116,7 @@ export default function VisualCanvasPage() {
     session?.token,
     sourceProjection,
     storedProject,
+    user?.tenantId,
   ])
 
   const handleFrozen = (document) => {

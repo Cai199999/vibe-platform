@@ -10,7 +10,7 @@ spring:
 
   # 复用 ~/Workspace/infra 的 MySQL，不在 Compose 中重复部署。
   datasource:
-    url: jdbc:mysql://${MYSQL_HOST:host.docker.internal}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:geo_ai_db}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    url: jdbc:mysql://${MYSQL_HOST:host.docker.internal}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:geo_ai_db}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
     username: ${MYSQL_USER:root}
     password: ${MYSQL_PASSWORD:root}
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -20,6 +20,9 @@ spring:
       minimum-idle: 1
       connection-timeout: 3000
       validation-timeout: 2000
+      # 统一会话时区，避免 TIMESTAMP / CURRENT_TIMESTAMP 在 +08 服务器上
+      # 被当成 UTC 读出 8 小时偏移。源码快照的 updatedAt 依赖此设置。
+      connection-init-sql: SET time_zone = '+00:00'
 
   # 复用 ~/Workspace/infra 的 Redis。
   data:

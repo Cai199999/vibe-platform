@@ -37,6 +37,10 @@ import {
 } from '../workspace/directOps.js'
 import { importProjectFile } from '../workspace/importClient.js'
 import {
+  loadProjectSource,
+  saveProjectSource,
+} from '../workspace/projectSourceClient.js'
+import {
   CREATE_NEW,
   MODIFY_EXISTING,
   isCreateAction,
@@ -1366,6 +1370,79 @@ export default function WorkspacePage() {
   // M2.5 全局架构澄清：与画布 Run 完全独立的 SSE / 状态存储。
   const architect = useArchitect({ token: session?.token })
   const architectStates = architect.states
+
+  // 导入源码的服务端回灌：localStorage 只是缓存，BFF 持久化快照才是
+  // 跨刷新 / 跨浏览器的事实源。每个项目每次页面加载最多请求一次。
+  const projectSourceHydrationRef = useRef(new Map())
+  useEffect(() => {
+    if (!session?.token) return
+    const tenantId = user?.tenantId || 'tenant_local'
+    projects
+      .filter(
+        (project) =>
+          project?.imported &&
+          (project.kind === 'react' ||
+            String(project.template || '').startsWith('imported-react')),
+      )
+      .forEach((project) => {
+        if (projectSourceHydrationRef.current.has(project.id)) return
+        projectSourceHydrationRef.current.set(project.id, 'settled')
+        void loadProjectSource(project.id, {
+          tenantId,
+          token: session.token,
+        })
+          .then((remote) => {
+            if (!remote?.files || Object.keys(remote.files).length === 0) {
+              return
+            }
+            const remoteRevision = Number(remote.revision) || 0
+            const localRevision = Number(project.sourceRevision) || 0
+            const localFiles = project.files || {}
+            const hasLocalSource = Object.values(localFiles).some(
+              (value) => typeof value === 'string' && value.trim().length > 0,
+            )
+            // 本地已有同一修订的源码时不覆盖，避免把工作区最新内容回滚成
+            // 上一次导入快照；跨浏览器 / 清缓存时本地缺失，必然回灌。
+            if (
+              hasLocalSource &&
+              remoteRevision > 0 &&
+              remoteRevision <= localRevision
+            ) {
+              return
+            }
+            const entryFile =
+              remote.entryFile || project.entryFile || TARGET_FILE
+            updateProject(project.id, {
+              files: remote.files,
+              entryFile,
+              sourceName: remote.sourceName || project.sourceName,
+              sourceRevision: remoteRevision,
+              imported: true,
+              generated: false,
+              bootstrap: 'ready',
+            })
+            const entrySource =
+              remote.files[entryFile] ||
+              Object.values(remote.files)[0] ||
+              ''
+            storeImportedSource(
+              project.id,
+              remote.sourceName || entryFile,
+              entrySource,
+            )
+          })
+          .catch((cause) => {
+            // 404 表示该导入项目早于持久化功能；本地文件仍可继续使用。
+            if (cause?.status !== 404) {
+              console.warn(
+                '[project-source] 服务端源码回灌失败',
+                project.id,
+                cause?.message || cause,
+              )
+            }
+          })
+      })
+  }, [projects, session?.token, user?.tenantId, updateProject])
 
   const [runStates, setRunStates] = useState(() => loadRunStates(projects))
   // Supervisor both 门控：AWAITING_CONTRACT 时 UI 子图不执行。
@@ -3509,6 +3586,10 @@ export default function WorkspacePage() {
   const handleImportSourceFile = async (file) => {
     if (!file || sourceImportBusy) return
     setSourceImportError('')
+    if (limitReached) {
+      setSourceImportError(`最多只能同时打开 ${maxTabs} 个项目，请先关闭其他项目`)
+      return
+    }
     if (!/\.(jsx?|tsx?)$/i.test(file.name)) {
       setSourceImportError('仅支持 .jsx / .tsx / .js / .ts 文件')
       return
@@ -3520,14 +3601,34 @@ export default function WorkspacePage() {
     setSourceImportBusy(true)
     try {
       const source = await file.text()
+      const projectName =
+        file.name.replace(/\.(jsx?|tsx?)$/i, '') || '存量项目'
+      const files = { [TARGET_FILE]: source }
+      const projectId = newId('proj')
+      // 先落库再建本地项目：刷新 / 换浏览器后仍能从 BFF 回灌源码事实。
+      const saved = await saveProjectSource(
+        {
+          projectId,
+          tenantId: user?.tenantId || 'tenant_local',
+          projectName,
+          entryFile: TARGET_FILE,
+          sourceName: file.name,
+          files,
+        },
+        session?.token,
+      )
       // 工作区项目统一落到 Vite 入口，保证后续后端增量绑定有可运行的前端；
       // 只读投影仍使用原始文件名展示分析来源。
-      const projectId = importProject({
-        name: file.name.replace(/\.(jsx?|tsx?)$/i, '') || '存量项目',
-        files: { 'src/App.jsx': source },
-        entryFile: 'src/App.jsx',
+      importProject({
+        id: projectId,
+        name: projectName,
+        files,
+        entryFile: TARGET_FILE,
         kind: 'react',
         sourceName: file.name,
+      })
+      updateProject(projectId, {
+        sourceRevision: Number(saved?.revision) || 1,
       })
       storeImportedSource(projectId, file.name, source)
       setNewProjectOpen(false)
