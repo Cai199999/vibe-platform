@@ -44,6 +44,51 @@ def _option(option_id: str, label: str, action: str, description: str = "") -> d
     }
 
 
+def _repeated_instances(identity: NodeIdentity) -> int:
+    """运行时路径里任一 oid 的 count > 1，即同一模板渲染多次。"""
+    counts = [
+        int(item.get("count") or 1)
+        for item in identity.instance_path
+        if isinstance(item, dict)
+    ]
+    return max(counts) if counts else max(1, identity.instance_count)
+
+
+def _template_hitl(
+    identity: NodeIdentity,
+    action_label: str,
+    *,
+    visual_option: bool = True,
+) -> ScopeDecision:
+    count = _repeated_instances(identity)
+    options = [
+        _option(
+            "edit_template",
+            f"{action_label}模板（影响全部 {count} 个实例）",
+            "DEFINITION",
+        )
+    ]
+    if visual_option:
+        options.append(
+            _option(
+                "visual_override",
+                "仅视觉覆盖当前实例",
+                "VISUAL_ONLY",
+            )
+        )
+    options.append(_option("cancel", "取消", "CANCEL"))
+    return ScopeDecision(
+        allowed=False,
+        scope="all_instances" if count > 1 else "definition",
+        strategy="hitl",
+        reasons=[
+            f"同一源码模板渲染 {count} 个实例；{action_label}会同时影响全部实例",
+            f"instanceKey={identity.instance_key or '(unknown)'}",
+        ],
+        options=options,
+    )
+
+
 def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
     action = str(action or "").upper()
 
@@ -76,14 +121,11 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
                 reasons=["页面根节点不能直接删除，将替换为空占位符"],
             )
         if identity.has_call_site:
+            if identity.in_map or _repeated_instances(identity) > 1:
+                return _template_hitl(identity, "删除")
             return ScopeDecision(True, "instance", "direct")
-        if identity.instance_count > 1 and identity.importer_count == 0:
-            return ScopeDecision(
-                True,
-                "all_instances",
-                "direct",
-                reasons=[f"将删除该源码对应的全部 {identity.instance_count} 个实例"],
-            )
+        if _repeated_instances(identity) > 1:
+            return _template_hitl(identity, "删除")
         if identity.is_protected and identity.importer_count > 0:
             return ScopeDecision(
                 allowed=False,
@@ -124,14 +166,11 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
                 ],
             )
         if identity.has_call_site:
+            if identity.in_map or _repeated_instances(identity) > 1:
+                return _template_hitl(identity, "移动")
             return ScopeDecision(True, "instance", "direct")
-        if identity.instance_count > 1 and identity.importer_count == 0:
-            return ScopeDecision(
-                True,
-                "all_instances",
-                "direct",
-                reasons=[f"将移动该源码对应的全部 {identity.instance_count} 个实例"],
-            )
+        if _repeated_instances(identity) > 1:
+            return _template_hitl(identity, "移动")
         if identity.is_protected and identity.importer_count > 0:
             return ScopeDecision(
                 allowed=False,
@@ -150,8 +189,18 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
 
     if action == "UPDATE_PROPS":
         if identity.is_call_site:
+            if identity.in_map or _repeated_instances(identity) > 1:
+                return _template_hitl(
+                    identity,
+                    "修改 Props",
+                    visual_option=False,
+                )
             return ScopeDecision(True, "instance", "direct")
-        if identity.is_protected or identity.is_shared or identity.instance_count > 1:
+        if (
+            identity.is_protected
+            or identity.is_shared
+            or _repeated_instances(identity) > 1
+        ):
             return ScopeDecision(
                 allowed=False,
                 scope="definition",
@@ -200,6 +249,8 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
                     _option("cancel", "取消", "CANCEL"),
                 ],
             )
+        if _repeated_instances(identity) > 1:
+            return _template_hitl(identity, "修改文本")
         return ScopeDecision(True, identity.editable_scope, "direct")
 
     if action == "ADD_COMPONENT":

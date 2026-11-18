@@ -813,6 +813,22 @@ class LocalDockerSandbox(SandboxProvider):
             logs_truncated=truncated,
         )
 
+    def file_exists(
+        self,
+        sandbox_id: str,
+        path: str,
+        draft_id: str | None = None,
+    ) -> bool:
+        container = self._get_container(sandbox_id)
+        workdir = self._resolve_workdir(sandbox_id, draft_id)
+        rel_path = self._normalize_path(path)
+        code, _output = self._exec(
+            container,
+            ["sh", "-lc", f"test -f {shlex.quote(rel_path)}"],
+            workdir=workdir,
+        )
+        return code == 0
+
     def read_file(
         self,
         sandbox_id: str,

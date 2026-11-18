@@ -2161,6 +2161,14 @@ export default function WorkspacePage() {
               : ''
           }`,
         )
+      } else if (result.status === 'HITL_REQUIRED' && result.decisionId) {
+        // 模板 / 多实例修改：让用户在“全部实例 / 仅当前 / 取消”之间选择。
+        setDirectDecision({
+          ...result,
+          projectId,
+          source: request.target ?? {},
+        })
+        showToast('info', '该操作会影响多个实例，请选择修改范围')
       }
       return result
     } catch (cause) {

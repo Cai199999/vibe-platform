@@ -28,6 +28,10 @@ from ai_core.direct_ops.failure_router import (
 )
 from ai_core.direct_ops.scope_policy import ScopeDecision, decide_scope
 from ai_core.direct_ops.source_sync import SourceSnapshotSync
+from ai_core.direct_ops.source_sync_queue import (
+    ensure_source_sync_retry_worker,
+    get_source_sync_queue,
+)
 from ai_core.direct_ops.static_analysis import analyze_delete_anchor
 from ai_core.direct_ops.templates import (
     COMPONENT_TEMPLATES,
@@ -161,23 +165,51 @@ class DirectOperationService:
         self._sandbox = sandbox or get_sandbox_provider()
         self._settings = settings or get_settings()
         self._changelog = get_change_log_store()
-        self._source_sync = SourceSnapshotSync(
-            base_url=getattr(self._settings, "bff_base_url", ""),
-            timeout_seconds=float(
-                getattr(
-                    self._settings,
-                    "source_snapshot_sync_timeout_seconds",
-                    3.0,
-                )
-            ),
-            enabled=bool(
-                getattr(
-                    self._settings,
-                    "source_snapshot_sync_enabled",
-                    True,
-                )
-            ),
+        sync_enabled = bool(
+            getattr(self._settings, "source_snapshot_sync_enabled", True)
         )
+        sync_base_url = getattr(self._settings, "bff_base_url", "")
+        sync_timeout = float(
+            getattr(self._settings, "source_snapshot_sync_timeout_seconds", 3.0)
+        )
+        queue_enabled = sync_enabled and bool(
+            getattr(self._settings, "source_snapshot_queue_enabled", True)
+        )
+        self._source_queue = (
+            get_source_sync_queue(
+                getattr(
+                    self._settings,
+                    "source_snapshot_queue_path",
+                    "data/source-sync-queue.json",
+                )
+            )
+            if queue_enabled
+            else None
+        )
+        self._source_sync = SourceSnapshotSync(
+            base_url=sync_base_url,
+            timeout_seconds=sync_timeout,
+            enabled=sync_enabled,
+            queue=self._source_queue,
+        )
+        if queue_enabled:
+            ensure_source_sync_retry_worker(
+                self._source_queue,
+                sync_factory=lambda: SourceSnapshotSync(
+                    base_url=sync_base_url,
+                    timeout_seconds=sync_timeout,
+                    enabled=True,
+                    queue=None,
+                ),
+                sandbox_provider=self._sandbox,
+                interval_seconds=float(
+                    getattr(
+                        self._settings,
+                        "source_snapshot_retry_interval_seconds",
+                        15.0,
+                    )
+                ),
+            )
 
     # --------------------------------------------------------
     # 查询
@@ -658,6 +690,39 @@ class DirectOperationService:
                         timings=timings,
                         started=started,
                     )
+                # 模板 / 多实例修改：返回可选范围，由前端弹出 HITL 面板，
+                # 不再直接把“会影响全部实例”简化成一条错误 toast。
+                if scope.strategy == "hitl" and scope.options:
+                    decision_id = f"ddec_{uuid.uuid4().hex[:20]}"
+                    _remember_decision(
+                        decision_id,
+                        {
+                            "payload": payload.model_dump(by_alias=True),
+                            "anchor": {
+                                "file": anchor.get("file"),
+                                "component": anchor.get("component"),
+                                "range": anchor.get("range"),
+                                "nodeSource": str(anchor.get("nodeSource") or "")[:500],
+                            },
+                            "identity": identity.to_dict(),
+                            "scope": scope.scope,
+                            "options": list(scope.options),
+                            "created_at": time.time(),
+                        },
+                    )
+                    timings["totalMs"] = _elapsed_ms(started)
+                    return self._response(
+                        payload,
+                        status="HITL_REQUIRED",
+                        risk=risk,
+                        resolved=resolved_target,
+                        revision=current_revision,
+                        timings=timings,
+                        started=started,
+                        decision_id=decision_id,
+                        options=list(scope.options),
+                        reasons=list(scope.reasons),
+                    )
                 shared_reason = str(anchor.get("sharedReason") or "")
                 policy_reason = "；".join(scope.reasons)
                 if policy_reason:
@@ -758,6 +823,7 @@ class DirectOperationService:
                 tenant_id=payload.tenant_id,
                 touched_file=file,
                 sandbox=self._sandbox,
+                commit_hash=commit_hash,
             )
             timings["sourceSyncMs"] = _elapsed_ms(mark)
             timings["totalMs"] = _elapsed_ms(started)
@@ -796,6 +862,8 @@ class DirectOperationService:
             "oid": target.oid or "",
             "sourceRange": dict(target.source_range or {}) or None,
             "callSiteOid": target.call_site_oid or "",
+            "instancePath": list(target.instance_path or []),
+            "instanceKey": target.instance_key or "",
             "file": target.file or "",
             "selector": target.selector or "",
             "line": target.line,
@@ -1312,6 +1380,9 @@ class DirectOperationService:
         commit_hash: str = "",
         change_id: str = "",
         source_sync: dict[str, Any] | None = None,
+        decision_id: str | None = None,
+        options: list[dict[str, Any]] | None = None,
+        reasons: list[str] | None = None,
         wouldChange: bool = True,
     ) -> DirectActionResponse:
         resolved = dict(resolved)
@@ -1329,6 +1400,9 @@ class DirectOperationService:
             commit_hash=commit_hash,
             change_id=change_id,
             source_sync=source_sync,
+            decision_id=decision_id,
+            options=list(options or []),
+            reasons=list(reasons or []),
             latency_ms=int(_elapsed_ms(started)),
             timings={key: round(value, 2) for key, value in timings.items()},
         )

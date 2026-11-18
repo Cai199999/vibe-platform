@@ -20,12 +20,14 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 源码级可视化：前端 Agent 语义工具复用 Direct Ops（文本/移动/增删/撤回），不 fork Utopia。
 - 构建期身份：inspect_plugin / CodeGen 注入 data-oid + vibe-source-map.json；SDK 与 resolver oid 优先，旧 file/line 仅兜底，地图过期 fail-closed。
 - 跨文件调用点：importerGraph + callSiteOid 双索引；UPDATE_PROPS 只改调用点 JSX（App.jsx），不触碰组件定义（UserCard.jsx）。
+- 多实例：SDK 上报 instancePath（父 oid 链 + 同模板序号）；模板/重复实例修改返回 HITL_REQUIRED + 范围选项。
+- SourceSync 边界：删除文件从快照移除；失败任务落盘 JSON 队列，后台指数退避重试。
 
 ## 最新验证
-前端 68 项 Vitest；Python 714 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除无 422、sourceSync 353ms、刷新回灌 3.6s；跨文件 Props E2E 命中 App.jsx 调用点、UserCard.jsx 未改。
+前端 68 项 Vitest；Python 722 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除无 422、sourceSync 353ms、刷新回灌 3.6s；跨文件 Props E2E 命中 App.jsx 调用点、UserCard.jsx 未改；多实例修改返回 HITL 范围选择。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 仅源码快照持久化（Run/指标仍无持久化）；沙盒无 gVisor；未云端部署。
 
 ## 下一步
-P0：instancePath、跨文件父容器移动、多调用点运行时消歧；P1：class/style、wrap、预览/构建验证；存量 Phase 2；Redis/云端。
+P0：containerScope 父容器移动、多调用点运行时消歧、rename/add 同步；P1：class/style、wrap、预览/构建验证；存量 Phase 2；Redis/云端。

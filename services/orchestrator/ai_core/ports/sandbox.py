@@ -292,7 +292,15 @@ class SandboxProvider(ABC):
     ) -> VerifyResult:
         """在沙盒内执行 npm run build / npm run test。"""
 
-    @abstractmethod
+    def file_exists(
+        self,
+        sandbox_id: str,
+        path: str,
+        draft_id: str | None = None,
+    ) -> bool:
+        """文件是否存在；默认 True 保持旧 Provider 兼容。"""
+        return True
+
     def read_file(self, sandbox_id: str, path: str) -> str:
         """读取沙盒内文件，供 Agent 维护 current_code。"""
 

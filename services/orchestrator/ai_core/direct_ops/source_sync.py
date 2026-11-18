@@ -29,11 +29,13 @@ class SourceSnapshotSync:
         timeout_seconds: float = 3.0,
         enabled: bool = True,
         client: httpx.Client | None = None,
+        queue: Any | None = None,
     ) -> None:
         self._base_url = str(base_url or "").rstrip("/")
         self._timeout = max(0.5, float(timeout_seconds))
         self._enabled = bool(enabled)
         self._client = client
+        self._queue = queue
 
     def sync(
         self,
@@ -43,6 +45,7 @@ class SourceSnapshotSync:
         tenant_id: str | None,
         touched_file: str,
         sandbox: SandboxProvider,
+        commit_hash: str = "",
     ) -> dict[str, Any]:
         if not self._enabled:
             return {"status": "DISABLED"}
@@ -78,8 +81,20 @@ class SourceSnapshotSync:
                 }
 
             files: dict[str, str] = {}
+            deleted: list[str] = []
             for path in paths:
+                # 删除 / 重命名后的旧路径不再存在于沙盒；从快照中移除，
+                # 由 BFF PUT 全量替换文件树。
+                if not sandbox.file_exists(sandbox_id, path):
+                    deleted.append(path)
+                    continue
                 files[path] = sandbox.read_file(sandbox_id, path)
+            if not files:
+                return {
+                    "status": "SKIPPED",
+                    "reason": "快照文件均已被删除",
+                    "deleted": deleted,
+                }
 
             payload = {
                 "tenantId": tenant,
@@ -96,6 +111,7 @@ class SourceSnapshotSync:
                 "revision": body.get("revision"),
                 "contentHash": body.get("contentHash"),
                 "fileCount": body.get("fileCount", len(files)),
+                "deleted": deleted,
                 "fingerprint": body.get("contentHash"),
             }
         except Exception as exc:  # noqa: BLE001 - 同步失败不能回滚已提交的代码
@@ -106,10 +122,27 @@ class SourceSnapshotSync:
                 touched_file,
                 exc,
             )
+            queued = False
+            if self._queue is not None:
+                try:
+                    self._queue.add(
+                        {
+                            "projectId": project_id,
+                            "sandboxId": sandbox_id,
+                            "tenantId": tenant,
+                            "touchedFile": touched_file,
+                            "commitHash": commit_hash,
+                            "lastError": str(exc)[:300],
+                        }
+                    )
+                    queued = True
+                except Exception:  # pragma: no cover - 队列落盘失败只影响补偿
+                    logger.exception("source sync enqueue failed")
             return {
                 "status": "FAILED",
                 "message": str(exc)[:300],
                 "retryable": True,
+                "queued": queued,
             }
         finally:
             if owns_client:

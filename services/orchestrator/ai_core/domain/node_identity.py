@@ -46,6 +46,8 @@ class NodeIdentity:
     oid: str = ""
     call_site_oid: str = ""
     is_call_site: bool = False
+    instance_path: tuple[dict[str, Any], ...] = ()
+    instance_key: str = ""
     component: str = ""
     node_type: str = ""
     kind: NodeKind = "unknown"
@@ -85,6 +87,8 @@ class NodeIdentity:
             "oid": self.oid,
             "callSiteOid": self.call_site_oid,
             "isCallSite": self.is_call_site,
+            "instancePath": [dict(item) for item in self.instance_path],
+            "instanceKey": self.instance_key,
             "file": self.file,
             "line": self.line,
             "column": self.column,
@@ -148,6 +152,12 @@ def identity_from_anchor(anchor: dict[str, Any]) -> NodeIdentity:
         oid=str(anchor.get("oid") or ""),
         call_site_oid=str(anchor.get("callSiteOid") or ""),
         is_call_site=bool(anchor.get("isCallSite")),
+        instance_path=tuple(
+            dict(item)
+            for item in anchor.get("instancePath") or []
+            if isinstance(item, dict)
+        ),
+        instance_key=str(anchor.get("instanceKey") or ""),
         line=int((anchor.get("range") or {}).get("startLine") or 0),
         column=int((anchor.get("range") or {}).get("startColumn") or 0),
         component=str(anchor.get("component") or ""),

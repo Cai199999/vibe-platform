@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     bff_base_url: str = "http://java-bff:8080"
     source_snapshot_sync_enabled: bool = True
     source_snapshot_sync_timeout_seconds: float = 3.0
+    source_snapshot_queue_enabled: bool = True
+    source_snapshot_queue_path: str = "data/source-sync-queue.json"
+    source_snapshot_retry_interval_seconds: float = 15.0
 
     # M1 只做占位；M2 由 ModelRouter 统一读取。
     deepseek_api_key: str = ""

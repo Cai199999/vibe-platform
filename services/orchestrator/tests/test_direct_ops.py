@@ -191,6 +191,9 @@ class _Settings:
     bff_base_url = ""
     source_snapshot_sync_enabled = False
     source_snapshot_sync_timeout_seconds = 1.0
+    source_snapshot_queue_enabled = False
+    source_snapshot_queue_path = "/tmp/vibe-test-source-sync-queue.json"
+    source_snapshot_retry_interval_seconds = 1.0
 
 
 def _payload(**overrides: Any) -> DirectActionPayload:
@@ -291,9 +294,10 @@ class DirectOperationMoveTest(unittest.TestCase):
 
         response = self.service.execute(_move_payload())
 
-        self.assertEqual(response.status, "SUCCEEDED")
-        self.assertEqual(response.risk, "L0_DIRECT")
-        self.assertEqual(self.sandbox.edits[0]["operation"], "move_node")
+        self.assertEqual(response.status, "HITL_REQUIRED")
+        self.assertEqual(response.risk, "L2_HITL")
+        self.assertTrue(response.decision_id)
+        self.assertEqual(self.sandbox.edits, [])
 
     def test_shared_component_moves_at_call_site(self) -> None:
         self.sandbox.anchor = {
@@ -433,9 +437,10 @@ class DirectOperationDeleteTest(unittest.TestCase):
 
         response = self.service.execute(_delete_payload())
 
-        self.assertEqual(response.status, "SUCCEEDED")
-        self.assertEqual(response.risk, "L0_DIRECT")
-        self.assertEqual(self.sandbox.edits[0]["operation"], "delete")
+        self.assertEqual(response.status, "HITL_REQUIRED")
+        self.assertEqual(response.risk, "L2_HITL")
+        self.assertTrue(response.decision_id)
+        self.assertEqual(self.sandbox.edits, [])
 
     def test_shared_component_deletes_call_site_instance(self) -> None:
         self.sandbox.anchor = {
@@ -480,10 +485,11 @@ class DirectOperationDeleteTest(unittest.TestCase):
         }
         payload = _delete_payload()
 
-        with self.assertRaises(DirectActionError) as ctx:
-            self.service.execute(payload)
+        response = self.service.execute(payload)
 
-        self.assertEqual(ctx.exception.code, DirectErrorCode.UNSAFE_OPERATION)
+        self.assertEqual(response.status, "HITL_REQUIRED")
+        self.assertEqual(response.risk, "L2_HITL")
+        self.assertTrue(response.options)
         self.assertEqual(self.sandbox.patches, [])
 
     def test_delete_node_count_mismatch_blocks_write(self) -> None:
@@ -573,6 +579,69 @@ class DirectOperationPropsTest(unittest.TestCase):
         entries = self.store.list_for_project(PROJECT_ID)
         self.assertIn("调用点 Props", entries[0].summary)
 
+    def test_update_props_call_site_in_map_requires_hitl(self) -> None:
+        anchor = dict(_anchor())
+        anchor.update(
+            {
+                "file": "src/App.jsx",
+                "component": "App",
+                "callSiteOid": "csoid_user_card",
+                "isCallSite": True,
+                "inMap": True,
+                "instanceCount": 1,
+                "instancePath": [
+                    {"oid": "oid_list", "index": 0, "count": 3},
+                    {"oid": "oid_card", "index": 0, "count": 3},
+                ],
+                "instanceKey": "oid_list[0]/oid_card[0]",
+                "nodeType": "JSXElement",
+                "range": {
+                    "startLine": 5,
+                    "startColumn": 7,
+                    "endLine": 5,
+                    "endColumn": 40,
+                    "startOffset": 60,
+                    "endOffset": 100,
+                },
+            }
+        )
+        sandbox = _FakeSandbox(anchor=anchor)
+        service = DirectOperationService(
+            sandbox=sandbox,  # type: ignore[arg-type]
+            settings=_Settings(),  # type: ignore[arg-type]
+        )
+        service._changelog = self.store
+        payload = DirectActionPayload.model_validate(
+            {
+                "directActionId": "dact_props_map",
+                "idempotencyKey": "proj_direct:dact_props_map",
+                "projectId": PROJECT_ID,
+                "sandboxId": SANDBOX_ID,
+                "tenantId": "tenant_local",
+                "baseRevision": BASE_SHA,
+                "action": "UPDATE_PROPS",
+                "target": {
+                    "anchorId": "anc_props_map",
+                    "callSiteOid": "csoid_user_card",
+                    "instanceKey": "oid_list[0]/oid_card[0]",
+                },
+                "payload": {"props": {"title": "x"}},
+                "options": {"source": "FLOATING_TOOLBAR", "dryRun": False},
+            }
+        )
+
+        response = service.execute(payload)
+
+        self.assertEqual(response.status, "HITL_REQUIRED")
+        self.assertEqual(response.risk, "L2_HITL")
+        self.assertTrue(response.decision_id)
+        self.assertTrue(response.options)
+        self.assertIn(
+            "oid_list[0]/oid_card[0]",
+            " ".join(response.reasons),
+        )
+        self.assertEqual(sandbox.edits, [])
+
     def test_update_props_without_call_site_is_blocked(self) -> None:
         anchor = dict(_anchor())
         anchor.update(
@@ -609,10 +678,11 @@ class DirectOperationPropsTest(unittest.TestCase):
             }
         )
 
-        with self.assertRaises(DirectActionError) as raised:
-            service.execute(payload)
+        response = service.execute(payload)
 
-        self.assertEqual(raised.exception.code, DirectErrorCode.UNSAFE_OPERATION)
+        self.assertEqual(response.status, "HITL_REQUIRED")
+        self.assertEqual(response.risk, "L2_HITL")
+        self.assertTrue(response.options)
         self.assertEqual(sandbox.edits, [])
 
 
@@ -793,10 +863,12 @@ class DirectOperationServiceTest(unittest.TestCase):
         payload = _payload()
         self.direct_action_ids.append(payload.direct_action_id)
 
-        with self.assertRaises(DirectActionError) as ctx:
-            self.service.execute(payload)
+        response = self.service.execute(payload)
 
-        self.assertEqual(ctx.exception.code, DirectErrorCode.UNSAFE_OPERATION)
+        self.assertEqual(response.status, "HITL_REQUIRED")
+        self.assertEqual(response.risk, "L2_HITL")
+        self.assertTrue(response.decision_id)
+        self.assertTrue(response.options)
         self.assertEqual(self.sandbox.patches, [])
 
         dry = _payload(
@@ -850,6 +922,25 @@ class NodeIdentityScopePolicyTest(unittest.TestCase):
         data.update(overrides)
         return NodeIdentity(**data)
 
+    def test_instance_path_repeated_template_forces_hitl(self) -> None:
+        from ai_core.direct_ops.scope_policy import decide_scope
+
+        identity = self._identity(
+            instance_count=1,
+            instance_path=(
+                {"oid": "oid_list", "index": 2, "count": 3},
+                {"oid": "oid_item", "index": 2, "count": 3},
+            ),
+            instance_key="oid_list[0]/oid_item[2]",
+        )
+        decision = decide_scope("UPDATE_TEXT", identity)
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.scope, "all_instances")
+        self.assertEqual(decision.strategy, "hitl")
+        self.assertTrue(any("3 个实例" in reason for reason in decision.reasons))
+        self.assertIn("oid_list[0]/oid_item[2]", " ".join(decision.reasons))
+
     def test_leaf_delete_is_direct_instance(self) -> None:
         from ai_core.direct_ops.scope_policy import decide_scope
 
@@ -896,8 +987,10 @@ class NodeIdentityScopePolicyTest(unittest.TestCase):
                 is_shared=True,
             ),
         )
-        self.assertTrue(decision.allowed)
+        self.assertFalse(decision.allowed)
         self.assertEqual(decision.scope, "all_instances")
+        self.assertEqual(decision.strategy, "hitl")
+        self.assertTrue(decision.options)
 
 
 class DeleteStaticAnalysisTest(unittest.TestCase):

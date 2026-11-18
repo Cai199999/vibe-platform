@@ -75,6 +75,57 @@
     }
     return mapped || null
   }
+
+  /** 同一 oid 模板在当前父容器中的运行时序号。 */
+  function runtimeOidIndex(node) {
+    var oid = node && node.getAttribute && node.getAttribute('data-oid')
+    if (!oid || !node.parentElement) return { index: 0, count: 1 }
+    var matches = []
+    var children = node.parentElement.children || []
+    for (var i = 0; i < children.length; i += 1) {
+      var child = children[i]
+      if (child.getAttribute && child.getAttribute('data-oid') === oid) {
+        matches.push(child)
+      }
+    }
+    var index = matches.indexOf(node)
+    return {
+      index: index >= 0 ? index : 0,
+      count: Math.max(1, matches.length),
+    }
+  }
+
+  /**
+   * 运行时实例路径：从文档根到当前节点的 oid 链 + 同模板序号。
+   * 这是 .map / 重复渲染消歧的唯一运行时事实，不靠源码行号猜。
+   */
+  function computeInstancePath(node) {
+    var path = []
+    var current = node
+    while (current && current !== document.documentElement) {
+      var oid =
+        current.getAttribute && current.getAttribute('data-oid')
+      if (oid) {
+        var slot = runtimeOidIndex(current)
+        path.unshift({
+          oid: oid,
+          index: slot.index,
+          count: slot.count,
+          tag: String(current.tagName || '').toLowerCase(),
+        })
+      }
+      current = current.parentElement
+    }
+    return path
+  }
+
+  function instanceKeyOf(path) {
+    return (path || [])
+      .map(function (item) {
+        return item.oid + '[' + item.index + ']'
+      })
+      .join('/')
+  }
   var INLINE_TAGS = {
     span: true,
     p: true,
@@ -665,6 +716,7 @@
     // 实例定位：同一份源码可能渲染多个 DOM 节点，必须把“第几个”与
     // 父级 JSX 调用位置一并回传，否则 Coder 只能改基础组件造成全局污染。
     var instanceInfo = instanceInfoFor(node, file, line, column)
+    var instancePath = computeInstancePath(node)
     var identity = {
       oid: oid,
       sourceRange: sourceRange,
@@ -672,6 +724,8 @@
       callSiteOid: (callSite && callSite.callSiteOid) || '',
       callSiteFile: (callSite && callSite.file) || '',
       callSiteRange: callSiteRange,
+      instancePath: instancePath,
+      instanceKey: instanceKeyOf(instancePath),
       file: file,
       line: line,
       column: column,
@@ -690,6 +744,8 @@
       callSiteOid: (callSite && callSite.callSiteOid) || '',
       callSiteFile: (callSite && callSite.file) || '',
       callSiteRange: callSiteRange,
+      instancePath: instancePath,
+      instanceKey: instanceKeyOf(instancePath),
       file: file,
       line: line,
       column: column,
@@ -833,6 +889,8 @@
       callSiteOid: source.callSiteOid || '',
       callSiteFile: source.callSiteFile || '',
       callSiteRange: source.callSiteRange || null,
+      instancePath: source.instancePath || [],
+      instanceKey: source.instanceKey || '',
       marker: source.marker,
       selector: source.selector,
       label: label,

@@ -755,6 +755,10 @@ function resolveOne(anchor, parser, workdir) {
   result.protected = shared
   result.sharedReason = reasons.join('；')
   result.instanceCount = instanceCount
+  result.instancePath = Array.isArray(anchor.instancePath)
+    ? anchor.instancePath
+    : []
+  result.instanceKey = String(anchor.instanceKey || '')
   result.importerCount = importerHits.length
   result.sharedByInstance = instanceCount > 1
   result.sharedByImport = importerHits.length > 0

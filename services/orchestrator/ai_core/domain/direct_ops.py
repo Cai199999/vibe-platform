@@ -62,6 +62,9 @@ class DirectActionTarget(CamelModel):
     source_range: dict[str, int] | None = None
     # 组件调用点 oid：UPDATE_PROPS 等实例级操作优先按它解析。
     call_site_oid: str | None = Field(default=None, max_length=96)
+    # 运行时实例路径：父 oid 链 + 同模板序号，用于 map/repeat 消歧。
+    instance_path: list[dict[str, Any]] | None = None
+    instance_key: str | None = Field(default=None, max_length=2000)
     selector: str | None = Field(default=None, max_length=500)
     file: str | None = Field(default=None, max_length=500)
     line: int | None = Field(default=None, ge=1)
@@ -168,7 +171,12 @@ class DirectDecisionRequest(CamelModel):
 class DirectActionResponse(CamelModel):
     direct_action_id: str
     run_id: str | None = None
-    status: Literal["DRY_RUN", "SUCCEEDED", "FAILED"] = "SUCCEEDED"
+    status: Literal[
+        "DRY_RUN",
+        "SUCCEEDED",
+        "FAILED",
+        "HITL_REQUIRED",
+    ] = "SUCCEEDED"
     action: DirectActionKind
     dry_run: bool = False
     risk: DirectActionRisk = "L0_DIRECT"
@@ -181,6 +189,10 @@ class DirectActionResponse(CamelModel):
     timings: dict[str, float] = Field(default_factory=dict)
     # 源码快照同步结果：SYNCED / SKIPPED / FAILED / DISABLED。
     source_sync: dict[str, Any] | None = None
+    # L2 HITL：前端展示范围选择；选择“模板/全部实例”后转 AI 或显式确认。
+    decision_id: str | None = None
+    options: list[dict[str, Any]] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
     error: dict[str, Any] | None = None
 
 
