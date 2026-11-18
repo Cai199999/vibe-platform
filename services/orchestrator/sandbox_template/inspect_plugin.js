@@ -316,6 +316,9 @@ function buildSourceMap() {
       (targetMeta.components || {})[definitionName] ||
       (targetMeta.components || {})[localBase] ||
       null
+    const forwardsChildren = Boolean(
+      (targetMeta.forwardingChildren || {})[definitionName],
+    )
     const callSite = {
       ...raw,
       importSource: imported?.source || '',
@@ -323,6 +326,8 @@ function buildSourceMap() {
       targetFile,
       definitionOid: definition?.definitionOid || '',
       definitionFile: definition?.file || '',
+      forwardsChildren,
+      slot: Boolean(raw.hasChildren && forwardsChildren),
     }
     callSites[callSiteOid] = callSite
     if (definition?.definitionOid && nodes[definition.definitionOid]) {
@@ -334,6 +339,7 @@ function buildSourceMap() {
         line: raw.line,
         column: raw.column,
         component: raw.component,
+        slot: callSite.slot,
         props: raw.props || {},
       })
       const key = `${definition.file || targetFile}#${definitionName}`
@@ -342,6 +348,7 @@ function buildSourceMap() {
         name: definitionName,
         definitionOid: definition.definitionOid,
         callSiteOids: [],
+        forwardsChildren,
       }
       component.callSiteOids.push(callSiteOid)
       components[key] = component
@@ -350,9 +357,24 @@ function buildSourceMap() {
 
   // 容器落点语义：DOM 容器不等于可插入的 JSX 作用域。
   const importedComponents = new Set(Object.keys(components))
+  const slotCounts = new Map()
+  for (const callSite of Object.values(callSites)) {
+    if (!callSite.slot || !callSite.definitionOid) continue
+    slotCounts.set(
+      callSite.definitionOid,
+      (slotCounts.get(callSite.definitionOid) || 0) + 1,
+    )
+  }
+  const slotRoots = new Set(
+    [...slotCounts.entries()]
+      .filter(([, count]) => count === 1)
+      .map(([oid]) => oid),
+  )
   for (const node of Object.values(nodes)) {
     if (node.inMap) {
       node.containerScope = 'repeated_template'
+    } else if (slotRoots.has(node.oid)) {
+      node.containerScope = 'call_site_slot'
     } else if (
       importedComponents.has(`${node.file}#${node.component}`)
     ) {
@@ -527,6 +549,7 @@ function collectModuleMeta(programPath, filename) {
     namedExports,
     defaultExportName,
     components: previous.components || {},
+    forwardingChildren: previous.forwardingChildren || {},
   })
 }
 
@@ -537,6 +560,24 @@ function buildJsxPlugin(filename) {
       visitor: {
         Program(programPath) {
           collectModuleMeta(programPath, filename)
+        },
+        JSXExpressionContainer(pathNode) {
+          const expression = pathNode.node.expression
+          if (
+            expression?.type !== 'Identifier' ||
+            expression.name !== 'children'
+          ) {
+            return
+          }
+          const file = relativeFile(filename)
+          const component = componentNameFor(pathNode, filename)
+          const meta = sourceMapFileMeta.get(file)
+          if (!meta) return
+          meta.forwardingChildren = {
+            ...(meta.forwardingChildren || {}),
+            [component]: true,
+          }
+          sourceMapFileMeta.set(file, meta)
         },
         JSXOpeningElement(pathNode) {
           const nameNode = pathNode.node.name
@@ -574,6 +615,13 @@ function buildJsxPlugin(filename) {
             const callSiteOid = `csoid_${hashText(
               `${file}|${scope}|${signature}|${tag}`,
             ).slice(0, 16)}`
+            const hasChildren = (elementNode.children || []).some(
+              (child) =>
+                child.type === 'JSXElement' ||
+                child.type === 'JSXFragment' ||
+                (child.type === 'JSXText' && child.value.trim()) ||
+                child.type === 'JSXExpressionContainer',
+            )
             recordCallSite({
               oid: callSiteOid,
               file,
@@ -587,6 +635,7 @@ function buildJsxPlugin(filename) {
               siblingCount: chain.length ? chain[chain.length - 1].count : 1,
               scope,
               inMap,
+              hasChildren,
               props: jsxStaticProps(elementNode),
             })
             return

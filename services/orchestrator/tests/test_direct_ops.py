@@ -336,6 +336,34 @@ class DirectOperationMoveTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, DirectErrorCode.UNSAFE_OPERATION)
         self.assertEqual(self.sandbox.patches, [])
 
+    def test_move_into_call_site_slot_is_direct(self) -> None:
+        self.sandbox.parent_anchor = {
+            **self.sandbox.parent_anchor,
+            "containerScope": "call_site_slot",
+            "callSiteOid": "csoid_slot",
+        }
+        payload = _move_payload(
+            target={
+                **_move_payload().target.model_dump(by_alias=True),
+                "placement": {
+                    "parentSelector": "[data-source='main']",
+                    "parentFile": "src/App.jsx",
+                    "parentCallSiteOid": "csoid_slot",
+                    "insertPosition": "inside_end",
+                    "siblingIndex": 1,
+                },
+            }
+        )
+
+        response = self.service.execute(payload)
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "move_node")
+        self.assertEqual(
+            self.sandbox.resolutions[-1][0]["callSiteOid"],
+            "csoid_slot",
+        )
+
     def test_move_into_component_definition_requires_hitl(self) -> None:
         self.sandbox.parent_anchor = {
             **self.sandbox.parent_anchor,

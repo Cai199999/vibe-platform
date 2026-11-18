@@ -227,6 +227,55 @@ export default function App() {
             all(item["containerScope"] == "repeated_template" for item in li_nodes)
         )
 
+    def test_call_site_slot_requires_children_forwarding(self) -> None:
+        (self.root / "src" / "UserCard.jsx").write_text(
+            """export default function UserCard({ children }) {
+  return (
+    <section>
+      {children}
+      <p>UserCard 内部</p>
+    </section>
+  )
+}
+""",
+            encoding="utf-8",
+        )
+        (self.root / "src" / "App.jsx").write_text(
+            """import UserCard from './UserCard'
+
+export default function App() {
+  return (
+    <main>
+      <UserCard><span>slot</span></UserCard>
+    </main>
+  )
+}
+""",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["node", "--input-type=module", "-e", GRAPH_PLUGIN_RUNNER],
+            cwd=TEMPLATE_DIR,
+            env={**os.environ, "VIBE_TEST_ROOT": str(self.root)},
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        source_map = json.loads(
+            (self.root / "vibe-source-map.json").read_text(encoding="utf-8")
+        )
+        call_site = next(
+            item
+            for item in source_map["callSites"].values()
+            if item["component"] == "UserCard"
+        )
+        self.assertTrue(call_site["hasChildren"])
+        self.assertTrue(call_site["forwardsChildren"])
+        self.assertTrue(call_site["slot"])
+        definition = source_map["nodes"][call_site["definitionOid"]]
+        self.assertEqual(definition["containerScope"], "call_site_slot")
+        self.assertTrue(definition["callSites"][0]["slot"])
+
     def test_importer_graph_and_call_site_props_edit(self) -> None:
         source_map = self._run_graph_plugin()
         call_sites = list(source_map["callSites"].values())

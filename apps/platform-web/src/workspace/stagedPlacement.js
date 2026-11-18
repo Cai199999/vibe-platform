@@ -113,6 +113,10 @@ export function pickParentDescriptor(parent) {
     'instanceKey',
     'instanceProps',
     'callSite',
+    'containerScope',
+    'callSiteOid',
+    'callSiteFile',
+    'callSiteRange',
   ]
   const picked = {}
   fields.forEach((field) => {
@@ -182,6 +186,9 @@ export function buildPlacementPatch({
     version: 1,
     targetParentId: parentAnchorId(parent),
     parent,
+    parentCallSiteOid: parent?.callSiteOid || '',
+    parentContainerScope: parent?.containerScope || 'local',
+    parentCallSiteRange: parent?.callSiteRange || null,
     insertAnchor,
     insertAnchorId:
       insertAnchor?.instanceId || insertAnchor?.marker || '',

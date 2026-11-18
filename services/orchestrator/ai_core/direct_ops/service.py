@@ -998,6 +998,7 @@ class DirectOperationService:
             or source.get("file")
             or "",
             "selector": placement.get("parentSelector") or "",
+            "callSiteOid": placement.get("parentCallSiteOid") or "",
             "line": placement.get("parentLine"),
             "column": placement.get("parentColumn"),
             "instance": placement.get("parentInstance"),
