@@ -25,6 +25,7 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - Props 面板：画布 ⚙ 直接编辑唯一调用点的 Props，支持新增/修改/删除；表达式 Props 只提示去源码改。
 - 多调用点消歧：优先 React dev `_debugSource` 精确定位；无 Fiber 时按源码顺序 + 运行时实例序号，仍不确定保持 HITL。
 - 多实例：SDK 上报 instancePath（父 oid 链 + 同模板序号）；模板/重复实例修改返回 HITL_REQUIRED + 范围选项。
+- 数据源删除：静态数组（字面量/同文件变量）可确定性删除对应元素；动态数据仍明确 HANDOFF_TO_AI。
 - 容器作用域：Source Map 标注 containerScope=local/component_definition/repeated_template/call_site_slot；local 与唯一调用点 children 插槽自动执行，组件定义/重复模板落点走 HITL。
 - SourceSync 边界：删除文件从快照移除；失败任务落盘 JSON 队列，后台指数退避重试。
 - 本地 CI：`scripts/ci_local.sh` 串行跑 Python 727 / 前端 68 + build / BFF 23；`RUN_E2E=1` 可追加浏览器 E2E。
@@ -33,7 +34,7 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 旧工程兼容：SDK 支持 `file:line` / `file:line:column` 两段与三段锚点，缺失时向上找源码祖先；页面根兜底取真实容器，不再报“标注缺少目标文件”。
 
 ## 最新验证
-前端 68 项 Vitest；Python 727 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除无 422、异步同步后删除响应 2.1s、刷新回灌 2.3s；跨文件 Props E2E 命中 App.jsx 调用点、UserCard.jsx 未改；多实例/组件定义落点返回 HITL 范围选择。
+前端 68 项 Vitest；Python 730 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除无 422、异步同步后删除响应 2.1s、刷新回灌 2.3s；跨文件 Props E2E 命中 App.jsx 调用点、UserCard.jsx 未改；多实例/组件定义落点返回 HITL 范围选择。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 仅源码快照持久化（Run/指标仍无持久化）；沙盒无 gVisor；未云端部署。

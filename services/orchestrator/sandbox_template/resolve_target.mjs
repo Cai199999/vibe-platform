@@ -569,6 +569,89 @@ function isTopLevelJsxRoot(node, parents) {
   return true
 }
 
+function walkAst(node, visit) {
+  if (!node || typeof node !== 'object') return
+  visit(node)
+  for (const key of Object.keys(node)) {
+    if (
+      key === 'loc' ||
+      key === 'start' ||
+      key === 'end' ||
+      key === 'extra' ||
+      key === 'comments' ||
+      key === 'tokens'
+    ) {
+      continue
+    }
+    const value = node[key]
+    if (Array.isArray(value)) {
+      for (const item of value) walkAst(item, visit)
+    } else if (value && typeof value === 'object' && value.type) {
+      walkAst(value, visit)
+    }
+  }
+}
+
+function findArrayInitializer(program, name) {
+  let found = null
+  walkAst(program, (node) => {
+    if (found) return
+    if (node.type === 'VariableDeclarator' && node.id?.name === name) {
+      if (node.init?.type === 'ArrayExpression') found = node.init
+    }
+  })
+  return found
+}
+
+/**
+ * 解析 .map() 的数据来源：静态数组可直接删元素，动态数据留给 Agent。
+ */
+function mapSourceFor(node, parents, code, program) {
+  let current = node
+  while (current) {
+    if (
+      current.type === 'CallExpression' &&
+      current.callee?.type === 'MemberExpression' &&
+      current.callee.property?.name === 'map'
+    ) {
+      const object = current.callee.object
+      if (object?.type === 'ArrayExpression') {
+        return {
+          kind: 'array_literal',
+          start: object.start,
+          end: object.end,
+          count: object.elements.length,
+        }
+      }
+      if (object?.type === 'Identifier') {
+        const initializer = findArrayInitializer(program, object.name)
+        if (initializer) {
+          return {
+            kind: 'variable_array',
+            variable: object.name,
+            start: initializer.start,
+            end: initializer.end,
+            count: initializer.elements.length,
+          }
+        }
+        return {
+          kind: 'dynamic',
+          variable: object.name,
+          expression: code.slice(object.start, object.end),
+        }
+      }
+      if (object) {
+        return {
+          kind: 'dynamic',
+          expression: code.slice(object.start, object.end).slice(0, 200),
+        }
+      }
+    }
+    current = parents.get(current)
+  }
+  return null
+}
+
 function resolveOne(anchor, parser, workdir) {
   const oid = String(anchor.oid || '').trim()
   const callSiteOid = String(anchor.callSiteOid || '').trim()
@@ -782,6 +865,7 @@ function resolveOne(anchor, parser, workdir) {
   if (inMap) deleteReasons.push('位于 map 循环内，删除会影响多个实例')
   if (isRouteRoot) deleteReasons.push('是页面顶层 JSX 根节点')
   result.inMap = inMap
+  result.mapSource = inMap ? mapSourceFor(node, index.parents, code, ast.program) : null
   result.isRouteRoot = isRouteRoot
   result.deleteSafe = !shared && !inMap && !isRouteRoot
   result.deleteReasons = deleteReasons

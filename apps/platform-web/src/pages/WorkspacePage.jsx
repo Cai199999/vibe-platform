@@ -1936,6 +1936,15 @@ export default function WorkspacePage() {
         showToast('success', result?.message || '已隐藏当前项（仅视觉）')
       } else if (status === 'HANDOFF_TO_AI') {
         showToast('info', result?.message || '该操作需要 AI 修改数据源')
+      } else if (status === 'SUCCEEDED') {
+        showToast('success', result?.message || '已删除数据源中的对应项')
+        const projectId = current?.projectId
+        if (projectId) {
+          setPreviewRefresh((previous) => ({
+            ...previous,
+            [projectId]: (previous[projectId] ?? 0) + 1,
+          }))
+        }
       } else {
         showToast('info', result?.message || '已取消')
       }

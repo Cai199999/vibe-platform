@@ -92,6 +92,26 @@ def _template_hitl(
 def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
     action = str(action or "").upper()
 
+    if action == "DELETE_DATA_ITEM":
+        map_source = identity.raw.get("mapSource") or {}
+        kind = str(map_source.get("kind") or "")
+        if kind in {"array_literal", "variable_array"}:
+            return ScopeDecision(True, "data_source", "direct")
+        return ScopeDecision(
+            allowed=False,
+            scope="data_source",
+            strategy="hitl",
+            reasons=["数据源不是静态数组，无法确定性删除单个元素"],
+            options=[
+                _option(
+                    "ai_data_edit",
+                    "交给 AI 定位并修改数据源",
+                    "AI_DATA_EDIT",
+                ),
+                _option("cancel", "取消", "CANCEL"),
+            ],
+        )
+
     if action == "DELETE_NODE":
         if identity.kind == "map_item":
             return ScopeDecision(

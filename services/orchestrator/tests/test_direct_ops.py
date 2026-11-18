@@ -744,6 +744,68 @@ class DirectOperationPropsTest(unittest.TestCase):
         self.assertEqual(sandbox.edits, [])
 
 
+class DataItemDeleteDecisionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryChangeLogStore(max_entries=50)
+        self.store.clear()
+        anchor = {
+            **_anchor(),
+            "inMap": True,
+            "instance": 2,
+            "instanceCount": 2,
+            "deleteSafe": False,
+            "deleteReasons": ["位于 map 循环内"],
+            "mapSource": {
+                "kind": "variable_array",
+                "variable": "items",
+                "start": 10,
+                "end": 80,
+                "count": 2,
+            },
+        }
+        self.sandbox = _FakeSandbox(anchor=anchor)
+        self.service = DirectOperationService(
+            sandbox=self.sandbox,  # type: ignore[arg-type]
+            settings=_Settings(),  # type: ignore[arg-type]
+        )
+        self.service._changelog = self.store
+
+    def tearDown(self) -> None:
+        from ai_core.direct_ops import service as service_module
+
+        with service_module._COMPLETED_LOCK:
+            service_module._COMPLETED.clear()
+
+    def test_remove_data_item_executes_deterministic_array_delete(self) -> None:
+        analysis = self.service.analyze_delete(_delete_payload())
+        decision_id = str(analysis.get("decisionId") or "")
+        self.assertTrue(decision_id)
+
+        result = self.service.decide(decision_id, "remove_data_item")
+
+        self.assertEqual(result["status"], "SUCCEEDED")
+        self.assertTrue(result["committed"])
+        self.assertEqual(self.sandbox.edits[0]["operation"], "delete_array_item")
+        self.assertEqual(self.sandbox.edits[0]["itemIndex"], 1)
+        self.assertEqual(self.sandbox.patches, [{"src/App.jsx": UPDATED}])
+        entries = self.store.list_for_project(PROJECT_ID)
+        self.assertIn("数据源的第 2 项", entries[0].summary)
+
+    def test_dynamic_map_source_hands_off_to_ai(self) -> None:
+        self.sandbox.anchor = {
+            **self.sandbox.anchor,
+            "mapSource": {"kind": "dynamic", "variable": "items"},
+        }
+        analysis = self.service.analyze_delete(_delete_payload())
+        decision_id = str(analysis.get("decisionId") or "")
+
+        result = self.service.decide(decision_id, "remove_data_item")
+
+        self.assertEqual(result["status"], "HANDOFF_TO_AI")
+        self.assertFalse(result["applied"])
+        self.assertEqual(self.sandbox.edits, [])
+
+
 class DirectOperationAddTest(unittest.TestCase):
     def setUp(self) -> None:
         self.store = MemoryChangeLogStore(max_entries=50)

@@ -229,6 +229,46 @@ export default function App() {
         )
         self.assertTrue(all(item["deleteSafe"] is False for item in li_nodes))
 
+    def test_static_map_source_and_delete_array_item(self) -> None:
+        source = """const items = [
+  { name: 'A' },
+  { name: 'B' },
+]
+
+export default function App() {
+  return (
+    <ul>
+      {items.map((item) => <li>{item.name}</li>)}
+    </ul>
+  )
+}
+"""
+        (self.root / "src" / "App.jsx").write_text(source, encoding="utf-8")
+        source_map = self._run_plugin()
+        li = next(item for item in source_map["nodes"].values() if item["tag"] == "li")
+
+        anchor = self._resolve(li["oid"])
+
+        self.assertEqual(anchor["status"], "RESOLVED")
+        self.assertTrue(anchor["inMap"])
+        self.assertEqual(anchor["mapSource"]["kind"], "variable_array")
+        self.assertEqual(anchor["mapSource"]["count"], 2)
+        edited = self._run_ast_edit(
+            {
+                "file": "src/App.jsx",
+                "operation": "delete_array_item",
+                "anchorRange": anchor["range"],
+                "arrayRange": {
+                    "startOffset": anchor["mapSource"]["start"],
+                    "endOffset": anchor["mapSource"]["end"],
+                },
+                "itemIndex": 0,
+            }
+        )
+        self.assertEqual(edited["status"], "OK", edited)
+        self.assertNotIn("name: 'A'", edited["content"])
+        self.assertIn("name: 'B'", edited["content"])
+
     def test_multiple_call_sites_are_ordered_and_conditional_marked(self) -> None:
         (self.root / "src" / "UserCard.jsx").write_text(
             """export default function UserCard({ title }) {

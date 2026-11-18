@@ -29,6 +29,31 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 
+function findNodeByRange(node, start, end, type) {
+  if (!node || typeof node !== 'object') return null
+  if (
+    node.type === type &&
+    Number(node.start) === Number(start) &&
+    Number(node.end) === Number(end)
+  ) {
+    return node
+  }
+  for (const key of Object.keys(node)) {
+    if (IGNORED_KEYS.has(key)) continue
+    const value = node[key]
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = findNodeByRange(item, start, end, type)
+        if (found) return found
+      }
+    } else if (value && typeof value === 'object' && value.type) {
+      const found = findNodeByRange(value, start, end, type)
+      if (found) return found
+    }
+  }
+  return null
+}
+
 const JSX_TYPES = new Set(['JSXElement', 'JSXFragment'])
 const IGNORED_KEYS = new Set([
   'loc',
@@ -487,6 +512,56 @@ function main() {
       return fail('MOVE_SCOPE_MISMATCH', '移动前后 JSX 节点数量不一致，已阻断')
     }
     return { status: 'OK', content: next }
+  }
+
+  // ---- Direct Ops：DELETE_DATA_ITEM ----
+  // 确定性删除静态数组中的一项；动态数据在 ScopePolicy 已转 AI。
+  if (operation === 'delete_array_item') {
+    const range = spec.arrayRange || {}
+    const startOffset = Number(range.startOffset)
+    const endOffset = Number(range.endOffset)
+    const array = findNodeByRange(
+      ast,
+      startOffset,
+      endOffset,
+      'ArrayExpression',
+    )
+    if (!array) {
+      return fail('ANCHOR_RANGE_MISMATCH', '数据源数组区间已失效')
+    }
+    const elements = array.elements || []
+    const index = Number(spec.itemIndex)
+    if (!Number.isInteger(index) || index < 0 || index >= elements.length) {
+      return fail('INVALID_DATA_ITEM', '数据项序号超出数组范围', {
+        itemIndex: spec.itemIndex,
+        count: elements.length,
+      })
+    }
+    let removeStart
+    let removeEnd
+    if (elements.length === 1) {
+      removeStart = elements[0].start
+      removeEnd = elements[0].end
+    } else if (index < elements.length - 1) {
+      removeStart = elements[index].start
+      removeEnd = elements[index + 1].start
+    } else {
+      removeStart = elements[index - 1].end
+      removeEnd = elements[index].end
+    }
+    const next = `${code.slice(0, removeStart)}${code.slice(removeEnd)}`
+    try {
+      parseCode(next, file, parser)
+    } catch (error) {
+      return fail('INVALID_DATA_ITEM', `删除数据项后文件无法解析: ${error.message}`)
+    }
+    return {
+      status: 'OK',
+      content: next,
+      removedItemIndex: index,
+      itemCountBefore: elements.length,
+      itemCountAfter: elements.length - 1,
+    }
   }
 
   // ---- Direct Ops：UPDATE_PROPS ----

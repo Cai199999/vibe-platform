@@ -1970,6 +1970,7 @@ class LocalDockerSandbox(SandboxProvider):
             "modify",
             "update_text",
             "update_props",
+            "delete_array_item",
             "move_node",
         }:
             raise SandboxError(f"不支持的 AST 编辑操作: {operation or '(空)'}")
@@ -1996,6 +1997,8 @@ class LocalDockerSandbox(SandboxProvider):
             # Direct Ops UPDATE_TEXT / UPDATE_PROPS 专用；其余操作忽略。
             "text": str(edit.get("text") or ""),
             "props": dict(edit.get("props") or {}),
+            "arrayRange": edit.get("arrayRange") or {},
+            "itemIndex": edit.get("itemIndex"),
         }
         # 同文件多编辑：服务端把前一条结果作为下一条输入，绝不接受模型传入。
         override = edit.get("contentOverride")

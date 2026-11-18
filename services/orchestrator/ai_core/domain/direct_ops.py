@@ -20,6 +20,7 @@ DirectActionKind = Literal[
     "UPDATE_TEXT",
     "UPDATE_PROPS",
     "DELETE_NODE",
+    "DELETE_DATA_ITEM",
     "ADD_COMPONENT",
     "MOVE_NODE",
     # 冻结 VisualDocument 一次性编译为真实 React 工程。

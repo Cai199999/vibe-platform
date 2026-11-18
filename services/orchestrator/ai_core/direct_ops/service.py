@@ -261,6 +261,7 @@ class DirectOperationService:
             "inMap": bool(anchor.get("inMap")),
             "isRouteRoot": bool(anchor.get("isRouteRoot")),
             "deleteSafe": bool(anchor.get("deleteSafe")),
+            "mapSource": anchor.get("mapSource") or None,
             "callSiteFile": anchor.get("callSiteFile") or "",
             "hasCallSite": isinstance(call_site, dict) and bool(call_site.get("file")),
             "instanceCount": int(anchor.get("instanceCount") or 1),
@@ -344,6 +345,46 @@ class DirectOperationService:
                 "changeId": change_id,
                 "message": "已隐藏当前项（仅视觉，未修改代码）",
             }
+        if (
+            action == "AI_DATA_EDIT"
+            and str(option.get("optionId")) == "remove_data_item"
+        ):
+            try:
+                response = self._delete_data_item(pending)
+            except DirectActionError as exc:
+                if exc.code in {
+                    DirectErrorCode.ROUTE_TO_LLM,
+                    DirectErrorCode.TARGET_NOT_FOUND,
+                }:
+                    return {
+                        **base,
+                        "status": "HANDOFF_TO_AI",
+                        "applied": False,
+                        "committed": False,
+                        "message": f"{exc.message}（已保留目标信息）",
+                    }
+                raise
+            if response.status == "HITL_REQUIRED":
+                return {
+                    **base,
+                    "status": "HANDOFF_TO_AI",
+                    "applied": False,
+                    "committed": False,
+                    "message": "数据源不是静态数组，需要 AI 定位并修改",
+                }
+            return {
+                **base,
+                "status": response.status,
+                "applied": response.status == "SUCCEEDED",
+                "committed": bool(response.commit_hash),
+                "changeId": response.change_id,
+                "commitHash": response.commit_hash,
+                "message": (
+                    "已删除数据源中的对应项"
+                    if response.status == "SUCCEEDED"
+                    else "删除数据项未完成"
+                ),
+            }
         return {
             **base,
             "status": "HANDOFF_TO_AI",
@@ -351,6 +392,32 @@ class DirectOperationService:
             "committed": False,
             "message": "该操作需要 AI 修改数据源或组件定义，已保留目标信息",
         }
+
+    def _delete_data_item(
+        self,
+        pending: dict[str, Any],
+    ) -> DirectActionResponse:
+        """把 map 删除决策转成一次 DELETE_DATA_ITEM Direct Ops。"""
+        original = dict(pending.get("payload") or {})
+        sandbox_id = str(original.get("sandboxId") or "")
+        if not sandbox_id:
+            raise DirectActionError(
+                DirectErrorCode.TARGET_NOT_FOUND,
+                "缺少沙盒，无法删除数据项",
+                status_code=404,
+            )
+        revision = self._sandbox.git_head(sandbox_id)
+        action_id = f"dact_data_{uuid.uuid4().hex[:16]}"
+        original["directActionId"] = action_id
+        original["idempotencyKey"] = f"{original.get('projectId')}:{action_id}"
+        original["action"] = "DELETE_DATA_ITEM"
+        original["baseRevision"] = revision
+        original["payload"] = {}
+        original["options"] = {
+            "source": "HITL_DECISION",
+            "dryRun": False,
+        }
+        return self.execute(DirectActionPayload.model_validate(original))
 
     def _record_visual_only(
         self,
@@ -1247,6 +1314,36 @@ class DirectOperationService:
                 "anchorRange": anchor.get("range") or {},
                 "props": dict(payload.payload.get("props") or {}),
             }
+        elif payload.action == "DELETE_DATA_ITEM":
+            map_source = anchor.get("mapSource") or {}
+            if map_source.get("kind") not in {
+                "array_literal",
+                "variable_array",
+            }:
+                raise DirectActionError(
+                    DirectErrorCode.ROUTE_TO_LLM,
+                    "数据源不是静态数组，需要交给 AI 修改。",
+                    status_code=422,
+                )
+            instance = int(anchor.get("instance") or 1)
+            item_index = instance - 1
+            count = int(map_source.get("count") or 0)
+            if item_index < 0 or (count and item_index >= count):
+                raise DirectActionError(
+                    DirectErrorCode.TARGET_NOT_FOUND,
+                    "无法定位要删除的数据项，请刷新后重试。",
+                    status_code=404,
+                )
+            edit = {
+                "operation": "delete_array_item",
+                "file": file,
+                "anchorRange": anchor.get("range") or {},
+                "arrayRange": {
+                    "startOffset": int(map_source.get("start") or 0),
+                    "endOffset": int(map_source.get("end") or 0),
+                },
+                "itemIndex": item_index,
+            }
         elif payload.action == "MOVE_NODE":
             if parent is None:
                 raise DirectActionError(
@@ -1462,6 +1559,11 @@ class DirectOperationService:
                 f"删除 {component} 内的节点 {node_preview}"
                 if node_preview
                 else f"删除 {component} 内的节点"
+            )
+        elif payload.action == "DELETE_DATA_ITEM":
+            summary = (
+                f"删除 {component} 对应数据源的第 "
+                f"{int(anchor.get('instance') or 1)} 项"
             )
         elif payload.action == "UPDATE_PROPS":
             prop_names = ", ".join(sorted(dict(payload.payload.get("props") or {})))
