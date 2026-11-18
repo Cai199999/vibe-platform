@@ -432,6 +432,17 @@ function buildSourceMap() {
     } else {
       node.containerScope = 'local'
     }
+    // 快路径判定：只对本地、非循环、非共享、非页面根的叶子成立。
+    // 运行时若发现多实例，SDK 会再降级到确认 / HITL。
+    const importedComponent = importedComponents.has(
+      `${node.file}#${node.component}`,
+    )
+    node.deleteSafe = Boolean(
+      !node.inMap &&
+        !importedComponent &&
+        !(Array.isArray(node.callSites) && node.callSites.length) &&
+        node.parentOid,
+    )
   }
 
   const revision = hashText(

@@ -103,6 +103,7 @@ class SourceMapPluginTests(unittest.TestCase):
 export default function App() {
   return (
     <main>
+      <h1>跨文件调用点</h1>
       <UserCard title="原始标题" />
     </main>
   )
@@ -226,6 +227,7 @@ export default function App() {
         self.assertTrue(
             all(item["containerScope"] == "repeated_template" for item in li_nodes)
         )
+        self.assertTrue(all(item["deleteSafe"] is False for item in li_nodes))
 
     def test_multiple_call_sites_are_ordered_and_conditional_marked(self) -> None:
         (self.root / "src" / "UserCard.jsx").write_text(
@@ -345,6 +347,14 @@ export default function App() {
             if item["file"] == "src/App.jsx" and item["tag"] == "main"
         )
         self.assertEqual(app_root["containerScope"], "local")
+        self.assertFalse(app_root["deleteSafe"])
+        self.assertFalse(definition["deleteSafe"])
+        app_leaf = next(
+            item
+            for item in source_map["nodes"].values()
+            if item["file"] == "src/App.jsx" and item["tag"] == "h1"
+        )
+        self.assertTrue(app_leaf["deleteSafe"])
         self.assertEqual(len(definition["callSites"]), 1)
         self.assertEqual(
             definition["callSites"][0]["callSiteOid"],

@@ -791,6 +791,12 @@
           }
         : null
     var instancePath = computeInstancePath(node)
+    var deleteSafe =
+      Boolean(mapped && mapped.deleteSafe) &&
+      Number(instanceInfo.instanceCount) === 1 &&
+      instancePath.every(function (item) {
+        return Number(item.count || 1) <= 1
+      })
     var identity = {
       oid: oid,
       sourceRange: sourceRange,
@@ -803,6 +809,7 @@
       instancePath: instancePath,
       instanceKey: instanceKeyOf(instancePath),
       containerScope: containerScope,
+      deleteSafe: deleteSafe,
       file: file,
       line: line,
       column: column,
@@ -826,6 +833,7 @@
       instancePath: instancePath,
       instanceKey: instanceKeyOf(instancePath),
       containerScope: containerScope,
+      deleteSafe: deleteSafe,
       file: file,
       line: line,
       column: column,
@@ -974,6 +982,7 @@
       instancePath: source.instancePath || [],
       instanceKey: source.instanceKey || '',
       containerScope: source.containerScope || 'local',
+      deleteSafe: Boolean(source.deleteSafe),
       marker: source.marker,
       selector: source.selector,
       label: label,
@@ -2721,9 +2730,9 @@
         directDeleteAutoConfirm =
           directTarget.getAttribute('data-vibe-created') === 'direct' ||
           Boolean(directTarget.querySelector?.('[data-vibe-created]'))
-        // 快路径：本地立即弹确认，不再先走 analyze-delete。
-        // 安全叶子确认后直接执行；不安全情况由 execute 返回 HITL。
-        if (directDeleteAutoConfirm) {
+        // 安全叶子：点击即乐观删除，可撤回；共享/循环/定义节点仍先确认。
+        // 无论哪条路径，最终都由 execute 的 ScopePolicy 兜底。
+        if (directDeleteAutoConfirm || directDeleteSource.deleteSafe === true) {
           commitDirectDelete()
         } else {
           showDirectConfirmPanel()
@@ -3134,7 +3143,8 @@
       directDeletePending = false
       var result = data.payload || {}
       if (result.ok || result.status === 'SUCCEEDED') {
-        // 快路径成功：节点已被乐观隐藏，等待 HMR 移除。
+        // 快路径成功：节点已被乐观隐藏，等待 HMR 移除；左下角可撤回。
+        showDirectToast('已删除，可点左下角“撤回”')
         return
       }
       if (result.handled || result.status === 'HITL_REQUIRED') {

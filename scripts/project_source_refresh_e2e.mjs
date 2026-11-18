@@ -246,19 +246,6 @@ async function main() {
       null,
       { timeout: 20000 },
     )
-    await frame.evaluate(() => {
-      document.querySelector('button[title="删除组件"]').click()
-    })
-    await frame.waitForFunction(
-      () =>
-        [...document.querySelectorAll('button')].some(
-          (item) =>
-            item.textContent === '确认删除' && item.offsetParent !== null,
-        ),
-      null,
-      { timeout: 20000 },
-    )
-
     const directResponsePromise = page.waitForResponse(
       (response) =>
         response.request().method() === 'POST' &&
@@ -266,11 +253,29 @@ async function main() {
       { timeout: 60000 },
     )
     await frame.evaluate(() => {
-      const button = [...document.querySelectorAll('button')].find(
-        (item) => item.textContent === '确认删除',
-      )
-      button.click()
+      document.querySelector('button[title="删除组件"]').click()
     })
+    // 安全叶子立即执行；只有不安全节点才弹确认面板。
+    const confirmVisible = await frame
+      .waitForFunction(
+        () =>
+          [...document.querySelectorAll('button')].some(
+            (item) =>
+              item.textContent === '确认删除' && item.offsetParent !== null,
+          ),
+        null,
+        { timeout: 1200 },
+      )
+      .then(() => true)
+      .catch(() => false)
+    if (confirmVisible) {
+      await frame.evaluate(() => {
+        const button = [...document.querySelectorAll('button')].find(
+          (item) => item.textContent === '确认删除',
+        )
+        button.click()
+      })
+    }
     const directResponse = await directResponsePromise
     const directBody = await directResponse.json()
     if (directResponse.status() !== 200 || directBody.status !== 'SUCCEEDED') {
