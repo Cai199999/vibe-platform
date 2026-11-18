@@ -405,8 +405,56 @@ function buildSourceMap() {
     })
   }
 
+  // 构建期 AST 子节点索引：SDK 用它把指针位置映射回 JSX 兄弟序号。
+  const childrenByParent = new Map()
+  for (const [oid, node] of Object.entries(nodes)) {
+    if (!node.parentOid) continue
+    const bucket = childrenByParent.get(node.parentOid) || []
+    bucket.push({
+      oid,
+      siblingIndex: node.siblingIndex,
+      siblingCount: node.siblingCount,
+    })
+    childrenByParent.set(node.parentOid, bucket)
+  }
+  for (const [oid, node] of Object.entries(nodes)) {
+    const children = (childrenByParent.get(oid) || []).sort(
+      (left, right) => left.siblingIndex - right.siblingIndex,
+    )
+    node.childOids = children.map((item) => item.oid)
+    // JSX 子节点总数可能大于可标记的原生元素数（例如子级是组件调用点）。
+    // childCount 用于 SDK 判断 AST 落位是否安全；不一致就回退 DOM。
+    node.childCount = children.reduce(
+      (total, item) => Math.max(total, Number(item.siblingCount) || 0),
+      0,
+    )
+  }
+
   // 容器落点语义：DOM 容器不等于可插入的 JSX 作用域。
-  const importedComponents = new Set(Object.keys(components))
+  // 只被 Vite 入口（src/main.* / src/index.*）渲染的组件是页面根，
+  // 不是可复用定义；否则存量项目的拖拽 / 插入会被误判为
+  // component_definition，每次都要 HITL。
+  const entryFiles = new Set(
+    [...sourceMapFileMeta.keys()].filter((file) =>
+      /^src\/(main|index)\.(js|jsx|ts|tsx)$/.test(file),
+    ),
+  )
+  const componentCallFiles = new Map()
+  for (const [key, component] of Object.entries(components)) {
+    const files = new Set(
+      (component.callSiteOids || [])
+        .map((oid) => callSites[oid]?.file || '')
+        .filter(Boolean),
+    )
+    componentCallFiles.set(key, files)
+  }
+  const importedComponents = new Set(
+    Object.keys(components).filter((key) => {
+      const files = componentCallFiles.get(key) || new Set()
+      if (!files.size) return true
+      return ![...files].every((file) => entryFiles.has(file))
+    }),
+  )
   const slotCounts = new Map()
   for (const callSite of Object.values(callSites)) {
     if (!callSite.slot || !callSite.definitionOid) continue

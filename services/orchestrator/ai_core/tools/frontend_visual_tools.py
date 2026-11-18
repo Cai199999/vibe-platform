@@ -132,16 +132,21 @@ def _target(
     component: str = "",
     instance: int | None = None,
     placement: dict[str, Any] | None = None,
+    call_site_oid: str = "",
 ) -> DirectActionTarget:
     node_id = str(node_id or "").strip()
     selector = str(selector or "").strip()
     file = str(file or "").strip()
+    call_site_oid = str(call_site_oid or "").strip()
+    if node_id.startswith("csoid_"):
+        call_site_oid = node_id
+        node_id = ""
     if node_id:
         selector = _node_selector(node_id)
-    if not selector and not file:
+    if not selector and not file and not call_site_oid:
         raise FrontendToolError(
             "DIRECT_TARGET_REQUIRED",
-            "必须提供 node_id、selector 或 file 之一。",
+            "必须提供 node_id、call_site_oid、selector 或 file 之一。",
         )
     if line is not None and line < 1:
         raise FrontendToolError("DIRECT_TARGET_INVALID", "line 必须大于等于 1")
@@ -151,6 +156,7 @@ def _target(
         anchor_id=anchor_id.strip() or None,
         selector=selector or None,
         file=file or None,
+        call_site_oid=call_site_oid or None,
         line=line,
         column=column,
         component=component.strip() or None,
@@ -322,6 +328,116 @@ def build_update_text_tool() -> BaseTool:
             return _json(_failure(exc))
 
     return update_text
+
+
+def build_update_props_tool() -> BaseTool:
+    @tool("update_props")
+    def update_props(
+        props: dict[str, Any],
+        node_id: str = "",
+        call_site_oid: str = "",
+        dry_run: bool = False,
+        base_revision: str = "",
+    ) -> str:
+        """修改组件调用点的 Props。
+
+        参数：
+          - props：属性对象，字符串 / 数字 / 布尔 / null（null 表示删除）；
+          - node_id：组件定义根 oid，或直接传 callSiteOid；
+          - call_site_oid：组件调用点 oid；
+          - dry_run / base_revision：同其他写工具。
+
+        只修改调用点 JSX，不触碰组件定义。
+        """
+        try:
+            if not isinstance(props, dict) or not props:
+                raise FrontendToolError(
+                    "DIRECT_TARGET_INVALID",
+                    "update_props 必须提供非空 props 对象",
+                )
+            target = _target(
+                node_id=node_id,
+                call_site_oid=call_site_oid,
+            )
+            return _json(
+                _execute(
+                    "UPDATE_PROPS",
+                    target,
+                    {"props": dict(props)},
+                    dry_run=dry_run,
+                    base_revision=base_revision,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _json(_failure(exc))
+
+    return update_props
+
+
+def build_update_class_tool() -> BaseTool:
+    @tool("update_class")
+    def update_class(
+        class_name: str,
+        node_id: str = "",
+        selector: str = "",
+        dry_run: bool = False,
+        base_revision: str = "",
+    ) -> str:
+        """修改节点的 className 字面量。
+
+        表达式 className 不会被直接覆盖；失败返回结构化错误。
+        """
+        try:
+            target = _target(node_id=node_id, selector=selector)
+            return _json(
+                _execute(
+                    "UPDATE_CLASS",
+                    target,
+                    {"className": str(class_name or "")},
+                    dry_run=dry_run,
+                    base_revision=base_revision,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _json(_failure(exc))
+
+    return update_class
+
+
+def build_update_style_tool() -> BaseTool:
+    @tool("update_style")
+    def update_style(
+        style: dict[str, Any],
+        node_id: str = "",
+        selector: str = "",
+        dry_run: bool = False,
+        base_revision: str = "",
+    ) -> str:
+        """修改节点的 inline style。
+
+        style 为 camelCase -> 字符串/数字/null（null 删除）。
+        禁止绝对/固定定位与动态表达式覆盖。
+        """
+        try:
+            if not isinstance(style, dict) or not style:
+                raise FrontendToolError(
+                    "DIRECT_TARGET_INVALID",
+                    "update_style 必须提供非空 style 对象",
+                )
+            target = _target(node_id=node_id, selector=selector)
+            return _json(
+                _execute(
+                    "UPDATE_STYLE",
+                    target,
+                    {"style": dict(style)},
+                    dry_run=dry_run,
+                    base_revision=base_revision,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _json(_failure(exc))
+
+    return update_style
 
 
 def build_move_node_tool() -> BaseTool:
@@ -518,6 +634,50 @@ def register_frontend_visual_tools(registry: ToolRegistry) -> None:
                 },
             ),
             build_update_text_tool(),
+        ),
+        (
+            ToolDescriptor(
+                name="update_props",
+                description="修改组件调用点 Props，复用 Direct Ops 的 AST 与调用点解析。",
+                danger_level="write",
+                metadata={
+                    "reuses": "DirectOperationService",
+                    "action": "UPDATE_PROPS",
+                    "arguments": [
+                        "props",
+                        "node_id",
+                        "call_site_oid",
+                        "dry_run",
+                    ],
+                },
+            ),
+            build_update_props_tool(),
+        ),
+        (
+            ToolDescriptor(
+                name="update_class",
+                description="修改节点 className 字面量，表达式属性会被拒绝。",
+                danger_level="write",
+                metadata={
+                    "reuses": "DirectOperationService",
+                    "action": "UPDATE_CLASS",
+                    "arguments": ["class_name", "node_id", "selector", "dry_run"],
+                },
+            ),
+            build_update_class_tool(),
+        ),
+        (
+            ToolDescriptor(
+                name="update_style",
+                description="修改节点 inline style，禁止绝对定位与动态表达式。",
+                danger_level="write",
+                metadata={
+                    "reuses": "DirectOperationService",
+                    "action": "UPDATE_STYLE",
+                    "arguments": ["style", "node_id", "selector", "dry_run"],
+                },
+            ),
+            build_update_style_tool(),
         ),
         (
             ToolDescriptor(

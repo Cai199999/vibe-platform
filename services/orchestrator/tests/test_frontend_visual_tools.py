@@ -23,6 +23,9 @@ from ai_core.tools.frontend_visual_tools import (
     build_insert_component_tool,
     build_move_node_tool,
     build_undo_last_frontend_change_tool,
+    build_update_class_tool,
+    build_update_props_tool,
+    build_update_style_tool,
     build_update_text_tool,
     register_frontend_visual_tools,
     reset_frontend_tool_context,
@@ -237,6 +240,47 @@ class FrontendVisualToolsTest(unittest.TestCase):
         self.assertEqual(undone["undoneChangeId"], "chg_before")
         self.assertEqual(self.service.undo_calls, 1)
 
+    def test_update_props_targets_call_site_oid(self) -> None:
+        result = _payload(
+            build_update_props_tool().invoke(
+                {
+                    "props": {"title": "新标题"},
+                    "node_id": "csoid_user_card",
+                }
+            )
+        )
+
+        self.assertTrue(result["ok"])
+        call = self.service.calls[-1]
+        self.assertEqual(call.action, "UPDATE_PROPS")
+        self.assertEqual(call.target.call_site_oid, "csoid_user_card")
+        self.assertEqual(call.payload["props"], {"title": "新标题"})
+
+    def test_update_class_and_style_tools(self) -> None:
+        class_result = _payload(
+            build_update_class_tool().invoke(
+                {
+                    "class_name": "text-red-600",
+                    "node_id": "oid_title0001",
+                }
+            )
+        )
+        style_result = _payload(
+            build_update_style_tool().invoke(
+                {
+                    "style": {"fontSize": "20px"},
+                    "node_id": "oid_title0001",
+                }
+            )
+        )
+
+        self.assertTrue(class_result["ok"])
+        self.assertTrue(style_result["ok"])
+        self.assertEqual(self.service.calls[-2].action, "UPDATE_CLASS")
+        self.assertEqual(self.service.calls[-2].payload["className"], "text-red-600")
+        self.assertEqual(self.service.calls[-1].action, "UPDATE_STYLE")
+        self.assertEqual(self.service.calls[-1].payload["style"], {"fontSize": "20px"})
+
     def test_registration_exposes_semantic_tools(self) -> None:
         registry = ToolRegistry()
         register_frontend_visual_tools(registry)
@@ -245,6 +289,9 @@ class FrontendVisualToolsTest(unittest.TestCase):
             names,
             {
                 "update_text",
+                "update_props",
+                "update_class",
+                "update_style",
                 "move_node",
                 "insert_component",
                 "delete_node",

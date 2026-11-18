@@ -335,6 +335,47 @@ class DirectOperationMoveTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, DirectErrorCode.UNSAFE_OPERATION)
         self.assertEqual(self.sandbox.patches, [])
 
+    def test_parent_oid_is_derived_from_data_oid_selector(self) -> None:
+        payload = _move_payload(
+            target={
+                **_move_payload().target.model_dump(by_alias=True),
+                "placement": {
+                    "parentSelector": '[data-oid="oid_main"]',
+                    "parentFile": "src/App.jsx",
+                    "insertPosition": "inside_index",
+                    "siblingIndex": 0,
+                },
+            }
+        )
+
+        response = self.service.execute(payload)
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        parent_request = self.sandbox.resolutions[-1][0]
+        self.assertEqual(parent_request["oid"], "oid_main")
+        self.assertEqual(self.sandbox.edits[0]["insertIndex"], 0)
+
+    def test_explicit_parent_oid_wins_over_selector(self) -> None:
+        payload = _move_payload(
+            target={
+                **_move_payload().target.model_dump(by_alias=True),
+                "placement": {
+                    "parentSelector": '[data-oid="oid_from_selector"]',
+                    "parentOid": "oid_explicit",
+                    "parentFile": "src/App.jsx",
+                    "insertPosition": "inside_end",
+                    "siblingIndex": 1,
+                },
+            }
+        )
+
+        self.service.execute(payload)
+
+        self.assertEqual(
+            self.sandbox.resolutions[-1][0]["oid"],
+            "oid_explicit",
+        )
+
     def test_move_into_call_site_slot_is_direct(self) -> None:
         self.sandbox.parent_anchor = {
             **self.sandbox.parent_anchor,

@@ -12,6 +12,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import logging
+import re
 import threading
 import time
 import uuid
@@ -107,6 +108,17 @@ def _event_buffer(direct_action_id: str) -> RunEventBuffer:
 
 def _sha256(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _oid_from_selector(selector: str) -> str:
+    """从 ``[data-oid="..."]`` 反推 oid；其它选择器返回空串。
+
+    SDK 的 source.selector 对 OID 节点就是 data-oid 选择器，但 data-oid
+    只存在于构建期 Source Map，并不写进源码。父容器解析必须拿到 oid
+    才能走地图定位，否则命中不到任何 JSX 节点。
+    """
+    match = re.search(r'\[data-oid\s*=\s*"([^"]+)"\]', str(selector or ""))
+    return match.group(1) if match else ""
 
 
 def _diff_summary(before: str, after: str, limit: int = 2000) -> str:
@@ -1059,15 +1071,20 @@ class DirectOperationService:
     ) -> dict[str, Any]:
         """按 placement 定位移动目标容器；不再让模型猜测父级。"""
         placement = payload.target.placement or {}
+        parent_selector = str(placement.get("parentSelector") or "")
         parent_anchor_id = f"anc_{payload.direct_action_id}_parent"
         request = {
             "anchorId": parent_anchor_id,
             "annotationId": f"{payload.direct_action_id}_parent",
+            # Source map 节点在源码里没有 data-oid 属性，只有构建期地图。
+            # 因此 [data-oid="..."] 选择器必须同时带 oid，否则父容器永远
+            # 解析不到，表现为“移动成功但组件没动 / 找不到落点”。
+            "oid": placement.get("parentOid") or _oid_from_selector(parent_selector),
             "file": placement.get("parentFile")
             or payload.target.file
             or source.get("file")
             or "",
-            "selector": placement.get("parentSelector") or "",
+            "selector": parent_selector,
             "callSiteOid": placement.get("parentCallSiteOid") or "",
             "line": placement.get("parentLine"),
             "column": placement.get("parentColumn"),

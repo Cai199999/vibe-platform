@@ -22,22 +22,21 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 源码级可视化：前端 Agent 语义工具复用 Direct Ops（文本/移动/增删/撤回），不 fork Utopia。
 - 构建期身份：inspect_plugin / CodeGen 注入 data-oid + vibe-source-map.json；SDK 与 resolver oid 优先，旧 file/line 仅兜底，地图过期 fail-closed。
 - 跨文件调用点：importerGraph + callSiteOid 双索引；UPDATE_PROPS 只改调用点 JSX（App.jsx），不触碰组件定义（UserCard.jsx）。
-- Props 面板：画布 ⚙ 直接编辑唯一调用点的 Props，支持新增/修改/删除；表达式 Props 只提示去源码改。
-- 样式类：画布 🎨 修改 className；UPDATE_CLASS 复用 AST 属性编辑，动态表达式/多实例走 HITL 或拒绝。
-- Inline style：画布 🖌 增删改 style 对象；UPDATE_STYLE 禁止绝对/固定定位与动态表达式。
+- 高级编辑只走前端 Agent 工具：`update_props` / `update_class` / `update_style`；画布不再暴露 ⚙/🎨/🖌 按钮。
+- 低级移动落位使用 manifest.childOids 的 AST 兄弟序号，不再按 DOM children 猜；DOM/AST 不一致时回退。SDK 回传 parentOid，服务端也可从 `[data-oid]` 选择器回补，修复“移动成功但没动 / 找不到落点”。
 - 多调用点消歧：优先 React dev `_debugSource` 精确定位；无 Fiber 时按源码顺序 + 运行时实例序号，仍不确定保持 HITL。
 - 多实例：SDK 上报 instancePath（父 oid 链 + 同模板序号）；模板/重复实例修改返回 HITL_REQUIRED + 范围选项。
 - 数据源删除：静态数组（字面量/同文件变量）可确定性删除对应元素；动态数据仍明确 HANDOFF_TO_AI。
-- 容器作用域：Source Map 标注 containerScope=local/component_definition/repeated_template/call_site_slot；local 与 call_site_slot 直接落位，跨文件仍拒绝。
+- 容器作用域：Source Map 标注 containerScope=local/component_definition/repeated_template/call_site_slot；local 与 call_site_slot 直接落位，跨文件仍拒绝。仅被 `src/main.*` / `src/index.*` 渲染的入口组件按 local（页面根）处理，存量项目拖拽不再误触 HITL。
 - 低级操作不转 Agent：父容器删除/移动连同子树直接执行；共享/循环/多实例不再 handoff，由 SDK 悬停高亮全部子节点提示影响范围。
 - SourceSync 边界：删除文件从快照移除；失败任务落盘 JSON 队列，后台指数退避重试。
-- 本地 CI：`scripts/ci_local.sh` 串行跑 Python 727 / 前端 68 + build / BFF 23；`RUN_E2E=1` 可追加浏览器 E2E。
+- 本地 CI：`scripts/ci_local.sh` 串行跑 Python 739 / 前端 68 + build / BFF 23；`RUN_E2E=1` 可追加浏览器 E2E。
 - 终极路线：`docs/design/16_平台终极目标与路线图.md` 固化六维目标；M1 闭环进行中。
 - 拖拽容错：落点出容器/缝隙时按 48px 几何距离吸附最近容器，不再直接“未能定位父容器”。
 - 旧工程兼容：SDK 支持 `file:line` / `file:line:column` 两段与三段锚点，缺失时向上找源码祖先；页面根兜底取真实容器，不再报“标注缺少目标文件”。
 
 ## 最新验证
-前端 68 项 Vitest；Python 734 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、样式类 1.8s、删除 1.9s、刷新回灌 2.2s；跨文件 Props E2E 命中 App.jsx 调用点、UserCard.jsx 未改；多实例/组件定义落点返回 HITL 范围选择。
+前端 68 项 Vitest；Python 739 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除预览消失 257ms、刷新回灌 3.9s、跨文件 Props 命中 App.jsx 调用点且 UserCard.jsx 未改、Direct MOVE 由真实 SDK 拖段落算出 siblingIndex=2，源码与预览同步重排。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 仅源码快照持久化（Run/指标仍无持久化）；沙盒无 gVisor；未云端部署。

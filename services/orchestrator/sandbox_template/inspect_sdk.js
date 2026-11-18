@@ -188,9 +188,10 @@
     }
     return null
   }
+  // 真正的行内文本才上溯到可拖拽祖先；p / h1-h6 是独立块级节点，
+  // 拖拽它们必须移动自身，否则用户拖段落会变成移动整个父容器。
   var INLINE_TAGS = {
     span: true,
-    p: true,
     strong: true,
     em: true,
     b: true,
@@ -199,12 +200,6 @@
     label: true,
     a: true,
     code: true,
-    h1: true,
-    h2: true,
-    h3: true,
-    h4: true,
-    h5: true,
-    h6: true,
   }
   var CONTAINER_TAGS = {
     div: true,
@@ -1437,7 +1432,79 @@
    *
    * siblingIndex 只是给用户和模型参考的序号，真正写入以锚点为准。
    */
-  function stageSlotFor(parentNode, children, x, y) {
+  /**
+   * 构建期 AST 兄弟序号落位。
+   *
+   * DOM children 与 JSX children 并不等价（文本、包装层、条件容器、
+   * 组件根都会造成偏差）。这里直接使用 manifest.childOids，把指针位置
+   * 映射回 AST 兄弟序号，避免“超过子节点范围”和假成功。
+   */
+  function astSiblingSlot(parentNode, x, y, sourceOid) {
+    var parentSource = readSource(parentNode)
+    var parentMapped =
+      parentSource && parentSource.oid
+        ? sourceMapNodeForOid(parentSource.oid)
+        : null
+    var order =
+      parentMapped && Array.isArray(parentMapped.childOids)
+        ? parentMapped.childOids
+        : []
+    if (!order.length) return null
+    // 混合了无法标记的组件子节点时，AST 落位不安全，回退 DOM。
+    if (Number(parentMapped.childCount || 0) !== order.length) return null
+    var byOid = {}
+    var domChildren = parentNode.children || []
+    for (var childIndex = 0; childIndex < domChildren.length; childIndex += 1) {
+      var oid = domChildren[childIndex].getAttribute?.('data-oid') || ''
+      if (oid) byOid[oid] = domChildren[childIndex]
+    }
+    for (var index = 0; index < order.length; index += 1) {
+      if (!byOid[order[index]]) return null
+    }
+    var entries = order.map(function (childOid) {
+      var node = byOid[childOid]
+      return { oid: childOid, node: node, rect: node.getBoundingClientRect() }
+    })
+    var isRow = stageAxisIsRow(parentNode)
+    var point = isRow ? x : y
+    var insertIndex = entries.length
+    for (var position = 0; position < entries.length; position += 1) {
+      var rect = entries[position].rect
+      var middle = isRow
+        ? rect.left + rect.width / 2
+        : rect.top + rect.height / 2
+      if (point < middle) {
+        insertIndex = position
+        break
+      }
+    }
+    if (sourceOid) {
+      var sourceIndex = order.indexOf(sourceOid)
+      if (sourceIndex >= 0 && insertIndex > sourceIndex) insertIndex -= 1
+    }
+    var anchorEntry =
+      insertIndex < entries.length
+        ? entries[insertIndex]
+        : entries[entries.length - 1]
+    return {
+      anchor: anchorEntry,
+      insertPosition: 'inside_index',
+      siblingIndex: insertIndex,
+      siblingCount: entries.length,
+      childIndex: insertIndex,
+      insertRect: {
+        x: round2(anchorEntry.rect.left),
+        y: round2(anchorEntry.rect.top),
+        width: round2(anchorEntry.rect.width),
+        height: 0,
+      },
+      confidence: 'ast_index',
+    }
+  }
+
+  function stageSlotFor(parentNode, children, x, y, sourceOid) {
+    var astSlot = astSiblingSlot(parentNode, x, y, sourceOid)
+    if (astSlot) return astSlot
     var parentRect = parentNode.getBoundingClientRect()
     if (!children.length) {
       var atTop = y < parentRect.top + parentRect.height / 2
@@ -2572,13 +2639,16 @@
           slotChildren,
           event.clientX,
           event.clientY,
+          state.source && state.source.oid,
         )
         var index = slot.siblingIndex
-        if (slot.insertPosition === 'after') index += 1
-        if (slot.insertPosition === 'inside_start') index = 0
-        if (slot.insertPosition === 'inside_end') index = allChildren.length
-        var sourceIndex = allChildren.indexOf(node)
-        if (sourceIndex >= 0 && index > sourceIndex) index -= 1
+        if (slot.confidence !== 'ast_index') {
+          if (slot.insertPosition === 'after') index += 1
+          if (slot.insertPosition === 'inside_start') index = 0
+          if (slot.insertPosition === 'inside_end') index = allChildren.length
+          var sourceIndex = allChildren.indexOf(node)
+          if (sourceIndex >= 0 && index > sourceIndex) index -= 1
+        }
         if (
           parentSource &&
           parentSource.selector &&
@@ -2586,6 +2656,8 @@
         ) {
           placement = {
             parentSelector: parentSource.selector,
+            parentOid: parentSource.oid || '',
+            parentCallSiteOid: parentSource.callSiteOid || '',
             parentFile: parentSource.file,
             parentLine: parentSource.line,
             parentColumn: parentSource.column,
@@ -2763,13 +2835,10 @@
   var directProjectId = ''
   var directBound = false
   var directDeleteBtn = null
-  var directPropsBtn = null
   var directPropsPanel = null
   var directPropsSource = null
-  var directClassBtn = null
   var directClassPanel = null
   var directClassSource = null
-  var directStyleBtn = null
   var directStylePanel = null
   var directStyleSource = null
   var directPlusBtn = null
@@ -2864,54 +2933,6 @@
         } else {
           showDirectConfirmPanel()
         }
-      })
-    }
-    if (!directPropsBtn) {
-      directPropsBtn = directEl(
-        'button',
-        'position:fixed;display:none;z-index:2147483645;width:22px;height:22px;' +
-          'border-radius:11px;border:1px solid rgba(96,165,250,.65);' +
-          'background:rgba(15,23,42,.92);color:#bfdbfe;font-size:12px;' +
-          'line-height:20px;padding:0;cursor:pointer;pointer-events:auto;',
-        '⚙',
-      )
-      directPropsBtn.title = '编辑组件 Props'
-      directPropsBtn.addEventListener('click', function (event) {
-        event.preventDefault()
-        event.stopPropagation()
-        openDirectPropsPanel()
-      })
-    }
-    if (!directClassBtn) {
-      directClassBtn = directEl(
-        'button',
-        'position:fixed;display:none;z-index:2147483645;width:22px;height:22px;' +
-          'border-radius:11px;border:1px solid rgba(168,85,247,.65);' +
-          'background:rgba(15,23,42,.92);color:#e9d5ff;font-size:11px;' +
-          'line-height:20px;padding:0;cursor:pointer;pointer-events:auto;',
-        '🎨',
-      )
-      directClassBtn.title = '编辑样式类'
-      directClassBtn.addEventListener('click', function (event) {
-        event.preventDefault()
-        event.stopPropagation()
-        openDirectClassPanel()
-      })
-    }
-    if (!directStyleBtn) {
-      directStyleBtn = directEl(
-        'button',
-        'position:fixed;display:none;z-index:2147483645;width:22px;height:22px;' +
-          'border-radius:11px;border:1px solid rgba(34,197,94,.65);' +
-          'background:rgba(15,23,42,.92);color:#bbf7d0;font-size:11px;' +
-          'line-height:20px;padding:0;cursor:pointer;pointer-events:auto;',
-        '🖌',
-      )
-      directStyleBtn.title = '编辑内联样式'
-      directStyleBtn.addEventListener('click', function (event) {
-        event.preventDefault()
-        event.stopPropagation()
-        openDirectStylePanel()
       })
     }
     if (!directPlusBtn) {
@@ -3414,11 +3435,8 @@
     clearSubtreeHighlight()
     if (directOutline) directOutline.style.display = 'none'
     if (directDeleteBtn) directDeleteBtn.style.display = 'none'
-    if (directPropsBtn) directPropsBtn.style.display = 'none'
     if (directPropsPanel) directPropsPanel.style.display = 'none'
-    if (directClassBtn) directClassBtn.style.display = 'none'
     if (directClassPanel) directClassPanel.style.display = 'none'
-    if (directStyleBtn) directStyleBtn.style.display = 'none'
     if (directStylePanel) directStylePanel.style.display = 'none'
     if (directPlusBtn) directPlusBtn.style.display = 'none'
     if (directMenu) directMenu.style.display = 'none'
@@ -3474,27 +3492,6 @@
     directDeleteBtn.style.left = placed.left + 'px'
     directDeleteBtn.style.top = placed.top + 'px'
     directDeleteBtn.style.display = 'block'
-    if (
-      directPropsBtn &&
-      source.callSiteOid &&
-      !source.callSiteAmbiguous
-    ) {
-      directPropsBtn.style.left = Math.max(2, placed.left - 28) + 'px'
-      directPropsBtn.style.top = placed.top + 'px'
-      directPropsBtn.style.display = 'block'
-    } else if (directPropsBtn) {
-      directPropsBtn.style.display = 'none'
-    }
-    if (directClassBtn) {
-      directClassBtn.style.left = Math.max(2, placed.left - 56) + 'px'
-      directClassBtn.style.top = placed.top + 'px'
-      directClassBtn.style.display = 'block'
-    }
-    if (directStyleBtn) {
-      directStyleBtn.style.left = Math.max(2, placed.left - 84) + 'px'
-      directStyleBtn.style.top = placed.top + 'px'
-      directStyleBtn.style.display = 'block'
-    }
     renderSubtreeHighlight(sourceNode)
 
     var isContainer =

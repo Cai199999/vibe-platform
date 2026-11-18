@@ -61,6 +61,21 @@ await new Promise((resolve) => setTimeout(resolve, 250))
 """
 
 
+ENTRY_PLUGIN_RUNNER = """
+import fs from 'node:fs'
+import { sourceInspectPlugin } from './inspect_plugin.js'
+
+const root = process.env.VIBE_TEST_ROOT
+const plugin = sourceInspectPlugin()
+plugin.configResolved({ root })
+for (const file of [root + '/src/App.jsx', root + '/src/main.jsx']) {
+  const code = fs.readFileSync(file, 'utf8')
+  plugin.transform(code, file)
+}
+await new Promise((resolve) => setTimeout(resolve, 250))
+"""
+
+
 class SourceMapPluginTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="vibe-oid-"))
@@ -113,6 +128,32 @@ export default function App() {
         )
         subprocess.run(
             ["node", "--input-type=module", "-e", GRAPH_PLUGIN_RUNNER],
+            cwd=TEMPLATE_DIR,
+            env={**os.environ, "VIBE_TEST_ROOT": str(self.root)},
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(
+            (self.root / "vibe-source-map.json").read_text(encoding="utf-8")
+        )
+
+    def _run_entry_plugin(self) -> dict:
+        (self.root / "src" / "main.jsx").write_text(
+            """import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App.jsx'
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+)
+""",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["node", "--input-type=module", "-e", ENTRY_PLUGIN_RUNNER],
             cwd=TEMPLATE_DIR,
             env={**os.environ, "VIBE_TEST_ROOT": str(self.root)},
             check=True,
@@ -485,6 +526,30 @@ export default function App() {
             "来自调用点的新标题",
             (self.root / "src" / "UserCard.jsx").read_text(encoding="utf-8"),
         )
+
+    def test_entry_component_is_page_scope_not_definition(self) -> None:
+        source_map = self._run_entry_plugin()
+        app_nodes = [
+            item
+            for item in source_map["nodes"].values()
+            if item["file"] == "src/App.jsx"
+        ]
+        self.assertTrue(app_nodes)
+        self.assertTrue(
+            all(item["containerScope"] == "local" for item in app_nodes),
+            {item["tag"]: item["containerScope"] for item in app_nodes},
+        )
+        # 入口调用点仍必须保留，供 callSite / instancePath 使用。
+        app_call = next(
+            (
+                item
+                for item in source_map["callSites"].values()
+                if item["file"] == "src/main.jsx" and item["component"] == "App"
+            ),
+            None,
+        )
+        self.assertIsNotNone(app_call)
+        self.assertEqual(app_call["definitionFile"], "src/App.jsx")
 
     def test_resolver_resolves_oid_without_file_line_or_selector(self) -> None:
         source_map = self._run_plugin()
