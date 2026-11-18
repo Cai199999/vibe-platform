@@ -1252,7 +1252,40 @@
    *
    * 绝不返回 body / html：它们的源码位置没有意义，会让 Resolver 迷路。
    */
-  function stageParentOf(node) {
+  function isContainerElement(element) {
+    if (!element || !element.getAttribute) return false
+    if (element.getAttribute('data-source-kind') === 'container') return true
+    const oid = element.getAttribute('data-oid') || ''
+    const mapped = oid ? sourceMapNodeForOid(oid) : null
+    if (mapped && mapped.isContainer) return true
+    return Boolean(CONTAINER_TAGS[String(element.tagName || '').toLowerCase()])
+  }
+
+  /** 指针在容器边缘/缝隙时，按矩形距离吸附最近容器。 */
+  function nearestContainerAt(x, y, tolerance) {
+    const limit = Number(tolerance) || 48
+    const candidates = document.querySelectorAll(
+      '[data-source-kind="container"], [data-oid], [data-source]',
+    )
+    let best = null
+    let bestDistance = Infinity
+    for (let index = 0; index < candidates.length; index += 1) {
+      const element = candidates[index]
+      if (!isContainerElement(element)) continue
+      const rect = element.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) continue
+      const dx = Math.max(rect.left - x, 0, x - rect.right)
+      const dy = Math.max(rect.top - y, 0, y - rect.bottom)
+      const distance = Math.sqrt(dx * dx + dy * dy)
+      if (distance <= limit && distance < bestDistance) {
+        best = element
+        bestDistance = distance
+      }
+    }
+    return best
+  }
+
+  function stageParentOf(node, x, y) {
     // 1. 构建期 oid 地图命中容器：确定性查表，不做标签 / class 猜测。
     var oidContainer = node ? findOidContainer(node) : null
     if (oidContainer) return { node: oidContainer, confidence: 'oid' }
@@ -1270,6 +1303,11 @@
       current = current.parentElement
     }
     if (fallback) return { node: fallback, confidence: 'container_only' }
+    // 3. 指针落在容器边缘 / 缝隙 / 空白处：按几何距离吸附最近容器。
+    if (Number.isFinite(Number(x)) && Number.isFinite(Number(y))) {
+      var nearest = nearestContainerAt(Number(x), Number(y), 48)
+      if (nearest) return { node: nearest, confidence: 'nearest' }
+    }
     var candidates = document.querySelectorAll('[data-source-kind="container"]')
     var root = null
     var rootArea = 0
@@ -1410,7 +1448,7 @@
     if (!node || node === document.documentElement) {
       return { ok: false, reason: 'NO_ELEMENT' }
     }
-    var parentHit = stageParentOf(node)
+    var parentHit = stageParentOf(node, x, y)
     var parentNode = parentHit.node
     if (!parentNode || !hasSourceAnchor(readSource(parentNode))) {
       return { ok: false, reason: 'NO_SOURCE_PARENT' }
@@ -2413,7 +2451,11 @@
     var placement = null
     try {
       var hitNode = document.elementFromPoint(event.clientX, event.clientY)
-      var parentHit = stageParentOf(hitNode)
+      var parentHit = stageParentOf(
+        hitNode,
+        event.clientX,
+        event.clientY,
+      )
       var parentNode = parentHit.node
       // 目标可以是 source 的祖先（同父级 / 根级重排），只要不是 source
       // 自身或 source 的子树即可。旧逻辑错误地排除了“父容器包含 source”，
