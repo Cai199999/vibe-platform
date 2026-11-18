@@ -2769,6 +2769,9 @@
   var directClassBtn = null
   var directClassPanel = null
   var directClassSource = null
+  var directStyleBtn = null
+  var directStylePanel = null
+  var directStyleSource = null
   var directPlusBtn = null
   var directOutline = null
   var directUndoBtn = null
@@ -2891,6 +2894,22 @@
         event.preventDefault()
         event.stopPropagation()
         openDirectClassPanel()
+      })
+    }
+    if (!directStyleBtn) {
+      directStyleBtn = directEl(
+        'button',
+        'position:fixed;display:none;z-index:2147483645;width:22px;height:22px;' +
+          'border-radius:11px;border:1px solid rgba(34,197,94,.65);' +
+          'background:rgba(15,23,42,.92);color:#bbf7d0;font-size:11px;' +
+          'line-height:20px;padding:0;cursor:pointer;pointer-events:auto;',
+        '🖌',
+      )
+      directStyleBtn.title = '编辑内联样式'
+      directStyleBtn.addEventListener('click', function (event) {
+        event.preventDefault()
+        event.stopPropagation()
+        openDirectStylePanel()
       })
     }
     if (!directPlusBtn) {
@@ -3163,6 +3182,164 @@
     })
   }
 
+  function addDirectStyleRow(panel, name, value, removable) {
+    var row = document.createElement('div')
+    row.setAttribute('data-vibe-style-row', 'true')
+    row.style.cssText =
+      'display:flex;gap:6px;align-items:center;margin-bottom:6px;'
+    var nameInput = document.createElement('input')
+    nameInput.setAttribute('data-vibe-style-key', 'true')
+    nameInput.value = name || ''
+    nameInput.placeholder = 'property'
+    nameInput.readOnly = Boolean(name)
+    nameInput.style.cssText =
+      'width:92px;padding:3px 6px;border-radius:5px;border:1px solid rgba(148,163,184,.35);' +
+      'background:rgba(2,6,23,.8);color:#e2e8f0;font-size:11px;'
+    var valueInput = document.createElement('input')
+    valueInput.setAttribute('data-vibe-style-value', 'true')
+    valueInput.value = value == null ? '' : String(value)
+    valueInput.placeholder = 'value'
+    valueInput.style.cssText =
+      'flex:1;min-width:0;padding:3px 6px;border-radius:5px;' +
+      'border:1px solid rgba(148,163,184,.35);background:rgba(2,6,23,.8);' +
+      'color:#e2e8f0;font-size:11px;'
+    var remove = document.createElement('button')
+    remove.type = 'button'
+    remove.setAttribute('data-vibe-style-remove', 'true')
+    remove.textContent = '×'
+    remove.style.cssText =
+      'width:20px;height:20px;border-radius:10px;border:1px solid rgba(248,113,113,.4);' +
+      'background:transparent;color:#fca5a5;cursor:pointer;font-size:11px;'
+    if (!removable) remove.style.visibility = 'hidden'
+    remove.addEventListener('click', function () {
+      row.remove()
+    })
+    row.appendChild(nameInput)
+    row.appendChild(valueInput)
+    row.appendChild(remove)
+    panel.appendChild(row)
+  }
+
+  function openDirectStylePanel() {
+    if (!directTarget) return
+    var source = readSource(directTarget)
+    if (!source || !hasSourceAnchor(source)) {
+      showDirectToast('目标没有源码锚点，无法修改样式')
+      return
+    }
+    directStyleSource = source
+    if (!directStylePanel) {
+      directStylePanel = directEl(
+        'div',
+        'position:fixed;display:none;z-index:2147483647;width:310px;padding:10px 12px;' +
+          'border-radius:10px;border:1px solid rgba(34,197,94,.35);' +
+          'background:rgba(15,23,42,.98);color:#e2e8f0;font-size:12px;' +
+          'pointer-events:auto;box-shadow:0 10px 30px rgba(0,0,0,.45);',
+      )
+      directStylePanel.setAttribute('data-vibe-style-panel', 'true')
+      var head = document.createElement('div')
+      head.style.cssText =
+        'display:flex;justify-content:space-between;align-items:center;' +
+        'margin-bottom:8px;font-weight:600;'
+      var title = document.createElement('span')
+      title.textContent = '编辑内联样式'
+      var close = document.createElement('button')
+      close.type = 'button'
+      close.textContent = '×'
+      close.style.cssText =
+        'border:0;background:transparent;color:#cbd5e1;cursor:pointer;font-size:14px;'
+      close.addEventListener('click', function () {
+        directStylePanel.style.display = 'none'
+      })
+      head.appendChild(title)
+      head.appendChild(close)
+      directStylePanel.appendChild(head)
+
+      var body = document.createElement('div')
+      body.setAttribute('data-vibe-style-body', 'true')
+      directStylePanel.appendChild(body)
+
+      var actions = document.createElement('div')
+      actions.style.cssText =
+        'display:flex;gap:8px;justify-content:space-between;align-items:center;margin-top:6px;'
+      var add = document.createElement('button')
+      add.type = 'button'
+      add.setAttribute('data-vibe-style-add', 'true')
+      add.textContent = '+ 新增'
+      add.style.cssText =
+        'padding:4px 8px;border-radius:6px;border:1px solid rgba(148,163,184,.3);' +
+        'background:transparent;color:#cbd5e1;cursor:pointer;font-size:11px;'
+      add.addEventListener('click', function () {
+        addDirectStyleRow(body, '', '', true)
+      })
+      var save = document.createElement('button')
+      save.type = 'button'
+      save.setAttribute('data-vibe-style-save', 'true')
+      save.textContent = '保存样式'
+      save.style.cssText =
+        'padding:4px 10px;border-radius:6px;border:1px solid rgba(34,197,94,.55);' +
+        'background:rgba(34,197,94,.15);color:#bbf7d0;cursor:pointer;font-size:11px;'
+      save.addEventListener('click', saveDirectStyle)
+      actions.appendChild(add)
+      actions.appendChild(save)
+      directStylePanel.appendChild(actions)
+    }
+
+    var body = directStylePanel.querySelector('[data-vibe-style-body]')
+    body.innerHTML = ''
+    var inlineStyle = directTarget.style
+    for (var index = 0; index < inlineStyle.length; index += 1) {
+      var property = inlineStyle[index]
+      addDirectStyleRow(
+        body,
+        property,
+        inlineStyle.getPropertyValue(property),
+        true,
+      )
+    }
+    var rect = directTarget.getBoundingClientRect()
+    directStylePanel.style.left = Math.max(8, rect.left) + 'px'
+    directStylePanel.style.top = Math.max(8, rect.bottom + 8) + 'px'
+    directStylePanel.style.display = 'block'
+  }
+
+  function saveDirectStyle() {
+    if (!directStyleSource || !directStylePanel) return
+    var body = directStylePanel.querySelector('[data-vibe-style-body]')
+    var rows = Array.prototype.slice.call(
+      body.querySelectorAll('[data-vibe-style-row]'),
+    )
+    var style = {}
+    var names = {}
+    for (var index = 0; index < rows.length; index += 1) {
+      var row = rows[index]
+      var keyInput = row.querySelector('[data-vibe-style-key]')
+      var valueInput = row.querySelector('[data-vibe-style-value]')
+      var key = String(keyInput.value || '').trim()
+      if (!key || names[key]) continue
+      names[key] = true
+      style[key] = String(valueInput.value || '')
+    }
+    var existing = directTarget.style
+    for (var index = 0; index < existing.length; index += 1) {
+      var property = existing[index]
+      if (!Object.prototype.hasOwnProperty.call(names, property)) {
+        style[property] = null
+      }
+    }
+    if (Object.keys(style).length === 0) {
+      showDirectToast('没有可保存的样式')
+      return
+    }
+    directStylePanel.style.display = 'none'
+    showDirectToast('正在保存样式…')
+    post('direct-style-update', {
+      projectId: directProjectId,
+      source: directStyleSource,
+      style: style,
+    })
+  }
+
   function directStyleContext(node) {
     var sibling = node && node.previousElementSibling
     while (sibling) {
@@ -3185,6 +3362,8 @@
     if (directPropsPanel) directPropsPanel.style.display = 'none'
     if (directClassBtn) directClassBtn.style.display = 'none'
     if (directClassPanel) directClassPanel.style.display = 'none'
+    if (directStyleBtn) directStyleBtn.style.display = 'none'
+    if (directStylePanel) directStylePanel.style.display = 'none'
     if (directPlusBtn) directPlusBtn.style.display = 'none'
     if (directMenu) directMenu.style.display = 'none'
     if (directConfirm) directConfirm.style.display = 'none'
@@ -3254,6 +3433,11 @@
       directClassBtn.style.left = Math.max(2, placed.left - 56) + 'px'
       directClassBtn.style.top = placed.top + 'px'
       directClassBtn.style.display = 'block'
+    }
+    if (directStyleBtn) {
+      directStyleBtn.style.left = Math.max(2, placed.left - 84) + 'px'
+      directStyleBtn.style.top = placed.top + 'px'
+      directStyleBtn.style.display = 'block'
     }
 
     var isContainer =

@@ -671,6 +671,40 @@ class DirectOperationPropsTest(unittest.TestCase):
         entries = self.store.list_for_project(PROJECT_ID)
         self.assertIn("样式类", entries[0].summary)
 
+    def test_update_style_rewrites_inline_props(self) -> None:
+        payload = DirectActionPayload.model_validate(
+            {
+                "directActionId": "dact_style",
+                "idempotencyKey": "proj_direct:dact_style",
+                "projectId": PROJECT_ID,
+                "sandboxId": SANDBOX_ID,
+                "tenantId": "tenant_local",
+                "baseRevision": BASE_SHA,
+                "action": "UPDATE_STYLE",
+                "target": {
+                    "anchorId": "anc_style",
+                    "file": "src/App.jsx",
+                    "selector": "[data-oid='oid_title']",
+                    "instance": 1,
+                    "instanceCount": 1,
+                },
+                "payload": {"style": {"fontSize": "20px", "opacity": 0.8}},
+                "options": {"source": "FLOATING_TOOLBAR", "dryRun": False},
+            }
+        )
+
+        response = self.service.execute(payload)
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "update_style")
+        self.assertEqual(
+            self.sandbox.edits[0]["style"],
+            {"fontSize": "20px", "opacity": 0.8},
+        )
+        self.assertEqual(self.sandbox.patches, [{"src/App.jsx": UPDATED}])
+        entries = self.store.list_for_project(PROJECT_ID)
+        self.assertIn("inline style", entries[0].summary)
+
     def test_update_props_call_site_in_map_requires_hitl(self) -> None:
         anchor = dict(_anchor())
         anchor.update(

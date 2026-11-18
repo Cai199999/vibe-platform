@@ -564,6 +564,120 @@ function main() {
     }
   }
 
+  // ---- Direct Ops：UPDATE_STYLE ----
+  if (operation === 'update_style') {
+    const target = findExactNode(ast, spec.anchorRange)
+    if (!target || target.type !== 'JSXElement' || !target.openingElement) {
+      return fail('ANCHOR_RANGE_MISMATCH', '样式更新目标必须是 JSX 元素')
+    }
+    const stylePatch = spec.style
+    if (
+      !stylePatch ||
+      typeof stylePatch !== 'object' ||
+      Array.isArray(stylePatch)
+    ) {
+      return fail('INVALID_STYLE', 'style 必须是对象')
+    }
+    const entries = Object.entries(stylePatch)
+    if (entries.length === 0 || entries.length > 30) {
+      return fail('INVALID_STYLE', '一次必须更新 1-30 个样式')
+    }
+    const updated = new Set()
+    for (const [name, value] of entries) {
+      if (!/^[A-Za-z][A-Za-z0-9]*$/.test(name) || name.length > 80) {
+        return fail('INVALID_STYLE', `非法样式名: ${name}`)
+      }
+      if (
+        value !== null &&
+        typeof value !== 'string' &&
+        typeof value !== 'number'
+      ) {
+        return fail('INVALID_STYLE', `样式 ${name} 只支持字符串/数字/null`)
+      }
+      if (typeof value === 'string' && /[;{}<>\r\n]/.test(value)) {
+        return fail('INVALID_STYLE', `样式 ${name} 包含非法字符`)
+      }
+      updated.add(name)
+    }
+
+    const opening = target.openingElement
+    const styleAttribute = (opening.attributes || []).find(
+      (attribute) =>
+        attribute.type === 'JSXAttribute' &&
+        attribute.name?.name === 'style',
+    )
+    let existingProperties = []
+    if (styleAttribute) {
+      if (
+        styleAttribute.value?.type !== 'JSXExpressionContainer' ||
+        styleAttribute.value.expression?.type !== 'ObjectExpression'
+      ) {
+        return fail(
+          'INVALID_STYLE',
+          '现有 style 不是静态对象，不能直接覆盖',
+        )
+      }
+      existingProperties =
+        styleAttribute.value.expression.properties || []
+    }
+
+    const parts = []
+    for (const property of existingProperties) {
+      if (
+        property.type === 'ObjectProperty' &&
+        !property.computed &&
+        property.key?.name &&
+        updated.has(property.key.name)
+      ) {
+        continue
+      }
+      parts.push(code.slice(property.start, property.end))
+    }
+    for (const [name, value] of entries) {
+      if (value === null) continue
+      if (typeof value === 'number') {
+        parts.push(`${name}: ${value}`)
+      } else {
+        const escaped = String(value)
+          .replace(/\\/g, '\\\\')
+          .replace(/"/g, '\\"')
+          .replace(/</g, '\\u003c')
+          .replace(/>/g, '\\u003e')
+        parts.push(`${name}: "${escaped}"`)
+      }
+    }
+    const styleText =
+      parts.length > 0 ? `style={{ ${parts.join(', ')} }}` : ''
+    let next
+    if (styleAttribute) {
+      next =
+        code.slice(0, styleAttribute.start) +
+        styleText +
+        code.slice(styleAttribute.end)
+    } else if (styleText) {
+      const insertAt = opening.end - (opening.selfClosing ? 2 : 1)
+      next =
+        `${code.slice(0, insertAt)} ${styleText}` + code.slice(insertAt)
+    } else {
+      next = code
+    }
+    let nextAst
+    try {
+      nextAst = parseCode(next, file, parser)
+    } catch (error) {
+      return fail('INVALID_STYLE', `样式更新后文件无法解析: ${error.message}`)
+    }
+    if (countJsxNodes(nextAst) !== countJsxNodes(ast)) {
+      return fail('STYLE_SCOPE_MISMATCH', '样式更新前后 JSX 节点数量不一致')
+    }
+    return {
+      status: 'OK',
+      content: next,
+      nodeCountBefore: countJsxNodes(ast),
+      nodeCountAfter: countJsxNodes(nextAst),
+    }
+  }
+
   // ---- Direct Ops：UPDATE_PROPS ----
   // 只改调用点 JSX 的属名 / 字面量；不执行表达式，不触碰组件定义。
   if (operation === 'update_props') {

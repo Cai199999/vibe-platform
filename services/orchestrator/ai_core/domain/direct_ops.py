@@ -20,6 +20,7 @@ DirectActionKind = Literal[
     "UPDATE_TEXT",
     "UPDATE_PROPS",
     "UPDATE_CLASS",
+    "UPDATE_STYLE",
     "DELETE_NODE",
     "DELETE_DATA_ITEM",
     "ADD_COMPONENT",
@@ -148,6 +149,44 @@ class DirectActionPayload(CamelModel):
                 raise ValueError("className 不能超过 500 字符")
             if any(char in class_name for char in "<>{}\n\r"):
                 raise ValueError("className 不能包含 < > { } 或换行")
+        if self.action == "UPDATE_STYLE":
+            style = self.payload.get("style")
+            if not isinstance(style, dict) or not style:
+                raise ValueError("UPDATE_STYLE 必须提供非空 payload.style")
+            if len(style) > 30:
+                raise ValueError("UPDATE_STYLE 一次最多更新 30 个样式")
+            forbidden_keys = {
+                "inset",
+                "top",
+                "left",
+                "right",
+                "bottom",
+            }
+            for key, value in style.items():
+                if (
+                    not isinstance(key, str)
+                    or not key
+                    or len(key) > 80
+                    or not key[0].isalpha()
+                    or not all(char.isalnum() for char in key)
+                ):
+                    raise ValueError(f"非法样式名: {key!r}")
+                if key in forbidden_keys:
+                    raise ValueError(f"样式 {key} 不允许直接编辑")
+                if value is None or isinstance(value, (int, float)):
+                    continue
+                if not isinstance(value, str):
+                    raise ValueError(f"样式 {key} 只支持字符串 / 数字 / null")
+                if len(value) > 200:
+                    raise ValueError(f"样式 {key} 超过 200 字符")
+                if any(char in value for char in ";{}<>\n\r"):
+                    raise ValueError(f"样式 {key} 包含非法字符")
+                if key == "position" and value.strip().lower() in {
+                    "absolute",
+                    "fixed",
+                    "sticky",
+                }:
+                    raise ValueError("不允许直接设置绝对/固定定位")
         if self.action == "MOVE_NODE":
             placement = self.target.placement or {}
             if not isinstance(placement, dict) or not (

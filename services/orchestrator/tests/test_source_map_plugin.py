@@ -246,6 +246,24 @@ export default function App() {
         self.assertEqual(edited["status"], "OK", edited)
         self.assertIn('className="text-red-600 font-bold"', edited["content"])
 
+    def test_update_style_ast_edit(self) -> None:
+        source_map = self._run_plugin()
+        h1 = next(item for item in source_map["nodes"].values() if item["tag"] == "h1")
+        edited = self._run_ast_edit(
+            {
+                "file": "src/App.jsx",
+                "operation": "update_style",
+                "anchorRange": {
+                    "startOffset": h1["start"],
+                    "endOffset": h1["end"],
+                },
+                "style": {"fontSize": "20px", "color": "red"},
+            }
+        )
+        self.assertEqual(edited["status"], "OK", edited)
+        self.assertIn('fontSize: "20px"', edited["content"])
+        self.assertIn('color: "red"', edited["content"])
+
     def test_static_map_source_and_delete_array_item(self) -> None:
         source = """const items = [
   { name: 'A' },

@@ -260,6 +260,24 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
             )
         return ScopeDecision(True, "instance", "direct")
 
+    if action == "UPDATE_STYLE":
+        if identity.kind == "map_item" or _repeated_instances(identity) > 1:
+            return _template_hitl(identity, "修改样式")
+        if identity.is_protected or identity.is_shared:
+            return ScopeDecision(
+                allowed=False,
+                scope="definition",
+                strategy="hitl",
+                reasons=["共享组件的 inline style 修改会影响全部实例"],
+                options=[
+                    _option(
+                        "edit_definition", "修改组件定义（影响全部）", "DEFINITION"
+                    ),
+                    _option("cancel", "取消", "CANCEL"),
+                ],
+            )
+        return ScopeDecision(True, "instance", "direct")
+
     if action == "UPDATE_TEXT":
         if identity.kind == "map_item":
             return ScopeDecision(

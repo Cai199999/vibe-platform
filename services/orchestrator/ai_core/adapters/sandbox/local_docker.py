@@ -1970,6 +1970,7 @@ class LocalDockerSandbox(SandboxProvider):
             "modify",
             "update_text",
             "update_props",
+            "update_style",
             "delete_array_item",
             "move_node",
         }:
@@ -1999,6 +2000,7 @@ class LocalDockerSandbox(SandboxProvider):
             "props": dict(edit.get("props") or {}),
             "arrayRange": edit.get("arrayRange") or {},
             "itemIndex": edit.get("itemIndex"),
+            "style": dict(edit.get("style") or {}),
         }
         # 同文件多编辑：服务端把前一条结果作为下一条输入，绝不接受模型传入。
         override = edit.get("contentOverride")
