@@ -199,41 +199,69 @@ async function main() {
       props: callSite.props,
     })
 
-    const revisionResponse = await fetch(
-      `${BFF}/api/v1/direct-ops/revision?projectId=${projectId}` +
-        `&sandboxId=${imported.sandboxId}`,
-    )
-    if (!revisionResponse.ok) {
-      throw new Error(`revision failed: ${await revisionResponse.text()}`)
+    // 通过画布 Props 面板修改调用点，而不是直接调 API。
+    await page.goto(`${WEB}/workspace`, { waitUntil: 'domcontentloaded' })
+    const panelViewResult = page.getByRole('button', { name: /查看效果/ })
+    if (await panelViewResult.isVisible().catch(() => false)) {
+      await panelViewResult.click()
     }
-    const revision = (await revisionResponse.json()).revision
-
-    const directActionId = `dact_props_${Date.now()}`
-    const directStarted = Date.now()
-    const directResponse = await fetch(
-      `${BFF}/api/v1/direct-ops/actions`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          directActionId,
-          idempotencyKey: `${projectId}:${directActionId}`,
-          projectId,
-          sandboxId: imported.sandboxId,
-          tenantId: 'tenant_local',
-          baseRevision: revision,
-          action: 'UPDATE_PROPS',
-          target: {
-            anchorId: 'anc_call_site_e2e',
-            callSiteOid: callSite.oid,
-          },
-          payload: { props: { title: '来自调用点的新标题' } },
-          options: { source: 'FLOATING_TOOLBAR', dryRun: false },
-        }),
+    await page.locator('.tab-window.is-active .runtime-preview-frame').waitFor({
+      state: 'visible',
+      timeout: 60000,
+    })
+    const panelHost = new URL(imported.previewUrl).host
+    const findFrame = () =>
+      page.frames().find((item) => item.url().includes(panelHost))
+    let panelFrame = findFrame()
+    await panelFrame.waitForSelector('text=原始标题', { timeout: 60000 })
+    await panelFrame.evaluate(() => {
+      const node = [...document.querySelectorAll('section')].find((item) =>
+        item.textContent.includes('原始标题'),
+      )
+      if (!node) throw new Error('UserCard target not found')
+      node.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, cancelable: true }),
+      )
+    })
+    await panelFrame.waitForFunction(
+      () => {
+        const button = document.querySelector(
+          'button[title="编辑组件 Props"]',
+        )
+        return Boolean(button && button.style.display !== 'none')
       },
+      null,
+      { timeout: 20000 },
     )
+    await panelFrame.evaluate(() => {
+      document.querySelector('button[title="编辑组件 Props"]').click()
+    })
+    await panelFrame.waitForFunction(
+      () => {
+        const panel = document.querySelector('[data-vibe-props-panel]')
+        return Boolean(panel && panel.style.display !== 'none')
+      },
+      null,
+      { timeout: 10000 },
+    )
+    await panelFrame.evaluate(() => {
+      const input = document.querySelector('[data-vibe-prop-value]')
+      input.value = '来自调用点的新标题'
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const directStarted = Date.now()
+    const directResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        response.url().includes('/api/v1/direct-ops/actions'),
+      { timeout: 60000 },
+    )
+    await panelFrame.evaluate(() => {
+      document.querySelector('[data-vibe-props-save]').click()
+    })
+    const directResponse = await directResponsePromise
     const directBody = await directResponse.json()
-    if (directResponse.status !== 200 || directBody.status !== 'SUCCEEDED') {
+    if (directResponse.status() !== 200 || directBody.status !== 'SUCCEEDED') {
       throw new Error(`direct props update failed: ${JSON.stringify(directBody)}`)
     }
     const syncStatus = directBody.sourceSync?.status

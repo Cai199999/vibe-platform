@@ -1985,6 +1985,40 @@ export default function WorkspacePage() {
         })
         return
       }
+      if (data.type === 'direct-props-update') {
+        const payload = data.payload || {}
+        const targetProjectId = payload.projectId || activeTabId
+        void handleDirectAction(targetProjectId, {
+          action: 'UPDATE_PROPS',
+          dryRun: false,
+          target: payload.source,
+          payload: { props: payload.props || {} },
+        })
+          .then((result) => {
+            if (result?.status === 'SUCCEEDED') {
+              reply(event.source, 'direct-result', {
+                ok: true,
+                message: 'Props 已保存',
+              })
+              return
+            }
+            reply(event.source, 'direct-result', {
+              ok: false,
+              requiresHuman: result?.status === 'HITL_REQUIRED',
+              message:
+                result?.status === 'HITL_REQUIRED'
+                  ? '该操作会影响多个实例，请选择修改范围'
+                  : `Props 保存未完成：${result?.status || '未知状态'}`,
+            })
+          })
+          .catch((cause) => {
+            reply(event.source, 'direct-result', {
+              ok: false,
+              message: `Props 保存失败：${cause?.message || cause}`,
+            })
+          })
+        return
+      }
       if (data.type === 'direct-delete-request') {
         const payload = data.payload || {}
         const targetProjectId = payload.projectId || activeTabId

@@ -859,6 +859,7 @@
             endOffset: Number(callSite.end),
           }
         : null
+    var callSiteProps = (callSite && callSite.props) || {}
     var instancePath = computeInstancePath(node)
     var deleteSafe =
       Boolean(mapped && mapped.deleteSafe) &&
@@ -875,6 +876,7 @@
       callSiteRange: callSiteRange,
       callSiteConfidence: callSiteConfidence,
       callSiteAmbiguous: callSiteAmbiguous,
+      callSiteProps: callSiteProps,
       instancePath: instancePath,
       instanceKey: instanceKeyOf(instancePath),
       containerScope: containerScope,
@@ -899,6 +901,7 @@
       callSiteRange: callSiteRange,
       callSiteConfidence: callSiteConfidence,
       callSiteAmbiguous: callSiteAmbiguous,
+      callSiteProps: callSiteProps,
       instancePath: instancePath,
       instanceKey: instanceKeyOf(instancePath),
       containerScope: containerScope,
@@ -1048,6 +1051,7 @@
       callSiteRange: source.callSiteRange || null,
       callSiteConfidence: source.callSiteConfidence || 'none',
       callSiteAmbiguous: Boolean(source.callSiteAmbiguous),
+      callSiteProps: source.callSiteProps || {},
       instancePath: source.instancePath || [],
       instanceKey: source.instanceKey || '',
       containerScope: source.containerScope || 'local',
@@ -1102,6 +1106,7 @@
       callSiteRange: null,
       callSiteConfidence: 'none',
       callSiteAmbiguous: false,
+      callSiteProps: {},
       instancePath: [],
       instanceKey: '',
       containerScope: 'local',
@@ -2758,6 +2763,9 @@
   var directProjectId = ''
   var directBound = false
   var directDeleteBtn = null
+  var directPropsBtn = null
+  var directPropsPanel = null
+  var directPropsSource = null
   var directPlusBtn = null
   var directOutline = null
   var directUndoBtn = null
@@ -2850,6 +2858,22 @@
         }
       })
     }
+    if (!directPropsBtn) {
+      directPropsBtn = directEl(
+        'button',
+        'position:fixed;display:none;z-index:2147483645;width:22px;height:22px;' +
+          'border-radius:11px;border:1px solid rgba(96,165,250,.65);' +
+          'background:rgba(15,23,42,.92);color:#bfdbfe;font-size:12px;' +
+          'line-height:20px;padding:0;cursor:pointer;pointer-events:auto;',
+        '⚙',
+      )
+      directPropsBtn.title = '编辑组件 Props'
+      directPropsBtn.addEventListener('click', function (event) {
+        event.preventDefault()
+        event.stopPropagation()
+        openDirectPropsPanel()
+      })
+    }
     if (!directPlusBtn) {
       directPlusBtn = directEl(
         'button',
@@ -2867,6 +2891,176 @@
         openDirectMenu()
       })
     }
+  }
+
+  function addDirectPropRow(panel, name, value, removable) {
+    var row = document.createElement('div')
+    row.setAttribute('data-vibe-prop-row', 'true')
+    row.style.cssText =
+      'display:flex;gap:6px;align-items:center;margin-bottom:6px;'
+    var nameInput = document.createElement('input')
+    nameInput.setAttribute('data-vibe-prop-name', 'true')
+    nameInput.value = name || ''
+    nameInput.placeholder = 'prop'
+    nameInput.readOnly = Boolean(name)
+    nameInput.style.cssText =
+      'width:78px;padding:3px 6px;border-radius:5px;border:1px solid rgba(148,163,184,.35);' +
+      'background:rgba(2,6,23,.8);color:#e2e8f0;font-size:11px;'
+    var valueInput = document.createElement('input')
+    valueInput.setAttribute('data-vibe-prop-value', 'true')
+    valueInput.value = value == null ? '' : String(value)
+    valueInput.placeholder = 'value'
+    valueInput.style.cssText =
+      'flex:1;min-width:0;padding:3px 6px;border-radius:5px;' +
+      'border:1px solid rgba(148,163,184,.35);background:rgba(2,6,23,.8);' +
+      'color:#e2e8f0;font-size:11px;'
+    var remove = document.createElement('button')
+    remove.type = 'button'
+    remove.setAttribute('data-vibe-prop-remove', 'true')
+    remove.textContent = '×'
+    remove.style.cssText =
+      'width:20px;height:20px;border-radius:10px;border:1px solid rgba(248,113,113,.4);' +
+      'background:transparent;color:#fca5a5;cursor:pointer;font-size:11px;'
+    if (!removable) remove.style.visibility = 'hidden'
+    remove.addEventListener('click', function () {
+      row.remove()
+    })
+    row.appendChild(nameInput)
+    row.appendChild(valueInput)
+    row.appendChild(remove)
+    panel.appendChild(row)
+  }
+
+  function openDirectPropsPanel() {
+    if (
+      !directTargetSource ||
+      !directTargetSource.callSiteOid ||
+      directTargetSource.callSiteAmbiguous
+    ) {
+      showDirectToast('该节点没有唯一的组件调用点，无法直接编辑 Props')
+      return
+    }
+    directPropsSource = directTargetSource
+    if (!directPropsPanel) {
+      directPropsPanel = directEl(
+        'div',
+        'position:fixed;display:none;z-index:2147483647;width:280px;padding:10px 12px;' +
+          'border-radius:10px;border:1px solid rgba(148,163,184,.4);' +
+          'background:rgba(15,23,42,.98);color:#e2e8f0;font-size:12px;' +
+          'pointer-events:auto;box-shadow:0 10px 30px rgba(0,0,0,.45);',
+      )
+      directPropsPanel.setAttribute('data-vibe-props-panel', 'true')
+      var head = document.createElement('div')
+      head.style.cssText =
+        'display:flex;justify-content:space-between;align-items:center;' +
+        'margin-bottom:8px;font-weight:600;'
+      var title = document.createElement('span')
+      title.textContent = '编辑 Props'
+      var close = document.createElement('button')
+      close.type = 'button'
+      close.textContent = '×'
+      close.style.cssText =
+        'border:0;background:transparent;color:#cbd5e1;cursor:pointer;font-size:14px;'
+      close.addEventListener('click', function () {
+        directPropsPanel.style.display = 'none'
+      })
+      head.appendChild(title)
+      head.appendChild(close)
+      directPropsPanel.appendChild(head)
+
+      var body = document.createElement('div')
+      body.setAttribute('data-vibe-props-body', 'true')
+      directPropsPanel.appendChild(body)
+
+      var note = document.createElement('div')
+      note.setAttribute('data-vibe-props-note', 'true')
+      note.style.cssText = 'color:#94a3b8;font-size:10.5px;margin:4px 0 8px;'
+      directPropsPanel.appendChild(note)
+
+      var actions = document.createElement('div')
+      actions.style.cssText =
+        'display:flex;gap:8px;justify-content:space-between;align-items:center;'
+      var add = document.createElement('button')
+      add.type = 'button'
+      add.setAttribute('data-vibe-prop-add', 'true')
+      add.textContent = '+ 新增'
+      add.style.cssText =
+        'padding:4px 8px;border-radius:6px;border:1px solid rgba(148,163,184,.3);' +
+        'background:transparent;color:#cbd5e1;cursor:pointer;font-size:11px;'
+      add.addEventListener('click', function () {
+        addDirectPropRow(body, '', '', true)
+      })
+      var save = document.createElement('button')
+      save.type = 'button'
+      save.setAttribute('data-vibe-props-save', 'true')
+      save.textContent = '保存 Props'
+      save.style.cssText =
+        'padding:4px 10px;border-radius:6px;border:1px solid rgba(96,165,250,.6);' +
+        'background:rgba(96,165,250,.15);color:#bfdbfe;cursor:pointer;font-size:11px;'
+      save.addEventListener('click', saveDirectProps)
+      actions.appendChild(add)
+      actions.appendChild(save)
+      directPropsPanel.appendChild(actions)
+    }
+
+    var body = directPropsPanel.querySelector('[data-vibe-props-body]')
+    var note = directPropsPanel.querySelector('[data-vibe-props-note]')
+    body.innerHTML = ''
+    var props = directPropsSource.callSiteProps || {}
+    var expressionNames = []
+    Object.keys(props).forEach(function (name) {
+      var value = props[name]
+      if (value === '<expression>') {
+        expressionNames.push(name)
+        return
+      }
+      addDirectPropRow(body, name, value, true)
+    })
+    note.textContent = expressionNames.length
+      ? '表达式 Props 请在源码中修改：' + expressionNames.join(', ')
+      : '只支持文本 / 数字 / 布尔字面量；删除留空后点 ×。'
+    var rect = directTarget.getBoundingClientRect()
+    directPropsPanel.style.left = Math.max(8, rect.left) + 'px'
+    directPropsPanel.style.top = Math.max(8, rect.bottom + 8) + 'px'
+    directPropsPanel.style.display = 'block'
+  }
+
+  function saveDirectProps() {
+    if (!directPropsSource || !directPropsPanel) return
+    var body = directPropsPanel.querySelector('[data-vibe-props-body]')
+    var rows = Array.prototype.slice.call(
+      body.querySelectorAll('[data-vibe-prop-row]'),
+    )
+    var props = {}
+    var names = {}
+    for (var index = 0; index < rows.length; index += 1) {
+      var row = rows[index]
+      var nameInput = row.querySelector('[data-vibe-prop-name]')
+      var valueInput = row.querySelector('[data-vibe-prop-value]')
+      var name = String(nameInput.value || '').trim()
+      if (!name || names[name]) continue
+      names[name] = true
+      var value = valueInput.value
+      if (value === 'true') props[name] = true
+      else if (value === 'false') props[name] = false
+      else props[name] = value
+    }
+    // 原 Props 中已删除的行 → null，由 AST 编辑移除该属性。
+    Object.keys(directPropsSource.callSiteProps || {}).forEach(function (name) {
+      if (directPropsSource.callSiteProps[name] === '<expression>') return
+      if (!Object.prototype.hasOwnProperty.call(names, name)) props[name] = null
+    })
+    if (Object.keys(props).length === 0) {
+      showDirectToast('没有可保存的 Props')
+      return
+    }
+    directPropsPanel.style.display = 'none'
+    showDirectToast('正在保存 Props…')
+    post('direct-props-update', {
+      projectId: directProjectId,
+      source: directPropsSource,
+      props: props,
+    })
   }
 
   function directStyleContext(node) {
@@ -2887,6 +3081,8 @@
   function hideDirectUi() {
     if (directOutline) directOutline.style.display = 'none'
     if (directDeleteBtn) directDeleteBtn.style.display = 'none'
+    if (directPropsBtn) directPropsBtn.style.display = 'none'
+    if (directPropsPanel) directPropsPanel.style.display = 'none'
     if (directPlusBtn) directPlusBtn.style.display = 'none'
     if (directMenu) directMenu.style.display = 'none'
     if (directConfirm) directConfirm.style.display = 'none'
@@ -2941,6 +3137,17 @@
     directDeleteBtn.style.left = placed.left + 'px'
     directDeleteBtn.style.top = placed.top + 'px'
     directDeleteBtn.style.display = 'block'
+    if (
+      directPropsBtn &&
+      source.callSiteOid &&
+      !source.callSiteAmbiguous
+    ) {
+      directPropsBtn.style.left = Math.max(2, placed.left - 28) + 'px'
+      directPropsBtn.style.top = placed.top + 'px'
+      directPropsBtn.style.display = 'block'
+    } else if (directPropsBtn) {
+      directPropsBtn.style.display = 'none'
+    }
 
     var isContainer =
       String(sourceNode.getAttribute('data-source-kind') || '') === 'container' ||
