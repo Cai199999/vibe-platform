@@ -2774,6 +2774,8 @@
   var directStyleSource = null
   var directPlusBtn = null
   var directOutline = null
+  var directSubtreeOutlines = []
+  var directScopeBadge = null
   var directUndoBtn = null
   var directMenu = null
   var directConfirm = null
@@ -3355,7 +3357,61 @@
     }
   }
 
+  function clearSubtreeHighlight() {
+    directSubtreeOutlines.forEach(function (outline) {
+      outline.remove()
+    })
+    directSubtreeOutlines = []
+    if (directScopeBadge) directScopeBadge.style.display = 'none'
+  }
+
+  /**
+   * 父容器操作高亮：目标本身 + 全部后代节点。
+   * 删除/移动会连同子树一起生效，用户必须能一眼看到影响范围。
+   */
+  function renderSubtreeHighlight(node) {
+    clearSubtreeHighlight()
+    if (!node) return
+    var descendants = node.querySelectorAll(
+      '[data-oid], [data-source], [data-source-file], [data-node-id]',
+    )
+    var count = 0
+    for (var index = 0; index < descendants.length && count < 80; index += 1) {
+      var child = descendants[index]
+      if (child === node) continue
+      var rect = child.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) continue
+      var outline = directEl(
+        'div',
+        'position:fixed;display:block;pointer-events:none;z-index:2147483643;' +
+          'border:1px dashed rgba(168,85,247,.55);border-radius:3px;' +
+          'background:rgba(168,85,247,.04);box-sizing:border-box;',
+      )
+      outline.style.left = rect.left + 'px'
+      outline.style.top = rect.top + 'px'
+      outline.style.width = rect.width + 'px'
+      outline.style.height = rect.height + 'px'
+      directSubtreeOutlines.push(outline)
+      count += 1
+    }
+    if (count === 0) return
+    if (!directScopeBadge) {
+      directScopeBadge = directEl(
+        'div',
+        'position:fixed;display:none;pointer-events:none;z-index:2147483646;' +
+          'padding:2px 7px;border-radius:999px;background:rgba(88,28,135,.95);' +
+          'border:1px solid rgba(192,132,252,.6);color:#f3e8ff;font-size:10.5px;',
+      )
+    }
+    directScopeBadge.textContent = '将影响 ' + count + ' 个子节点'
+    var rect = node.getBoundingClientRect()
+    directScopeBadge.style.left = Math.max(2, rect.left) + 'px'
+    directScopeBadge.style.top = Math.max(2, rect.top - 22) + 'px'
+    directScopeBadge.style.display = 'block'
+  }
+
   function hideDirectUi() {
+    clearSubtreeHighlight()
     if (directOutline) directOutline.style.display = 'none'
     if (directDeleteBtn) directDeleteBtn.style.display = 'none'
     if (directPropsBtn) directPropsBtn.style.display = 'none'
@@ -3439,6 +3495,7 @@
       directStyleBtn.style.top = placed.top + 'px'
       directStyleBtn.style.display = 'block'
     }
+    renderSubtreeHighlight(sourceNode)
 
     var isContainer =
       String(sourceNode.getAttribute('data-source-kind') || '') === 'container' ||

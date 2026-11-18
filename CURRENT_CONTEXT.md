@@ -28,7 +28,8 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 多调用点消歧：优先 React dev `_debugSource` 精确定位；无 Fiber 时按源码顺序 + 运行时实例序号，仍不确定保持 HITL。
 - 多实例：SDK 上报 instancePath（父 oid 链 + 同模板序号）；模板/重复实例修改返回 HITL_REQUIRED + 范围选项。
 - 数据源删除：静态数组（字面量/同文件变量）可确定性删除对应元素；动态数据仍明确 HANDOFF_TO_AI。
-- 容器作用域：Source Map 标注 containerScope=local/component_definition/repeated_template/call_site_slot；local 与唯一调用点 children 插槽自动执行，组件定义/重复模板落点走 HITL。
+- 容器作用域：Source Map 标注 containerScope=local/component_definition/repeated_template/call_site_slot；local 与 call_site_slot 直接落位，跨文件仍拒绝。
+- 低级操作不转 Agent：父容器删除/移动连同子树直接执行；共享/循环/多实例不再 handoff，由 SDK 悬停高亮全部子节点提示影响范围。
 - SourceSync 边界：删除文件从快照移除；失败任务落盘 JSON 队列，后台指数退避重试。
 - 本地 CI：`scripts/ci_local.sh` 串行跑 Python 727 / 前端 68 + build / BFF 23；`RUN_E2E=1` 可追加浏览器 E2E。
 - 终极路线：`docs/design/16_平台终极目标与路线图.md` 固化六维目标；M1 闭环进行中。

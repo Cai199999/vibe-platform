@@ -229,8 +229,32 @@ async function main() {
     const previewHost = new URL(imported.previewUrl).host
     const findPreviewFrame = () =>
       page.frames().find((item) => item.url().includes(previewHost))
+    const waitForPreviewFrame = async (timeout = 30000) => {
+      const started = Date.now()
+      while (Date.now() - started < timeout) {
+        const current = findPreviewFrame()
+        if (current) return current
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      }
+      throw new Error('preview frame not found after reload')
+    }
     let frame = findPreviewFrame()
     await frame.waitForSelector('text=可删除节点', { timeout: 60000 })
+
+    // 父容器高亮：悬停 main 应显示整棵子树的影响提示。
+    await frame.evaluate(() => {
+      const node = document.querySelector('main')
+      if (!node) throw new Error('main not found')
+      node.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, cancelable: true }),
+      )
+    })
+    await frame.waitForFunction(
+      () => document.documentElement.innerText.includes('将影响'),
+      null,
+      { timeout: 10000 },
+    )
+    log('subtree highlight ok')
 
     // 画布样式类面板：先把 p 的 className 改掉。
     await frame.evaluate(() => {
@@ -300,7 +324,7 @@ async function main() {
     })
 
     // HMR 后 iframe 会重建，重新绑定 frame 再操作删除。
-    frame = findPreviewFrame()
+    frame = await waitForPreviewFrame()
     await frame.waitForSelector('text=可删除节点', { timeout: 60000 })
 
     // 画布 inline style 面板：新增 fontSize。
@@ -382,7 +406,7 @@ async function main() {
       totalMs: styleBody.timings?.totalMs,
     })
 
-    frame = findPreviewFrame()
+    frame = await waitForPreviewFrame()
     await frame.waitForSelector('text=可删除节点', { timeout: 60000 })
     await frame.evaluate(() => {
       const node = [...document.querySelectorAll('p')].find((item) =>

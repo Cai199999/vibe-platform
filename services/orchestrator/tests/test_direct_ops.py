@@ -294,10 +294,9 @@ class DirectOperationMoveTest(unittest.TestCase):
 
         response = self.service.execute(_move_payload())
 
-        self.assertEqual(response.status, "HITL_REQUIRED")
-        self.assertEqual(response.risk, "L2_HITL")
-        self.assertTrue(response.decision_id)
-        self.assertEqual(self.sandbox.edits, [])
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(response.risk, "L0_DIRECT")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "move_node")
 
     def test_shared_component_moves_at_call_site(self) -> None:
         self.sandbox.anchor = {
@@ -495,10 +494,9 @@ class DirectOperationDeleteTest(unittest.TestCase):
 
         response = self.service.execute(_delete_payload())
 
-        self.assertEqual(response.status, "HITL_REQUIRED")
-        self.assertEqual(response.risk, "L2_HITL")
-        self.assertTrue(response.decision_id)
-        self.assertEqual(self.sandbox.edits, [])
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(response.risk, "L0_DIRECT")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "delete")
 
     def test_shared_component_deletes_call_site_instance(self) -> None:
         self.sandbox.anchor = {
@@ -545,10 +543,9 @@ class DirectOperationDeleteTest(unittest.TestCase):
 
         response = self.service.execute(payload)
 
-        self.assertEqual(response.status, "HITL_REQUIRED")
-        self.assertEqual(response.risk, "L2_HITL")
-        self.assertTrue(response.options)
-        self.assertEqual(self.sandbox.patches, [])
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(response.risk, "L0_DIRECT")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "delete")
 
     def test_delete_node_count_mismatch_blocks_write(self) -> None:
         original = self.sandbox.apply_ast_edit
@@ -758,15 +755,13 @@ class DirectOperationPropsTest(unittest.TestCase):
 
         response = service.execute(payload)
 
-        self.assertEqual(response.status, "HITL_REQUIRED")
-        self.assertEqual(response.risk, "L2_HITL")
-        self.assertTrue(response.decision_id)
-        self.assertTrue(response.options)
-        self.assertIn(
-            "oid_list[0]/oid_card[0]",
-            " ".join(response.reasons),
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(response.risk, "L0_DIRECT")
+        self.assertEqual(sandbox.edits[0]["operation"], "update_props")
+        self.assertEqual(
+            sandbox.edits[0]["props"],
+            {"title": "x"},
         )
-        self.assertEqual(sandbox.edits, [])
 
     def test_update_props_without_call_site_is_blocked(self) -> None:
         anchor = dict(_anchor())
@@ -804,11 +799,10 @@ class DirectOperationPropsTest(unittest.TestCase):
             }
         )
 
-        response = service.execute(payload)
+        with self.assertRaises(DirectActionError) as raised:
+            service.execute(payload)
 
-        self.assertEqual(response.status, "HITL_REQUIRED")
-        self.assertEqual(response.risk, "L2_HITL")
-        self.assertTrue(response.options)
+        self.assertEqual(raised.exception.code, DirectErrorCode.UNSAFE_OPERATION)
         self.assertEqual(sandbox.edits, [])
 
 
@@ -844,33 +838,48 @@ class DataItemDeleteDecisionTest(unittest.TestCase):
         with service_module._COMPLETED_LOCK:
             service_module._COMPLETED.clear()
 
+    def _data_payload(self) -> DirectActionPayload:
+        return DirectActionPayload.model_validate(
+            {
+                "directActionId": "dact_data",
+                "idempotencyKey": "proj_direct:dact_data",
+                "projectId": PROJECT_ID,
+                "sandboxId": SANDBOX_ID,
+                "tenantId": "tenant_local",
+                "baseRevision": BASE_SHA,
+                "action": "DELETE_DATA_ITEM",
+                "target": {
+                    "anchorId": "anc_data",
+                    "file": "src/App.jsx",
+                    "selector": "[data-oid='oid_item']",
+                    "instance": 2,
+                    "instanceCount": 2,
+                },
+                "payload": {},
+                "options": {"source": "FLOATING_TOOLBAR", "dryRun": False},
+            }
+        )
+
     def test_remove_data_item_executes_deterministic_array_delete(self) -> None:
-        analysis = self.service.analyze_delete(_delete_payload())
-        decision_id = str(analysis.get("decisionId") or "")
-        self.assertTrue(decision_id)
+        response = self.service.execute(self._data_payload())
 
-        result = self.service.decide(decision_id, "remove_data_item")
-
-        self.assertEqual(result["status"], "SUCCEEDED")
-        self.assertTrue(result["committed"])
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertTrue(response.commit_hash)
         self.assertEqual(self.sandbox.edits[0]["operation"], "delete_array_item")
         self.assertEqual(self.sandbox.edits[0]["itemIndex"], 1)
         self.assertEqual(self.sandbox.patches, [{"src/App.jsx": UPDATED}])
         entries = self.store.list_for_project(PROJECT_ID)
         self.assertIn("数据源的第 2 项", entries[0].summary)
 
-    def test_dynamic_map_source_hands_off_to_ai(self) -> None:
+    def test_dynamic_map_source_requires_hitl(self) -> None:
         self.sandbox.anchor = {
             **self.sandbox.anchor,
             "mapSource": {"kind": "dynamic", "variable": "items"},
         }
-        analysis = self.service.analyze_delete(_delete_payload())
-        decision_id = str(analysis.get("decisionId") or "")
 
-        result = self.service.decide(decision_id, "remove_data_item")
+        response = self.service.execute(self._data_payload())
 
-        self.assertEqual(result["status"], "HANDOFF_TO_AI")
-        self.assertFalse(result["applied"])
+        self.assertEqual(response.status, "HITL_REQUIRED")
         self.assertEqual(self.sandbox.edits, [])
 
 
@@ -1053,11 +1062,9 @@ class DirectOperationServiceTest(unittest.TestCase):
 
         response = self.service.execute(payload)
 
-        self.assertEqual(response.status, "HITL_REQUIRED")
-        self.assertEqual(response.risk, "L2_HITL")
-        self.assertTrue(response.decision_id)
-        self.assertTrue(response.options)
-        self.assertEqual(self.sandbox.patches, [])
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(response.risk, "L0_DIRECT")
+        self.assertEqual(self.sandbox.patches, [{"src/App.jsx": UPDATED}])
 
         dry = _payload(
             directActionId="dact_dry_shared",
@@ -1068,7 +1075,7 @@ class DirectOperationServiceTest(unittest.TestCase):
         self.direct_action_ids.append(dry.direct_action_id)
         response = self.service.execute(dry)
         self.assertEqual(response.status, "DRY_RUN")
-        self.assertEqual(response.risk, "L2_HITL")
+        self.assertEqual(response.risk, "L0_DIRECT")
 
     def test_project_busy_returns_direct_error(self) -> None:
         lease = project_write_lock.acquire(PROJECT_ID, owner="ai-run", timeout=1)
@@ -1110,7 +1117,7 @@ class NodeIdentityScopePolicyTest(unittest.TestCase):
         data.update(overrides)
         return NodeIdentity(**data)
 
-    def test_instance_path_repeated_template_forces_hitl(self) -> None:
+    def test_instance_path_repeated_template_is_direct(self) -> None:
         from ai_core.direct_ops.scope_policy import decide_scope
 
         identity = self._identity(
@@ -1123,11 +1130,8 @@ class NodeIdentityScopePolicyTest(unittest.TestCase):
         )
         decision = decide_scope("UPDATE_TEXT", identity)
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.scope, "all_instances")
-        self.assertEqual(decision.strategy, "hitl")
-        self.assertTrue(any("3 个实例" in reason for reason in decision.reasons))
-        self.assertIn("oid_list[0]/oid_item[2]", " ".join(decision.reasons))
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.strategy, "direct")
 
     def test_leaf_delete_is_direct_instance(self) -> None:
         from ai_core.direct_ops.scope_policy import decide_scope
@@ -1137,20 +1141,15 @@ class NodeIdentityScopePolicyTest(unittest.TestCase):
         self.assertEqual(decision.scope, "instance")
         self.assertEqual(decision.strategy, "direct")
 
-    def test_map_item_delete_returns_hitl_options(self) -> None:
+    def test_map_item_delete_is_direct(self) -> None:
         from ai_core.direct_ops.scope_policy import decide_scope
 
         decision = decide_scope(
             "DELETE_NODE",
             self._identity(kind="map_item", in_map=True),
         )
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.scope, "data_source")
-        self.assertTrue(decision.options)
-        self.assertEqual(
-            {item["action"] for item in decision.options},
-            {"AI_DATA_EDIT", "VISUAL_ONLY", "CANCEL"},
-        )
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.strategy, "direct")
 
     def test_route_root_delete_uses_placeholder(self) -> None:
         from ai_core.direct_ops.scope_policy import decide_scope
@@ -1175,10 +1174,8 @@ class NodeIdentityScopePolicyTest(unittest.TestCase):
                 is_shared=True,
             ),
         )
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.scope, "all_instances")
-        self.assertEqual(decision.strategy, "hitl")
-        self.assertTrue(decision.options)
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.strategy, "direct")
 
 
 class DeleteStaticAnalysisTest(unittest.TestCase):
@@ -1268,11 +1265,10 @@ class DeleteStaticAnalysisTest(unittest.TestCase):
 
         result = service.analyze_delete(payload)
 
-        self.assertFalse(result["safe"])
+        self.assertTrue(result["safe"])
         self.assertTrue(result["inMap"])
-        self.assertIn("数据源", "；".join(result["reasons"]))
 
-    def test_map_item_visual_hide_consumes_decision_without_code_write(self) -> None:
+    def test_map_item_delete_analysis_is_direct(self) -> None:
         sandbox = _FakeSandbox(
             anchor={
                 **_anchor(),
@@ -1299,22 +1295,9 @@ class DeleteStaticAnalysisTest(unittest.TestCase):
         )
 
         analysis = service.analyze_delete(payload)
-        self.assertTrue(analysis["decisionId"].startswith("ddec_"))
-        self.assertEqual(analysis["strategy"], "hitl")
 
-        decision = service.decide(analysis["decisionId"], "visual_hide")
-
-        self.assertEqual(decision["status"], "VISUAL_ONLY")
-        self.assertFalse(decision["applied"])
-        self.assertFalse(decision["committed"])
-        self.assertEqual(len(sandbox.patches), 0)
-        entries = store.list_for_project(PROJECT_ID)
-        self.assertEqual(len(entries), 1)
-        self.assertTrue(entries[0].visual_only)
-        self.assertFalse(entries[0].applied)
-
-        with self.assertRaises(DirectActionError):
-            service.decide(analysis["decisionId"], "visual_hide")
+        self.assertNotIn("decisionId", analysis)
+        self.assertEqual(analysis["strategy"], "direct")
 
 
 class DirectUndoTest(unittest.TestCase):

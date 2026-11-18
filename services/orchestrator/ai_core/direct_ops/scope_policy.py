@@ -113,26 +113,6 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
         )
 
     if action == "DELETE_NODE":
-        if identity.kind == "map_item":
-            return ScopeDecision(
-                allowed=False,
-                scope="data_source",
-                strategy="hitl",
-                reasons=["列表项由数据源生成，不能只删除一个 JSX 节点"],
-                options=[
-                    _option(
-                        "remove_data_item",
-                        "删除对应的数据项（AI 定位数据源）",
-                        "AI_DATA_EDIT",
-                    ),
-                    _option(
-                        "visual_hide",
-                        "仅隐藏视觉上的当前项",
-                        "VISUAL_ONLY",
-                    ),
-                    _option("cancel", "取消", "CANCEL"),
-                ],
-            )
         if identity.kind == "route_root":
             return ScopeDecision(
                 allowed=True,
@@ -140,40 +120,11 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
                 strategy="replace_placeholder",
                 reasons=["页面根节点不能直接删除，将替换为空占位符"],
             )
-        if identity.has_call_site:
-            if identity.in_map or _repeated_instances(identity) > 1:
-                return _template_hitl(identity, "删除")
-            return ScopeDecision(True, "instance", "direct")
-        if _repeated_instances(identity) > 1:
-            return _template_hitl(identity, "删除")
-        if identity.is_protected and identity.importer_count > 0:
-            return ScopeDecision(
-                allowed=False,
-                scope="definition",
-                strategy="hitl",
-                reasons=["组件定义被其它文件引用，需要选择修改范围"],
-                options=[
-                    _option("detach_instance", "仅分离当前实例", "DETACH"),
-                    _option(
-                        "edit_definition", "修改组件定义（影响全部）", "DEFINITION"
-                    ),
-                    _option("cancel", "取消", "CANCEL"),
-                ],
-            )
+        # 低级操作不转 Agent：父容器连同子树直接删除；
+        # 共享/循环/多实例由前端高亮受影响范围。
         return ScopeDecision(True, "instance", "direct")
 
     if action == "MOVE_NODE":
-        if identity.kind == "map_item":
-            return ScopeDecision(
-                allowed=False,
-                scope="data_source",
-                strategy="hitl",
-                reasons=["列表项位置由数据源顺序决定"],
-                options=[
-                    _option("reorder_data", "调整数据源顺序（AI）", "AI_DATA_EDIT"),
-                    _option("cancel", "取消", "CANCEL"),
-                ],
-            )
         if identity.kind == "route_root":
             return ScopeDecision(
                 allowed=False,
@@ -185,56 +136,17 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
                     _option("cancel", "取消", "CANCEL"),
                 ],
             )
-        if identity.has_call_site:
-            if identity.in_map or _repeated_instances(identity) > 1:
-                return _template_hitl(identity, "移动")
-            return ScopeDecision(True, "instance", "direct")
-        if _repeated_instances(identity) > 1:
-            return _template_hitl(identity, "移动")
-        if identity.is_protected and identity.importer_count > 0:
-            return ScopeDecision(
-                allowed=False,
-                scope="definition",
-                strategy="hitl",
-                reasons=["组件定义被引用，移动会影响多个页面"],
-                options=[
-                    _option("detach_instance", "仅分离当前实例", "DETACH"),
-                    _option(
-                        "edit_definition", "移动组件定义（影响全部）", "DEFINITION"
-                    ),
-                    _option("cancel", "取消", "CANCEL"),
-                ],
-            )
+        # 低级操作不转 Agent：同文件父容器连同子树直接移动。
+        return ScopeDecision(True, "instance", "direct")
+
+    if action == "UPDATE_TEXT":
+        # 低级操作不转 Agent；共享/循环/多实例由前端高亮提示。
         return ScopeDecision(True, "instance", "direct")
 
     if action == "UPDATE_PROPS":
         if identity.is_call_site:
-            if identity.in_map or _repeated_instances(identity) > 1:
-                return _template_hitl(
-                    identity,
-                    "修改 Props",
-                    visual_option=False,
-                )
+            # 低级操作不转 Agent；循环/多实例由前端高亮提示影响范围。
             return ScopeDecision(True, "instance", "direct")
-        if (
-            identity.is_protected
-            or identity.is_shared
-            or _repeated_instances(identity) > 1
-        ):
-            return ScopeDecision(
-                allowed=False,
-                scope="definition",
-                strategy="hitl",
-                reasons=["Props 属于组件调用点，直接修改定义会影响全部实例"],
-                options=[
-                    _option(
-                        "edit_call_site",
-                        "定位调用点后修改传入 Props",
-                        "CALL_SITE",
-                    ),
-                    _option("cancel", "取消", "CANCEL"),
-                ],
-            )
         return ScopeDecision(
             allowed=False,
             scope="blocked",
@@ -243,98 +155,15 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
         )
 
     if action == "UPDATE_CLASS":
-        if identity.kind == "map_item" or _repeated_instances(identity) > 1:
-            return _template_hitl(identity, "修改样式类")
-        if identity.is_protected or identity.is_shared:
-            return ScopeDecision(
-                allowed=False,
-                scope="definition",
-                strategy="hitl",
-                reasons=["共享组件的样式类修改会影响全部实例"],
-                options=[
-                    _option(
-                        "edit_definition", "修改组件定义（影响全部）", "DEFINITION"
-                    ),
-                    _option("cancel", "取消", "CANCEL"),
-                ],
-            )
+        # 低级操作不转 Agent；共享/循环影响由前端高亮提示。
         return ScopeDecision(True, "instance", "direct")
 
     if action == "UPDATE_STYLE":
-        if identity.kind == "map_item" or _repeated_instances(identity) > 1:
-            return _template_hitl(identity, "修改样式")
-        if identity.is_protected or identity.is_shared:
-            return ScopeDecision(
-                allowed=False,
-                scope="definition",
-                strategy="hitl",
-                reasons=["共享组件的 inline style 修改会影响全部实例"],
-                options=[
-                    _option(
-                        "edit_definition", "修改组件定义（影响全部）", "DEFINITION"
-                    ),
-                    _option("cancel", "取消", "CANCEL"),
-                ],
-            )
+        # 低级操作不转 Agent；共享/循环影响由前端高亮提示。
         return ScopeDecision(True, "instance", "direct")
 
-    if action == "UPDATE_TEXT":
-        if identity.kind == "map_item":
-            return ScopeDecision(
-                allowed=False,
-                scope="data_source",
-                strategy="hitl",
-                reasons=["循环项文本通常来自数据源"],
-                options=[
-                    _option("edit_data", "编辑数据源字段（AI）", "AI_DATA_EDIT"),
-                    _option("visual_override", "仅视觉覆盖当前项", "VISUAL_ONLY"),
-                    _option("cancel", "取消", "CANCEL"),
-                ],
-            )
-        if identity.is_protected and not identity.has_call_site:
-            return ScopeDecision(
-                allowed=False,
-                scope="definition",
-                strategy="hitl",
-                reasons=["公共组件文本修改会影响全部实例"],
-                options=[
-                    _option("detach_instance", "仅分离当前实例", "DETACH"),
-                    _option(
-                        "edit_definition", "修改组件定义（影响全部）", "DEFINITION"
-                    ),
-                    _option("cancel", "取消", "CANCEL"),
-                ],
-            )
-        if _repeated_instances(identity) > 1:
-            return _template_hitl(identity, "修改文本")
-        return ScopeDecision(True, identity.editable_scope, "direct")
-
     if action == "ADD_COMPONENT":
-        if identity.in_map:
-            return ScopeDecision(
-                allowed=False,
-                scope="data_source",
-                strategy="hitl",
-                reasons=["循环容器新增元素需要修改数据源"],
-                options=[
-                    _option("add_data_item", "在数据源新增一项（AI）", "AI_DATA_EDIT"),
-                    _option("cancel", "取消", "CANCEL"),
-                ],
-            )
-        if identity.is_shared or identity.is_protected:
-            return ScopeDecision(
-                allowed=False,
-                scope="definition",
-                strategy="hitl",
-                reasons=["目标容器是公共组件，新增会影响全部实例"],
-                options=[
-                    _option("detach_instance", "仅分离当前实例", "DETACH"),
-                    _option(
-                        "edit_definition", "修改组件定义（影响全部）", "DEFINITION"
-                    ),
-                    _option("cancel", "取消", "CANCEL"),
-                ],
-            )
+        # 低级操作不转 Agent；循环/共享影响由前端高亮提示。
         return ScopeDecision(True, "instance", "direct")
 
     return ScopeDecision(
