@@ -700,6 +700,9 @@
             endOffset: Number(mapped.end),
           }
         : null
+    var containerScope =
+      (mapped && mapped.containerScope) ||
+      (mapped && mapped.isContainer ? 'local' : 'element')
     // 组件定义根节点若只有一个调用点，直接把 callSite 带给父页面；
     // 多个调用点时不猜，交给后端 HITL 选择范围。
     var callSite =
@@ -726,6 +729,7 @@
       callSiteRange: callSiteRange,
       instancePath: instancePath,
       instanceKey: instanceKeyOf(instancePath),
+      containerScope: containerScope,
       file: file,
       line: line,
       column: column,
@@ -746,6 +750,7 @@
       callSiteRange: callSiteRange,
       instancePath: instancePath,
       instanceKey: instanceKeyOf(instancePath),
+      containerScope: containerScope,
       file: file,
       line: line,
       column: column,
@@ -891,6 +896,7 @@
       callSiteRange: source.callSiteRange || null,
       instancePath: source.instancePath || [],
       instanceKey: source.instanceKey || '',
+      containerScope: source.containerScope || 'local',
       marker: source.marker,
       selector: source.selector,
       label: label,
@@ -923,6 +929,9 @@
       callSiteOid: '',
       callSiteFile: '',
       callSiteRange: null,
+      instancePath: [],
+      instanceKey: '',
+      containerScope: 'local',
       marker: 'page',
       selector: '',
       label: '页面',

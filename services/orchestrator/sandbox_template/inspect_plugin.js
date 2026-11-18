@@ -198,6 +198,23 @@ function jsxScopeSignature(openingPath) {
     .join('/')
 }
 
+/** 当前 JSX 是否位于 .map(...) 回调产生的重复模板中。 */
+function jsxInsideMap(openingPath) {
+  let current = openingPath
+  while (current) {
+    const node = current.node
+    if (
+      node?.type === 'CallExpression' &&
+      node.callee?.type === 'MemberExpression' &&
+      node.callee.property?.name === 'map'
+    ) {
+      return true
+    }
+    current = current.parentPath
+  }
+  return false
+}
+
 function recordSourceMapNode(record) {
   sourceMapNodes.set(record.oid, record)
   const file = sourceMapFiles.get(record.file) || {
@@ -328,6 +345,20 @@ function buildSourceMap() {
       }
       component.callSiteOids.push(callSiteOid)
       components[key] = component
+    }
+  }
+
+  // 容器落点语义：DOM 容器不等于可插入的 JSX 作用域。
+  const importedComponents = new Set(Object.keys(components))
+  for (const node of Object.values(nodes)) {
+    if (node.inMap) {
+      node.containerScope = 'repeated_template'
+    } else if (
+      importedComponents.has(`${node.file}#${node.component}`)
+    ) {
+      node.containerScope = 'component_definition'
+    } else {
+      node.containerScope = 'local'
     }
   }
 
@@ -524,6 +555,7 @@ function buildJsxPlugin(filename) {
           const chain = jsxAncestorChain(pathNode)
           const signature = signatureOf(chain)
           const scope = jsxScopeSignature(pathNode)
+          const inMap = jsxInsideMap(pathNode)
           const parentChain = chain.length >= 2 ? chain.slice(0, -1) : []
           const parent = parentChain.length
             ? parentChain[parentChain.length - 1]
@@ -554,6 +586,7 @@ function buildJsxPlugin(filename) {
               siblingIndex: chain.length ? chain[chain.length - 1].index : 0,
               siblingCount: chain.length ? chain[chain.length - 1].count : 1,
               scope,
+              inMap,
               props: jsxStaticProps(elementNode),
             })
             return
@@ -579,6 +612,7 @@ function buildJsxPlugin(filename) {
             siblingIndex: chain.length ? chain[chain.length - 1].index : 0,
             siblingCount: chain.length ? chain[chain.length - 1].count : 1,
             depth: Math.max(0, chain.length - 1),
+            inMap,
           })
           if (chain.length === 1) {
             const meta = sourceMapFileMeta.get(file) || {

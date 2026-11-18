@@ -218,11 +218,14 @@ export default function App() {
         source_map = self._run_plugin()
         oids = list(source_map["nodes"])
         self.assertEqual(len(oids), len(set(oids)))
-        li_oids = [
-            item["oid"] for item in source_map["nodes"].values() if item["tag"] == "li"
+        li_nodes = [
+            item for item in source_map["nodes"].values() if item["tag"] == "li"
         ]
-        self.assertEqual(len(li_oids), 2)
-        self.assertEqual(len(set(li_oids)), 2)
+        self.assertEqual(len(li_nodes), 2)
+        self.assertEqual(len({item["oid"] for item in li_nodes}), 2)
+        self.assertTrue(
+            all(item["containerScope"] == "repeated_template" for item in li_nodes)
+        )
 
     def test_importer_graph_and_call_site_props_edit(self) -> None:
         source_map = self._run_graph_plugin()
@@ -235,6 +238,13 @@ export default function App() {
         self.assertEqual(call_site["props"]["title"], "原始标题")
 
         definition = source_map["nodes"][call_site["definitionOid"]]
+        self.assertEqual(definition["containerScope"], "component_definition")
+        app_root = next(
+            item
+            for item in source_map["nodes"].values()
+            if item["file"] == "src/App.jsx" and item["tag"] == "main"
+        )
+        self.assertEqual(app_root["containerScope"], "local")
         self.assertEqual(len(definition["callSites"]), 1)
         self.assertEqual(
             definition["callSites"][0]["callSiteOid"],

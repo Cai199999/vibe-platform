@@ -759,6 +759,9 @@ function resolveOne(anchor, parser, workdir) {
     ? anchor.instancePath
     : []
   result.instanceKey = String(anchor.instanceKey || '')
+  result.containerScope = callSite
+    ? 'call_site_slot'
+    : (oidNode && oidNode.containerScope) || 'local'
   result.importerCount = importerHits.length
   result.sharedByInstance = instanceCount > 1
   result.sharedByImport = importerHits.length > 0

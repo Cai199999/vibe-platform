@@ -76,6 +76,7 @@ importerGraph  component -> {definitionOid, callSites:[{callSiteOid,file,...}]}
 data-node-id   VisualDocument 逻辑节点 ID（CodeGen 同时注入）
 data-source    file:line:column，仅作旧项目兜底 / 调试
 instancePath   运行时父 oid 链 + 同模板序号（SDK 已上报）
+containerScope local / component_definition / repeated_template（父容器落点语义）
 ```
 
 约束：
@@ -136,8 +137,9 @@ Agent 只能根据 `code` / `requiresHuman` / `retryable` 决定重试、换工�
 - `UPDATE_PROPS` Direct Ops：只改调用点 JSX，不触碰组件定义；
 - Direct Ops `oid / callSiteOid → 源码区间` 解析（已落地，旧 file/line 仅兜底）；
 - 运行时 `instancePath` 上报；模板 / 多实例修改返回 HITL 范围选择；
+- `containerScope` 标注：local 直接移动，组件定义/重复模板落点 HITL；
 - SourceSync 删除感知 + 本地 JSON 补偿队列（失败后台重试）；
-- 跨文件父容器移动（containerScope）、多调用点运行时精确消歧（后续）。
+- `call_site_slot` 自动插入与多调用点运行时精确消歧（后续）。
 
 ### P1
 

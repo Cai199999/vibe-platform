@@ -336,6 +336,36 @@ class DirectOperationMoveTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, DirectErrorCode.UNSAFE_OPERATION)
         self.assertEqual(self.sandbox.patches, [])
 
+    def test_move_into_component_definition_requires_hitl(self) -> None:
+        self.sandbox.parent_anchor = {
+            **self.sandbox.parent_anchor,
+            "containerScope": "component_definition",
+        }
+        payload = _move_payload()
+
+        response = self.service.execute(payload)
+
+        self.assertEqual(response.status, "HITL_REQUIRED")
+        self.assertEqual(response.risk, "L2_HITL")
+        self.assertTrue(response.decision_id)
+        self.assertTrue(any("组件定义" in reason for reason in response.reasons))
+        self.assertEqual(self.sandbox.edits, [])
+
+    def test_move_into_repeated_template_requires_hitl(self) -> None:
+        self.sandbox.parent_anchor = {
+            **self.sandbox.parent_anchor,
+            "containerScope": "repeated_template",
+        }
+        payload = _move_payload()
+
+        response = self.service.execute(payload)
+
+        self.assertEqual(response.status, "HITL_REQUIRED")
+        self.assertEqual(response.risk, "L2_HITL")
+        self.assertTrue(response.decision_id)
+        self.assertTrue(any("循环模板" in reason for reason in response.reasons))
+        self.assertEqual(self.sandbox.edits, [])
+
     def test_move_requires_placement(self) -> None:
         with self.assertRaises(ValueError):
             DirectActionPayload.model_validate(

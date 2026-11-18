@@ -21,10 +21,11 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 构建期身份：inspect_plugin / CodeGen 注入 data-oid + vibe-source-map.json；SDK 与 resolver oid 优先，旧 file/line 仅兜底，地图过期 fail-closed。
 - 跨文件调用点：importerGraph + callSiteOid 双索引；UPDATE_PROPS 只改调用点 JSX（App.jsx），不触碰组件定义（UserCard.jsx）。
 - 多实例：SDK 上报 instancePath（父 oid 链 + 同模板序号）；模板/重复实例修改返回 HITL_REQUIRED + 范围选项。
+- 容器作用域：Source Map 标注 containerScope=local/component_definition/repeated_template；父容器移动只在 local 自动执行，组件定义/重复模板落点走 HITL。
 - SourceSync 边界：删除文件从快照移除；失败任务落盘 JSON 队列，后台指数退避重试。
 
 ## 最新验证
-前端 68 项 Vitest；Python 722 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除无 422、sourceSync 353ms、刷新回灌 3.6s；跨文件 Props E2E 命中 App.jsx 调用点、UserCard.jsx 未改；多实例修改返回 HITL 范围选择。
+前端 68 项 Vitest；Python 724 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除无 422、sourceSync 353ms、刷新回灌 3.6s；跨文件 Props E2E 命中 App.jsx 调用点、UserCard.jsx 未改；多实例/组件定义落点返回 HITL 范围选择。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 仅源码快照持久化（Run/指标仍无持久化）；沙盒无 gVisor；未云端部署。

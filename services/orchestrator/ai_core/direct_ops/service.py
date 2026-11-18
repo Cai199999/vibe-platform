@@ -657,6 +657,42 @@ class DirectOperationService:
                         reasons=["跨文件移动需要 AI 处理"],
                     )
                     risk = "L3_AI_REQUIRED"
+                parent_scope = str(parent.get("containerScope") or "local")
+                if parent_scope in {
+                    "component_definition",
+                    "repeated_template",
+                }:
+                    scope = ScopeDecision(
+                        allowed=False,
+                        scope=(
+                            "all_instances"
+                            if parent_scope == "repeated_template"
+                            else "definition"
+                        ),
+                        strategy="hitl",
+                        reasons=[
+                            (
+                                "落点是组件定义内部，移动会影响所有实例"
+                                if parent_scope == "component_definition"
+                                else "落点是循环模板，移动会影响所有实例"
+                            ),
+                        ],
+                        options=[
+                            {
+                                "optionId": "edit_template",
+                                "label": "改模板（影响全部实例）",
+                                "action": "DEFINITION",
+                                "description": "需要 AI 修改组件定义或循环模板",
+                            },
+                            {
+                                "optionId": "cancel",
+                                "label": "取消",
+                                "action": "CANCEL",
+                                "description": "",
+                            },
+                        ],
+                    )
+                    risk = "L2_HITL"
             resolved_target = {
                 "identity": identity.to_dict(),
                 "scope": scope.scope,
@@ -677,6 +713,7 @@ class DirectOperationService:
                     "range": parent.get("range"),
                     "isShared": bool(parent.get("isShared")),
                     "protected": bool(parent.get("protected")),
+                    "containerScope": parent.get("containerScope") or "local",
                 }
 
             if risk in {"L2_HITL", "L3_AI_REQUIRED"}:
