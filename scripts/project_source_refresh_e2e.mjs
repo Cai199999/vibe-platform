@@ -299,6 +299,88 @@ async function main() {
     // HMR 后 iframe 会重建，重新绑定 frame 再操作删除。
     frame = findPreviewFrame()
     await frame.waitForSelector('text=可删除节点', { timeout: 60000 })
+
+    // 画布 inline style 面板：新增 fontSize。
+    await frame.evaluate(() => {
+      const node = [...document.querySelectorAll('p')].find((item) =>
+        item.textContent.includes('可删除节点'),
+      )
+      if (!node) throw new Error('target node not found')
+      node.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, cancelable: true }),
+      )
+    })
+    await frame.waitForFunction(
+      () => {
+        const button = document.querySelector('button[title="编辑内联样式"]')
+        return Boolean(button && button.style.display !== 'none')
+      },
+      null,
+      { timeout: 20000 },
+    )
+    await frame.evaluate(() => {
+      document.querySelector('button[title="编辑内联样式"]').click()
+    })
+    await frame.waitForFunction(
+      () => {
+        const panel = document.querySelector('[data-vibe-style-panel]')
+        return Boolean(panel && panel.style.display !== 'none')
+      },
+      null,
+      { timeout: 10000 },
+    )
+    await frame.evaluate(() => {
+      document.querySelector('[data-vibe-style-add]').click()
+    })
+    await frame.waitForFunction(
+      () => Boolean(document.querySelector('[data-vibe-style-key]')),
+      null,
+      { timeout: 10000 },
+    )
+    await frame.evaluate(() => {
+      const key = document.querySelector('[data-vibe-style-key]')
+      const value = document.querySelector('[data-vibe-style-value]')
+      key.value = 'fontSize'
+      key.dispatchEvent(new Event('input', { bubbles: true }))
+      value.value = '18px'
+      value.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const styleResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        response.url().includes('/api/v1/direct-ops/actions'),
+      { timeout: 60000 },
+    )
+    await frame.evaluate(() => {
+      document.querySelector('[data-vibe-style-save]').click()
+    })
+    const styleResponse = await styleResponsePromise
+    const styleBody = await styleResponse.json()
+    if (styleResponse.status() !== 200 || styleBody.status !== 'SUCCEEDED') {
+      throw new Error(`style update failed: ${JSON.stringify(styleBody)}`)
+    }
+    let stylePersisted = false
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const response = await fetch(
+        `${BFF}/api/v1/project-sources/${projectId}?tenantId=tenant_local`,
+      )
+      if (response.ok) {
+        const body = await response.json()
+        const app = body.files?.['src/App.jsx'] || ''
+        if (app.includes('fontSize') && app.includes('18px')) {
+          stylePersisted = true
+          break
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    if (!stylePersisted) throw new Error('style change was not persisted')
+    log('style panel updated', {
+      totalMs: styleBody.timings?.totalMs,
+    })
+
+    frame = findPreviewFrame()
+    await frame.waitForSelector('text=可删除节点', { timeout: 60000 })
     await frame.evaluate(() => {
       const node = [...document.querySelectorAll('p')].find((item) =>
         item.textContent.includes('可删除节点'),
