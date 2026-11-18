@@ -236,7 +236,8 @@ async function main() {
     if (directResponse.status !== 200 || directBody.status !== 'SUCCEEDED') {
       throw new Error(`direct props update failed: ${JSON.stringify(directBody)}`)
     }
-    if (directBody.sourceSync?.status !== 'SYNCED') {
+    const syncStatus = directBody.sourceSync?.status
+    if (!['SYNCED', 'PENDING'].includes(syncStatus)) {
       throw new Error(`source sync failed: ${JSON.stringify(directBody.sourceSync)}`)
     }
     log('direct props updated', {
@@ -247,15 +248,22 @@ async function main() {
       wallMs: Date.now() - directStarted,
     })
 
-    const snapshotResponse = await fetch(
-      `${BFF}/api/v1/project-sources/${projectId}?tenantId=tenant_local`,
-    )
-    if (!snapshotResponse.ok) {
-      throw new Error(`snapshot failed: ${await snapshotResponse.text()}`)
+    let snapshot = null
+    let app = ''
+    let card = ''
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const snapshotResponse = await fetch(
+        `${BFF}/api/v1/project-sources/${projectId}?tenantId=tenant_local`,
+      )
+      if (snapshotResponse.ok) {
+        snapshot = await snapshotResponse.json()
+        app = snapshot.files['src/App.jsx'] || ''
+        card = snapshot.files['src/UserCard.jsx'] || ''
+        if (app.includes('来自调用点的新标题')) break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
     }
-    const snapshot = await snapshotResponse.json()
-    const app = snapshot.files['src/App.jsx'] || ''
-    const card = snapshot.files['src/UserCard.jsx'] || ''
+    if (!snapshot) throw new Error('snapshot failed')
     if (!app.includes('title="来自调用点的新标题"')) {
       throw new Error('App.jsx call site props were not updated')
     }

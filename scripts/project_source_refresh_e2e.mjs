@@ -281,7 +281,8 @@ async function main() {
     if (directResponse.status() !== 200 || directBody.status !== 'SUCCEEDED') {
       throw new Error(`direct delete failed: ${JSON.stringify(directBody)}`)
     }
-    if (directBody.sourceSync?.status !== 'SYNCED') {
+    const syncStatus = directBody.sourceSync?.status
+    if (!['SYNCED', 'PENDING'].includes(syncStatus)) {
       throw new Error(
         `source snapshot not synced: ${JSON.stringify(directBody.sourceSync)}`,
       )
@@ -292,12 +293,21 @@ async function main() {
       '可删除节点',
     )
 
-    const persisted = await fetch(
-      `${BFF}/api/v1/project-sources/${projectId}?tenantId=tenant_local`,
-    )
-    if (!persisted.ok) throw new Error(`snapshot get failed: ${persisted.status}`)
-    const persistedBody = await persisted.json()
-    const persistedSource = persistedBody.files?.['src/App.jsx'] || ''
+    // 异步 sourceSync：轮询 BFF 快照，直到删除结果可见。
+    let persistedBody = null
+    let persistedSource = ''
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const persisted = await fetch(
+        `${BFF}/api/v1/project-sources/${projectId}?tenantId=tenant_local`,
+      )
+      if (persisted.ok) {
+        persistedBody = await persisted.json()
+        persistedSource = persistedBody.files?.['src/App.jsx'] || ''
+        if (!persistedSource.includes('可删除节点')) break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    if (!persistedBody) throw new Error('snapshot get failed')
     if (persistedSource.includes('可删除节点')) {
       throw new Error('persisted snapshot still contains deleted node')
     }

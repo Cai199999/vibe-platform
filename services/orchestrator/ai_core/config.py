@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     source_snapshot_queue_enabled: bool = True
     source_snapshot_queue_path: str = "data/source-sync-queue.json"
     source_snapshot_retry_interval_seconds: float = 15.0
+    # Direct Ops 成功后异步同步快照；Git commit 仍同步完成。
+    source_snapshot_async: bool = True
 
     # M1 只做占位；M2 由 ModelRouter 统一读取。
     deepseek_api_key: str = ""

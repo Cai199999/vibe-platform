@@ -13,7 +13,7 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 存量只读投影：Babel 分析 → 导入 .jsx/.tsx 只读树；不转虚拟树。
 - 双轨制：前后端分流；新建强制选从零/导入；空工作区可直达导入；Resolver 以 files/sandbox 事实判定（仅声明存量不再生效）；Fullstack Run 带 projectMode，存量禁止 frontend/fullstack CodeGen，仅后端增量；Architect 首屏切换为存量文案。
 - 源码持久化：导入先 PUT BFF，MySQL 存元数据/文件树，MinIO 存正文；重开/清缓存从后端回灌，ReadOnly 投影可直接补拉。
-- 写回闭环：Direct Ops Git commit 成功后自动把最新源码同步回 BFF，快照 revision 递增；同步失败不回滚代码，响应返回 sourceSync=FAILED。
+- 写回闭环：Direct Ops Git commit 成功后自动同步快照；sourceSync 异步 + 持久化队列，commit 仍同步完成。失败不回滚代码，队列后台重试。
 - 删除快路径：安全叶子点击即乐观删除 + 左下角撤回；共享/循环/定义节点仍先确认再 execute，HITL/失败自动恢复。
 - 交互规范：`docs/design/15_交互语义与节点身份规范.md` 冻结身份优先级、L0-L3 分级与操作矩阵。
 - 两阶段：V0 只出虚拟树 → 画布 delta → BACKEND_BINDING；最终契约带冻结树。
@@ -32,7 +32,7 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 旧工程兼容：SDK 支持 `file:line` / `file:line:column` 两段与三段锚点，缺失时向上找源码祖先；页面根兜底取真实容器，不再报“标注缺少目标文件”。
 
 ## 最新验证
-前端 68 项 Vitest；Python 727 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除无 422、sourceSync 353ms、刷新回灌 3.6s；跨文件 Props E2E 命中 App.jsx 调用点、UserCard.jsx 未改；多实例/组件定义落点返回 HITL 范围选择。
+前端 68 项 Vitest；Python 727 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除无 422、异步同步后删除响应 2.1s、刷新回灌 2.3s；跨文件 Props E2E 命中 App.jsx 调用点、UserCard.jsx 未改；多实例/组件定义落点返回 HITL 范围选择。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 仅源码快照持久化（Run/指标仍无持久化）；沙盒无 gVisor；未云端部署。

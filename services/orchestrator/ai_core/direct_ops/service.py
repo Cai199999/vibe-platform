@@ -192,6 +192,12 @@ class DirectOperationService:
             enabled=sync_enabled,
             queue=self._source_queue,
         )
+        self._source_sync_base_url = sync_base_url
+        self._source_sync_timeout = sync_timeout
+        self._source_sync_async = (
+            bool(getattr(self._settings, "source_snapshot_async", True))
+            and self._source_queue is not None
+        )
         if queue_enabled:
             ensure_source_sync_retry_worker(
                 self._source_queue,
@@ -854,12 +860,9 @@ class DirectOperationService:
             # Git commit 已成功：立即把最新源码同步到 BFF 快照。
             # 同步失败不回滚用户修改，但在响应中给出可观测状态。
             mark = time.perf_counter()
-            source_sync = self._source_sync.sync(
-                project_id=payload.project_id,
-                sandbox_id=payload.sandbox_id,
-                tenant_id=payload.tenant_id,
+            source_sync = self._sync_source_snapshot(
+                payload=payload,
                 touched_file=file,
-                sandbox=self._sandbox,
                 commit_hash=commit_hash,
             )
             timings["sourceSyncMs"] = _elapsed_ms(mark)
@@ -1057,6 +1060,96 @@ class DirectOperationService:
         merged = dict(call_site)
         merged.setdefault("component", anchor.get("component") or "")
         return merged
+
+    def _sync_source_snapshot(
+        self,
+        *,
+        payload: DirectActionPayload,
+        touched_file: str,
+        commit_hash: str,
+    ) -> dict[str, Any]:
+        """Git commit 已完成；快照同步可异步执行。
+
+        同步任务先落盘到补偿队列，再由后台线程立即尝试。即使进程在此
+        期间退出，队列仍会在下次启动时重试，不会丢用户代码。
+        """
+        task = {
+            "projectId": payload.project_id,
+            "sandboxId": payload.sandbox_id,
+            "tenantId": payload.tenant_id,
+            "touchedFile": touched_file,
+            "commitHash": commit_hash,
+        }
+        if not self._source_sync_async:
+            return self._source_sync.sync(
+                project_id=payload.project_id,
+                sandbox_id=payload.sandbox_id,
+                tenant_id=payload.tenant_id,
+                touched_file=touched_file,
+                sandbox=self._sandbox,
+                commit_hash=commit_hash,
+            )
+
+        queue = self._source_queue
+        try:
+            key = queue.add(task)
+        except Exception as exc:  # pragma: no cover - 队列落盘失败降级同步
+            logger.warning("source sync enqueue failed: %s", exc)
+            return self._source_sync.sync(
+                project_id=payload.project_id,
+                sandbox_id=payload.sandbox_id,
+                tenant_id=payload.tenant_id,
+                touched_file=touched_file,
+                sandbox=self._sandbox,
+                commit_hash=commit_hash,
+            )
+
+        def worker() -> None:
+            sync = SourceSnapshotSync(
+                base_url=self._source_sync_base_url,
+                timeout_seconds=self._source_sync_timeout,
+                enabled=True,
+                queue=None,
+            )
+            try:
+                result = sync.sync(
+                    project_id=payload.project_id,
+                    sandbox_id=payload.sandbox_id,
+                    tenant_id=payload.tenant_id,
+                    touched_file=touched_file,
+                    sandbox=self._sandbox,
+                    commit_hash=commit_hash,
+                )
+            except Exception as exc:  # noqa: BLE001 - 后台线程必须收敛
+                result = {"status": "FAILED", "message": str(exc)}
+            status = str(result.get("status") or "")
+            if status in {"SYNCED", "SKIPPED", "DISABLED"}:
+                queue.remove(key)
+                logger.info(
+                    "source sync async succeeded project=%s key=%s",
+                    payload.project_id,
+                    key,
+                )
+            else:
+                queue.reschedule(key, str(result.get("message") or result))
+                logger.warning(
+                    "source sync async failed project=%s key=%s error=%s",
+                    payload.project_id,
+                    key,
+                    result.get("message"),
+                )
+
+        threading.Thread(
+            target=worker,
+            name=f"source-sync-{payload.direct_action_id}",
+            daemon=True,
+        ).start()
+        return {
+            "status": "PENDING",
+            "async": True,
+            "queued": True,
+            "queueKey": key,
+        }
 
     @staticmethod
     def _risk(
