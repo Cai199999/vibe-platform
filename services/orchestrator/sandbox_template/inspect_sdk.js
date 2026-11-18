@@ -126,6 +126,68 @@
       })
       .join('/')
   }
+
+  function normalizedSourceFile(value) {
+    var text = String(value || '').split('?')[0]
+    try {
+      if (/^https?:/i.test(text)) text = new URL(text).pathname
+    } catch (error) {
+      // 保留原值
+    }
+    return text.replace(/^\/+/, '')
+  }
+
+  function sameSourceFile(left, right) {
+    var a = normalizedSourceFile(left)
+    var b = normalizedSourceFile(right)
+    if (!a || !b) return false
+    return a === b || a.endsWith('/' + b) || b.endsWith('/' + a)
+  }
+
+  function reactFiberOf(node) {
+    if (!node) return null
+    var keys = Object.keys(node)
+    for (var index = 0; index < keys.length; index += 1) {
+      var key = keys[index]
+      if (
+        key.indexOf('__reactFiber$') === 0 ||
+        key.indexOf('__reactInternalInstance$') === 0
+      ) {
+        return node[key]
+      }
+    }
+    return null
+  }
+
+  /**
+   * React dev runtime 的 _debugSource 能精确定位 JSX 调用点。
+   * 条件渲染 / 多调用点时，用它补静态顺序无法消歧的部分。
+   */
+  function callSiteFromFiber(node, callSites) {
+    var fiber = reactFiberOf(node)
+    var guard = 0
+    while (fiber && guard < 80) {
+      guard += 1
+      var source = fiber._debugSource
+      if (source && source.fileName) {
+        var line = Number(source.lineNumber)
+        var match = null
+        for (var index = 0; index < callSites.length; index += 1) {
+          var item = callSites[index]
+          if (
+            Number(item.line) === line &&
+            sameSourceFile(item.file, source.fileName)
+          ) {
+            match = item
+            break
+          }
+        }
+        if (match) return match
+      }
+      fiber = fiber.return
+    }
+    return null
+  }
   var INLINE_TAGS = {
     span: true,
     p: true,
@@ -765,22 +827,29 @@
       callSite = callSites[0]
       callSiteConfidence = 'exact'
     } else if (callSites.length > 1) {
-      // 静态顺序 + 运行时实例序号：只在调用点全部非循环、非条件渲染，
-      // 且静态调用点数量与运行时实例数一致时才自动消歧。
-      var ordered = callSites.every(function (item) {
-        return item.safeForOrder !== false && !item.inMap && !item.conditional
-      })
-      var instanceIndex = Number(instanceInfo.instance) || 1
-      if (
-        ordered &&
-        callSites.length === instanceInfo.instanceCount &&
-        instanceIndex >= 1 &&
-        instanceIndex <= callSites.length
-      ) {
-        callSite = callSites[instanceIndex - 1]
-        callSiteConfidence = 'ordered'
+      // 1) React dev 的 _debugSource 优先：能处理条件渲染。
+      var fiberMatch = callSiteFromFiber(node, callSites)
+      if (fiberMatch) {
+        callSite = fiberMatch
+        callSiteConfidence = 'fiber'
       } else {
-        callSiteAmbiguous = true
+        // 2) 静态顺序 + 运行时实例序号：只在非循环、非条件渲染，
+        //    且静态调用点数量与运行时实例数一致时才自动消歧。
+        var ordered = callSites.every(function (item) {
+          return item.safeForOrder !== false && !item.inMap && !item.conditional
+        })
+        var instanceIndex = Number(instanceInfo.instance) || 1
+        if (
+          ordered &&
+          callSites.length === instanceInfo.instanceCount &&
+          instanceIndex >= 1 &&
+          instanceIndex <= callSites.length
+        ) {
+          callSite = callSites[instanceIndex - 1]
+          callSiteConfidence = 'ordered'
+        } else {
+          callSiteAmbiguous = true
+        }
       }
     }
     var callSiteRange =
