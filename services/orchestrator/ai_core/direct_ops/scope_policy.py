@@ -148,6 +148,31 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
             )
         return ScopeDecision(True, "instance", "direct")
 
+    if action == "UPDATE_PROPS":
+        if identity.is_call_site:
+            return ScopeDecision(True, "instance", "direct")
+        if identity.is_protected or identity.is_shared or identity.instance_count > 1:
+            return ScopeDecision(
+                allowed=False,
+                scope="definition",
+                strategy="hitl",
+                reasons=["Props 属于组件调用点，直接修改定义会影响全部实例"],
+                options=[
+                    _option(
+                        "edit_call_site",
+                        "定位调用点后修改传入 Props",
+                        "CALL_SITE",
+                    ),
+                    _option("cancel", "取消", "CANCEL"),
+                ],
+            )
+        return ScopeDecision(
+            allowed=False,
+            scope="blocked",
+            strategy="blocked",
+            reasons=["没有解析到组件调用点，不能修改 Props"],
+        )
+
     if action == "UPDATE_TEXT":
         if identity.kind == "map_item":
             return ScopeDecision(

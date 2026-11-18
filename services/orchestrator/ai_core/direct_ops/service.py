@@ -795,6 +795,7 @@ class DirectOperationService:
             "annotationId": target.annotation_id or payload.direct_action_id,
             "oid": target.oid or "",
             "sourceRange": dict(target.source_range or {}) or None,
+            "callSiteOid": target.call_site_oid or "",
             "file": target.file or "",
             "selector": target.selector or "",
             "line": target.line,
@@ -1040,6 +1041,13 @@ class DirectOperationService:
                 "targetRange": anchor.get("range") or {},
                 "text": str(payload.payload.get("text") or ""),
             }
+        elif payload.action == "UPDATE_PROPS":
+            edit = {
+                "operation": "update_props",
+                "file": file,
+                "anchorRange": anchor.get("range") or {},
+                "props": dict(payload.payload.get("props") or {}),
+            }
         elif payload.action == "MOVE_NODE":
             if parent is None:
                 raise DirectActionError(
@@ -1256,6 +1264,9 @@ class DirectOperationService:
                 if node_preview
                 else f"删除 {component} 内的节点"
             )
+        elif payload.action == "UPDATE_PROPS":
+            prop_names = ", ".join(sorted(dict(payload.payload.get("props") or {})))
+            summary = f"更新 {anchor.get('component') or component} 调用点 Props: {prop_names}"
         else:
             summary = f"对 {component} 执行 {payload.action}"
         entry = ChangeLogEntry(
@@ -1268,6 +1279,7 @@ class DirectOperationService:
                 "file": file,
                 "component": anchor.get("component") or "",
                 "anchorId": anchor.get("anchorId") or "",
+                "callSiteOid": anchor.get("callSiteOid") or "",
                 "range": anchor.get("range") or {},
                 "placement": placement,
                 "nodeSource": " ".join(str(anchor.get("nodeSource") or "").split())[

@@ -46,6 +46,20 @@ if (!result || !result.code.includes('data-oid=')) {
 await new Promise((resolve) => setTimeout(resolve, 250))
 """
 
+GRAPH_PLUGIN_RUNNER = """
+import fs from 'node:fs'
+import { sourceInspectPlugin } from './inspect_plugin.js'
+
+const root = process.env.VIBE_TEST_ROOT
+const plugin = sourceInspectPlugin()
+plugin.configResolved({ root })
+for (const file of [root + '/src/UserCard.jsx', root + '/src/App.jsx']) {
+  const code = fs.readFileSync(file, 'utf8')
+  plugin.transform(code, file)
+}
+await new Promise((resolve) => setTimeout(resolve, 250))
+"""
+
 
 class SourceMapPluginTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -69,6 +83,65 @@ class SourceMapPluginTests(unittest.TestCase):
         return json.loads(
             (self.root / "vibe-source-map.json").read_text(encoding="utf-8")
         )
+
+    def _run_graph_plugin(self) -> dict:
+        (self.root / "src" / "UserCard.jsx").write_text(
+            """export default function UserCard({ title }) {
+  return (
+    <section>
+      <h2>{title}</h2>
+      <p>UserCard 内部</p>
+    </section>
+  )
+}
+""",
+            encoding="utf-8",
+        )
+        (self.root / "src" / "App.jsx").write_text(
+            """import UserCard from './UserCard'
+
+export default function App() {
+  return (
+    <main>
+      <UserCard title="原始标题" />
+    </main>
+  )
+}
+""",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["node", "--input-type=module", "-e", GRAPH_PLUGIN_RUNNER],
+            cwd=TEMPLATE_DIR,
+            env={**os.environ, "VIBE_TEST_ROOT": str(self.root)},
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(
+            (self.root / "vibe-source-map.json").read_text(encoding="utf-8")
+        )
+
+    def _run_ast_edit(self, spec: dict) -> dict:
+        spec_path = self.root / "edit-spec.json"
+        spec_path.write_text(
+            json.dumps(
+                {
+                    "workdir": str(self.root),
+                    "parserRoot": str(TEMPLATE_DIR),
+                    **spec,
+                }
+            ),
+            encoding="utf-8",
+        )
+        output = subprocess.run(
+            ["node", "apply_ast_edit.mjs", str(spec_path)],
+            cwd=TEMPLATE_DIR,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(output.stdout)
 
     def _resolve(self, oid: str) -> dict:
         spec = self.root / "spec.json"
@@ -150,6 +223,73 @@ class SourceMapPluginTests(unittest.TestCase):
         ]
         self.assertEqual(len(li_oids), 2)
         self.assertEqual(len(set(li_oids)), 2)
+
+    def test_importer_graph_and_call_site_props_edit(self) -> None:
+        source_map = self._run_graph_plugin()
+        call_sites = list(source_map["callSites"].values())
+        self.assertEqual(len(call_sites), 1)
+        call_site = call_sites[0]
+        self.assertEqual(call_site["file"], "src/App.jsx")
+        self.assertEqual(call_site["definitionFile"], "src/UserCard.jsx")
+        self.assertEqual(call_site["component"], "UserCard")
+        self.assertEqual(call_site["props"]["title"], "原始标题")
+
+        definition = source_map["nodes"][call_site["definitionOid"]]
+        self.assertEqual(len(definition["callSites"]), 1)
+        self.assertEqual(
+            definition["callSites"][0]["callSiteOid"],
+            call_site["oid"],
+        )
+
+        spec = self.root / "call-site-spec.json"
+        spec.write_text(
+            json.dumps(
+                {
+                    "workdir": str(self.root),
+                    "parserRoot": str(TEMPLATE_DIR),
+                    "anchors": [
+                        {
+                            "anchorId": "anc_props",
+                            "annotationId": "ann_props",
+                            "callSiteOid": call_site["oid"],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        resolved = json.loads(
+            subprocess.run(
+                ["node", "resolve_target.mjs", str(spec)],
+                cwd=TEMPLATE_DIR,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )["anchors"][0]
+        self.assertEqual(resolved["status"], "RESOLVED")
+        self.assertEqual(resolved["file"], "src/App.jsx")
+        self.assertTrue(resolved["isCallSite"])
+        self.assertIn('<UserCard title="原始标题" />', resolved["nodeSource"])
+
+        edited = self._run_ast_edit(
+            {
+                "file": "src/App.jsx",
+                "operation": "update_props",
+                "anchorRange": resolved["range"],
+                "props": {"title": "来自调用点的新标题"},
+            }
+        )
+        self.assertEqual(edited["status"], "OK")
+        self.assertIn('title="来自调用点的新标题"', edited["content"])
+        self.assertIn(
+            "UserCard 内部",
+            (self.root / "src" / "UserCard.jsx").read_text(encoding="utf-8"),
+        )
+        self.assertNotIn(
+            "来自调用点的新标题",
+            (self.root / "src" / "UserCard.jsx").read_text(encoding="utf-8"),
+        )
 
     def test_resolver_resolves_oid_without_file_line_or_selector(self) -> None:
         source_map = self._run_plugin()

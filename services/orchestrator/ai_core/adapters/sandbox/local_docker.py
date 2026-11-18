@@ -1948,7 +1948,14 @@ class LocalDockerSandbox(SandboxProvider):
         except SandboxValidationError as exc:
             raise SandboxError(f"AST 编辑目标文件非法: {exc}") from exc
         operation = str(edit.get("operation") or "").lower()
-        if operation not in {"insert", "delete", "modify", "update_text", "move_node"}:
+        if operation not in {
+            "insert",
+            "delete",
+            "modify",
+            "update_text",
+            "update_props",
+            "move_node",
+        }:
             raise SandboxError(f"不支持的 AST 编辑操作: {operation or '(空)'}")
 
         container = self._get_container(sandbox_id)
@@ -1970,8 +1977,9 @@ class LocalDockerSandbox(SandboxProvider):
             # inside_index 的子节点序号；None 表示不适用。
             "insertIndex": edit.get("insertIndex"),
             "jsxCode": str(edit.get("jsxCode") or ""),
-            # Direct Ops UPDATE_TEXT 专用；其余操作忽略。
+            # Direct Ops UPDATE_TEXT / UPDATE_PROPS 专用；其余操作忽略。
             "text": str(edit.get("text") or ""),
+            "props": dict(edit.get("props") or {}),
         }
         # 同文件多编辑：服务端把前一条结果作为下一条输入，绝不接受模型传入。
         override = edit.get("contentOverride")

@@ -18,10 +18,10 @@ from ai_core.domain.common import CamelModel
 
 DirectActionKind = Literal[
     "UPDATE_TEXT",
+    "UPDATE_PROPS",
     "DELETE_NODE",
     "ADD_COMPONENT",
     "MOVE_NODE",
-    "UPDATE_PROPS",
     # 冻结 VisualDocument 一次性编译为真实 React 工程。
     "VISUAL_CODEGEN",
 ]
@@ -60,6 +60,8 @@ class DirectActionTarget(CamelModel):
     # 构建期 source map 的稳定身份；有 oid 时解析器必须优先走 oid 映射。
     oid: str | None = Field(default=None, max_length=80)
     source_range: dict[str, int] | None = None
+    # 组件调用点 oid：UPDATE_PROPS 等实例级操作优先按它解析。
+    call_site_oid: str | None = Field(default=None, max_length=96)
     selector: str | None = Field(default=None, max_length=500)
     file: str | None = Field(default=None, max_length=500)
     line: int | None = Field(default=None, ge=1)
@@ -109,6 +111,30 @@ class DirectActionPayload(CamelModel):
                 raise ValueError("UPDATE_TEXT 文案不能超过 2000 字符")
             if any(char in text for char in "<>{}\n\r"):
                 raise ValueError("UPDATE_TEXT 文案不能包含 < > { } 或换行")
+        if self.action == "UPDATE_PROPS":
+            props = self.payload.get("props")
+            if not isinstance(props, dict) or not props:
+                raise ValueError("UPDATE_PROPS 必须提供非空 payload.props")
+            if len(props) > 30:
+                raise ValueError("UPDATE_PROPS 一次最多更新 30 个属性")
+            for name, value in props.items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or len(name) > 80
+                    or not all(char.isalnum() or char in "_$:-" for char in name)
+                ):
+                    raise ValueError(f"非法 prop 名称: {name!r}")
+                if value is None or isinstance(value, bool):
+                    continue
+                if isinstance(value, (int, float)):
+                    continue
+                if not isinstance(value, str):
+                    raise ValueError(f"prop {name} 只支持字符串 / 数字 / 布尔 / null")
+                if len(value) > 2000:
+                    raise ValueError(f"prop {name} 超过 2000 字符")
+                if any(char in value for char in "<>{}\n\r"):
+                    raise ValueError(f"prop {name} 不能包含 < > {{ }} 或换行")
         if self.action == "MOVE_NODE":
             placement = self.target.placement or {}
             if not isinstance(placement, dict) or not (

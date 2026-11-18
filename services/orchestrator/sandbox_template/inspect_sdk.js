@@ -649,6 +649,19 @@
             endOffset: Number(mapped.end),
           }
         : null
+    // 组件定义根节点若只有一个调用点，直接把 callSite 带给父页面；
+    // 多个调用点时不猜，交给后端 HITL 选择范围。
+    var callSite =
+      mapped && Array.isArray(mapped.callSites) && mapped.callSites.length === 1
+        ? mapped.callSites[0]
+        : null
+    var callSiteRange =
+      callSite && Number.isFinite(Number(callSite.start))
+        ? {
+            startOffset: Number(callSite.start),
+            endOffset: Number(callSite.end),
+          }
+        : null
     // 实例定位：同一份源码可能渲染多个 DOM 节点，必须把“第几个”与
     // 父级 JSX 调用位置一并回传，否则 Coder 只能改基础组件造成全局污染。
     var instanceInfo = instanceInfoFor(node, file, line, column)
@@ -656,6 +669,9 @@
       oid: oid,
       sourceRange: sourceRange,
       parentOid: (mapped && mapped.parentOid) || '',
+      callSiteOid: (callSite && callSite.callSiteOid) || '',
+      callSiteFile: (callSite && callSite.file) || '',
+      callSiteRange: callSiteRange,
       file: file,
       line: line,
       column: column,
@@ -671,6 +687,9 @@
       oid: oid,
       sourceRange: sourceRange,
       parentOid: (mapped && mapped.parentOid) || '',
+      callSiteOid: (callSite && callSite.callSiteOid) || '',
+      callSiteFile: (callSite && callSite.file) || '',
+      callSiteRange: callSiteRange,
       file: file,
       line: line,
       column: column,
@@ -811,6 +830,9 @@
       oid: source.oid || '',
       sourceRange: source.sourceRange || null,
       parentOid: source.parentOid || '',
+      callSiteOid: source.callSiteOid || '',
+      callSiteFile: source.callSiteFile || '',
+      callSiteRange: source.callSiteRange || null,
       marker: source.marker,
       selector: source.selector,
       label: label,
@@ -840,6 +862,9 @@
       oid: '',
       sourceRange: null,
       parentOid: '',
+      callSiteOid: '',
+      callSiteFile: '',
+      callSiteRange: null,
       marker: 'page',
       selector: '',
       label: '页面',

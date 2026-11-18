@@ -82,6 +82,12 @@ function sourceMapNodeForOid(workdir, oid) {
   return map?.nodes?.[oid] || null
 }
 
+function sourceMapCallSiteForOid(workdir, oid) {
+  if (!oid) return null
+  const map = loadSourceMap(workdir)
+  return map?.callSites?.[oid] || null
+}
+
 const JSX_TYPES = new Set(['JSXElement', 'JSXFragment'])
 const FUNCTION_TYPES = new Set([
   'FunctionDeclaration',
@@ -565,14 +571,21 @@ function isTopLevelJsxRoot(node, parents) {
 
 function resolveOne(anchor, parser, workdir) {
   const oid = String(anchor.oid || '').trim()
+  const callSiteOid = String(anchor.callSiteOid || '').trim()
   const oidNode = sourceMapNodeForOid(workdir, oid)
-  // source map 是构建期事实：oid 命中时文件以地图为准，不被旧 file:line
-  // 覆盖；地图缺失时才退回前端携带的 file。
-  const file = String((oidNode && oidNode.file) || anchor.file || '').trim()
+  const callSite = sourceMapCallSiteForOid(workdir, callSiteOid)
+  // source map 是构建期事实：callSite / oid 命中时文件以地图为准，
+  // 不被旧 file:line 覆盖；地图缺失时才退回前端携带的 file。
+  const file = String(
+    (callSite && callSite.file) || (oidNode && oidNode.file) || anchor.file || '',
+  ).trim()
   const result = {
     anchorId: anchor.anchorId,
     annotationId: anchor.annotationId,
     oid,
+    callSiteOid,
+    isCallSite: Boolean(callSite),
+    definitionOid: (callSite && callSite.definitionOid) || '',
     status: 'TARGET_NOT_FOUND',
     file,
     reason: '',
@@ -616,15 +629,20 @@ function resolveOne(anchor, parser, workdir) {
     : null
 
   const oidRange =
-    oidNode && Number.isFinite(Number(oidNode.start))
+    callSite && Number.isFinite(Number(callSite.start))
       ? {
-          startOffset: Number(oidNode.start),
-          endOffset: Number(oidNode.end),
+          startOffset: Number(callSite.start),
+          endOffset: Number(callSite.end),
         }
-      : anchor.sourceRange &&
-          Number.isFinite(Number(anchor.sourceRange.startOffset))
-        ? anchor.sourceRange
-        : null
+      : oidNode && Number.isFinite(Number(oidNode.start))
+        ? {
+            startOffset: Number(oidNode.start),
+            endOffset: Number(oidNode.end),
+          }
+        : anchor.sourceRange &&
+            Number.isFinite(Number(anchor.sourceRange.startOffset))
+          ? anchor.sourceRange
+          : null
   let node = oidRange ? findExactNode(index.jsxNodes, oidRange) : null
   if (!node && anchor.selectedRange) {
     node = findExactNode(index.jsxNodes, anchor.selectedRange)
@@ -633,9 +651,16 @@ function resolveOne(anchor, parser, workdir) {
   // revision 不一致。此时必须 fail-closed，绝不能再退回 selector / 行列
   // 猜一个“看起来像”的节点。生成工程的 manifest 只有 nodeId、没有区间，
   // 允许继续走 [data-oid] / [data-node-id] selector。
+  const callSiteHasRange = Boolean(
+    callSite && Number.isFinite(Number(callSite.start)),
+  )
   const oidHasRange = Boolean(
     oidNode && Number.isFinite(Number(oidNode.start)),
   )
+  if (!node && callSiteOid && callSiteHasRange) {
+    result.reason = `callSiteOid 源码区间未命中当前 AST，source map 可能已过期: ${callSiteOid}`
+    return result
+  }
   if (!node && oid && oidHasRange) {
     result.reason = `oid 源码区间未命中当前 AST，source map 可能已过期: ${oid}`
     return result

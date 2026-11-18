@@ -71,6 +71,8 @@ L1 工具是 `DirectOperationService` 的门面，不新增执行器。新增能
 ```text
 data-oid       构建期稳定源码身份（inspect_plugin / CodeGen 注入）
 vibe-source-map.json  oid -> {file,start,end,line,column,parentOid,container,...}
+callSiteOid    组件调用点身份（不注入 props，只写 importer graph）
+importerGraph  component -> {definitionOid, callSites:[{callSiteOid,file,...}]}
 data-node-id   VisualDocument 逻辑节点 ID（CodeGen 同时注入）
 data-source    file:line:column，仅作旧项目兜底 / 调试
 instancePath   同一源码多实例的渲染路径（后续补齐）
@@ -130,8 +132,10 @@ Agent 只能根据 `code` / `requiresHuman` / `retryable` 决定重试、换工�
 - 项目源码持久化（MySQL 元数据 + MinIO 正文，已落地）；
 - Direct Ops commit → BFF 快照同步（已落地，失败不回滚用户修改）；
 - 构建期 `data-oid` 与 `vibe-source-map.json`（插件 + CodeGen 已落地）；
-- Direct Ops `oid → 源码区间` 解析（已落地，旧 file/line 仅兜底）；
-- `instancePath` 与跨文件组件边界（后续）。
+- Importer Graph + `callSiteOid` 双索引（已落地，单调用点 Props 编辑）；
+- `UPDATE_PROPS` Direct Ops：只改调用点 JSX，不触碰组件定义；
+- Direct Ops `oid / callSiteOid → 源码区间` 解析（已落地，旧 file/line 仅兜底）；
+- `instancePath`、跨文件父容器移动、多调用点运行时消歧（后续）。
 
 ### P1
 

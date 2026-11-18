@@ -60,6 +60,8 @@ let sdkCache = ''
  */
 const sourceMapNodes = new Map()
 const sourceMapFiles = new Map()
+const sourceMapFileMeta = new Map()
+const sourceMapCallSites = new Map()
 let sourceMapJson = ''
 let sourceMapTimer = null
 
@@ -207,12 +209,47 @@ function recordSourceMapNode(record) {
   sourceMapFiles.set(record.file, file)
 }
 
+function recordCallSite(record) {
+  sourceMapCallSites.set(record.oid, record)
+}
+
 function forgetFile(file) {
   const previous = sourceMapFiles.get(file)
   if (previous) {
     for (const oid of previous.oids) sourceMapNodes.delete(oid)
   }
+  for (const [oid, callSite] of sourceMapCallSites.entries()) {
+    if (callSite.file === file) sourceMapCallSites.delete(oid)
+  }
   sourceMapFiles.delete(file)
+  sourceMapFileMeta.delete(file)
+}
+
+const MODULE_EXTENSIONS = [
+  '',
+  '.jsx',
+  '.tsx',
+  '.js',
+  '.ts',
+  '/index.jsx',
+  '/index.tsx',
+  '/index.js',
+  '/index.ts',
+]
+
+/** 把相对 import 解析成 Source Map 里真实存在的文件。 */
+function resolveImportFile(fromFile, source) {
+  if (!source || !source.startsWith('.')) return ''
+  const base = path.posix.normalize(
+    path.posix.join(path.posix.dirname(fromFile), source),
+  )
+  for (const suffix of MODULE_EXTENSIONS) {
+    const candidate = `${base}${suffix}`
+    if (sourceMapFiles.has(candidate) || sourceMapFileMeta.has(candidate)) {
+      return candidate
+    }
+  }
+  return ''
 }
 
 function buildSourceMap() {
@@ -221,16 +258,86 @@ function buildSourceMap() {
     a.localeCompare(b),
   )
   for (const [file, meta] of entries) {
-    files[file] = { hash: meta.hash || '', oids: [...meta.oids].sort() }
+    const fileMeta = sourceMapFileMeta.get(file) || {}
+    files[file] = {
+      hash: meta.hash || '',
+      oids: [...meta.oids].sort(),
+      imports: fileMeta.imports || [],
+      defaultExportName: fileMeta.defaultExportName || '',
+      namedExports: fileMeta.namedExports || [],
+    }
   }
   const nodes = {}
   for (const [oid, record] of [...sourceMapNodes.entries()].sort(([a], [b]) =>
     a.localeCompare(b),
   )) {
-    nodes[oid] = record
+    nodes[oid] = { ...record, callSites: [] }
   }
+
+  const callSites = {}
+  const components = {}
+  for (const [callSiteOid, raw] of [...sourceMapCallSites.entries()].sort(
+    ([a], [b]) => a.localeCompare(b),
+  )) {
+    const meta = sourceMapFileMeta.get(raw.file) || {}
+    const localBase = String(raw.component || '').split('.')[0]
+    const imported = (meta.imports || []).find(
+      (item) => item.local === localBase,
+    )
+    const targetFile =
+      imported && imported.source.startsWith('.')
+        ? resolveImportFile(raw.file, imported.source)
+        : raw.file
+    const targetMeta = sourceMapFileMeta.get(targetFile) || {}
+    const definitionName =
+      imported?.imported === 'default'
+        ? targetMeta.defaultExportName ||
+          path.posix.basename(targetFile).replace(/\.[^.]+$/, '') ||
+          localBase
+        : imported?.imported || raw.component
+    const definition =
+      (targetMeta.components || {})[definitionName] ||
+      (targetMeta.components || {})[localBase] ||
+      null
+    const callSite = {
+      ...raw,
+      importSource: imported?.source || '',
+      importedName: imported?.imported || '',
+      targetFile,
+      definitionOid: definition?.definitionOid || '',
+      definitionFile: definition?.file || '',
+    }
+    callSites[callSiteOid] = callSite
+    if (definition?.definitionOid && nodes[definition.definitionOid]) {
+      nodes[definition.definitionOid].callSites.push({
+        callSiteOid,
+        file: raw.file,
+        start: raw.start,
+        end: raw.end,
+        line: raw.line,
+        column: raw.column,
+        component: raw.component,
+        props: raw.props || {},
+      })
+      const key = `${definition.file || targetFile}#${definitionName}`
+      const component = components[key] || {
+        file: definition.file || targetFile,
+        name: definitionName,
+        definitionOid: definition.definitionOid,
+        callSiteOids: [],
+      }
+      component.callSiteOids.push(callSiteOid)
+      components[key] = component
+    }
+  }
+
   const revision = hashText(
-    JSON.stringify({ files, oids: Object.keys(nodes) }),
+    JSON.stringify({
+      files,
+      oids: Object.keys(nodes),
+      callSites: Object.keys(callSites),
+      components: Object.keys(components),
+    }),
   ).slice(0, 16)
   return JSON.stringify(
     {
@@ -239,6 +346,8 @@ function buildSourceMap() {
       generatedAt: new Date().toISOString(),
       files,
       nodes,
+      callSites,
+      importerGraph: { components },
     },
     null,
     2,
@@ -317,17 +426,92 @@ function componentNameFor(pathNode, filename) {
   return fileComponent(filename)
 }
 
+function jsxStaticProps(node) {
+  const props = {}
+  for (const attribute of node?.openingElement?.attributes || []) {
+    if (attribute.type !== 'JSXAttribute' || !attribute.name?.name) continue
+    const name = attribute.name.name
+    if (attribute.value == null) {
+      props[name] = true
+    } else if (attribute.value.type === 'StringLiteral') {
+      props[name] = attribute.value.value
+    } else {
+      props[name] = '<expression>'
+    }
+  }
+  return props
+}
+
+function collectModuleMeta(programPath, filename) {
+  const imports = []
+  const namedExports = []
+  let defaultExportName = ''
+  for (const statement of programPath.node.body || []) {
+    if (statement.type === 'ImportDeclaration') {
+      const source = String(statement.source?.value || '')
+      for (const specifier of statement.specifiers || []) {
+        if (specifier.type === 'ImportDefaultSpecifier') {
+          imports.push({
+            local: specifier.local.name,
+            source,
+            imported: 'default',
+          })
+        } else if (specifier.type === 'ImportSpecifier') {
+          imports.push({
+            local: specifier.local.name,
+            source,
+            imported: specifier.imported?.name || specifier.local.name,
+          })
+        } else if (specifier.type === 'ImportNamespaceSpecifier') {
+          imports.push({
+            local: specifier.local.name,
+            source,
+            imported: '*',
+          })
+        }
+      }
+    } else if (statement.type === 'ExportDefaultDeclaration') {
+      const declaration = statement.declaration
+      if (declaration?.type === 'FunctionDeclaration' && declaration.id) {
+        defaultExportName = declaration.id.name
+      } else if (declaration?.type === 'Identifier') {
+        defaultExportName = declaration.name
+      }
+    } else if (statement.type === 'ExportNamedDeclaration') {
+      if (statement.declaration?.type === 'FunctionDeclaration') {
+        if (statement.declaration.id?.name) {
+          namedExports.push(statement.declaration.id.name)
+        }
+      }
+      for (const specifier of statement.specifiers || []) {
+        if (specifier.exported?.name) namedExports.push(specifier.exported.name)
+      }
+    }
+  }
+  const file = relativeFile(filename)
+  const previous = sourceMapFileMeta.get(file) || {}
+  sourceMapFileMeta.set(file, {
+    file,
+    imports,
+    namedExports,
+    defaultExportName,
+    components: previous.components || {},
+  })
+}
+
 function buildJsxPlugin(filename) {
   return function jsxSourcePlugin({ types }) {
     return {
       name: 'vibe-inspect-jsx-source',
       visitor: {
+        Program(programPath) {
+          collectModuleMeta(programPath, filename)
+        },
         JSXOpeningElement(pathNode) {
           const nameNode = pathNode.node.name
           if (!nameNode || nameNode.type !== 'JSXIdentifier') return
           const tag = nameNode.name
-          // 组件（大写开头）的属性可能不会落到 DOM，只标记原生标签。
-          if (!tag || /^[A-Z]/.test(tag)) return
+          if (!tag) return
           const elementNode = pathNode.parentPath?.node
           if (!elementNode || elementNode.type !== 'JSXElement') return
 
@@ -337,9 +521,6 @@ function buildJsxPlugin(filename) {
           const line = loc.line
           const column = loc.column + 1
           const component = componentNameFor(pathNode, filename)
-          const names = jsxAttributeNames(elementNode)
-          const existingOid = jsxStringAttribute(elementNode, 'data-oid')
-
           const chain = jsxAncestorChain(pathNode)
           const signature = signatureOf(chain)
           const scope = jsxScopeSignature(pathNode)
@@ -354,6 +535,32 @@ function buildJsxPlugin(filename) {
                 `${scope}|${signatureOf(parentChain)}|${parent.tag}`,
               )
             : null
+
+          // 大写组件是调用点：不注入 props，只把 callSiteOid 写进地图，
+          // 供 Props 编辑 / 跨文件定位使用。
+          if (/^[A-Z]/.test(tag)) {
+            const callSiteOid = `csoid_${hashText(
+              `${file}|${scope}|${signature}|${tag}`,
+            ).slice(0, 16)}`
+            recordCallSite({
+              oid: callSiteOid,
+              file,
+              start: Number.isFinite(elementNode.start) ? elementNode.start : 0,
+              end: Number.isFinite(elementNode.end) ? elementNode.end : 0,
+              line,
+              column,
+              component: tag,
+              parentOid,
+              siblingIndex: chain.length ? chain[chain.length - 1].index : 0,
+              siblingCount: chain.length ? chain[chain.length - 1].count : 1,
+              scope,
+              props: jsxStaticProps(elementNode),
+            })
+            return
+          }
+
+          const names = jsxAttributeNames(elementNode)
+          const existingOid = jsxStringAttribute(elementNode, 'data-oid')
           const oid =
             existingOid ||
             oidFor(file, component, `${scope}|${signature}|${tag}`)
@@ -373,6 +580,26 @@ function buildJsxPlugin(filename) {
             siblingCount: chain.length ? chain[chain.length - 1].count : 1,
             depth: Math.max(0, chain.length - 1),
           })
+          if (chain.length === 1) {
+            const meta = sourceMapFileMeta.get(file) || {
+              file,
+              imports: [],
+              namedExports: [],
+              defaultExportName: '',
+              components: {},
+            }
+            meta.components = meta.components || {}
+            if (!meta.components[component]) {
+              meta.components[component] = {
+                definitionOid: oid,
+                file,
+                start: elementNode.start,
+                end: elementNode.end,
+                line,
+              }
+            }
+            sourceMapFileMeta.set(file, meta)
+          }
 
           const injection = []
           if (!existingOid) {

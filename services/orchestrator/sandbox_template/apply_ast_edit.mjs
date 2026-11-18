@@ -489,6 +489,91 @@ function main() {
     return { status: 'OK', content: next }
   }
 
+  // ---- Direct Ops：UPDATE_PROPS ----
+  // 只改调用点 JSX 的属名 / 字面量；不执行表达式，不触碰组件定义。
+  if (operation === 'update_props') {
+    const target = findExactNode(ast, spec.anchorRange)
+    if (!target || target.type !== 'JSXElement' || !target.openingElement) {
+      return fail('ANCHOR_RANGE_MISMATCH', 'Props 更新目标必须是 JSX 元素')
+    }
+    const props = spec.props
+    if (!props || typeof props !== 'object' || Array.isArray(props)) {
+      return fail('INVALID_PROPS', 'props 必须是对象')
+    }
+    const entries = Object.entries(props)
+    if (entries.length === 0 || entries.length > 30) {
+      return fail('INVALID_PROPS', '一次必须更新 1-30 个属性')
+    }
+    const updated = new Set()
+    for (const [name, value] of entries) {
+      if (!/^[A-Za-z_$][A-Za-z0-9_$:-]*$/.test(name) || name.length > 80) {
+        return fail('INVALID_PROPS', `非法 prop 名称: ${name}`)
+      }
+      if (
+        value !== null &&
+        typeof value !== 'string' &&
+        typeof value !== 'number' &&
+        typeof value !== 'boolean'
+      ) {
+        return fail('INVALID_PROPS', `prop ${name} 只支持字符串/数字/布尔/null`)
+      }
+      if (typeof value === 'string' && /[<>{}\r\n]/.test(value)) {
+        return fail('INVALID_PROPS', `prop ${name} 不能包含 < > { } 或换行`)
+      }
+      updated.add(name)
+    }
+
+    const opening = target.openingElement
+    const attributes = []
+    for (const attribute of opening.attributes || []) {
+      if (
+        attribute.type === 'JSXAttribute' &&
+        updated.has(attribute.name?.name)
+      ) {
+        continue
+      }
+      attributes.push(code.slice(attribute.start, attribute.end))
+    }
+    for (const [name, value] of entries) {
+      if (value === null) continue
+      if (value === true) {
+        attributes.push(name)
+      } else if (typeof value === 'number') {
+        attributes.push(`${name}={${value}}`)
+      } else {
+        const escaped = String(value)
+          .replace(/&/g, '&amp;')
+          .replace(/"/g, '&quot;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+        attributes.push(`${name}="${escaped}"`)
+      }
+    }
+    const tagName = code.slice(opening.start, opening.name.end)
+    const closing = opening.selfClosing ? ' />' : '>'
+    const nextOpening =
+      `${tagName}${attributes.length ? ` ${attributes.join(' ')}` : ''}` +
+      closing
+    const next = `${code.slice(0, opening.start)}${nextOpening}${code.slice(
+      opening.end,
+    )}`
+    let nextAst
+    try {
+      nextAst = parseCode(next, file, parser)
+    } catch (error) {
+      return fail('INVALID_PROPS', `Props 更新后文件无法解析: ${error.message}`)
+    }
+    if (countJsxNodes(nextAst) !== countJsxNodes(ast)) {
+      return fail('PROPS_SCOPE_MISMATCH', 'Props 更新前后 JSX 节点数量不一致')
+    }
+    return {
+      status: 'OK',
+      content: next,
+      nodeCountBefore: countJsxNodes(ast),
+      nodeCountAfter: countJsxNodes(nextAst),
+    }
+  }
+
   if (operation === 'modify' || operation === 'delete') {
     const target = findExactNode(ast, spec.targetRange || spec.anchorRange)
     if (!target || !JSX_TYPES.has(target.type)) {

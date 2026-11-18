@@ -503,6 +503,119 @@ class DirectOperationDeleteTest(unittest.TestCase):
         self.assertEqual(self.sandbox.patches, [])
 
 
+class DirectOperationPropsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryChangeLogStore(max_entries=50)
+        self.store.clear()
+        anchor = dict(_anchor())
+        anchor.update(
+            {
+                "file": "src/App.jsx",
+                "component": "App",
+                "callSiteOid": "csoid_user_card",
+                "isCallSite": True,
+                "nodeType": "JSXElement",
+                "range": {
+                    "startLine": 5,
+                    "startColumn": 7,
+                    "endLine": 5,
+                    "endColumn": 40,
+                    "startOffset": 60,
+                    "endOffset": 100,
+                },
+            }
+        )
+        self.sandbox = _FakeSandbox(anchor=anchor)
+        self.service = DirectOperationService(
+            sandbox=self.sandbox,  # type: ignore[arg-type]
+            settings=_Settings(),  # type: ignore[arg-type]
+        )
+        self.service._changelog = self.store
+
+    def tearDown(self) -> None:
+        from ai_core.direct_ops import service as service_module
+
+        with service_module._COMPLETED_LOCK:
+            service_module._COMPLETED.clear()
+
+    def test_update_props_targets_call_site_not_definition(self) -> None:
+        payload = DirectActionPayload.model_validate(
+            {
+                "directActionId": "dact_props",
+                "idempotencyKey": "proj_direct:dact_props",
+                "projectId": PROJECT_ID,
+                "sandboxId": SANDBOX_ID,
+                "tenantId": "tenant_local",
+                "baseRevision": BASE_SHA,
+                "action": "UPDATE_PROPS",
+                "target": {
+                    "anchorId": "anc_props",
+                    "callSiteOid": "csoid_user_card",
+                    "file": "src/UserCard.jsx",
+                    "component": "UserCard",
+                },
+                "payload": {"props": {"title": "来自调用点的新标题"}},
+                "options": {"source": "FLOATING_TOOLBAR", "dryRun": False},
+            }
+        )
+
+        response = self.service.execute(payload)
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "update_props")
+        self.assertEqual(
+            self.sandbox.edits[0]["props"],
+            {"title": "来自调用点的新标题"},
+        )
+        # Fake resolver 返回的是 App.jsx 调用点，而不是 UserCard.jsx 定义。
+        self.assertEqual(self.sandbox.edits[0]["file"], "src/App.jsx")
+        self.assertEqual(self.sandbox.patches, [{"src/App.jsx": UPDATED}])
+        entries = self.store.list_for_project(PROJECT_ID)
+        self.assertIn("调用点 Props", entries[0].summary)
+
+    def test_update_props_without_call_site_is_blocked(self) -> None:
+        anchor = dict(_anchor())
+        anchor.update(
+            {
+                "file": "src/UserCard.jsx",
+                "component": "UserCard",
+                "nodeType": "JSXElement",
+                "protected": True,
+                "isShared": True,
+                "instanceCount": 2,
+            }
+        )
+        sandbox = _FakeSandbox(anchor=anchor)
+        service = DirectOperationService(
+            sandbox=sandbox,  # type: ignore[arg-type]
+            settings=_Settings(),  # type: ignore[arg-type]
+        )
+        service._changelog = self.store
+        payload = DirectActionPayload.model_validate(
+            {
+                "directActionId": "dact_props_definition",
+                "idempotencyKey": "proj_direct:dact_props_definition",
+                "projectId": PROJECT_ID,
+                "sandboxId": SANDBOX_ID,
+                "tenantId": "tenant_local",
+                "baseRevision": BASE_SHA,
+                "action": "UPDATE_PROPS",
+                "target": {
+                    "anchorId": "anc_props_definition",
+                    "file": "src/UserCard.jsx",
+                },
+                "payload": {"props": {"title": "x"}},
+                "options": {"source": "FLOATING_TOOLBAR", "dryRun": False},
+            }
+        )
+
+        with self.assertRaises(DirectActionError) as raised:
+            service.execute(payload)
+
+        self.assertEqual(raised.exception.code, DirectErrorCode.UNSAFE_OPERATION)
+        self.assertEqual(sandbox.edits, [])
+
+
 class DirectOperationAddTest(unittest.TestCase):
     def setUp(self) -> None:
         self.store = MemoryChangeLogStore(max_entries=50)
