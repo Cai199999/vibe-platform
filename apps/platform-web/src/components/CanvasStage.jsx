@@ -136,6 +136,16 @@ const StagedDragGhost = memo(function StagedDragGhost({
 })
 
 /** 把一个带标记的 DOM 节点转换为可序列化的目标描述。 */
+function parseDataSourceMarker(value) {
+  const match = /^(.+?):(\d+)(?::(\d+))?$/.exec(String(value || ''))
+  if (!match) return null
+  return {
+    file: match[1],
+    line: Number(match[2]) || 0,
+    column: Number(match[3]) || 1,
+  }
+}
+
 function targetForNode(node) {
   if (!node) return null
   const oid = node.getAttribute?.('data-oid') || ''
@@ -143,6 +153,7 @@ function targetForNode(node) {
   const legacyMarker = node.getAttribute?.('data-vibe-target')
   const marker = oid || sourceMarker || legacyMarker
   if (!marker) return null
+  const parsedSource = parseDataSourceMarker(sourceMarker || legacyMarker)
   const attr = oid
     ? 'data-oid'
     : sourceMarker
@@ -162,10 +173,16 @@ function targetForNode(node) {
     component: meta.component,
     tag: node.tagName?.toLowerCase() || '',
     kind: node.getAttribute?.('data-source-kind') || 'element',
-    file: node.getAttribute?.('data-source-file') || '',
-    line: Number(node.getAttribute?.('data-source-line') || 0) || undefined,
+    file:
+      node.getAttribute?.('data-source-file') || parsedSource?.file || '',
+    line:
+      Number(node.getAttribute?.('data-source-line') || 0) ||
+      parsedSource?.line ||
+      undefined,
     column:
-      Number(node.getAttribute?.('data-source-column') || 0) || undefined,
+      Number(node.getAttribute?.('data-source-column') || 0) ||
+      parsedSource?.column ||
+      undefined,
   }
 }
 

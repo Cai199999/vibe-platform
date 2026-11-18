@@ -1208,6 +1208,7 @@ class _ReactCompiler:
             f'data-oid="{_oid_for_node(node.id)}"',
             f'data-node-id="{node.id}"',
             f'data-source="{SOURCE_FILE}:{_SOURCE_PLACEHOLDER}"',
+            f'data-source-file="{SOURCE_FILE}"',
             f'data-source-kind="{source_kind}"',
             f'data-visual-type="{node.type}"',
         ]
@@ -1537,6 +1538,7 @@ def _fallback_result(
                 f'      <div data-oid="{_oid_for_node(node.id)}" '
                 f'data-node-id="{node.id}" '
                 f'data-source="{SOURCE_FILE}:{_SOURCE_PLACEHOLDER}" '
+                f'data-source-file="{SOURCE_FILE}" '
                 f'data-visual-type="{node.type}" '
                 'className="my-1.5 rounded-[var(--radius-sm)] border '
                 'border-[var(--color-border)] px-3 py-2">'

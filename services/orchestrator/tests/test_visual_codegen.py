@@ -159,6 +159,7 @@ class VisualCodegenCompileTests(unittest.TestCase):
         for node_id in expected:
             self.assertEqual(source.count(f'data-node-id="{node_id}"'), 1)
         self.assertRegex(source, r'data-source="src/App\.jsx:\d+"')
+        self.assertIn('data-source-file="src/App.jsx"', source)
         self.assertIn('data-source-kind="container"', source)
         self.assertIn('data-source-kind="element"', source)
         self.assertIn("visual-repeat-item", source)

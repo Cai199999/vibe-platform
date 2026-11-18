@@ -651,6 +651,45 @@
    * withStyles 只允许 pick / 圈选分析开启：hover 每帧都会调用它，读取
    * computedStyle + 扫描子树代价太高。
    */
+  /** 兼容 file:line 与 file:line:column 两种生成标记。 */
+  function parseGeneratedSource(value) {
+    var match = /^(.+?):(\d+)(?::(\d+))?$/.exec(String(value || ''))
+    if (!match) return null
+    return {
+      file: match[1],
+      line: Number(match[2]) || 0,
+      column: Number(match[3]) || 1,
+    }
+  }
+
+  /**
+   * 当前节点自身没有源码锚点时，沿 DOM 祖先找最近可定位的源码位置。
+   * 旧 CodeGen 只有 file:line，没有 manifest；这是必要的兼容回退。
+   */
+  function nearestSourceLocation(node) {
+    var current = node && node.parentElement
+    while (current && current !== document.documentElement) {
+      var file = current.getAttribute('data-source-file') || ''
+      var line = Number(current.getAttribute('data-source-line') || 0)
+      var column = Number(current.getAttribute('data-source-column') || 0)
+      var marker =
+        current.getAttribute('data-source') ||
+        current.getAttribute('data-vibe-target') ||
+        ''
+      var parsed = parseGeneratedSource(marker)
+      if (file || parsed) {
+        return {
+          file: file || parsed.file,
+          line: line || (parsed && parsed.line) || 0,
+          column: column || (parsed && parsed.column) || 0,
+          component: current.getAttribute('data-source-component') || '',
+        }
+      }
+      current = current.parentElement
+    }
+    return null
+  }
+
   function readSource(node, withStyles) {
     if (!node || typeof node.getAttribute !== 'function') return null
     var oid = node.getAttribute('data-oid') || ''
@@ -680,11 +719,20 @@
           ? '[data-node-id="' + nodeId + '"]'
           : ''
     if (!file && dataSource) {
-      var generated = /^(.+?):(\d+):(\d+)$/.exec(dataSource)
+      var generated = parseGeneratedSource(dataSource)
       if (generated) {
-        file = generated[1]
-        line = Number(generated[2])
-        column = Number(generated[3])
+        file = generated.file
+        line = generated.line
+        column = generated.column
+      }
+    }
+    if (!file) {
+      var fallback = nearestSourceLocation(node)
+      if (fallback) {
+        file = fallback.file
+        line = line || fallback.line
+        column = column || fallback.column
+        component = component || fallback.component
       }
     }
     var kind =
@@ -951,6 +999,22 @@
 
   /** 页面根目标：所有组件都没带 data-source 时的兜底插入容器。 */
   function pageTarget() {
+    var root = document.querySelector(
+      '[data-source-kind="container"][data-oid],' +
+        '[data-source-kind="container"][data-source],' +
+        '[data-source-kind="container"][data-source-file]',
+    )
+    var source = root ? readSource(root) : null
+    if (source && source.file) {
+      return {
+        ...source,
+        marker: source.marker || 'page',
+        selector: source.selector || '',
+        label: '页面',
+        role: 'container',
+        kind: 'container',
+      }
+    }
     return {
       oid: '',
       sourceRange: null,
