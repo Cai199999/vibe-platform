@@ -432,6 +432,71 @@ class VisualCodegenContractTests(unittest.TestCase):
         with self.assertRaises(FullstackContractInvalidError):
             self.service._resolve_contract(request)
 
+    def test_existing_contract_blocks_frontend_codegen(self) -> None:
+        request = FullstackRunRequest(
+            projectId="proj_existing",
+            contractId="contract_codegen",
+            contract=_contract(projectMode="EXISTING_SOURCE"),
+            options={"mode": "frontend"},
+        )
+        with self.assertRaises(FullstackContractInvalidError) as raised:
+            self.service._resolve_contract(request)
+        self.assertIn("存量项目禁止前端 CodeGen", str(raised.exception))
+
+    def test_client_declared_existing_blocks_even_for_new_contract(self) -> None:
+        # 旧契约 / 前端回传快照可能仍写着 NEW_PROJECT；本次 Run 的
+        # projectMode 是项目当前事实，不能被旧契约覆盖。
+        request = FullstackRunRequest(
+            projectId="proj_existing",
+            contractId="contract_codegen",
+            contract=_contract(frontendRoutes=[], components=[]),
+            options={"mode": "fullstack", "projectMode": "EXISTING_SOURCE"},
+        )
+        with self.assertRaises(FullstackContractInvalidError) as raised:
+            self.service._resolve_contract(request)
+        self.assertIn("存量项目禁止前端 CodeGen", str(raised.exception))
+
+    def test_new_project_with_template_files_still_allows_visual_codegen(self) -> None:
+        # 新建项目首次 CodeGen 会携带内置模板 / 当前入口源码，不能因为
+        # source.files 非空就误判为存量项目。
+        request = FullstackRunRequest(
+            projectId="proj_new",
+            contractId="contract_codegen",
+            contract=_contract(
+                appShape="full_stack_system",
+                frontendRoutes=[],
+                components=[],
+            ),
+            visualDocument=_document(),
+            source={"files": {"src/App.jsx": "export default function App() {}"}},
+            options={"mode": "frontend", "projectMode": "NEW_PROJECT"},
+        )
+        resolved = self.service._resolve_contract(request)
+        self.assertEqual(resolved.contract_id, "contract_codegen")
+
+    def test_existing_contract_allows_backend_increment(self) -> None:
+        request = FullstackRunRequest(
+            projectId="proj_existing",
+            contractId="contract_codegen",
+            contract=_contract(
+                projectMode="EXISTING_SOURCE",
+                appShape="full_stack_system",
+                apiRoutes=[
+                    {
+                        "method": "GET",
+                        "path": "/api/v1/users",
+                        "request": "",
+                        "response": "[]",
+                        "description": "用户列表",
+                    }
+                ],
+            ),
+            source={"files": {"src/App.jsx": "export default function App() {}"}},
+            options={"mode": "backend"},
+        )
+        resolved = self.service._resolve_contract(request)
+        self.assertEqual(resolved.contract_id, "contract_codegen")
+
 
 class _MemorySandbox(SandboxProvider):
     def __init__(self) -> None:

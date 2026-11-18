@@ -40,6 +40,7 @@ from ai_core.domain.fullstack import (
     FullstackRunSnapshot,
     FullstackStep,
 )
+from ai_core.domain.project_mode import EXISTING_SOURCE
 from ai_core.fullstack.coders import (
     collection_path,
     contract_database_engine,
@@ -520,7 +521,17 @@ class FullstackService:
                 f"契约当前状态为 {contract.status}，请先确认后再生成代码"
             )
         # 存量项目：源码是唯一事实源，绝不能触发前端 CodeGen。
-        if contract.project_mode == "EXISTING_SOURCE" and request.options.mode in {
+        # 不能只信契约里的 project_mode（可能是旧契约 / 前端回传快照）：
+        # 前端本次 Run 显式声明的 projectMode 优先级最高。
+        #
+        # 注意：不能用 request.source.files 反推模式——新建项目也会携带
+        # 内置模板 / 当前入口源码，按 files 判定会把首次 CodeGen 误杀。
+        declared_modes = {
+            value
+            for value in (request.options.project_mode, contract.project_mode)
+            if value
+        }
+        if EXISTING_SOURCE in declared_modes and request.options.mode in {
             "frontend",
             "fullstack",
         }:

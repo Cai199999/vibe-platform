@@ -1443,6 +1443,7 @@ export default function ArchitectPanel({
   // 新建项目的第一条输入：纯自然语言目标，不再要求先做形态选择。
   const [goal, setGoal] = useState('')
   const [docsOpen, setDocsOpen] = useState(false)
+  const existingSource = projectMode === 'EXISTING_SOURCE'
   const status = state?.status ?? 'IDLE'
   const statusTone = STATUS_TONES[status] ?? 'idle'
   const shape = state?.appShape
@@ -1705,23 +1706,36 @@ export default function ArchitectPanel({
           )}
 
           {status === 'IDLE' && (
-            <div className="architect-intro">
+            <div
+              className="architect-intro"
+              data-architect-intro={existingSource ? 'existing' : 'new'}
+            >
               <span className="architect-intro-mark" aria-hidden="true">
-                ✦
+                {existingSource ? '◇' : '✦'}
               </span>
-              <h3>告诉我你要做什么，架构师来拆解</h3>
+              <h3>
+                {existingSource
+                  ? '描述要为现有前端补充的后端能力'
+                  : '告诉我你要做什么，架构师来拆解'}
+              </h3>
               <p>
-                不需要先画原型或选择项目类型。用一句话描述目标，架构师会从
-                对话中识别应用形态，并逐步追问用户群体、核心功能、技术栈、
-                数据实体与页面结构。
+                {existingSource
+                  ? '源码是唯一事实源。这里不会新建 VisualDocument，也不会重写现有 React 页面；架构师只基于现有文件树、组件和路由做业务审查，并确认接口与数据表的增量。'
+                  : '不需要先画原型或选择项目类型。用一句话描述目标，架构师会从对话中识别应用形态，并逐步追问用户群体、核心功能、技术栈、数据实体与页面结构。'}
               </p>
               <label className="architect-goal">
-                <span>你想创建什么？</span>
+                <span>
+                  {existingSource ? '本次后端增量目标是什么？' : '你想创建什么？'}
+                </span>
                 <textarea
                   rows={5}
                   value={goal}
                   data-architect-goal
-                  placeholder="例如：我要做一个团队任务看板，成员可以登录、创建任务、拖拽状态，并给任务指派负责人。"
+                  placeholder={
+                    existingSource
+                      ? '例如：为现有的用户列表补充分页查询接口、users 表的索引，并增加角色字段；不要改动页面结构。'
+                      : '例如：我要做一个团队任务看板，成员可以登录、创建任务、拖拽状态，并给任务指派负责人。'
+                  }
                   onChange={(event) => setGoal(event.target.value)}
                   onKeyDown={(event) => {
                     // Cmd/Ctrl + Enter 直接提交，适合连续多轮对话。
@@ -1744,10 +1758,12 @@ export default function ArchitectPanel({
                   disabled={!goal.trim()}
                   onClick={() => onStart?.(goal.trim())}
                 >
-                  开始架构设计
+                  {existingSource ? '开始后端增量审查' : '开始架构设计'}
                 </button>
                 <span className="architect-goal-hint">
-                  架构师会连续追问，直到契约置信度达到阈值
+                  {existingSource
+                    ? '只确认接口 / 数据表增量，不生成前端代码'
+                    : '架构师会连续追问，直到契约置信度达到阈值'}
                 </span>
               </div>
             </div>

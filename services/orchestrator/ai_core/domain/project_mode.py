@@ -35,9 +35,12 @@ def resolve_project_mode(
     优先级：
       1. 有 sandbox → EXISTING_SOURCE（服务端会读取最新源码）；
       2. 有非空 files → EXISTING_SOURCE；
-      3. 否则采用前端显式声明，默认 NEW_PROJECT。
+      3. 没有源码事实 → NEW_PROJECT。
 
-    ``declared`` 只在没有源码事实时作为回退，不能覆盖“已有源码”事实。
+    ``declared`` 不能覆盖“已有源码”事实；反过来，仅声明存量但没有
+    files / sandbox 时也不能凭空进入 EXISTING_SOURCE。否则存量 Prompt、
+    跳过 DDL 自检、禁止前端 CodeGen 都会作用在一个没有源码的项目上，
+    等于绕开双轨制事实判定。
     """
     source_files = {
         str(path): str(content)
@@ -59,8 +62,8 @@ def resolve_project_mode(
         )
     if declared == EXISTING_SOURCE:
         return ProjectModeDecision(
-            EXISTING_SOURCE,
-            reason="前端声明为存量项目",
+            NEW_PROJECT,
+            reason="声明为存量但缺少 files / sandbox 源码事实，按新建项目处理",
         )
     return ProjectModeDecision(NEW_PROJECT, reason="无源码，按新建项目处理")
 

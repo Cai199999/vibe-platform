@@ -22,6 +22,7 @@ from pydantic import Field, model_validator
 
 from ai_core.domain.architect import ArchitectContract
 from ai_core.domain.common import CamelModel
+from ai_core.domain.project_mode import ProjectMode
 from ai_core.domain.visual_document import VisualDocument
 
 FullstackRunStatus = Literal["RUNNING", "SUCCEEDED", "FAILED"]
@@ -53,6 +54,9 @@ class FullstackRunOptions(CamelModel):
     """
 
     mode: Literal["fullstack", "frontend", "backend", "dba"] = "fullstack"
+    # 前端对项目模式的事实判定。契约快照可能是旧版本，不能单独作为
+    # “是否可以跑前端 CodeGen”的唯一依据。
+    project_mode: ProjectMode | None = None
     verify_build: bool = True
     restart_sandbox: bool = True
     max_output_chars: int = Field(default=4000, ge=500, le=20_000)

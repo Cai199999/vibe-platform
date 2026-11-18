@@ -49,13 +49,24 @@ class ProjectModeResolverTests(unittest.TestCase):
             EXISTING_SOURCE,
         )
 
-    def test_declared_existing_is_only_a_fallback(self) -> None:
+    def test_declared_existing_without_source_facts_is_new(self) -> None:
+        # 仅声明存量不够：没有 files / sandbox 时必须是 NEW_PROJECT，
+        # 否则会以“存量模式”跑在没有源码的项目上。
+        decision = resolve_project_mode(declared=EXISTING_SOURCE, files={})
+        self.assertEqual(decision.mode, NEW_PROJECT)
+        self.assertIn("缺少", decision.reason)
+
+    def test_source_facts_override_declared_new(self) -> None:
         self.assertEqual(
-            resolve_project_mode(declared=EXISTING_SOURCE, files={}).mode,
+            resolve_project_mode(declared=NEW_PROJECT, files={"a.js": "x"}).mode,
             EXISTING_SOURCE,
         )
         self.assertEqual(
-            resolve_project_mode(declared=NEW_PROJECT, files={"a.js": "x"}).mode,
+            resolve_project_mode(
+                declared=NEW_PROJECT,
+                files={},
+                sandbox_id="sbx_1",
+            ).mode,
             EXISTING_SOURCE,
         )
 
@@ -122,9 +133,7 @@ class MultiPageBuilderTests(unittest.TestCase):
         )
         document = VisualDocument.model_validate(payload)
         self.assertEqual(len(document.pages), 2)
-        self.assertEqual(
-            {page.path for page in document.pages}, {"/", "/users"}
-        )
+        self.assertEqual({page.path for page in document.pages}, {"/", "/users"})
         self.assertEqual(document.active_page_id, document.pages[0].page_id)
         report = validate_visual_document(document)
         self.assertTrue(report.ok, report.errors)

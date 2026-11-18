@@ -1054,6 +1054,9 @@ export function useArchitect({ token } = {}) {
         },
         options: {
           mode,
+          // 项目模式以本次工作区事实为准；旧契约快照不能单独决定
+          // 是否允许前端 CodeGen。
+          projectMode: options.projectMode || undefined,
           verifyBuild: options.verifyBuild ?? true,
           restartSandbox: options.restartSandbox ?? true,
           ...(options.options ?? {}),

@@ -1300,17 +1300,31 @@ function applyStreamEvent(run, event, annotationId) {
   return base
 }
 
-function EmptyWorkspace({ onNewProject }) {
+function EmptyWorkspace({ onNewProject, onImportSource, busy = false }) {
   return (
     <div className="workspace-empty">
       <div className="empty-mark" aria-hidden="true">
         ▦
       </div>
       <h2>工作区里还没有打开的窗口</h2>
-      <p>新建一个项目，或从左上角项目下拉栏重新打开已有项目。</p>
-      <button className="primary-button" type="button" onClick={onNewProject}>
-        ＋ 新建项目
-      </button>
+      <p>
+        新建一个项目，或直接导入已有 React 源码；也可以从左上角项目下拉栏
+        重新打开已有项目。
+      </p>
+      <div className="workspace-empty-actions">
+        <button className="primary-button" type="button" onClick={onNewProject}>
+          ＋ 新建项目
+        </button>
+        <button
+          className="ghost-button"
+          type="button"
+          data-direct-import
+          disabled={busy}
+          onClick={onImportSource}
+        >
+          {busy ? '正在分析…' : '导入源码分析'}
+        </button>
+      </div>
     </div>
   )
 }
@@ -1443,6 +1457,8 @@ export default function WorkspacePage() {
   const [newProjectOpen, setNewProjectOpen] = useState(false)
   const [sourceImportBusy, setSourceImportBusy] = useState(false)
   const [sourceImportError, setSourceImportError] = useState('')
+  // 空工作区 / 存量入口的直达文件选择：不需要先经过“新建项目”对话。
+  const directImportInputRef = useRef(null)
   // 导出状态只保留一个：同时下载多个项目没有意义，且提示条全局唯一。
   const [exportingProjectId, setExportingProjectId] = useState(null)
   const [exportNotice, setExportNotice] = useState(null)
@@ -3521,10 +3537,23 @@ export default function WorkspacePage() {
         )}&mode=existing`,
       )
     } catch (cause) {
-      setSourceImportError(`导入失败：${cause?.message || cause}`)
+      const message = `导入失败：${cause?.message || cause}`
+      setSourceImportError(message)
+      // 直达导入没有弹窗承载错误，必须用 toast 保证用户能看到失败原因。
+      if (!newProjectOpen) showToast('error', message)
     } finally {
       setSourceImportBusy(false)
     }
+  }
+
+  /**
+   * 直达导入：空工作区不需要先打开“新建项目”对话。
+   * 选择文件后仍复用 handleImportSourceFile 的落盘 + 只读投影跳转。
+   */
+  const openDirectImportPicker = () => {
+    if (sourceImportBusy) return
+    setSourceImportError('')
+    directImportInputRef.current?.click()
   }
 
   /**
@@ -3794,6 +3823,7 @@ export default function WorkspacePage() {
       contract,
       contractId: contract.contractId,
       mode: 'backend',
+      projectMode: PROJECT_MODE.EXISTING_SOURCE,
       options: { maxOutputChars: 20000 },
     })
     if (started) {
@@ -3892,6 +3922,9 @@ export default function WorkspacePage() {
       contract,
       contractId: contract.contractId,
       mode,
+      // handleVisualCodegen 已前置拒绝存量项目，这里显式传 NEW_PROJECT，
+      // 避免服务端被旧契约 / 模板源码误判。
+      projectMode: PROJECT_MODE.NEW_PROJECT,
       visualDocument: document,
       options: { maxOutputChars: 20000 },
     })
@@ -4019,6 +4052,8 @@ export default function WorkspacePage() {
       files,
       contract,
       contractId: contract.contractId,
+      // 与上方分流使用同一判定，不在请求层引入第二套依据。
+      projectMode: resolveProjectMode(project),
     })
     console.info('[fullstack] generate dispatched', { ...diagnostics, started })
     if (started) {
@@ -4103,6 +4138,7 @@ export default function WorkspacePage() {
       contract,
       contractId,
       mode: 'frontend',
+      projectMode: PROJECT_MODE.NEW_PROJECT,
       options: { maxOutputChars: 20000 },
     })
     if (!started) {
@@ -7071,7 +7107,13 @@ export default function WorkspacePage() {
           )}
 
           {openProjects.length === 0 &&
-            !activeSnapshotTab && <EmptyWorkspace onNewProject={openNewProjectDialog} />}
+            !activeSnapshotTab && (
+              <EmptyWorkspace
+                onNewProject={openNewProjectDialog}
+                onImportSource={openDirectImportPicker}
+                busy={sourceImportBusy}
+              />
+            )}
         </div>
       </main>
 
@@ -7085,6 +7127,20 @@ export default function WorkspacePage() {
         }}
         onCreateBlank={handleCreateBlankProject}
         onImportSource={handleImportSourceFile}
+      />
+
+      {/* 空工作区直达导入：不弹“新建项目”对话，选择文件后直接进入只读投影。 */}
+      <input
+        ref={directImportInputRef}
+        type="file"
+        accept=".jsx,.tsx,.js,.ts"
+        hidden
+        data-direct-import-input
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          event.target.value = ''
+          if (file) void handleImportSourceFile(file)
+        }}
       />
 
       <DirectOpsDecisionDialog
