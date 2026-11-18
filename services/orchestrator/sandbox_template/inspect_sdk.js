@@ -705,10 +705,36 @@
       (mapped && mapped.isContainer ? 'local' : 'element')
     // 组件定义根节点若只有一个调用点，直接把 callSite 带给父页面；
     // 多个调用点时不猜，交给后端 HITL 选择范围。
-    var callSite =
-      mapped && Array.isArray(mapped.callSites) && mapped.callSites.length === 1
-        ? mapped.callSites[0]
-        : null
+    // 实例定位：同一份源码可能渲染多个 DOM 节点，必须把“第几个”与
+    // 父级 JSX 调用位置一并回传，否则 Coder 只能改基础组件造成全局污染。
+    var instanceInfo = instanceInfoFor(node, file, line, column)
+    var callSites =
+      mapped && Array.isArray(mapped.callSites) ? mapped.callSites : []
+    var callSite = null
+    var callSiteConfidence = 'none'
+    var callSiteAmbiguous = false
+    if (callSites.length === 1) {
+      callSite = callSites[0]
+      callSiteConfidence = 'exact'
+    } else if (callSites.length > 1) {
+      // 静态顺序 + 运行时实例序号：只在调用点全部非循环、非条件渲染，
+      // 且静态调用点数量与运行时实例数一致时才自动消歧。
+      var ordered = callSites.every(function (item) {
+        return item.safeForOrder !== false && !item.inMap && !item.conditional
+      })
+      var instanceIndex = Number(instanceInfo.instance) || 1
+      if (
+        ordered &&
+        callSites.length === instanceInfo.instanceCount &&
+        instanceIndex >= 1 &&
+        instanceIndex <= callSites.length
+      ) {
+        callSite = callSites[instanceIndex - 1]
+        callSiteConfidence = 'ordered'
+      } else {
+        callSiteAmbiguous = true
+      }
+    }
     var callSiteRange =
       callSite && Number.isFinite(Number(callSite.start))
         ? {
@@ -716,9 +742,6 @@
             endOffset: Number(callSite.end),
           }
         : null
-    // 实例定位：同一份源码可能渲染多个 DOM 节点，必须把“第几个”与
-    // 父级 JSX 调用位置一并回传，否则 Coder 只能改基础组件造成全局污染。
-    var instanceInfo = instanceInfoFor(node, file, line, column)
     var instancePath = computeInstancePath(node)
     var identity = {
       oid: oid,
@@ -727,6 +750,8 @@
       callSiteOid: (callSite && callSite.callSiteOid) || '',
       callSiteFile: (callSite && callSite.file) || '',
       callSiteRange: callSiteRange,
+      callSiteConfidence: callSiteConfidence,
+      callSiteAmbiguous: callSiteAmbiguous,
       instancePath: instancePath,
       instanceKey: instanceKeyOf(instancePath),
       containerScope: containerScope,
@@ -748,6 +773,8 @@
       callSiteOid: (callSite && callSite.callSiteOid) || '',
       callSiteFile: (callSite && callSite.file) || '',
       callSiteRange: callSiteRange,
+      callSiteConfidence: callSiteConfidence,
+      callSiteAmbiguous: callSiteAmbiguous,
       instancePath: instancePath,
       instanceKey: instanceKeyOf(instancePath),
       containerScope: containerScope,
@@ -894,6 +921,8 @@
       callSiteOid: source.callSiteOid || '',
       callSiteFile: source.callSiteFile || '',
       callSiteRange: source.callSiteRange || null,
+      callSiteConfidence: source.callSiteConfidence || 'none',
+      callSiteAmbiguous: Boolean(source.callSiteAmbiguous),
       instancePath: source.instancePath || [],
       instanceKey: source.instanceKey || '',
       containerScope: source.containerScope || 'local',
@@ -929,6 +958,8 @@
       callSiteOid: '',
       callSiteFile: '',
       callSiteRange: null,
+      callSiteConfidence: 'none',
+      callSiteAmbiguous: false,
       instancePath: [],
       instanceKey: '',
       containerScope: 'local',

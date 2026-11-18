@@ -185,6 +185,27 @@ function signatureOf(chain) {
   return chain.map((item) => `${item.tag}:${item.index}`).join('/')
 }
 
+/** 完整 JSX 祖先键路径（含表达式容器 / 条件分支），用于 oid 唯一性。 */
+function jsxElementSignature(elementPath) {
+  const parts = []
+  let current = elementPath
+  while (current && !current.isFunction?.()) {
+    const node = current.node
+    if (node) parts.unshift(`${node.type}:${current.key ?? ''}`)
+    current = current.parentPath
+  }
+  return parts.join('/')
+}
+
+function jsxParentElementPath(elementPath) {
+  let current = elementPath?.parentPath
+  while (current && !current.isFunction?.()) {
+    if (current.node?.type === 'JSXElement') return current
+    current = current.parentPath
+  }
+  return null
+}
+
 /**
  * 函数作用域签名：避免同一组件内多个匿名 map 回调产生相同结构路径。
  * 使用 AST 祖先 key 而不是行号，保证纯换行 / 空行不影响 oid。
@@ -207,6 +228,22 @@ function jsxInsideMap(openingPath) {
       node?.type === 'CallExpression' &&
       node.callee?.type === 'MemberExpression' &&
       node.callee.property?.name === 'map'
+    ) {
+      return true
+    }
+    current = current.parentPath
+  }
+  return false
+}
+
+/** 条件渲染下的调用点无法用静态顺序稳定消歧。 */
+function jsxInsideConditional(openingPath) {
+  let current = openingPath
+  while (current) {
+    const node = current.node
+    if (
+      node?.type === 'ConditionalExpression' ||
+      node?.type === 'LogicalExpression'
     ) {
       return true
     }
@@ -328,6 +365,7 @@ function buildSourceMap() {
       definitionFile: definition?.file || '',
       forwardsChildren,
       slot: Boolean(raw.hasChildren && forwardsChildren),
+      safeForOrder: !raw.inMap && !raw.conditional,
     }
     callSites[callSiteOid] = callSite
     if (definition?.definitionOid && nodes[definition.definitionOid]) {
@@ -340,6 +378,9 @@ function buildSourceMap() {
         column: raw.column,
         component: raw.component,
         slot: callSite.slot,
+        inMap: Boolean(raw.inMap),
+        conditional: Boolean(raw.conditional),
+        safeForOrder: callSite.safeForOrder,
         props: raw.props || {},
       })
       const key = `${definition.file || targetFile}#${definitionName}`
@@ -353,6 +394,15 @@ function buildSourceMap() {
       component.callSiteOids.push(callSiteOid)
       components[key] = component
     }
+  }
+
+  // 调用点按源码顺序排序，运行时实例序号才能与静态顺序对齐。
+  for (const node of Object.values(nodes)) {
+    if (!Array.isArray(node.callSites) || node.callSites.length < 2) continue
+    node.callSites.sort((left, right) => {
+      if (left.file !== right.file) return left.file.localeCompare(right.file)
+      return Number(left.start) - Number(right.start)
+    })
   }
 
   // 容器落点语义：DOM 容器不等于可插入的 JSX 作用域。
@@ -593,19 +643,19 @@ function buildJsxPlugin(filename) {
           const line = loc.line
           const column = loc.column + 1
           const component = componentNameFor(pathNode, filename)
+          const elementPath = pathNode.parentPath
           const chain = jsxAncestorChain(pathNode)
-          const signature = signatureOf(chain)
+          const signature = jsxElementSignature(elementPath)
           const scope = jsxScopeSignature(pathNode)
           const inMap = jsxInsideMap(pathNode)
-          const parentChain = chain.length >= 2 ? chain.slice(0, -1) : []
-          const parent = parentChain.length
-            ? parentChain[parentChain.length - 1]
-            : null
-          const parentOid = parent
+          const conditional = jsxInsideConditional(pathNode)
+          const parentElementPath = jsxParentElementPath(elementPath)
+          const parentOid = parentElementPath
             ? oidFor(
                 file,
                 component,
-                `${scope}|${signatureOf(parentChain)}|${parent.tag}`,
+                `${scope}|${jsxElementSignature(parentElementPath)}|` +
+                  `${jsxTagName(parentElementPath.node)}`,
               )
             : null
 
@@ -635,6 +685,7 @@ function buildJsxPlugin(filename) {
               siblingCount: chain.length ? chain[chain.length - 1].count : 1,
               scope,
               inMap,
+              conditional,
               hasChildren,
               props: jsxStaticProps(elementNode),
             })

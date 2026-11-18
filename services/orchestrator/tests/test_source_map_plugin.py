@@ -227,6 +227,57 @@ export default function App() {
             all(item["containerScope"] == "repeated_template" for item in li_nodes)
         )
 
+    def test_multiple_call_sites_are_ordered_and_conditional_marked(self) -> None:
+        (self.root / "src" / "UserCard.jsx").write_text(
+            """export default function UserCard({ title }) {
+  return <section>{title}</section>
+}
+""",
+            encoding="utf-8",
+        )
+        (self.root / "src" / "App.jsx").write_text(
+            """import UserCard from './UserCard'
+
+export default function App({ show }) {
+  return (
+    <main>
+      <UserCard title="A" />
+      {show ? <UserCard title="B" /> : null}
+    </main>
+  )
+}
+""",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["node", "--input-type=module", "-e", GRAPH_PLUGIN_RUNNER],
+            cwd=TEMPLATE_DIR,
+            env={**os.environ, "VIBE_TEST_ROOT": str(self.root)},
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        source_map = json.loads(
+            (self.root / "vibe-source-map.json").read_text(encoding="utf-8")
+        )
+        call_sites = sorted(
+            (
+                item
+                for item in source_map["callSites"].values()
+                if item["component"] == "UserCard"
+            ),
+            key=lambda item: item["start"],
+        )
+        self.assertEqual([item["props"]["title"] for item in call_sites], ["A", "B"])
+        self.assertFalse(call_sites[0]["conditional"])
+        self.assertTrue(call_sites[1]["conditional"])
+        self.assertFalse(call_sites[1]["safeForOrder"])
+        definition = source_map["nodes"][call_sites[0]["definitionOid"]]
+        self.assertEqual(
+            [item["props"]["title"] for item in definition["callSites"]],
+            ["A", "B"],
+        )
+
     def test_call_site_slot_requires_children_forwarding(self) -> None:
         (self.root / "src" / "UserCard.jsx").write_text(
             """export default function UserCard({ children }) {

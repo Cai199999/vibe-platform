@@ -139,8 +139,9 @@ Agent 只能根据 `code` / `requiresHuman` / `retryable` 决定重试、换工�
 - 运行时 `instancePath` 上报；模板 / 多实例修改返回 HITL 范围选择；
 - `containerScope` 标注：local 直接移动，组件定义/重复模板落点 HITL；
 - `call_site_slot`：唯一调用点且组件转发 children 时，插入调用点 JSX；
+- 多调用点：静态源码顺序 + 运行时实例序号消歧（仅非 map / 非条件）；
 - SourceSync 删除感知 + 本地 JSON 补偿队列（失败后台重试）；
-- 多调用点运行时精确消歧、rename/add 全量同步（后续）。
+- 条件/循环调用点精确消歧、rename/add 全量同步（后续）。
 
 ### P1
 
