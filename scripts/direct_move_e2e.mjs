@@ -303,7 +303,19 @@ async function main() {
         )
         .then((handle) => handle.jsonValue())
       const sdkPlacement = dragEnd?.payload?.placement || {}
-      log('sdk drag payload', JSON.stringify(dragEnd?.payload || {}))
+      const sdkPayload = dragEnd?.payload || {}
+      log('sdk drag payload', {
+        token: sdkPayload.token,
+        sourceOid: sdkPayload.source?.oid,
+        placement: process.env.LIVE_DEBUG === '1'
+          ? sdkPayload.placement
+          : {
+              parentOid: sdkPayload.placement?.parentOid,
+              parentFile: sdkPayload.placement?.parentFile,
+              insertPosition: sdkPayload.placement?.insertPosition,
+              siblingIndex: sdkPayload.placement?.siblingIndex,
+            },
+      })
       if (
         sdkPlacement.parentOid !== main.oid ||
         sdkPlacement.parentFile !== 'src/App.jsx' ||

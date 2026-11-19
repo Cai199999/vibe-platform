@@ -60,6 +60,50 @@ function log(...args) {
   console.log('[visual-chain-e2e]', ...args)
 }
 
+/** 默认只输出可定位字段；完整响应体仅在 LIVE_DEBUG=1 时打印。 */
+function compactDirectResponse(response) {
+  if (!response) return null
+  let body = {}
+  try {
+    body = JSON.parse(response.body || '{}')
+  } catch {
+    body = {}
+  }
+  const summary = {
+    httpStatus: response.status,
+    action: body.action || null,
+    result: body.status || null,
+    changeId: body.changeId || null,
+    errorCode: body.code || body.errorCode || null,
+    error:
+      body.diagnostic?.toolMessage ||
+      body.userMessage ||
+      body.message ||
+      null,
+    parentOid:
+      body.resolvedTarget?.parent?.oid ||
+      body.resolvedTarget?.identity?.parentOid ||
+      null,
+    commitHash: body.commitHash || null,
+  }
+  return process.env.LIVE_DEBUG === '1'
+    ? { ...summary, body: response.body }
+    : summary
+}
+
+function compactPlacement(placement) {
+  if (!placement) return null
+  const summary = {
+    parentOid: placement.parentOid || '',
+    parentFile: placement.parentFile || '',
+    insertPosition: placement.insertPosition || '',
+    siblingIndex: placement.siblingIndex,
+  }
+  return process.env.LIVE_DEBUG === '1'
+    ? { ...summary, raw: placement }
+    : summary
+}
+
 function fail(message) {
   throw new Error(message)
 }
@@ -184,7 +228,7 @@ async function tryDirectDelete(page, frame) {
     await confirm.click()
   }
   const response = await waitForDirectResponse()
-  log('direct delete response', response)
+  log('direct delete response', compactDirectResponse(response))
   const toast = await page
     .locator('.workspace-toast')
     .allInnerTexts()
@@ -296,7 +340,7 @@ async function trySameParentReorder(page, active) {
       .filter((item) => item.type === 'drag-end')
       .map((item) => item.payload?.placement),
   )
-  log('same-parent reorder drag placement', dragEvents)
+  log('same-parent reorder drag placement', dragEvents.map(compactPlacement))
   log('same-parent reorder response', {
     status: response?.status,
     action: response?.body ? JSON.parse(response.body).action : null,
@@ -463,9 +507,17 @@ async function tryDirectDrag(page, active) {
       rect: item.payload?.rect,
     })),
   )
-  log('drag events', JSON.stringify(dragEvents.slice(-6), null, 2))
+  log(
+    'drag events',
+    dragEvents.slice(-6).map((item) => ({
+      type: item.type,
+      sourceOid: item.sourceOid,
+      placement: compactPlacement(item.placement),
+      rect: process.env.LIVE_DEBUG === '1' ? item.rect : undefined,
+    })),
+  )
   const response = await waitForDirectResponse(20000)
-  log('direct drag response', response)
+  log('direct drag response', compactDirectResponse(response))
   const toast = await page
     .locator('.workspace-toast')
     .allInnerTexts()
@@ -807,7 +859,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
       .filter((item) => item.type === 'drag-end')
       .map((item) => item.payload?.placement),
   )
-  log('grid drag placement', gridPlacement)
+  log('grid drag placement', gridPlacement.map(compactPlacement))
   if (!response || response.status !== 200) {
     let detail = {}
     try {

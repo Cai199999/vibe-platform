@@ -18,3 +18,22 @@
 - 后端 API 交付前必须本地跑通测试；Python 代码写完后执行 `black`。
 - 只做本地 commit，不自动 `git push`。
 - 全局规范见 `~/AGENTS.md`，与本文件不冲突时同时生效。
+
+## 2. 开发会话上下文预算
+
+目标是避免“同一批大文件 / 大日志被反复带进上下文”，不是限制深入排查。
+
+- **读文件**：先用 `rg` / `grep -n` 定位，再用 `Read offset/limit` 读目标函数；
+  禁止整文件加载超过约 200 行的文件（`WorkspacePage.jsx`、`inspect_sdk.js`、
+  `agent/graph.py`、`coders.py`、`test_fullstack.py` 等）。
+- **命令输出**：禁止 `cat` 大文件或直接打印完整 E2E 日志 / JSON；
+  统一用 `head`、`tail`、`rg`、`jq` 摘要。
+- **E2E 日志**：默认只输出 `httpStatus / action / result / errorCode /
+  parentOid / siblingIndex`；完整响应体、DOM tree、placement 仅在
+  `LIVE_DEBUG=1` 或 `LIVE_DIAGNOSE=1` 时展开。
+- **失败信息**：失败时只展开关键诊断字段并截断到约 600 字符，不整段回灌。
+- **重复读取**：同一会话内不重复读取同一文件；编辑后不重读验证，依赖
+  `Edit/Write` 成功、定向测试和 `node --check` / `git diff --check`。
+- **测试节奏**：日常只跑定向测试；`scripts/ci_local.sh` 仅在里程碑或交付前跑。
+- **跨文件排查**：优先派子 Agent 做只读搜索，只回收结论与文件位置，不把
+  全量搜索结果带回主会话。
