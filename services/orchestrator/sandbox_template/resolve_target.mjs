@@ -634,6 +634,17 @@ function findArrayInitializer(program, name) {
 /**
  * 解析 .map() 的数据来源：静态数组可直接删元素，动态数据留给 Agent。
  */
+function nearestJsxRange(node, parents) {
+  let current = parents.get(node)
+  while (current) {
+    if (JSX_TYPES.has(current.type)) {
+      return { start: current.start, end: current.end }
+    }
+    current = parents.get(current)
+  }
+  return null
+}
+
 function mapSourceFor(node, parents, code, program) {
   let current = node
   while (current) {
@@ -643,36 +654,44 @@ function mapSourceFor(node, parents, code, program) {
       current.callee.property?.name === 'map'
     ) {
       const object = current.callee.object
+      const container = nearestJsxRange(current, parents) || {}
+      const withContainer = (source) => ({
+        ...source,
+        // .map(...) 所在的 JSX 容器（ul / table / 列表根），用于判断
+        // 拖拽落点是不是“回到同一个循环容器”。
+        containerStart: container.start,
+        containerEnd: container.end,
+      })
       if (object?.type === 'ArrayExpression') {
-        return {
+        return withContainer({
           kind: 'array_literal',
           start: object.start,
           end: object.end,
           count: object.elements.length,
-        }
+        })
       }
       if (object?.type === 'Identifier') {
         const initializer = findArrayInitializer(program, object.name)
         if (initializer) {
-          return {
+          return withContainer({
             kind: 'variable_array',
             variable: object.name,
             start: initializer.start,
             end: initializer.end,
             count: initializer.elements.length,
-          }
+          })
         }
-        return {
+        return withContainer({
           kind: 'dynamic',
           variable: object.name,
           expression: code.slice(object.start, object.end),
-        }
+        })
       }
       if (object) {
-        return {
+        return withContainer({
           kind: 'dynamic',
           expression: code.slice(object.start, object.end).slice(0, 200),
-        }
+        })
       }
     }
     current = parents.get(current)
@@ -880,6 +899,8 @@ function resolveOne(anchor, parser, workdir) {
   result.protected = shared
   result.sharedReason = reasons.join('；')
   result.instanceCount = instanceCount
+  // 运行时实例序号必须原样回传：循环项删除/移动都依赖它定位第几项。
+  result.instance = Math.max(1, Number(anchor.instance) || 1)
   result.instancePath = Array.isArray(anchor.instancePath)
     ? anchor.instancePath
     : []

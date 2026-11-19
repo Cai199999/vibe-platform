@@ -2000,6 +2000,34 @@
   }
 
   /**
+   * 循环项内的拖拽应落到循环容器本身（数据项重排），而不是嵌套进
+   * 另一个循环项。只有 codegen repeat 包装层带 data-repeat-template；
+   * 普通组件不受影响。
+   */
+  function repeatContainerFor(node, parentNode) {
+    var sourceItem = node && node.closest
+      ? node.closest('[data-repeat-template]')
+      : null
+    if (!sourceItem) return null
+    var template = sourceItem.getAttribute('data-repeat-template') || ''
+    if (!template) return null
+    var candidateItem =
+      parentNode && parentNode.closest
+        ? parentNode.closest('[data-repeat-template]')
+        : null
+    if (
+      candidateItem &&
+      candidateItem.getAttribute('data-repeat-template') === template
+    ) {
+      return candidateItem.parentElement || null
+    }
+    if (parentNode && parentNode.contains && parentNode.contains(sourceItem)) {
+      return parentNode
+    }
+    return null
+  }
+
+  /**
    * 同父兄弟的边缘落点应表达“排序”，而不是“塞进兄弟容器”。
    *
    * 指针停在兄弟容器的上/下/左/右边距附近时，返回共同父容器；停在
@@ -2046,8 +2074,14 @@
           ? stageParentOf(node.parentElement).node
           : null
       }
-      // 同父兄弟的边缘命中 → 按排序处理；中央区域才允许嵌套。
-      parentNode = preferParentForSiblingEdge(node, parentNode, x, y)
+      // 循环项之间拖动 → 落在循环容器上，作为数据项重排。
+      var repeatParent = repeatContainerFor(node, parentNode)
+      if (repeatParent) {
+        parentNode = repeatParent
+      } else {
+        // 同父兄弟的边缘命中 → 按排序处理；中央区域才允许嵌套。
+        parentNode = preferParentForSiblingEdge(node, parentNode, x, y)
+      }
       if (!parentNode || parentNode === node || node.contains(parentNode)) {
         return result
       }

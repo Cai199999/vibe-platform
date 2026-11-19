@@ -174,6 +174,20 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
         # 共享/循环/多实例由前端高亮受影响范围。
         return ScopeDecision(True, "instance", "direct")
 
+    if action == "MOVE_DATA_ITEM":
+        map_source = identity.raw.get("mapSource") or {}
+        if str(map_source.get("kind") or "") in {
+            "array_literal",
+            "variable_array",
+        }:
+            return ScopeDecision(True, "data_source", "direct")
+        return ScopeDecision(
+            allowed=False,
+            scope="data_source",
+            strategy="blocked",
+            reasons=["数据源不是静态数组，无法直接调整顺序；请使用 AI 修改"],
+        )
+
     if action == "MOVE_NODE":
         if identity.kind == "route_root":
             return ScopeDecision(

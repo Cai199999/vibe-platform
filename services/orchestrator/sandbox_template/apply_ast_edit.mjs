@@ -516,6 +516,57 @@ function main() {
 
   // ---- Direct Ops：DELETE_DATA_ITEM ----
   // 确定性删除静态数组中的一项；动态数据在 ScopePolicy 已转 AI。
+  if (operation === 'move_array_item') {
+    const range = spec.arrayRange || {}
+    const startOffset = Number(range.startOffset)
+    const endOffset = Number(range.endOffset)
+    const array = findNodeByRange(
+      ast,
+      startOffset,
+      endOffset,
+      'ArrayExpression',
+    )
+    if (!array) {
+      return fail('ANCHOR_RANGE_MISMATCH', '数据源数组区间已失效')
+    }
+    const elements = array.elements || []
+    const fromIndex = Number(spec.fromIndex)
+    const toIndex = Number(spec.toIndex)
+    if (
+      !Number.isInteger(fromIndex) ||
+      fromIndex < 0 ||
+      fromIndex >= elements.length ||
+      !Number.isInteger(toIndex) ||
+      toIndex < 0 ||
+      toIndex >= elements.length
+    ) {
+      return fail('INVALID_DATA_ITEM', '数据项移动序号超出数组范围', {
+        fromIndex: spec.fromIndex,
+        toIndex: spec.toIndex,
+        count: elements.length,
+      })
+    }
+    const texts = elements.map((element) => code.slice(element.start, element.end))
+    const [moved] = texts.splice(fromIndex, 1)
+    texts.splice(toIndex, 0, moved)
+    const next =
+      code.slice(0, array.start + 1) +
+      texts.join(', ') +
+      code.slice(array.end - 1)
+    try {
+      parseCode(next, file, parser)
+    } catch (error) {
+      return fail('INVALID_DATA_ITEM', `移动数据项后文件无法解析: ${error.message}`)
+    }
+    return {
+      status: 'OK',
+      content: next,
+      fromIndex,
+      toIndex,
+      itemCount: elements.length,
+    }
+  }
+
   if (operation === 'delete_array_item') {
     const range = spec.arrayRange || {}
     const startOffset = Number(range.startOffset)

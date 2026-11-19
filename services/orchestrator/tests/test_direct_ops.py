@@ -298,6 +298,34 @@ class DirectOperationMoveTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, DirectErrorCode.UNSAFE_OPERATION)
         self.assertEqual(self.sandbox.edits, [])
 
+    def test_repeat_item_move_reorders_static_array(self) -> None:
+        self.sandbox.anchor = {
+            **_anchor(),
+            "inMap": True,
+            "instance": 3,
+            "instanceCount": 3,
+            "mapSource": {
+                "kind": "variable_array",
+                "variable": "items",
+                "start": 10,
+                "end": 80,
+                "count": 3,
+            },
+        }
+        self.sandbox.parent_anchor = {
+            **self.sandbox.parent_anchor,
+            "range": {"startOffset": 0, "endOffset": 200},
+        }
+
+        response = self.service.execute(_move_payload())
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(response.action, "MOVE_DATA_ITEM")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "move_array_item")
+        self.assertEqual(self.sandbox.edits[0]["fromIndex"], 2)
+        # placement.siblingIndex=1，源在第 3 项：移除后目标仍为 1。
+        self.assertEqual(self.sandbox.edits[0]["toIndex"], 1)
+
     def test_shared_component_moves_at_call_site(self) -> None:
         self.sandbox.anchor = {
             **_anchor(shared=True),

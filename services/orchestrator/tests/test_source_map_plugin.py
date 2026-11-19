@@ -510,6 +510,45 @@ export default function App() {
         self.assertNotIn("name: 'A'", edited["content"])
         self.assertIn("name: 'B'", edited["content"])
 
+    def test_move_array_item_reorders_static_items(self) -> None:
+        source = """const items = [
+  { name: 'A' },
+  { name: 'B' },
+  { name: 'C' },
+]
+
+export default function App() {
+  return (
+    <ul>
+      {items.map((item) => <li>{item.name}</li>)}
+    </ul>
+  )
+}
+"""
+        (self.root / "src" / "App.jsx").write_text(source, encoding="utf-8")
+        source_map = self._run_plugin()
+        li = next(item for item in source_map["nodes"].values() if item["tag"] == "li")
+        anchor = self._resolve(li["oid"])
+
+        edited = self._run_ast_edit(
+            {
+                "file": "src/App.jsx",
+                "operation": "move_array_item",
+                "anchorRange": anchor["range"],
+                "arrayRange": {
+                    "startOffset": anchor["mapSource"]["start"],
+                    "endOffset": anchor["mapSource"]["end"],
+                },
+                "fromIndex": 2,
+                "toIndex": 0,
+            }
+        )
+
+        self.assertEqual(edited["status"], "OK", edited)
+        content = edited["content"]
+        self.assertLess(content.index("name: 'C'"), content.index("name: 'A'"))
+        self.assertLess(content.index("name: 'A'"), content.index("name: 'B'"))
+
     def test_multiple_call_sites_are_ordered_and_conditional_marked(self) -> None:
         (self.root / "src" / "UserCard.jsx").write_text(
             """export default function UserCard({ title }) {

@@ -856,6 +856,176 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   }
 }
 
+async function tryRepeatReorder(page, active) {
+  const context = lastDirectRequest || {}
+  const sandboxId = context.sandboxId || context.sandbox_id
+  const repeatSource = `const ITEMS = ['甲', '乙', '丙']
+
+export default function RepeatList() {
+  return (
+    <ul
+      data-repeat-demo
+      style={{ display: 'flex', gap: 8, margin: 16, padding: 0, listStyle: 'none' }}
+    >
+      {ITEMS.map((label, index) => (
+        <li
+          key={label}
+          data-repeat-template="oid_repeat_demo"
+          data-repeat-index={index}
+          style={{ padding: '8px 12px', background: '#fff', borderRadius: 4 }}
+        >
+          {label}
+        </li>
+      ))}
+    </ul>
+  )
+}
+`
+  const mainSource = `import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App.jsx'
+import AgentCard from './AgentCard.jsx'
+import GridCards from './GridCards.jsx'
+import RepeatList from './RepeatList.jsx'
+import './visual.css'
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+    <AgentCard />
+    <GridCards />
+    <RepeatList />
+  </React.StrictMode>,
+)
+`
+  const patchResponse = await fetch(
+    `${PY_AI}/api/v1/internal/sandbox/apply-patch`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sandbox_id: sandboxId,
+        files: {
+          'src/RepeatList.jsx': repeatSource,
+          'src/main.jsx': mainSource,
+        },
+      }),
+    },
+  )
+  if (!patchResponse.ok) {
+    fail(`写入 repeat 测试组件失败: ${await patchResponse.text()}`)
+  }
+  const deadline = Date.now() + 20000
+  let geometry = null
+  while (Date.now() < deadline) {
+    let frame = null
+    try {
+      frame = await frameOf(active.locator('.canvas-live-frame'))
+    } catch {
+      // HMR 重载中
+    }
+    if (frame) {
+      geometry = await frame
+        .evaluate(() => {
+          const list = document.querySelector('[data-repeat-demo]')
+          if (!list) return null
+          const items = Array.from(
+            list.querySelectorAll('[data-repeat-template]'),
+          )
+          if (items.length < 3) return null
+          const rectOf = (node) => node.getBoundingClientRect()
+          const sourceRect = rectOf(items[2])
+          const targetRect = rectOf(items[0])
+          return {
+            sourceText: (items[2].textContent || '').trim(),
+            targetText: (items[0].textContent || '').trim(),
+            source: {
+              x: sourceRect.left + sourceRect.width / 2,
+              y: sourceRect.top + sourceRect.height / 2,
+            },
+            target: {
+              x: targetRect.left + 2,
+              y: targetRect.top + targetRect.height / 2,
+            },
+          }
+        })
+        .catch(() => null)
+      if (geometry) break
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300))
+  }
+  if (!geometry) fail('repeat 测试组件未渲染')
+  log('repeat reorder geometry', geometry)
+  await ensureDragArmed(page, active)
+  const frame = await frameOf(active.locator('.canvas-live-frame'))
+  await frame.evaluate(({ source, target }) => {
+    const list = document.querySelector('[data-repeat-demo]')
+    const items = Array.from(list?.querySelectorAll('[data-repeat-template]') || [])
+    const sourceNode = items[2]
+    if (!sourceNode) return
+    const dispatch = (node, type, x, y) => {
+      node.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          pointerType: 'mouse',
+          button: 0,
+          buttons: type === 'pointerup' ? 0 : 1,
+          clientX: x,
+          clientY: y,
+        }),
+      )
+    }
+    dispatch(sourceNode, 'pointerdown', source.x, source.y)
+    for (let step = 1; step <= 8; step += 1) {
+      dispatch(
+        document,
+        'pointermove',
+        source.x + ((target.x - source.x) * step) / 8,
+        source.y + ((target.y - source.y) * step) / 8,
+      )
+    }
+    dispatch(document, 'pointerup', target.x, target.y)
+  }, geometry)
+  const response = await waitForDirectResponse(20000)
+  if (!response || response.status !== 200) {
+    fail(`repeat 拖拽失败: ${response?.body || '无响应'}`)
+  }
+  let body = {}
+  try {
+    body = JSON.parse(response.body)
+  } catch {
+    // 保留原始日志
+  }
+  if (body.status !== 'SUCCEEDED' || body.action !== 'MOVE_DATA_ITEM') {
+    fail(`repeat 拖拽没有走 MOVE_DATA_ITEM: ${response.body}`)
+  }
+  const orderDeadline = Date.now() + 15000
+  let labels = []
+  while (Date.now() < orderDeadline) {
+    try {
+      const live = await frameOf(active.locator('.canvas-live-frame'))
+      labels = await live.evaluate(() => {
+        const list = document.querySelector('[data-repeat-demo]')
+        return Array.from(
+          list?.querySelectorAll('[data-repeat-template]') || [],
+        ).map((node) => (node.textContent || '').trim())
+      })
+    } catch {
+      labels = []
+    }
+    if (labels[0] === geometry.sourceText) break
+    await new Promise((resolve) => setTimeout(resolve, 300))
+  }
+  log('repeat order after HMR', labels)
+  if (labels[0] !== geometry.sourceText) {
+    fail(
+      `repeat 数据项重排未生效：期望首位 ${geometry.sourceText}，实际 ${labels.join(',')}`,
+    )
+  }
+}
+
 async function waitForParentAfterHmr(
   active,
   oid,
@@ -1162,6 +1332,7 @@ async function main() {
       await tryDirectDrag(page, active)
       await tryAgentComponentEdit(page, active)
       await tryGridReorder(page, active)
+      await tryRepeatReorder(page, active)
     }
 
     log('reload workspace: state must survive')

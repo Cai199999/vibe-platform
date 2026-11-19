@@ -1290,7 +1290,12 @@ class _ReactCompiler:
         self.repeat_constants.setdefault(constant, count)
         lines = [
             f"{pad}{{{constant}.map((_, index) => (",
-            f'{inner}<{item_tag} key={{String(index)}} className="visual-repeat-item">',
+            (
+                f"{inner}<{item_tag} key={{String(index)}} "
+                'className="visual-repeat-item" '
+                f'data-repeat-template="{_oid_for_node(node.id)}" '
+                "data-repeat-index={index}>"
+            ),
         ]
         lines.extend(self._render_children(node.children, indent + 4))
         lines.extend(

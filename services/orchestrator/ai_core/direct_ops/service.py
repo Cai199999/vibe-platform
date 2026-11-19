@@ -744,6 +744,20 @@ class DirectOperationService:
                 if payload.action == "MOVE_NODE"
                 else None
             )
+            # 循环项在同一个循环容器内拖动 = 数据项重排，而不是移动模板。
+            if (
+                payload.action == "MOVE_NODE"
+                and parent is not None
+                and anchor.get("inMap")
+            ):
+                map_source = anchor.get("mapSource") or {}
+                if str(map_source.get("kind") or "") in {
+                    "array_literal",
+                    "variable_array",
+                } and self._parent_contains_map_source(parent, map_source):
+                    payload = payload.model_copy(
+                        update={"action": "MOVE_DATA_ITEM", "payload": {}}
+                    )
             timings["resolveMs"] = _elapsed_ms(mark)
             move_anchor = (
                 self._move_source_anchor(payload, anchor)
@@ -1175,6 +1189,24 @@ class DirectOperationService:
         return parent
 
     @staticmethod
+    def _parent_contains_map_source(
+        parent: dict[str, Any],
+        map_source: dict[str, Any],
+    ) -> bool:
+        """父容器 JSX 区间是否包住循环数据源（即它就是循环容器）。"""
+        parent_range = parent.get("range") or {}
+        try:
+            parent_start = float(parent_range.get("startOffset"))
+            parent_end = float(parent_range.get("endOffset"))
+            source_start = float(
+                map_source.get("containerStart", map_source.get("start"))
+            )
+            source_end = float(map_source.get("containerEnd", map_source.get("end")))
+        except (TypeError, ValueError):
+            return False
+        return parent_start <= source_start and parent_end >= source_end
+
+    @staticmethod
     def _move_source_anchor(
         payload: DirectActionPayload,
         anchor: dict[str, Any],
@@ -1412,6 +1444,51 @@ class DirectOperationService:
                 "anchorRange": anchor.get("range") or {},
                 "style": dict(payload.payload.get("style") or {}),
             }
+        elif payload.action == "MOVE_DATA_ITEM":
+            map_source = anchor.get("mapSource") or {}
+            if str(map_source.get("kind") or "") not in {
+                "array_literal",
+                "variable_array",
+            }:
+                raise DirectActionError(
+                    DirectErrorCode.ROUTE_TO_LLM,
+                    "数据源不是静态数组，需要交给 AI 修改。",
+                    status_code=422,
+                )
+            placement = payload.target.placement or {}
+            try:
+                gap_index = int(placement.get("siblingIndex"))
+            except (TypeError, ValueError):
+                raise DirectActionError(
+                    DirectErrorCode.ACTION_INVALID,
+                    "数据项移动缺少目标序号",
+                    status_code=400,
+                ) from None
+            from_index = int(anchor.get("instance") or 1) - 1
+            count = int(map_source.get("count") or 0)
+            if from_index < 0 or (count and from_index >= count):
+                raise DirectActionError(
+                    DirectErrorCode.TARGET_NOT_FOUND,
+                    "无法定位要移动的数据项，请刷新后重试。",
+                    status_code=404,
+                )
+            # placement.siblingIndex 是“源项仍在数组中”的视觉缝隙；
+            # 移动后数组会先移除源项，因此后半段目标序号要减一。
+            to_index = gap_index if gap_index <= from_index else gap_index - 1
+            if count:
+                to_index = max(0, min(to_index, count - 1))
+            edit = {
+                "operation": "move_array_item",
+                "file": file,
+                # 写工具会先校验源节点锚点；没有它会把 0..0 当成非法区间。
+                "anchorRange": anchor.get("range") or {},
+                "arrayRange": {
+                    "startOffset": int(map_source.get("start") or 0),
+                    "endOffset": int(map_source.get("end") or 0),
+                },
+                "fromIndex": from_index,
+                "toIndex": to_index,
+            }
         elif payload.action == "DELETE_DATA_ITEM":
             map_source = anchor.get("mapSource") or {}
             if map_source.get("kind") not in {
@@ -1556,7 +1633,16 @@ class DirectOperationService:
                 DirectErrorCode.TOOL_FAILED,
                 "该组件无法安全直接修改，请改用 AI 修改。",
                 status_code=409,
-                diagnostic={"toolCode": code, "toolMessage": message[:500]},
+                diagnostic={
+                    "toolCode": code,
+                    "toolMessage": message[:500],
+                    "operation": edit.get("operation"),
+                    "file": edit.get("file"),
+                    "arrayRange": edit.get("arrayRange"),
+                    "fromIndex": edit.get("fromIndex"),
+                    "toIndex": edit.get("toIndex"),
+                    "itemIndex": edit.get("itemIndex"),
+                },
             )
         content = str(result.get("content") or "")
         if payload.action == "ADD_COMPONENT":
@@ -1666,6 +1752,11 @@ class DirectOperationService:
             summary = (
                 f"删除 {component} 对应数据源的第 "
                 f"{int(anchor.get('instance') or 1)} 项"
+            )
+        elif payload.action == "MOVE_DATA_ITEM":
+            summary = (
+                f"调整 {component} 循环数据项顺序（第 "
+                f"{int(anchor.get('instance') or 1)} 项）"
             )
         elif payload.action == "UPDATE_PROPS":
             prop_names = ", ".join(sorted(dict(payload.payload.get("props") or {})))

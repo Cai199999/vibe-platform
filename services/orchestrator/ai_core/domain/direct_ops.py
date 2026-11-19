@@ -23,6 +23,7 @@ DirectActionKind = Literal[
     "UPDATE_STYLE",
     "DELETE_NODE",
     "DELETE_DATA_ITEM",
+    "MOVE_DATA_ITEM",
     "ADD_COMPONENT",
     "MOVE_NODE",
     # 冻结 VisualDocument 一次性编译为真实 React 工程。
@@ -187,7 +188,7 @@ class DirectActionPayload(CamelModel):
                     "sticky",
                 }:
                     raise ValueError("不允许直接设置绝对/固定定位")
-        if self.action == "MOVE_NODE":
+        if self.action in {"MOVE_NODE", "MOVE_DATA_ITEM"}:
             placement = self.target.placement or {}
             if not isinstance(placement, dict) or not (
                 placement.get("parentSelector")

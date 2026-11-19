@@ -1972,6 +1972,7 @@ class LocalDockerSandbox(SandboxProvider):
             "update_props",
             "update_style",
             "delete_array_item",
+            "move_array_item",
             "move_node",
         }:
             raise SandboxError(f"不支持的 AST 编辑操作: {operation or '(空)'}")
@@ -2000,6 +2001,8 @@ class LocalDockerSandbox(SandboxProvider):
             "props": dict(edit.get("props") or {}),
             "arrayRange": edit.get("arrayRange") or {},
             "itemIndex": edit.get("itemIndex"),
+            "fromIndex": edit.get("fromIndex"),
+            "toIndex": edit.get("toIndex"),
             "style": dict(edit.get("style") or {}),
         }
         # 同文件多编辑：服务端把前一条结果作为下一条输入，绝不接受模型传入。
