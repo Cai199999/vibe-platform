@@ -81,6 +81,10 @@ TASK_SETTING_FIELD: dict[str, str] = {
     "architect_helper": "model_architect_helper_name",
 }
 
+# Architect 的结构化输出包含完整契约与 VisualDocument，DeepSeek 默认
+# 4096 输出上限会把 JSON 截断；这些任务使用独立的输出上限。
+ARCHITECT_TASKS = {"architect_analyze", "architect_contract", "architect_helper"}
+
 # 任务级温度覆盖：只给需要“确定性”的节点单独降低温度，不影响 Coder
 # 这类需要一定创造力的生成任务。留空则回退到 FAST / STRONG 层级温度。
 TASK_TEMPERATURE_FIELD: dict[str, str] = {
@@ -114,8 +118,10 @@ class ModelRouter:
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
-        # key = (model, temperature)；reasoner 不含 temperature 时用 None。
-        self._clients: dict[tuple[str, float | None], ChatOpenAI] = {}
+        # key = (model, temperature, max_tokens)；reasoner 不含 temperature
+        # 时用 None。max_tokens 必须进缓存键：同一模型 / 温度下 Architect
+        # 与其它任务可能共用客户端，否则输出上限会互相污染。
+        self._clients: dict[tuple[str, float | None, int | None], ChatOpenAI] = {}
 
     # ------------------------------------------------------------
     # 解析
@@ -160,6 +166,13 @@ class ModelRouter:
     # ------------------------------------------------------------
     # 客户端
     # ------------------------------------------------------------
+    def _max_output_tokens(self, task: str) -> int | None:
+        """Architect 任务使用更长的输出上限；其余任务沿用网关默认值。"""
+        if task not in ARCHITECT_TASKS:
+            return None
+        value = int(self._settings.architect_max_output_tokens)
+        return value if value > 0 else None
+
     def build(self, task: str) -> ChatOpenAI:
         """获取（并缓存）任务对应的 ChatOpenAI 客户端。
 
@@ -168,9 +181,11 @@ class ModelRouter:
         """
         profile = self.resolve(task)
         supports_temperature = "reasoner" not in profile.model.lower()
+        max_tokens = self._max_output_tokens(task)
         cache_key = (
             profile.model,
             profile.temperature if supports_temperature else None,
+            max_tokens,
         )
         cached = self._clients.get(cache_key)
         if cached is not None:
@@ -190,6 +205,8 @@ class ModelRouter:
             # 成本统计变成 0。
             "stream_usage": True,
         }
+        if max_tokens:
+            kwargs["max_tokens"] = max_tokens
         # deepseek-reasoner 不接受 temperature / top_p 等采样参数；
         # 显式省略，避免切换到推理模型时 400。
         if supports_temperature:

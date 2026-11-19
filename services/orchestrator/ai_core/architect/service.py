@@ -110,6 +110,13 @@ class ArchitectContractNotFoundError(ArchitectServiceError):
     status_code = 404
 
 
+class ArchitectVisualRequiredError(ArchitectServiceError):
+    """后端绑定阶段缺少冻结虚拟树：继续执行只会产出无法初始化的契约。"""
+
+    code = "ARCHITECT_VISUAL_REQUIRED"
+    status_code = 422
+
+
 # ------------------------------------------------------------
 # 运行期数据
 # ------------------------------------------------------------
@@ -223,6 +230,17 @@ class ArchitectService:
     # 启动
     # --------------------------------------------------------
     def start_stream(self, request: ArchitectRunRequest) -> ActiveArchitectRun:
+        # BACKEND_BINDING 的唯一前端事实源就是冻结虚拟树；缺失时契约
+        # 会缺 visualDocument / frontendRoutes / components，前端随后无法
+        # 初始化画布。这里提前失败，避免产出“可确认但不可用”的契约。
+        if (
+            request.output_phase == "BACKEND_BINDING"
+            and request.visual_document is None
+        ):
+            raise ArchitectVisualRequiredError(
+                "后端绑定阶段必须携带已冻结的虚拟界面；"
+                "请重新打开虚拟画布完成冻结后再继续。"
+            )
         run_id = request.run_id or f"arc_{uuid.uuid4().hex[:20]}"
         fingerprint = _request_fingerprint(request)
         llm = self._llm_override or build_architect_llm(

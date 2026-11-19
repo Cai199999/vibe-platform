@@ -121,6 +121,33 @@ async function waitForSourceMap(previewUrl) {
   return map
 }
 
+/**
+ * 等待跨文件定义映射完成。
+ *
+ * 源码地图按 Vite transform 增量写入：App.jsx 先于被 import 的
+ * UserCard.jsx 进入地图时，callSites 已非空但 definitionFile 仍为空。
+ * 只看“callSites 非空”会概率性拿到半成品地图，导致 CI 抖动。
+ */
+async function waitForCallSiteDefinition(previewUrl) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    try {
+      const response = await fetch(`${previewUrl}/vibe-source-map.json`)
+      if (response.ok) {
+        const map = await response.json()
+        const callSite = Object.values(map.callSites || {}).find(
+          (item) =>
+            item.file === 'src/App.jsx' && item.component === 'UserCard',
+        )
+        if (callSite?.definitionFile === 'src/UserCard.jsx') return map
+      }
+    } catch {
+      // Vite 尚未就绪
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  return waitForSourceMap(previewUrl)
+}
+
 async function main() {
   prepareFixture()
   const browser = await chromium.launch({
@@ -178,7 +205,7 @@ async function main() {
     })
     if (!seed.ok) throw new Error(`seed failed: ${await seed.text()}`)
 
-    const sourceMap = await waitForSourceMap(imported.previewUrl)
+    const sourceMap = await waitForCallSiteDefinition(imported.previewUrl)
     const callSites = Object.values(sourceMap.callSites || {})
     const callSite = callSites.find(
       (item) => item.file === 'src/App.jsx' && item.component === 'UserCard',

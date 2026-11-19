@@ -42,13 +42,14 @@ cp -a "${ROOT}/apps/platform-bff/pom.xml" "${ROOT}/apps/platform-bff/src" "${BFF
 )
 
 if [[ "${RUN_E2E:-0}" == "1" ]]; then
-  step "E2E: source refresh + call-site props"
+  step "E2E: source refresh + call-site props + visual chain"
   if [[ -z "${NODE_PATH:-}" ]]; then
     echo "RUN_E2E=1 需要 NODE_PATH 指向包含 playwright-core 的目录" >&2
     exit 2
   fi
   node "${ROOT}/scripts/project_source_refresh_e2e.mjs"
   node "${ROOT}/scripts/call_site_props_e2e.mjs"
+  node "${ROOT}/scripts/architect_visual_chain_e2e.mjs"
 fi
 
 step "CI PASS"

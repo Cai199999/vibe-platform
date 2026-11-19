@@ -113,6 +113,20 @@ def validate_draft(
     script_spec = dict(draft.script_spec)
     visual_document = dict(draft.visual_document or {})
 
+    # V0 阶段跳过下面整块“前端骨架三字段”检查，但虚拟树本身是唯一前端
+    # 产物：缺失或 Schema 不合法必须在契约校验阶段给出结构化 issue，
+    # 不能拖到 assemble_contract 的 model_validate 变成内部错误。
+    if visual_v0 and shape in {"lightweight_web", "full_stack_system"}:
+        if not visual_document:
+            issues.append("VISUAL_V0 阶段必须输出 visual_document 虚拟树")
+        else:
+            report = validate_visual_document(visual_document)
+            if not report.ok:
+                preview = "；".join(report.errors[:5])
+                issues.append(
+                    "visual_document 不符合 VisualDocument Schema：" + preview
+                )
+
     # 前端骨架由 FrontendCoder 直接消费这三项，缺失时不允许进入确认。
     # V0 / BACKEND_BINDING 阶段不生成或重写前端骨架，因此跳过这些检查。
     if (

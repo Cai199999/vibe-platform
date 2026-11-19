@@ -137,9 +137,18 @@ class ArchitectErrorEnvelopeTests(unittest.TestCase):
             run_id="arc_retry",
         )
         self.assertEqual(envelope.code, "ARCHITECT_LLM_ERROR")
-        self.assertIn("架构师模型连接中断", envelope.user_message)
+        # 不能声称“已保留进度”：Run 已终止，只能重新发起。
+        self.assertIn("本次架构任务已停止", envelope.user_message)
         self.assertTrue(envelope.retryable)
         self.assertNotIn("未预期问题", envelope.user_message)
+
+    def test_visual_required_error_points_to_canvas(self) -> None:
+        envelope = envelope_from_code(
+            "ARCHITECT_VISUAL_REQUIRED",
+            technical_message="missing visual document",
+        )
+        self.assertIn("虚拟画布", envelope.user_message)
+        self.assertFalse(envelope.retryable)
 
 
 if __name__ == "__main__":

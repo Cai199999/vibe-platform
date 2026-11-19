@@ -40,7 +40,11 @@ from ai_core.architect.skeleton import (
 from ai_core.architect.slots import infer_app_shape, infer_slots
 from ai_core.domain.visual_document import VisualDocument, VisualNode
 from ai_core.architect import service as architect_service_module
-from ai_core.architect.service import ActiveArchitectRun, ArchitectService
+from ai_core.architect.service import (
+    ActiveArchitectRun,
+    ArchitectService,
+    ArchitectVisualRequiredError,
+)
 from ai_core.architect.schemas import (
     ArchitectAnalysis,
     ArchitectApiRoute,
@@ -1012,6 +1016,44 @@ class ContractTierValidationTest(unittest.TestCase):
         self.assertFalse(validation.valid)
         self.assertTrue(any("visual_document" in issue for issue in validation.issues))
 
+    def test_visual_v0_requires_visual_document(self) -> None:
+        draft = MockArchitectLLM().draft_contract(self._context("lightweight_web"))
+        empty = replace(draft, visual_document={})
+        validation = validate_draft(
+            "lightweight_web",
+            empty,
+            output_phase="VISUAL_V0",
+        )
+        self.assertFalse(validation.valid)
+        self.assertTrue(
+            any("visual_document" in issue for issue in validation.issues),
+            validation.issues,
+        )
+
+    def test_visual_v0_invalid_visual_document_is_reported(self) -> None:
+        draft = MockArchitectLLM().draft_contract(self._context("lightweight_web"))
+        broken = replace(
+            draft,
+            visual_document={
+                "schemaVersion": "1.0",
+                "docId": "vdoc_bad",
+                "root": {"id": "bad_node_id", "type": "page"},
+            },
+        )
+        validation = validate_draft(
+            "lightweight_web",
+            broken,
+            output_phase="VISUAL_V0",
+        )
+        self.assertFalse(validation.valid)
+        self.assertTrue(
+            any(
+                "visual_document" in issue and "Schema" in issue
+                for issue in validation.issues
+            ),
+            validation.issues,
+        )
+
     def test_lightweight_rejects_api_and_ddl(self) -> None:
         llm = MockArchitectLLM()
         draft = llm.draft_contract(self._context("lightweight_web"))
@@ -1617,6 +1659,45 @@ class ContractConflictServiceTest(unittest.TestCase):
             service.decide_conflict(active.run_id, active.conflict.conflict_id, request)
         self.assertEqual(active.status, "AWAITING_DECISION")
         self.assertIsNotNone(active.conflict)
+
+
+class BackendBindingPreconditionTest(unittest.TestCase):
+    """BACKEND_BINDING 缺少冻结树时必须 fail-fast，不能产出不可用契约。"""
+
+    def test_backend_binding_without_visual_document_is_rejected(self) -> None:
+        run_id = f"arc_{uuid.uuid4().hex[:12]}"
+        request = ArchitectRunRequest(
+            run_id=run_id,
+            project_id="p_backend_binding",
+            output_phase="BACKEND_BINDING",
+            ui_history=[{"role": "user", "content": "为冻结界面补充订单接口"}],
+        )
+        service = ArchitectService(llm=MockArchitectLLM())
+        with self.assertRaises(ArchitectVisualRequiredError):
+            service.start_stream(request)
+        # 拒绝必须发生在注册 Run 之前：不得留下半成品状态。
+        self.assertIsNone(architect_service_module.get_active_architect_run(run_id))
+
+    def test_backend_binding_with_visual_document_is_accepted(self) -> None:
+        run_id = f"arc_{uuid.uuid4().hex[:12]}"
+        document = VisualDocument(
+            docId=f"vdoc_{uuid.uuid4().hex[:8]}",
+            projectId="p_backend_binding",
+            root=VisualNode(id="nd_page0001", type="page", name="页面"),
+        )
+        request = ArchitectRunRequest(
+            run_id=run_id,
+            project_id="p_backend_binding",
+            output_phase="BACKEND_BINDING",
+            visualDocument=document,
+            ui_history=[{"role": "user", "content": "为冻结界面补充订单接口"}],
+        )
+        service = ArchitectService(llm=MockArchitectLLM())
+        with patch.object(ArchitectService, "_run_worker", lambda *args: None):
+            active = service.start_stream(request)
+        self.addCleanup(lambda: architect_service_module._ACTIVE_RUNS.pop(run_id, None))
+        self.assertEqual(active.output_phase, "BACKEND_BINDING")
+        self.assertIsNotNone(active.request.visual_document)
 
 
 if __name__ == "__main__":

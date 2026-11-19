@@ -292,7 +292,10 @@ class Settings(BaseSettings):
     architect_contract_repair_limit: int = 1
     # JSON 结构化输出：DeepSeek JSON Output + Pydantic 校验失败回传重试。
     architect_structured_output: bool = True
-    architect_json_retry_limit: int = 1
+    # 契约单次输出包含完整 VisualDocument，DeepSeek 默认 4096 容易被截断；
+    # 这里显式抬高上限（DeepSeek 支持 8192），并按任务只给 Architect 使用。
+    architect_max_output_tokens: int = 8192
+    architect_json_retry_limit: int = 2
     # 连接级瞬态错误（流式连接中断 / 网关 502 / 超时）在每次 JSON
     # 修复尝试内部最多再重试 N 次；与“格式不合法的修复重试”分开计。
     architect_llm_retry_limit: int = 2

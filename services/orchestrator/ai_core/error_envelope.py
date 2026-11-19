@@ -208,8 +208,14 @@ _SPECS: dict[str, ErrorSpec] = {
     "ARCHITECT_LLM_ERROR": ErrorSpec(
         "ARCHITECT",
         "RECOVERABLE",
-        "架构师模型连接中断，已保留当前进度，请重新发起或稍后重试。",
+        "架构模型调用失败，本次架构任务已停止；请重新发起后重试。",
         retryable=True,
+    ),
+    "ARCHITECT_VISUAL_REQUIRED": ErrorSpec(
+        "ARCHITECT",
+        "DECISION_REQUIRED",
+        "未找到已冻结的虚拟界面，无法继续后端绑定；"
+        "请重新打开虚拟画布确认视觉后再继续。",
     ),
     "ARCHITECT_INTERNAL_ERROR": ErrorSpec(
         "ARCHITECT", "FATAL", "架构澄清遇到内部问题，已记录诊断编号，请重新发起。"

@@ -1229,7 +1229,10 @@ function ProjectWorkspaceInner({
           onFrontendBootstrap={onFrontendBootstrap}
           onExport={onArchitectExport}
           exporting={exporting}
-          autoBootstrap={project.bootstrap !== 'ready'}
+          autoBootstrap={
+            project.bootstrap !== 'ready' &&
+            architectState?.contract?.outputPhase !== 'BACKEND_BINDING'
+          }
           gate={supervisorGate}
           onReleaseGate={onReleaseGate}
           projectMode={projectMode}

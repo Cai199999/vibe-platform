@@ -1566,6 +1566,9 @@ export default function WorkspacePage() {
   const visualDocumentNoticeRef = useRef(new Set())
   const visualDocumentAutoOpenRef = useRef(new Set())
   const visualReviewStartedRef = useRef(new Set())
+  // 冻结树与审查包分开存储：缺冻结树时只提示一次，且不消费审查包，
+  // 让用户重新冻结后还能继续同一次业务审查。
+  const visualReviewBlockedRef = useRef(new Set())
   const frontendBootstrapFailureRef = useRef(new Map())
   // 页面级挂载标记：所有异步回调写状态前必须检查，避免卸载后 setState。
   const workspaceMountedRef = useRef(true)
@@ -4264,6 +4267,14 @@ export default function WorkspacePage() {
       showToast('error', `契约状态为 ${contract.status}，确认后才能生成全栈代码`)
       return
     }
+    if (contract.outputPhase === 'BACKEND_BINDING' && !contract.visualDocument) {
+      console.warn('[fullstack] aborted: backend binding without visual', diagnostics)
+      showToast(
+        'error',
+        '当前契约未携带冻结的虚拟界面，无法生成前端代码；请重新冻结视觉后再发起后端绑定',
+      )
+      return
+    }
     if (contract.appShape !== 'full_stack_system') {
       console.warn('[fullstack] aborted: app shape is not fullstack', diagnostics)
       showToast('info', '当前契约形态不需要生成后端代码')
@@ -4344,6 +4355,15 @@ export default function WorkspacePage() {
     }
     if (contract.status && contract.status !== 'CONFIRMED') {
       showToast('error', '架构契约尚未确认，无法初始化前端页面')
+      return
+    }
+    if (contract.outputPhase === 'BACKEND_BINDING') {
+      // 该阶段契约只做后端增量，本来就没有前端骨架字段；继续走
+      // FrontendCoder 只会得到“缺少 frontendRoutes”这类误导性错误。
+      showToast(
+        'error',
+        '当前契约来自后端绑定阶段，不包含前端骨架；请重新冻结视觉后再生成前端',
+      )
       return
     }
     if (contract.appShape === 'script_automation') {
@@ -4533,6 +4553,25 @@ export default function WorkspacePage() {
     if (!activeTabId) return undefined
     const pending = peekSemanticReviewPacket(activeTabId)
     if (!pending) return undefined
+    // BACKEND_BINDING 的唯一前端事实源是冻结虚拟树。审查包（sessionStorage）
+    // 与冻结树（localStorage / 内存 store）分开存储，可能只留下前者；
+    // 此时绝不能带着 `visualDocument: undefined` 启动后端绑定，否则会产出
+    // 缺少 frontendRoutes / components 的契约，把画布卡在初始化失败。
+    const frozenDocument = loadFrozenVisualDocument(activeTabId)
+    if (!frozenDocument) {
+      const blockedKey = `${activeTabId}:${
+        pending.contentHash || pending.documentId || 'missing-frozen'
+      }`
+      if (!visualReviewBlockedRef.current.has(blockedKey)) {
+        visualReviewBlockedRef.current.add(blockedKey)
+        showToast(
+          'error',
+          '冻结界面已丢失，无法继续业务审查：请重新打开虚拟画布并确认视觉后再试',
+        )
+      }
+      // 不 takeSemanticReviewPacket：用户重新冻结后仍可复用本次审查包。
+      return undefined
+    }
     // StrictMode 会先执行一次 effect 再模拟卸载；延迟到稳定挂载后消费，
     // 避免刚刚 POST 的 Architect SSE 被第一轮 cleanup abort。
     const timer = window.setTimeout(() => {
@@ -4542,7 +4581,6 @@ export default function WorkspacePage() {
       if (visualReviewStartedRef.current.has(key)) return
       visualReviewStartedRef.current.add(key)
       const project = projects.find((item) => item.id === activeTabId)
-      const frozenDocument = loadFrozenVisualDocument(activeTabId)
       architect.openPanel(activeTabId)
       architect.start(activeTabId, {
         runId: newId('arc'),
@@ -4554,7 +4592,7 @@ export default function WorkspacePage() {
         latestChanges: packet.summary,
         projectMode: PROJECT_MODE.NEW_PROJECT,
         outputPhase: 'BACKEND_BINDING',
-        visualDocument: frozenDocument || undefined,
+        visualDocument: frozenDocument,
         visualDelta: packet.visualDelta || undefined,
         uiHistory: [
           {
@@ -4587,6 +4625,9 @@ export default function WorkspacePage() {
     Object.entries(architectStates).forEach(([projectId, state]) => {
       if (state?.status !== 'CONFIRMED') return
       if (state?.contract?.visualDocument) return
+      // 后端绑定契约按设计不含 frontendRoutes / components，不能走旧版
+      // 前端骨架初始化；它必须携带冻结树走 Visual CodeGen。
+      if (state?.contract?.outputPhase === 'BACKEND_BINDING') return
       const project = projects.find((item) => item.id === projectId)
       if (!project || project.bootstrap !== 'pending') return
       const key = state.contract?.contractId || state.runId

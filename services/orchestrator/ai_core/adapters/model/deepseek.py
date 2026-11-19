@@ -52,6 +52,7 @@ class DeepSeekClient(ModelClient):
             raise ModelClientError(f"DeepSeek 调用失败: {exc}") from exc
 
         self._record_usage(task, profile.model, response)
+        self._warn_if_truncated(task, response)
         return self._content_to_text(response.content)
 
     def generate_json(
@@ -111,6 +112,7 @@ class DeepSeekClient(ModelClient):
                 )
             else:
                 self._record_usage(task, profile.model, response)
+                self._warn_if_truncated(task, response)
                 return self._content_to_text(response.content)
 
         try:
@@ -118,6 +120,7 @@ class DeepSeekClient(ModelClient):
         except Exception as exc:  # noqa: BLE001 - 统一转换为端口异常
             raise ModelClientError(f"DeepSeek 调用失败: {exc}") from exc
         self._record_usage(task, profile.model, response)
+        self._warn_if_truncated(task, response)
         return self._content_to_text(response.content)
 
     def _stream(
@@ -172,7 +175,23 @@ class DeepSeekClient(ModelClient):
             return None
         if last_chunk is not None:
             self._record_usage(task, profile.model, last_chunk)
+            self._warn_if_truncated(task, last_chunk)
         return "".join(parts)
+
+    @staticmethod
+    def _finish_reason(response: Any) -> str:
+        metadata = getattr(response, "response_metadata", None) or {}
+        return str(metadata.get("finish_reason") or "")
+
+    def _warn_if_truncated(self, task: str, response: Any) -> None:
+        """输出达到 max_tokens 时 JSON 必然不完整，留下可检索的诊断日志。"""
+        if response is None or self._finish_reason(response) != "length":
+            return
+        logger.warning(
+            "DeepSeek 输出达到 max_tokens 上限被截断 task=%s；"
+            "请提高 Architect 输出上限或缩小单次产物",
+            task,
+        )
 
     def _record_usage(self, task: str, model: str, response: Any) -> None:
         """把 usage 写入当前节点采集器（无采集器时为空操作）。"""
