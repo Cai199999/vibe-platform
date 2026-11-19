@@ -34,9 +34,10 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 终极路线：`docs/design/16_平台终极目标与路线图.md` 固化六维目标；M1 闭环进行中。
 - 拖拽容错：落点出容器/缝隙时按 48px 几何距离吸附最近容器，不再直接“未能定位父容器”。
 - 旧工程兼容：SDK 支持 `file:line` / `file:line:column` 两段与三段锚点，缺失时向上找源码祖先；页面根兜底取真实容器，不再报“标注缺少目标文件”。
+- 拖拽实时预览：拖动中按指针求候选父容器与 AST 视觉缝隙，画虚线框 + 插入线；松手复用同一计算，所见即所写。
 
 ## 最新验证
-前端 68 项 Vitest；Python 739 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除预览消失 257ms、刷新回灌 3.9s、跨文件 Props 命中 App.jsx 调用点且 UserCard.jsx 未改、Direct MOVE 由真实 SDK 拖段落算出 siblingIndex=2，源码与预览同步重排。
+前端 68 项 Vitest；Python 739 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除预览消失 257ms、刷新回灌 3.9s、跨文件 Props 命中 App.jsx 调用点且 UserCard.jsx 未改、Direct MOVE 由真实 SDK 拖段落算出 siblingIndex=2，源码与预览同步重排；拖动中候选父容器框与插入线几何断言通过，松手后提示清零。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 仅源码快照持久化（Run/指标仍无持久化）；沙盒无 gVisor；未云端部署。

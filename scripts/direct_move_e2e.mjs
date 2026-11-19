@@ -237,7 +237,61 @@ async function main() {
       await previewPage.mouse.move(dragGeom.startX, dragGeom.startY)
       await previewPage.mouse.down()
       await previewPage.mouse.move(dragGeom.endX, dragGeom.endY, { steps: 12 })
+      // 拖动中：候选父容器虚线框 + 插入线必须已经可见。
+      await previewPage.waitForFunction(
+        () => {
+          const box = document.querySelector(
+            '[data-vibe-drag-hint="container"]',
+          )
+          const line = document.querySelector('[data-vibe-drag-hint="line"]')
+          return Boolean(
+            box &&
+              box.style.display === 'block' &&
+              line &&
+              line.style.display === 'block',
+          )
+        },
+        null,
+        { timeout: 5000 },
+      )
+      const hint = await previewPage.evaluate(
+        ({ parentOid }) => {
+          const toRect = (node) => node.getBoundingClientRect().toJSON()
+          return {
+            box: toRect(
+              document.querySelector('[data-vibe-drag-hint="container"]'),
+            ),
+            line: toRect(document.querySelector('[data-vibe-drag-hint="line"]')),
+            parent: toRect(document.querySelector(`[data-oid="${parentOid}"]`)),
+            button: toRect(document.querySelector('button')),
+          }
+        },
+        { parentOid: main.oid },
+      )
+      log('drag hint', JSON.stringify(hint))
+      const near = (a, b) => Math.abs(a - b) <= 2
+      if (
+        !near(hint.box.left, hint.parent.left) ||
+        !near(hint.box.top, hint.parent.top) ||
+        !near(hint.box.width, hint.parent.width) ||
+        !near(hint.box.height, hint.parent.height)
+      ) {
+        throw new Error(`drag hint parent box mismatch: ${JSON.stringify(hint)}`)
+      }
+      // 拖到末尾：插入线应落在 button 底边，宽度与 button 对齐。
+      if (
+        !near(hint.line.top, hint.button.bottom) ||
+        !near(hint.line.width, hint.button.width)
+      ) {
+        throw new Error(`drag hint line mismatch: ${JSON.stringify(hint)}`)
+      }
       await previewPage.mouse.up()
+      const hintsAfterDrop = await previewPage.evaluate(
+        () => document.querySelectorAll('[data-vibe-drag-hint]').length,
+      )
+      if (hintsAfterDrop !== 0) {
+        throw new Error('drag hint should be cleared after drop')
+      }
       const dragEnd = await previewPage
         .waitForFunction(
           () => {

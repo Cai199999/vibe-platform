@@ -29,6 +29,8 @@
   // 直接拖拽布局：由父页面显式开启，避免普通浏览时点击按钮误触发位移。
   var dragArmed = false
   var dragState = null
+  // 拖拽中的候选父容器高亮 + 插入线（Onlook 式实时落点预览）。
+  var dragHint = null
   // token -> {node, startTranslate, selector}；成功提交后由父页面清理。
   // 记录“开始拖拽前的 inline translate”，失败回滚时原样还原。
   var appliedDrags = {}
@@ -1478,6 +1480,9 @@
         break
       }
     }
+    // 视觉缝隙按“源节点仍在原位”的 DOM 顺序算；siblingIndex 则是
+    // 移动后（源节点已移除）的最终序号，两者不能混用。
+    var visualIndex = insertIndex
     if (sourceOid) {
       var sourceIndex = order.indexOf(sourceOid)
       if (sourceIndex >= 0 && insertIndex > sourceIndex) insertIndex -= 1
@@ -1486,6 +1491,20 @@
       insertIndex < entries.length
         ? entries[insertIndex]
         : entries[entries.length - 1]
+    // 插入线落在“视觉缝隙”：中间取后继节点的起始边，
+    // 末尾取最后一个节点的结束边（列取 top/bottom，行取 left/right）。
+    var lineRect
+    if (visualIndex < entries.length) {
+      var headRect = entries[visualIndex].rect
+      lineRect = isRow
+        ? { x: headRect.left, y: headRect.top, width: 0, height: headRect.height }
+        : { x: headRect.left, y: headRect.top, width: headRect.width, height: 0 }
+    } else {
+      var tailRect = entries[entries.length - 1].rect
+      lineRect = isRow
+        ? { x: tailRect.right, y: tailRect.top, width: 0, height: tailRect.height }
+        : { x: tailRect.left, y: tailRect.bottom, width: tailRect.width, height: 0 }
+    }
     return {
       anchor: anchorEntry,
       insertPosition: 'inside_index',
@@ -1498,6 +1517,7 @@
         width: round2(anchorEntry.rect.width),
         height: 0,
       },
+      lineRect: lineRect,
       confidence: 'ast_index',
     }
   }
@@ -1559,6 +1579,40 @@
         width: round2(last.rect.width),
         height: 0,
       },
+    }
+  }
+
+  /**
+   * 候选落点的插入线几何（iframe 视口 CSS 像素）。
+   *
+   * AST 落位在 astSiblingSlot 里已经算好；DOM 兜底则按锚点矩形的
+   * before / after 边推导。拖拽预览与松手写入共用同一个 slot，
+   * 保证「拖动中看到的线」就是真正写入的位置。
+   */
+  function slotLineRect(parentNode, slot) {
+    if (!parentNode || !slot) return null
+    if (slot.lineRect) return slot.lineRect
+    var isRow = stageAxisIsRow(parentNode)
+    var parentRect = parentNode.getBoundingClientRect()
+    var anchorRect = slot.anchor && slot.anchor.rect
+    if (!anchorRect) {
+      return isRow
+        ? { x: parentRect.left, y: parentRect.top, width: 0, height: parentRect.height }
+        : { x: parentRect.left, y: parentRect.top, width: parentRect.width, height: 0 }
+    }
+    if (isRow) {
+      return {
+        x: slot.insertPosition === 'after' ? anchorRect.right : anchorRect.left,
+        y: anchorRect.top,
+        width: 0,
+        height: anchorRect.height,
+      }
+    }
+    return {
+      x: anchorRect.left,
+      y: slot.insertPosition === 'after' ? anchorRect.bottom : anchorRect.top,
+      width: anchorRect.width,
+      height: 0,
     }
   }
 
@@ -1728,6 +1782,180 @@
     document.documentElement.appendChild(style)
   }
 
+  /*
+   * 拖拽实时落点提示。
+   * ------------------------------------------------------------------
+   * 拖动过程中按当前指针位置求候选父容器与 AST 兄弟序号，在 iframe 内
+   * 画虚线容器框与插入线。松手时直接复用同一个 computeDrop 结果，
+   * 保证「拖动中看到的位置」与真正写入的 placement 一致。
+   */
+  function ensureDragHint() {
+    if (dragHint && dragHint.box.isConnected) return dragHint
+    var box = document.createElement('div')
+    box.setAttribute('data-vibe-drag-hint', 'container')
+    box.style.cssText = [
+      'position:fixed',
+      'display:none',
+      'pointer-events:none',
+      'z-index:2147483644',
+      'border:2px dashed #38bdf8',
+      'background:rgba(56,189,248,.10)',
+      'box-shadow:0 0 0 1px rgba(2,6,23,.35)',
+      'border-radius:3px',
+      'box-sizing:border-box',
+      'transition:none',
+    ].join(';')
+    var line = document.createElement('div')
+    line.setAttribute('data-vibe-drag-hint', 'line')
+    line.style.cssText = [
+      'position:fixed',
+      'display:none',
+      'pointer-events:none',
+      'z-index:2147483645',
+      'background:#38bdf8',
+      'border-radius:2px',
+      'box-shadow:0 0 0 1px rgba(2,6,23,.35),0 0 10px rgba(56,189,248,.7)',
+      'transition:none',
+    ].join(';')
+    document.documentElement.appendChild(box)
+    document.documentElement.appendChild(line)
+    dragHint = { box: box, line: line }
+    return dragHint
+  }
+
+  function clearDragHint() {
+    if (!dragHint) return
+    if (dragHint.box.parentNode) dragHint.box.parentNode.removeChild(dragHint.box)
+    if (dragHint.line.parentNode) {
+      dragHint.line.parentNode.removeChild(dragHint.line)
+    }
+    dragHint = null
+  }
+
+  function drawDragHint(parentNode, slot) {
+    if (!parentNode || !slot) {
+      clearDragHint()
+      return
+    }
+    var hint = ensureDragHint()
+    var parentRect = parentNode.getBoundingClientRect()
+    hint.box.style.display = 'block'
+    hint.box.style.left = round2(parentRect.left) + 'px'
+    hint.box.style.top = round2(parentRect.top) + 'px'
+    hint.box.style.width = Math.max(0, round2(parentRect.width)) + 'px'
+    hint.box.style.height = Math.max(0, round2(parentRect.height)) + 'px'
+    var lineRect = slotLineRect(parentNode, slot)
+    if (!lineRect) {
+      hint.line.style.display = 'none'
+      return
+    }
+    // 3px 视觉线；零宽 / 零高的几何在 render 时补成可见厚度。
+    var thickness = 3
+    hint.line.style.display = 'block'
+    if (stageAxisIsRow(parentNode)) {
+      hint.line.style.left = round2(lineRect.x - thickness / 2) + 'px'
+      hint.line.style.top = round2(lineRect.y) + 'px'
+      hint.line.style.width = thickness + 'px'
+      hint.line.style.height = Math.max(8, round2(lineRect.height)) + 'px'
+    } else {
+      hint.line.style.left = round2(lineRect.x) + 'px'
+      hint.line.style.top = round2(lineRect.y - thickness / 2) + 'px'
+      hint.line.style.width = Math.max(8, round2(lineRect.width)) + 'px'
+      hint.line.style.height = thickness + 'px'
+    }
+  }
+
+  /**
+   * 求当前指针的落点：候选父容器 + AST 兄弟序号 + 可直接写入的 placement。
+   *
+   * pointermove（拖拽预览）与 pointerup（真正提交）共用这一份计算，
+   * 避免“拖动中高亮的容器”与“松手后写入的容器”不一致。
+   */
+  function computeDrop(state, node, x, y) {
+    var result = {
+      parentNode: null,
+      parentSource: null,
+      slot: null,
+      placement: null,
+    }
+    if (!state || !node) return result
+    try {
+      var hitNode = document.elementFromPoint(x, y)
+      var parentHit = stageParentOf(hitNode, x, y)
+      var parentNode = parentHit.node
+      // 目标可以是 source 的祖先（同父级 / 根级重排），只要不是 source
+      // 自身或 source 的子树即可。旧逻辑错误地排除了“父容器包含 source”，
+      // 导致容器只能在另一个容器内部移动，无法回到页面根级。
+      if (!parentNode || parentNode === node) {
+        parentNode = node.parentElement
+          ? stageParentOf(node.parentElement).node
+          : null
+      }
+      if (!parentNode || parentNode === node || node.contains(parentNode)) {
+        return result
+      }
+      var parentSource = readSource(parentNode)
+      if (!parentSource || !parentSource.selector || !parentSource.file) {
+        var rootNode = topLevelSourceNode()
+        if (rootNode && rootNode !== node && !node.contains(rootNode)) {
+          parentNode = rootNode
+          parentSource = readSource(parentNode)
+        }
+      }
+      // Babel 的 move_node 以“全部 JSX 子节点”计数；这里不能用
+      // stageSourceChildren（只含带 data-source 的节点），否则自定义
+      // 组件 / 无标记节点会造成 siblingIndex 越界。
+      var allChildren = Array.prototype.slice
+        .call(parentNode.children || [])
+        .filter(function (child) {
+          return child && child.getBoundingClientRect
+        })
+      var slotChildren = allChildren.map(function (child) {
+        return {
+          node: child,
+          source: readSource(child),
+          rect: child.getBoundingClientRect(),
+        }
+      })
+      var slot = stageSlotFor(
+        parentNode,
+        slotChildren,
+        x,
+        y,
+        state.source && state.source.oid,
+      )
+      var index = slot.siblingIndex
+      if (slot.confidence !== 'ast_index') {
+        if (slot.insertPosition === 'after') index += 1
+        if (slot.insertPosition === 'inside_start') index = 0
+        if (slot.insertPosition === 'inside_end') index = allChildren.length
+        var sourceIndex = allChildren.indexOf(node)
+        if (sourceIndex >= 0 && index > sourceIndex) index -= 1
+      }
+      result.parentNode = parentNode
+      result.parentSource = parentSource
+      result.slot = slot
+      if (parentSource && parentSource.selector && parentSource.file) {
+        result.placement = {
+          parentSelector: parentSource.selector,
+          parentOid: parentSource.oid || '',
+          parentCallSiteOid: parentSource.callSiteOid || '',
+          parentFile: parentSource.file,
+          parentLine: parentSource.line,
+          parentColumn: parentSource.column,
+          parentComponent: parentSource.component,
+          parentInstance: parentSource.instance,
+          parentInstanceCount: parentSource.instanceCount,
+          insertPosition: 'inside_index',
+          siblingIndex: Math.max(0, index),
+        }
+      }
+    } catch (error) {
+      return { parentNode: null, parentSource: null, slot: null, placement: null }
+    }
+    return result
+  }
+
   // 父页面在拖拽过程中可能因为提交 / 门控状态变化补发 drag-mode=false。
   // 此时手势还没结束，不能立刻 cancelActiveDrag() 把组件弹回原位；
   // 先记下“待退出”，等 pointerup 完成本次拖拽后再真正解除。
@@ -1748,7 +1976,15 @@
     )
     if (!dragArmed) {
       cancelActiveDrag()
+      clearDragHint()
       document.documentElement.classList.remove('vibe-drag-active')
+    }
+  }
+
+  /** 恢复拖拽期间被临时关闭的命中测试（elementFromPoint 需要跳过被拖节点）。 */
+  function restoreDragPointerEvents(state) {
+    if (state && state.node && state.node.style) {
+      state.node.style.pointerEvents = state.startPointerEvents || ''
     }
   }
 
@@ -1762,6 +1998,8 @@
       state.baseX,
       state.baseY,
     )
+    restoreDragPointerEvents(state)
+    clearDragHint()
     if (state.dragging) {
       post('drag-cancel', {
         token: state.token,
@@ -2415,6 +2653,31 @@
    *     drag-rollback，按 token 还原到拖拽前的位置。
    * 中键平移仍由上面的 pan-* 协议负责，两者互不干扰。
    */
+  /** 按帧刷新拖拽位移与落点预览：父页面只需要最新位置。 */
+  function flushDragMove(state) {
+    if (!state || !state.node) return
+    var drop = computeDrop(
+      state,
+      state.node,
+      state.pointerX,
+      state.pointerY,
+    )
+    // 只有能算出确定性 placement 时才画提示，避免“高亮了却不落位”。
+    if (drop.placement) drawDragHint(drop.parentNode, drop.slot)
+    else clearDragHint()
+    state.lastRect = rectOf(state.node)
+    post('drag-move', {
+      token: state.token,
+      selector: state.selector,
+      source: state.source,
+      dx: state.dx,
+      dy: state.dy,
+      inlineX: state.baseX + state.dx,
+      inlineY: state.baseY + state.dy,
+      rect: state.lastRect,
+    })
+  }
+
   document.addEventListener(
     'pointerdown',
     function (event) {
@@ -2444,12 +2707,17 @@
         pointerId: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,
+        pointerX: event.clientX,
+        pointerY: event.clientY,
         baseX: start.x,
         baseY: start.y,
         dx: 0,
         dy: 0,
         dragging: false,
         startTranslate: target.style.translate || '',
+        // 拖拽期间临时关掉被拖节点的命中测试，elementFromPoint 才能
+        // 穿透到它下面的候选父容器；松手 / 取消时原样恢复。
+        startPointerEvents: target.style.pointerEvents || '',
         frame: 0,
         lastRect: rectOf(target),
       }
@@ -2473,6 +2741,10 @@
         if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return
         state.dragging = true
         document.documentElement.classList.add('vibe-drag-active')
+        // 让 elementFromPoint 穿透被拖节点，落点始终看“下面是什么”。
+        if (state.node && state.node.style) {
+          state.node.style.pointerEvents = 'none'
+        }
         try {
           window.getSelection().removeAllRanges()
         } catch (error) {
@@ -2494,9 +2766,13 @@
       event.stopPropagation()
       state.dx = dx
       state.dy = dy
+      state.pointerX = event.clientX
+      state.pointerY = event.clientY
       if (!state.node || !state.node.isConnected) {
+        // HMR 可能整棵替换节点；新节点同样要退出命中测试。
         state.node = queryNode(state.selector)
         if (!state.node) return
+        if (state.node.style) state.node.style.pointerEvents = 'none'
       }
       applyInlineTranslate(
         state.node,
@@ -2508,31 +2784,11 @@
       state.frame = window.requestAnimationFrame
         ? window.requestAnimationFrame(function () {
             state.frame = 0
-            if (!state.node) return
-            state.lastRect = rectOf(state.node)
-            post('drag-move', {
-              token: state.token,
-              selector: state.selector,
-              source: state.source,
-              dx: state.dx,
-              dy: state.dy,
-              inlineX: state.baseX + state.dx,
-              inlineY: state.baseY + state.dy,
-              rect: state.lastRect,
-            })
+            flushDragMove(state)
           })
         : window.setTimeout(function () {
             state.frame = 0
-            post('drag-move', {
-              token: state.token,
-              selector: state.selector,
-              source: state.source,
-              dx: state.dx,
-              dy: state.dy,
-              inlineX: state.baseX + state.dx,
-              inlineY: state.baseY + state.dy,
-              rect: rectOf(state.node),
-            })
+            flushDragMove(state)
           }, 16)
     },
     true,
@@ -2558,7 +2814,11 @@
       state.frame = 0
     }
     document.documentElement.classList.remove('vibe-drag-active')
-    if (!state.dragging) return
+    clearDragHint()
+    if (!state.dragging) {
+      restoreDragPointerEvents(state)
+      return
+    }
     // 拖拽完成后吞掉浏览器补发的 click，避免误触按钮 / 链接。
     suppressClick = true
     window.setTimeout(function () {
@@ -2568,6 +2828,7 @@
       ? state.node
       : queryNode(state.selector)
     if (!node) {
+      restoreDragPointerEvents(state)
       post('drag-cancel', {
         token: state.token,
         selector: state.selector,
@@ -2589,88 +2850,13 @@
     }
     // Direct Ops：松手位置换算为确定性父容器 + 子节点序号。
     // 父页面据此直接调用 MOVE_NODE，不经过 Agent / LLM。
-    var placement = null
-    try {
-      var hitNode = document.elementFromPoint(event.clientX, event.clientY)
-      var parentHit = stageParentOf(
-        hitNode,
-        event.clientX,
-        event.clientY,
-      )
-      var parentNode = parentHit.node
-      // 目标可以是 source 的祖先（同父级 / 根级重排），只要不是 source
-      // 自身或 source 的子树即可。旧逻辑错误地排除了“父容器包含 source”，
-      // 导致容器只能在另一个容器内部移动，无法回到页面根级。
-      if (!parentNode || parentNode === node) {
-        parentNode = node.parentElement
-          ? stageParentOf(node.parentElement).node
-          : null
-      }
-      if (parentNode && parentNode !== node && !node.contains(parentNode)) {
-        var parentSource = readSource(parentNode)
-        if (
-          !parentSource ||
-          !parentSource.selector ||
-          !parentSource.file
-        ) {
-          var rootNode = topLevelSourceNode()
-          if (rootNode && rootNode !== node && !node.contains(rootNode)) {
-            parentNode = rootNode
-            parentSource = readSource(parentNode)
-          }
-        }
-        // Babel 的 move_node 以“全部 JSX 子节点”计数；这里不能用
-        // stageSourceChildren（只含带 data-source 的节点），否则自定义
-        // 组件 / 无标记节点会造成 siblingIndex 越界。
-        var allChildren = Array.prototype.slice
-          .call(parentNode.children || [])
-          .filter(function (child) {
-            return child && child.getBoundingClientRect
-          })
-        var slotChildren = allChildren.map(function (child) {
-          return {
-            node: child,
-            source: readSource(child),
-            rect: child.getBoundingClientRect(),
-          }
-        })
-        var slot = stageSlotFor(
-          parentNode,
-          slotChildren,
-          event.clientX,
-          event.clientY,
-          state.source && state.source.oid,
-        )
-        var index = slot.siblingIndex
-        if (slot.confidence !== 'ast_index') {
-          if (slot.insertPosition === 'after') index += 1
-          if (slot.insertPosition === 'inside_start') index = 0
-          if (slot.insertPosition === 'inside_end') index = allChildren.length
-          var sourceIndex = allChildren.indexOf(node)
-          if (sourceIndex >= 0 && index > sourceIndex) index -= 1
-        }
-        if (
-          parentSource &&
-          parentSource.selector &&
-          parentSource.file
-        ) {
-          placement = {
-            parentSelector: parentSource.selector,
-            parentOid: parentSource.oid || '',
-            parentCallSiteOid: parentSource.callSiteOid || '',
-            parentFile: parentSource.file,
-            parentLine: parentSource.line,
-            parentColumn: parentSource.column,
-            parentComponent: parentSource.component,
-            parentInstance: parentSource.instance,
-            parentInstanceCount: parentSource.instanceCount,
-            insertPosition: 'inside_index',
-            siblingIndex: Math.max(0, index),
-          }
-        }
-      }
-    } catch (error) {
-      placement = null
+    // 复用拖动中的 computeDrop：预览里高亮的容器就是这里写入的容器。
+    var drop = computeDrop(state, node, event.clientX, event.clientY)
+    var placement = drop.placement
+    // 先恢复命中测试再发消息，避免节点带着 pointer-events:none 进入 HMR。
+    restoreDragPointerEvents(state)
+    if (node !== state.node && node.style) {
+      node.style.pointerEvents = state.startPointerEvents || ''
     }
     post('drag-end', {
       token: state.token,
