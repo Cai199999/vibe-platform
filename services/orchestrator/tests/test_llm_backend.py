@@ -98,6 +98,35 @@ class LLMBackendCoderTest(unittest.TestCase):
         for path, content in untouched.items():
             self.assertEqual(repaired.files[path], content)
 
+    def test_prompt_includes_read_only_db_js_authority(self) -> None:
+        """db.js 是 Applier 判断 JOIN 别名的真实事实源，必须只读入 Prompt。"""
+        contract, schema, bundle = _bundle()
+        dba = generate_dba_bundle(contract)
+        response = json.dumps(
+            {"files": {"server/index.js": bundle.files["server/index.js"]}}
+        )
+        client = _FakeModelClient(response)
+        coder = LLMBackendCoder(
+            Settings(
+                deepseek_api_key="test-key",
+                fullstack_llm_repair_enabled=True,
+            ),
+            client=client,
+        )
+
+        coder.repair(
+            contract=contract,
+            bundle=bundle,
+            dba_schema=schema,
+            diagnostics=["[server/index.js] 嵌套路由别名错误"],
+            authoritative_files={"server/db.js": dba.files["server/db.js"]},
+        )
+
+        human = client.calls[0][2]
+        self.assertIn("只读权威 ORM", human)
+        self.assertIn("RELATIONS", human)
+        self.assertIn("server/db.js", human)
+
     def test_accepts_markdown_fenced_json(self) -> None:
         contract, schema, bundle = _bundle()
         response = (

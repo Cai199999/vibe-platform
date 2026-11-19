@@ -37,6 +37,7 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 拖拽实时预览：拖动中按指针求候选父容器与 AST 视觉缝隙，画虚线框 + 插入线；松手复用同一计算，所见即所写。
 - 澄清可靠性：Architect 输出上限 8192、JSON 修复重试 2 次，`finish_reason=length` 留告警；LLM 失败文案不再声称“已保留进度”。V0 契约在 validate_draft 校验 visual_document，缺失/非法走结构化打回而非内部错误。
 - 两阶段守卫：BACKEND_BINDING 缺冻结树服务端 422 `ARCHITECT_VISUAL_REQUIRED`；前端缺冻结树时不消费审查包并阻断，旧骨架入口按 `outputPhase=BACKEND_BINDING` 门禁，不再误报缺 frontendRoutes/components。
+- 代码自愈收敛：Applier 诊断带 source 归属，db.js 缺陷回 DBACoder 重建（不再空转 BackendCoder），index.js 缺陷走 LLM；修复以被拦截候选为基线并只读注入 db.js，Coder 输出上限 8192。
 
 ## 最新验证
 前端 68 项 Vitest；Python 739 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除预览消失 257ms、刷新回灌 3.9s、跨文件 Props 命中 App.jsx 调用点且 UserCard.jsx 未改、Direct MOVE 由真实 SDK 拖段落算出 siblingIndex=2，源码与预览同步重排；拖动中候选父容器框与插入线几何断言通过，松手后提示清零。两阶段全链路 E2E PASS：V0 → 冻结 → BACKEND_BINDING 澄清 → 确认（无旧骨架入口）→ Visual CodeGen → live 画布 → 刷新回灌；call-site E2E 增加定义映射完成等待。

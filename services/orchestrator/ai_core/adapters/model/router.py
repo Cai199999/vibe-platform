@@ -84,6 +84,8 @@ TASK_SETTING_FIELD: dict[str, str] = {
 # Architect 的结构化输出包含完整契约与 VisualDocument，DeepSeek 默认
 # 4096 输出上限会把 JSON 截断；这些任务使用独立的输出上限。
 ARCHITECT_TASKS = {"architect_analyze", "architect_contract", "architect_helper"}
+# Coder / BackendCoder 修复要输出完整源码文件，同样需要更高上限。
+CODER_TASKS = {"coder", "coder_fast"}
 
 # 任务级温度覆盖：只给需要“确定性”的节点单独降低温度，不影响 Coder
 # 这类需要一定创造力的生成任务。留空则回退到 FAST / STRONG 层级温度。
@@ -167,10 +169,13 @@ class ModelRouter:
     # 客户端
     # ------------------------------------------------------------
     def _max_output_tokens(self, task: str) -> int | None:
-        """Architect 任务使用更长的输出上限；其余任务沿用网关默认值。"""
-        if task not in ARCHITECT_TASKS:
+        """Architect / Coder 使用更长的输出上限；其余任务沿用网关默认值。"""
+        if task in ARCHITECT_TASKS:
+            value = int(self._settings.architect_max_output_tokens)
+        elif task in CODER_TASKS:
+            value = int(self._settings.coder_max_output_tokens)
+        else:
             return None
-        value = int(self._settings.architect_max_output_tokens)
         return value if value > 0 else None
 
     def build(self, task: str) -> ChatOpenAI:

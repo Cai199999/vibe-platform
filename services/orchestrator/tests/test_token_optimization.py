@@ -97,6 +97,20 @@ class ModelRouterTest(unittest.TestCase):
         self.assertIn("summary", described)
         self.assertEqual(described["coder"]["model"], "coder-override")
 
+    def test_output_limits_apply_to_architect_and_coder(self) -> None:
+        # 完整契约 / 完整源码文件的 JSON 输出需要更大上限，默认 8192。
+        self.assertEqual(self.router._max_output_tokens("architect_contract"), 8192)
+        self.assertEqual(self.router._max_output_tokens("coder"), 8192)
+        self.assertIsNone(self.router._max_output_tokens("planner"))
+        router = ModelRouter(
+            Settings(
+                architect_max_output_tokens=4096,
+                coder_max_output_tokens=0,
+            )
+        )
+        self.assertEqual(router._max_output_tokens("architect_analyze"), 4096)
+        self.assertIsNone(router._max_output_tokens("coder"))
+
     def test_client_cache_separates_temperatures(self) -> None:
         router = ModelRouter(
             Settings(

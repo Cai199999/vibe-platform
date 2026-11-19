@@ -47,6 +47,7 @@ from ai_core.fullstack.coders import (
 )
 from ai_core.fullstack.applier import Applier, ApplierSafetyBlock
 from ai_core.fullstack.consistency import verify_consistency
+from ai_core.fullstack.diagnostics import OrmDiagnostic, OrmSyntaxReport
 from ai_core.fullstack.graph import (
     FullstackConsistencyError,
     FullstackContractContradictionError,
@@ -1852,6 +1853,7 @@ class GraphTests(unittest.TestCase):
                 diagnostics,
                 attempt,
                 max_attempts,
+                authoritative_files=None,
             ):
                 calls.append(
                     {
@@ -1861,6 +1863,7 @@ class GraphTests(unittest.TestCase):
                         "diagnostics": list(diagnostics),
                         "attempt": attempt,
                         "max_attempts": max_attempts,
+                        "authoritative_files": dict(authoritative_files or {}),
                     }
                 )
                 files = dict(bundle.files)
@@ -1929,7 +1932,12 @@ class GraphTests(unittest.TestCase):
         feedback = "\n".join(calls[0]["diagnostics"])
         self.assertIn("resumez", feedback)
         self.assertIn("JOIN", feedback.upper())
+        # 诊断带 source 前缀，模型能判断缺陷归属文件。
+        self.assertIn("[server/index.js]", feedback)
         self.assertIn("/:id/resumez", calls[0]["bundle"].files["server/index.js"])
+        # db.js 作为只读事实源随修复请求提供，用于对齐真实 RELATIONS。
+        db_source = calls[0]["authoritative_files"].get("server/db.js", "")
+        self.assertIn("RELATIONS", db_source)
         self.assertEqual(result["llm_repair_count"], 1)
 
         self.assertNotIn("resumez", sandbox.files["server/index.js"])
@@ -1944,6 +1952,140 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(len(repair_events), 1)
         self.assertEqual(repair_events[0].payload["status"], "SUCCEEDED")
         self.assertEqual(repair_events[0].payload["files"], ["server/index.js"])
+
+    def test_applier_db_source_routes_to_dbacoder(self) -> None:
+        """db.js 缺陷超出 BackendCoder 权限，必须回 DBACoder 重建而不是空转。"""
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        runner = FullstackGraphRunner(sandbox, event_sink=RunEventBuffer("x"))
+        report = OrmSyntaxReport(
+            applicable=True,
+            multi_table=False,
+            issues=(
+                OrmDiagnostic(
+                    code="ORM_SCHEMA_MISMATCH",
+                    message="ORM 模型引用了 DDL 中不存在的字段：unknown",
+                    source="server/db.js",
+                ),
+            ),
+            tables=("app_records",),
+        )
+        state = {
+            "run_id": "fsk_db_route",
+            "contract": _master_detail_contract(),
+            "applier_retry_count": 0,
+        }
+        result = runner._handle_applier_block(
+            state,
+            ApplierSafetyBlock(report),
+            time.monotonic(),
+        )
+        self.assertFalse(result["needs_backend_retry"])
+        self.assertTrue(result["applier_dba_retry"])
+        self.assertEqual(result["applier_retry_count"], 1)
+        # DBA 重建不需要把旧诊断塞给 LLM。
+        self.assertEqual(result["applier_feedback"], [])
+
+    def test_second_repair_uses_previous_failed_candidate(self) -> None:
+        """第二轮修复必须以“上一轮被拦截的产物”为基线，而不是重置模板。
+
+        否则模型看不到自己上一次改了什么，两轮都在同一模板上重写，
+        修复过程不收敛。
+        """
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        contract = _master_detail_contract()
+        buffer = RunEventBuffer("fsk_llm_repair_previous")
+        calls: list[dict] = []
+
+        class _TwoRoundLLM:
+            available = True
+
+            def repair(
+                self,
+                *,
+                bundle,
+                attempt,
+                authoritative_files=None,
+                **kwargs,
+            ):
+                code = bundle.files["server/index.js"]
+                calls.append(
+                    {
+                        "attempt": attempt,
+                        "code": code,
+                        "authoritative_files": dict(authoritative_files or {}),
+                    }
+                )
+                files = dict(bundle.files)
+                if attempt == 1:
+                    # 第一轮只加标记，不修复 JOIN -> 仍会被 Applier 拦截。
+                    files["server/index.js"] = "// attempt-one-marker\n" + code
+                else:
+                    self_test.assertIn("attempt-one-marker", code)
+                    files["server/index.js"] = code.replace(
+                        "/:id/resumez", "/:id/resumes"
+                    )
+                metadata = dict(bundle.metadata)
+                metadata["llmRepair"] = {
+                    "used": True,
+                    "files": ["server/index.js"],
+                }
+                return GeneratedBundle(
+                    files=files,
+                    summary="fake LLM repaired",
+                    metadata=metadata,
+                )
+
+        self_test = self
+        runner = FullstackGraphRunner(
+            sandbox,
+            event_sink=buffer,
+            backend_llm=_TwoRoundLLM(),
+        )
+
+        from ai_core.fullstack import graph as graph_module
+
+        real_generator = generate_backend_bundle
+
+        def generate_with_bad_join(*args, **kwargs):
+            bundle = real_generator(*args, **kwargs)
+            files = dict(bundle.files)
+            files["server/index.js"] = files["server/index.js"].replace(
+                "/:id/resumes", "/:id/resumez"
+            )
+            return GeneratedBundle(
+                files=files,
+                summary=bundle.summary,
+                metadata=bundle.metadata,
+            )
+
+        with patch.object(
+            graph_module,
+            "generate_backend_bundle",
+            side_effect=generate_with_bad_join,
+        ):
+            result = runner.run(
+                {
+                    "run_id": "fsk_llm_repair_previous",
+                    "project_id": "proj_fullstack",
+                    "sandbox_id": sandbox.handle.sandbox_id,
+                    "preview_url": sandbox.handle.preview_url,
+                    "contract": contract,
+                    "files": [],
+                }
+            )
+
+        self.assertEqual([call["attempt"] for call in calls], [1, 2])
+        # 第二轮拿到的是第一轮产物（含标记），不是重新生成的模板。
+        self.assertIn("attempt-one-marker", calls[1]["code"])
+        # 两轮都携带只读 db.js 事实源。
+        for call in calls:
+            self.assertIn("RELATIONS", call["authoritative_files"]["server/db.js"])
+        # llm_repair_count 只统计最终成功落盘的 LLM 修复次数（既有语义）。
+        self.assertEqual(result["llm_repair_count"], 1)
+        self.assertNotIn("resumez", sandbox.files["server/index.js"])
+        self.assertIn("attempt-one-marker", sandbox.files["server/index.js"])
 
     def test_llm_repair_failure_falls_back_to_template(self) -> None:
         """LLM 不可用/失败时不得伪装修复：Applier 继续拦截并最终报错。"""

@@ -38,6 +38,8 @@ REPAIRABLE_FILES = ("server/index.js",)
 # 单文件上限：防止模型输出被截断后仍被当成“完整文件”落盘。
 MAX_REPAIR_FILE_BYTES = 512_000
 MAX_PROMPT_CHARS = 80_000
+# 只读事实源（server/db.js）的 Prompt 预算；超长时截断并保留尾部提示。
+MAX_AUTHORITATIVE_CHARS = 40_000
 
 _REPAIR_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -104,6 +106,7 @@ class LLMBackendCoder:
         diagnostics: Sequence[str],
         attempt: int = 1,
         max_attempts: int = 1,
+        authoritative_files: Mapping[str, str] | None = None,
     ) -> GeneratedBundle:
         """基于 Applier 诊断修复模板产物。
 
@@ -132,6 +135,8 @@ class LLMBackendCoder:
             diagnostics=diagnostics,
             attempt=attempt,
             max_attempts=max_attempts,
+            authoritative_files=authoritative_files,
+            previous_attempt=bool(bundle.metadata.get("applierPreviousAttempt")),
         )
         try:
             raw = self._ensure_client().generate_json(
@@ -186,6 +191,11 @@ class LLMBackendCoder:
             "- 当前只允许修改 server/index.js。禁止输出 server/db.js、"
             "server/migrations/**、server/schema.core.json、"
             "server/api-routes.json、package.json 等文件；\n"
+            "- server/db.js 会作为只读事实源提供：index.js 的 include / "
+            "嵌套路由 alias 必须与其中 RELATIONS 完全一致，禁止臆造别名；\n"
+            "- 如果诊断来自 server/db.js，说明问题不在你的修改权限内："
+            "不要为了“消除诊断”去删改路由或字段，保持 index.js 与 db.js "
+            "的实际结构一致，并在 reasoning 中说明该诊断需要持久化层修复；\n"
             "- 禁止修改契约中的表名、列名、路径、HTTP 方法与外键字段；\n"
             "- 禁止新增契约未声明的路由，禁止删除已有健康检查与通用 CRUD；\n"
             "- 必须保留 ES Module 语法（import / export）与 Node 22 兼容性。\n\n"
@@ -213,6 +223,8 @@ class LLMBackendCoder:
         diagnostics: Sequence[str],
         attempt: int,
         max_attempts: int,
+        authoritative_files: Mapping[str, str] | None = None,
+        previous_attempt: bool = False,
     ) -> str:
         core = core_table_for_contract(contract)
         routes = [
@@ -238,8 +250,28 @@ class LLMBackendCoder:
                 current_text[:MAX_PROMPT_CHARS]
                 + "\n... [当前文件过长，已截断；仍需输出完整文件]"
             )
+        db_js = str((authoritative_files or {}).get("server/db.js") or "")
+        db_section = ""
+        if db_js.strip():
+            db_text = db_js
+            if len(db_text) > MAX_AUTHORITATIVE_CHARS:
+                db_text = (
+                    db_text[:MAX_AUTHORITATIVE_CHARS]
+                    + "\n... [db.js 已截断；index.js 以实际 RELATIONS 为准]"
+                )
+            db_section = (
+                "## server/db.js（只读权威 ORM；禁止修改）\n"
+                f"```javascript\n{db_text}\n```\n\n"
+            )
+        attempt_note = (
+            "- 当前文件是上一轮被 AST 门禁拦截的版本：请做增量修正，\n"
+            "  保留已经正确、未被诊断点名的逻辑，不要整段重写。\n"
+            if previous_attempt
+            else ""
+        )
         human = (
-            f"## 修复轮次\n第 {attempt}/{max_attempts} 次 LLM 修复\n\n"
+            f"## 修复轮次\n第 {attempt}/{max_attempts} 次 LLM 修复\n"
+            f"{attempt_note}\n"
             f"## 核心表\n{core.name}\n\n"
             f"## 契约集合路径\n{collection_path(contract.api_routes or [])}\n\n"
             f"## 契约路由\n{json.dumps(routes, ensure_ascii=False, indent=2)}\n\n"
@@ -248,6 +280,7 @@ class LLMBackendCoder:
             f"## databaseDdl\n```sql\n{contract.database_ddl or '（空）'}\n```\n\n"
             f"## schema.core.json（DBACoder 权威输出）\n```json\n"
             f"{dba_schema}\n```\n\n"
+            f"{db_section}"
             f"## Applier AST 门禁诊断\n{diagnostic_lines}\n\n"
             f"## 当前 server/index.js（需要修复的完整文件）\n"
             f"```javascript\n{current_text}\n```\n\n"
@@ -268,11 +301,15 @@ def _parse_repair_payload(raw: str, *, allowed: set[str]) -> dict[str, str]:
         start = text.find("{")
         end = text.rfind("}")
         if start < 0 or end <= start:
-            raise LLMBackendRepairError("LLM 未返回 JSON 对象") from None
+            raise LLMBackendRepairError(
+                "LLM 未返回 JSON 对象（也可能输出被 max_tokens 截断）"
+            ) from None
         try:
             payload = json.loads(text[start : end + 1])
         except json.JSONDecodeError as exc:
-            raise LLMBackendRepairError(f"LLM JSON 解析失败: {exc}") from exc
+            raise LLMBackendRepairError(
+                f"LLM JSON 解析失败（也可能是输出被 max_tokens 截断）: {exc}"
+            ) from exc
     if not isinstance(payload, dict):
         raise LLMBackendRepairError("LLM JSON 顶层必须是对象")
     raw_files = payload.get("files")

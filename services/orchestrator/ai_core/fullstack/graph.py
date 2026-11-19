@@ -226,9 +226,15 @@ class FullstackState(TypedDict, total=False):
     # Applier AST 门禁：拦截后先分类，再决定重生成 Backend 还是要求改契约。
     applier_retry_count: int
     needs_backend_retry: bool
+    # 缺陷来源是 server/db.js（持久化层）时，BackendCoder 无权修复，
+    # 必须回到 DBACoder 重建 ORM / 迁移后再绑定 HTTP 层。
+    applier_dba_retry: bool
     # Applier / 一致性诊断原文：下一次 BackendCoder 把这段错误反馈给 LLM。
     applier_feedback: list[str]
     applier_feedback_attempt: int
+    # 上一轮被 Applier 拦截的候选产物。下一轮 LLM 修复以此为基线，
+    # 避免每轮都从模板重置、反复引入同类缺陷。
+    applier_previous_files: dict[str, str]
     llm_repair_count: int
     # ---- 风险自适应门禁 ----
     quality_tier: str
@@ -330,7 +336,12 @@ class FullstackGraphRunner:
             builder.add_conditional_edges(
                 "BackendCoder",
                 self._route_after_backend_coder,
-                {"retry": "BackendCoder", "frontend": "BuildVerifier"},
+                {
+                    "retry": "BackendCoder",
+                    # 持久化层缺陷回到 DBACoder，重建后再进 BackendCoder。
+                    "retry_dba": "DBACoder",
+                    "frontend": "BuildVerifier",
+                },
             )
             builder.add_edge("BuildVerifier", "SandboxRestart")
             builder.add_edge("SandboxRestart", END)
@@ -361,6 +372,9 @@ class FullstackGraphRunner:
                 # Applier 拦截了 JOIN/ORM 缺陷：只重跑 BackendCoder，
                 # 不重新生成 DDL，也不进入注定失败的构建。
                 "retry": "BackendCoder",
+                # 缺陷来源是 server/db.js：BackendCoder 无权修改持久化层，
+                # 回到 DBACoder 重建 ORM / 迁移。
+                "retry_dba": "DBACoder",
             },
         )
         builder.add_edge("FrontendCoder", "InfraCoder")
@@ -389,6 +403,8 @@ class FullstackGraphRunner:
         后端子图没有 ConsistencyVerifier 节点（构建后直接重启），因此
         只在 fullstack 模式下允许返回 ``consistency``。
         """
+        if state.get("applier_dba_retry"):
+            return "retry_dba"
         if state.get("needs_backend_retry"):
             return "retry"
         options = state.get("options") or FullstackRunOptions()
@@ -488,11 +504,23 @@ class FullstackGraphRunner:
                     bundle,
                     feedback,
                     dba_schema,
+                    # db.js 是 Applier 校验 JOIN 别名的真实事实源；把它
+                    # 只读地放进修复 Prompt，模型才能对齐实际 RELATIONS。
+                    authoritative_db_js=self._read_optional(sandbox_id, "server/db.js"),
                 )
             try:
                 files = self._write_bundle(state, bundle)
             except ApplierSafetyBlock as exc:
-                return self._handle_applier_block(state, exc, started)
+                blocked = self._handle_applier_block(state, exc, started)
+                # 只有回 BackendCoder 重写时才保留本次候选，作为下一轮
+                # LLM 修复的基线；DBACoder 重建会重新生成持久化层。
+                if blocked.get("needs_backend_retry"):
+                    blocked["applier_previous_files"] = {
+                        path: bundle.files[path]
+                        for path in ("server/index.js",)
+                        if isinstance(bundle.files.get(path), str)
+                    }
+                return blocked
             collection = str(bundle.metadata.get("collectionPath") or "")
             summary = bundle.summary
             if fix_routes:
@@ -513,9 +541,11 @@ class FullstackGraphRunner:
                 "consistency_applied_routes": applied_routes,
                 "needs_backend_repair": False,
                 "needs_backend_retry": False,
+                "applier_dba_retry": False,
                 # 诊断已消费：下一次普通生成不应继续携带旧错误。
                 "applier_feedback": [],
                 "applier_feedback_attempt": 0,
+                "applier_previous_files": {},
                 "llm_repair_count": int(state.get("llm_repair_count") or 0)
                 + (1 if llm_repaired else 0),
             }
@@ -533,6 +563,8 @@ class FullstackGraphRunner:
         bundle: GeneratedBundle,
         feedback: list[str],
         dba_schema: str,
+        *,
+        authoritative_db_js: str | None = None,
     ) -> tuple[GeneratedBundle, bool]:
         """把 Applier 诊断交给 LLM，返回 ``(修复后产物, 是否成功)``。
 
@@ -541,6 +573,18 @@ class FullstackGraphRunner:
         """
         attempt = int(state.get("applier_feedback_attempt") or 1)
         max_attempts = max(MAX_APPLIER_REPAIRS, MAX_JOIN_REPAIRS)
+        # 上一轮被拦截的候选优先作为修复基线：否则每轮都从模板重置，
+        # 模型看不到自己上一次改了什么，修复过程不保证收敛。
+        previous = state.get("applier_previous_files") or {}
+        repair_bundle = bundle
+        if isinstance(previous.get("server/index.js"), str):
+            repair_files = dict(bundle.files)
+            repair_files["server/index.js"] = previous["server/index.js"]
+            repair_bundle = GeneratedBundle(
+                files=repair_files,
+                summary=bundle.summary,
+                metadata={**bundle.metadata, "applierPreviousAttempt": True},
+            )
         coder = self._resolve_backend_llm()
         if coder is None or not coder.available:
             self._emit(
@@ -559,11 +603,16 @@ class FullstackGraphRunner:
         try:
             repaired = coder.repair(
                 contract=state["contract"],
-                bundle=bundle,
+                bundle=repair_bundle,
                 dba_schema=dba_schema,
                 diagnostics=feedback,
                 attempt=attempt,
                 max_attempts=max_attempts,
+                authoritative_files=(
+                    {"server/db.js": authoritative_db_js}
+                    if authoritative_db_js
+                    else None
+                ),
             )
         except LLMBackendRepairUnavailable as exc:
             logger.warning(
@@ -653,6 +702,11 @@ class FullstackGraphRunner:
         options = state.get("options") or FullstackRunOptions()
         retry_count = int(state.get("applier_retry_count") or 0)
         report = exc.report
+        # 只有 db.js 的问题属于持久化层：index.js 无论怎么改都消不掉，
+        # 继续让 BackendCoder 重写只会浪费重试预算。
+        db_only = bool(report.issues) and all(
+            issue.source == "server/db.js" for issue in report.issues
+        )
         audit = audit_contract(
             contract,
             mode=options.mode,
@@ -666,6 +720,7 @@ class FullstackGraphRunner:
                 "attempt": retry_count,
                 "maxAttempts": MAX_APPLIER_REPAIRS,
                 "defectKind": audit.defect_kind,
+                "route": "DBACoder" if db_only else "BackendCoder",
                 "issues": [issue.to_dict() for issue in report.issues],
                 "metrics": FULLSTACK_METRICS.snapshot(),
             },
@@ -690,9 +745,13 @@ class FullstackGraphRunner:
                 node="BackendCoder",
             )
         next_count = retry_count + 1
+        target = "DBACoder" if db_only else "BackendCoder"
+        action = "重建持久化层" if db_only else "重新生成"
         logger.warning(
-            "Applier 拦截 %d 处代码缺陷，转 BackendCoder 重生成 [%d/%d] run_id=%s",
+            "Applier 拦截 %d 处代码缺陷，转 %s %s [%d/%d] run_id=%s",
             len(report.issues),
+            target,
+            action,
             next_count,
             MAX_APPLIER_REPAIRS,
             state.get("run_id"),
@@ -702,18 +761,34 @@ class FullstackGraphRunner:
             state,
             (
                 f"Applier AST 门禁拦截 {len(report.issues)} 处代码缺陷，"
-                f"转 BackendCoder 重新生成（第 {next_count}/{MAX_APPLIER_REPAIRS} 次）"
+                f"转 {target} {action}（第 {next_count}/{MAX_APPLIER_REPAIRS} 次）"
             ),
             [],
             started,
         )
         return {
-            "needs_backend_retry": True,
+            # db.js 缺陷回到 DBACoder；index.js 缺陷才让 BackendCoder+LLM 修复。
+            "needs_backend_retry": not db_only,
+            "applier_dba_retry": db_only,
             "applier_retry_count": next_count,
             # 下一轮 BackendCoder 不再盲目重跑模板，而是携带这些诊断
             # 调用 LLM；模板仍作为 LLM 不可用时的降级产物。
-            "applier_feedback": report.messages(),
-            "applier_feedback_attempt": next_count,
+            # 带 source 前缀：模型能区分 index.js / db.js，避免在错误
+            # 的文件里反复“修”一个不属于它的缺陷。
+            "applier_feedback": (
+                []
+                if db_only
+                else [
+                    (
+                        f"[{issue.source}] {issue.message}"
+                        if issue.source
+                        else issue.message
+                    )
+                    for issue in report.issues
+                ]
+            ),
+            "applier_feedback_attempt": 0 if db_only else next_count,
+            "applier_previous_files": {},
             "consistency_ok": False,
         }
 
