@@ -207,10 +207,146 @@ async function tryDirectDelete(page, frame) {
   await page.waitForTimeout(1500)
 }
 
-async function tryDirectDrag(page, active) {
+async function ensureDragArmed(page, active) {
   const toggle = active.locator('[data-canvas-drag-toggle]')
   if ((await toggle.count()) === 0) fail('live 画布缺少拖拽模式开关')
-  await toggle.click()
+  if ((await toggle.getAttribute('aria-pressed')) !== 'true') {
+    await toggle.click()
+    await page.waitForTimeout(300)
+  }
+}
+
+async function trySameParentReorder(page, active) {
+  await ensureDragArmed(page, active)
+  const frame = await frameOf(active.locator('.canvas-live-frame'))
+  const geometry = await frame.evaluate(() => {
+    const containers = Array.from(
+      document.querySelectorAll('[data-oid][data-source-kind="container"]'),
+    ).filter((node) => node.hasAttribute('data-node-id'))
+    const parent = containers.find(
+      (node) =>
+        Array.from(node.children || []).filter(
+          (child) => child.hasAttribute?.('data-oid'),
+        ).length >= 2,
+    )
+    if (!parent) return null
+    const children = Array.from(parent.children || []).filter((child) =>
+      child.hasAttribute?.('data-oid'),
+    )
+    const source = children[children.length - 1]
+    const target = children[0]
+    const sourceRect = source.getBoundingClientRect()
+    const targetRect = target.getBoundingClientRect()
+    return {
+      parentOid: parent.getAttribute('data-oid'),
+      source: {
+        oid: source.getAttribute('data-oid'),
+        x: sourceRect.left + sourceRect.width / 2,
+        y: sourceRect.top + Math.min(24, sourceRect.height / 2),
+      },
+      target: {
+        oid: target.getAttribute('data-oid'),
+        x: targetRect.left + Math.min(24, targetRect.width / 2),
+        y: targetRect.top + 4,
+      },
+    }
+  })
+  if (!geometry) fail('没有可测试同父容器重排的兄弟节点')
+  log('same-parent reorder geometry', geometry)
+  await page.evaluate(() => {
+    window.__vibeDragEvents = []
+    window.addEventListener('message', (event) => {
+      const data = event.data
+      if (data && data.channel === 'vibe-inspect') {
+        window.__vibeDragEvents.push(data)
+      }
+    })
+  })
+  await frame.evaluate(({ source, target }) => {
+    const sourceNode = document.querySelector(`[data-oid="${source.oid}"]`)
+    if (!sourceNode) return
+    const dispatch = (node, type, x, y) => {
+      node.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          pointerType: 'mouse',
+          button: 0,
+          buttons: type === 'pointerup' ? 0 : 1,
+          clientX: x,
+          clientY: y,
+        }),
+      )
+    }
+    dispatch(sourceNode, 'pointerdown', source.x, source.y)
+    for (let step = 1; step <= 8; step += 1) {
+      dispatch(
+        document,
+        'pointermove',
+        source.x + ((target.x - source.x) * step) / 8,
+        source.y + ((target.y - source.y) * step) / 8,
+      )
+    }
+    dispatch(document, 'pointerup', target.x, target.y)
+  }, geometry)
+  const response = await waitForDirectResponse(20000)
+  const dragEvents = await page.evaluate(() =>
+    (window.__vibeDragEvents || [])
+      .filter((item) => item.type === 'drag-end')
+      .map((item) => item.payload?.placement),
+  )
+  log('same-parent reorder drag placement', dragEvents)
+  log('same-parent reorder response', {
+    status: response?.status,
+    action: response?.body ? JSON.parse(response.body).action : null,
+    parent: response?.body
+      ? JSON.parse(response.body).resolvedTarget?.parent
+      : null,
+    summary: response?.body
+      ? JSON.parse(response.body).resolvedTarget?.identity?.file
+      : null,
+  })
+  if (!response || response.status !== 200) {
+    fail(`同父容器拖拽失败: ${response?.body || '无响应'}`)
+  }
+  let body = {}
+  try {
+    body = JSON.parse(response.body)
+  } catch {
+    // 保留原始日志
+  }
+  if (body.status !== 'SUCCEEDED' || body.action !== 'MOVE_NODE') {
+    fail(`同父容器拖拽未成功: ${response.body}`)
+  }
+  const deadline = Date.now() + 15000
+  let order = []
+  while (Date.now() < deadline) {
+    try {
+      const live = await frameOf(active.locator('.canvas-live-frame'))
+      order = await live.evaluate(({ parentOid }) => {
+        const parent = document.querySelector(`[data-oid="${parentOid}"]`)
+        if (!parent) return []
+        return Array.from(parent.children || [])
+          .filter((child) => child.hasAttribute?.('data-oid'))
+          .map((child) => child.getAttribute('data-oid'))
+      }, geometry)
+    } catch {
+      order = []
+    }
+    if (order[0] === geometry.source.oid) break
+    await new Promise((resolve) => setTimeout(resolve, 300))
+  }
+  log('same-parent order after HMR', order)
+  if (order[0] !== geometry.source.oid) {
+    fail(
+      `同父容器重排未按鼠标位置生效：期望首位 ${geometry.source.oid}，实际 ${order.join(',')}`,
+    )
+  }
+}
+
+async function tryDirectDrag(page, active) {
+  await ensureDragArmed(page, active)
   // 删除成功后会触发 HMR / iframe 重载，必须重新获取 Frame。
   const frame = await frameOf(active.locator('.canvas-live-frame'))
   const geometry = await frame.evaluate(() => {
@@ -255,8 +391,9 @@ async function tryDirectDrag(page, active) {
       target: {
         oid: target.getAttribute('data-oid'),
         tag: target.tagName.toLowerCase(),
+        // 落在兄弟容器中央 → 嵌套；边缘落点会按同父排序处理。
         x: targetRect.left + targetRect.width / 2,
-        y: targetRect.bottom - 8,
+        y: targetRect.top + targetRect.height / 2,
       },
     }
   })
@@ -835,6 +972,7 @@ async function main() {
     }
     if (process.env.LIVE_DIRECT_OPS !== '0') {
       await tryDirectDelete(page, liveDocumentFrame)
+      await trySameParentReorder(page, active)
       await tryDirectDrag(page, active)
       await tryAgentComponentEdit(page, active)
     }

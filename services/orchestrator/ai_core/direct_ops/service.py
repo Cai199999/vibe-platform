@@ -262,6 +262,19 @@ class DirectOperationService:
         result["strategy"] = scope.strategy
         result["options"] = list(scope.options)
         result["identity"] = identity.to_dict()
+        # 静态数组的循环项：直接按“删除当前数据项”处理，不进入 HITL
+        # 安全路径面板。execute 会把 DELETE_NODE 自动转成 DELETE_DATA_ITEM。
+        map_source = anchor.get("mapSource") or {}
+        if anchor.get("inMap") and str(map_source.get("kind") or "") in {
+            "array_literal",
+            "variable_array",
+        }:
+            result["safe"] = True
+            result["scope"] = "data_source"
+            result["strategy"] = "direct"
+            result["reasons"] = ["将只删除当前数据项"]
+            result["options"] = []
+            result["autoAction"] = "DELETE_DATA_ITEM"
         call_site = anchor.get("callSiteAnchor")
         anchor_summary = {
             "file": anchor.get("file"),
@@ -283,7 +296,7 @@ class DirectOperationService:
             "sharedReason": anchor.get("sharedReason") or "",
         }
         result["anchor"] = anchor_summary
-        if scope.strategy == "hitl" and scope.options:
+        if scope.strategy == "hitl" and scope.options and not result.get("safe"):
             decision_id = f"ddec_{uuid.uuid4().hex[:20]}"
             _remember_decision(
                 decision_id,
@@ -715,6 +728,17 @@ class DirectOperationService:
 
             mark = time.perf_counter()
             anchor = self._resolve(payload)
+            # 循环模板的静态数组：删除单个渲染项等于删除一个数据元素。
+            # 这是可确定的低级操作，直接执行，不弹“安全路径”决策面板。
+            if payload.action == "DELETE_NODE" and anchor.get("inMap"):
+                map_source = anchor.get("mapSource") or {}
+                if str(map_source.get("kind") or "") in {
+                    "array_literal",
+                    "variable_array",
+                }:
+                    payload = payload.model_copy(
+                        update={"action": "DELETE_DATA_ITEM", "payload": {}}
+                    )
             parent = (
                 self._resolve_parent(payload, anchor)
                 if payload.action == "MOVE_NODE"

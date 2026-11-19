@@ -154,6 +154,9 @@ class RelativeCoordinatePromptTest(unittest.TestCase):
         self.assertIn('"parentHeight": 360.0', client.human)
         self.assertIn("relativeX", client.system)
         self.assertIn("parentWidth", client.system)
+        # 圈选尺寸必须参与新增组件的视觉规划，而不是只用于找父容器。
+        self.assertIn("widthPx", client.system)
+        self.assertIn("25%", client.system)
 
     def test_coder_prompt_requires_transform_move_and_relative_hints(self) -> None:
         llm, client = self._llm(
@@ -188,6 +191,9 @@ class RelativeCoordinatePromptTest(unittest.TestCase):
         self.assertIn("flex/grid", client.system)
         self.assertIn("transform: translate3d(dx, dy, 0)", client.system)
         self.assertIn("禁止修改 width / height", client.system)
+        self.assertIn("圈选尺寸铁律", client.system)
+        self.assertIn("页面风格铁律", client.system)
+        self.assertIn("rounded-lg", client.system)
         self.assertIn('"relativeX": 320.5', client.human)
 
 

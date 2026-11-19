@@ -6,7 +6,19 @@
   "version": "1.0.0",
   "enabled": true,
   "priority": 40,
-  "tools": ["read_file", "apply_code_edit", "run_build"],
-  "keywords": ["tailwind", "样式", "美化", "布局", "响应式", "间距", "卡片"],
-  "systemPrompt": "Tailwind 视觉强化规则（仅在项目已配置 Tailwind 或用户明确要求 Tailwind 时生效）：\n1. 优先使用语义化工具类组合，禁止为每个元素重复写相同的 className；重复结构应抽成小组件或常量。\n2. 间距使用 4 的倍数（p-4 / gap-6 / mt-8），圆角与阴影保持同一层级：卡片 rounded-2xl shadow-lg，按钮 rounded-full。\n3. 颜色只用项目已有的 Tailwind token（如 bg-slate-900 / text-slate-300 / bg-blue-600）；不要引入新的十六进制色值，除非用户明确指定。\n4. 布局优先 flex / grid，并补齐 responsive 断点：移动端单列，sm 双列，lg 保持主视觉宽度。\n5. 交互必须包含 hover / focus-visible / disabled 状态，禁止移除 outline 而不给替代焦点样式。\n6. 新增内容必须与周边元素共享同一视觉节奏（字号、行高、间距、圆角），不要生成突兀的默认 HTML 控件。\n7. 保持可访问性：按钮必须有可读文本或 aria-label，图片必须有 alt，颜色对比度满足 WCAG AA。\n8. 不要为了“好看”重写无关区域；只修改当前标注圈定的容器及其新增子节点。"
+  "tools": [
+    "read_file",
+    "apply_code_edit",
+    "run_build"
+  ],
+  "keywords": [
+    "tailwind",
+    "样式",
+    "美化",
+    "布局",
+    "响应式",
+    "间距",
+    "卡片"
+  ],
+  "systemPrompt": "Tailwind 视觉强化规则（仅在项目已配置 Tailwind 或用户明确要求 Tailwind 时生效）：\n1. 优先使用语义化工具类组合，禁止为每个元素重复写相同的 className；重复结构应抽成小组件或常量。\n2. 间距使用 4 的倍数（p-4 / gap-6 / mt-8）。圆角与阴影必须沿用页面已有控件与 reference_styles 的层级；只有页面没有任何参考时才使用统一默认（卡片 rounded-xl / rounded-2xl，按钮 rounded-md），禁止默认 rounded-full 造成与方角页面不一致。\n3. 颜色只用项目已有的 Tailwind token（如 bg-slate-900 / text-slate-300 / bg-blue-600）；不要引入新的十六进制色值，除非用户明确指定。\n4. 布局优先 flex / grid，并补齐 responsive 断点：移动端单列，sm 双列，lg 保持主视觉宽度。\n5. 交互必须包含 hover / focus-visible / disabled 状态，禁止移除 outline 而不给替代焦点样式。\n6. 新增内容必须与周边元素共享同一视觉节奏（字号、行高、间距、圆角），不要生成突兀的默认 HTML 控件。\n7. 保持可访问性：按钮必须有可读文本或 aria-label，图片必须有 alt，颜色对比度满足 WCAG AA。\n8. 不要为了“好看”重写无关区域；只修改当前标注圈定的容器及其新增子节点。"
 }

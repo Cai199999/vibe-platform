@@ -126,42 +126,50 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
         if identity.in_map:
             map_source = identity.raw.get("mapSource") or {}
             kind = str(map_source.get("kind") or "")
-            options: list[dict[str, Any]] = []
-            reasons = ["该组件位于循环模板内，直接删除会影响全部渲染实例"]
             if kind in {"array_literal", "variable_array"}:
-                options.append(
-                    _option(
-                        "remove_data_item",
-                        "只删除当前数据项",
-                        "AI_DATA_EDIT",
-                        "保留循环模板，只从静态数据源移除对应元素",
-                    )
+                # execute / analyze_delete 会把这类删除自动转成
+                # DELETE_DATA_ITEM；保留策略描述用于直接调用与审计。
+                return ScopeDecision(
+                    allowed=False,
+                    scope="data_source",
+                    strategy="hitl",
+                    reasons=["将只删除当前数据项"],
+                    options=[
+                        _option(
+                            "remove_data_item",
+                            "只删除当前数据项",
+                            "AI_DATA_EDIT",
+                        ),
+                        _option("cancel", "取消", "CANCEL"),
+                    ],
                 )
-                reasons.append("可直接从静态数据源删除单个元素")
-            options.append(
-                _option(
-                    "edit_template",
-                    "删除整个循环模板（影响全部实例）",
-                    "DEFINITION",
-                    "需要 AI 修改模板结构",
-                )
-            )
-            options.append(_option("cancel", "取消", "CANCEL"))
+            # 动态数据无法确定“删除哪一个渲染项”，不弹安全路径，
+            # 直接给出可执行的错误提示。
             return ScopeDecision(
                 allowed=False,
                 scope="repeated_template",
-                strategy="hitl",
-                reasons=reasons,
-                options=options,
+                strategy="blocked",
+                reasons=[
+                    "该组件位于动态循环模板，无法单独删除当前项；"
+                    "请使用 AI 修改数据源"
+                ],
             )
         # 同一源码被渲染多次但没有调用点 / map 信息：删除源节点会
-        # 确定性移除全部实例，必须让用户明确选择。
+        # 确定性移除全部实例，不弹安全路径，直接要求 AI 处理。
         if (
             _repeated_instances(identity) > 1
             and not identity.has_call_site
             and identity.importer_count == 0
         ):
-            return _template_hitl(identity, "删除")
+            return ScopeDecision(
+                allowed=False,
+                scope="all_instances",
+                strategy="blocked",
+                reasons=[
+                    f"同一源码渲染 {_repeated_instances(identity)} 个实例，"
+                    "无法确定删除哪一个；请使用 AI 修改"
+                ],
+            )
         # 低级操作不转 Agent：父容器连同子树直接删除；
         # 共享/循环/多实例由前端高亮受影响范围。
         return ScopeDecision(True, "instance", "direct")
@@ -184,18 +192,10 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
             return ScopeDecision(
                 allowed=False,
                 scope="repeated_template",
-                strategy="hitl",
+                strategy="blocked",
                 reasons=[
-                    "循环模板中的项不能单独移动；移动会作用于全部实例",
-                    "请调整数据源顺序，或交给 AI 修改模板结构",
-                ],
-                options=[
-                    _option(
-                        "edit_template",
-                        "交给 AI 调整循环项顺序",
-                        "DEFINITION",
-                    ),
-                    _option("cancel", "取消", "CANCEL"),
+                    "循环模板中的项不能单独移动；移动会作用于全部实例，"
+                    "请使用 AI 调整数据源顺序"
                 ],
             )
         # 同一源码渲染多次且没有调用点：移动会改到所有实例。
@@ -204,7 +204,15 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
             and not identity.has_call_site
             and identity.importer_count == 0
         ):
-            return _template_hitl(identity, "移动", visual_option=False)
+            return ScopeDecision(
+                allowed=False,
+                scope="all_instances",
+                strategy="blocked",
+                reasons=[
+                    f"同一源码渲染 {_repeated_instances(identity)} 个实例，"
+                    "无法单独移动；请使用 AI 修改"
+                ],
+            )
         # 低级操作不转 Agent：同文件父容器连同子树直接移动。
         return ScopeDecision(True, "instance", "direct")
 

@@ -1871,6 +1871,34 @@
     }
   }
 
+  /** 节点所在的最近源码父容器（不包含节点自身）。 */
+  function containerParentOf(node) {
+    if (!node || !node.parentElement) return null
+    var hit = stageParentOf(node.parentElement)
+    return hit && hit.node ? hit.node : null
+  }
+
+  /**
+   * 同父兄弟的边缘落点应表达“排序”，而不是“塞进兄弟容器”。
+   *
+   * 指针停在兄弟容器的上/下/左/右边距附近时，返回共同父容器；停在
+   * 兄弟内部中央区域时才允许嵌套进去。这样同父容器拖拽才能真正按
+   * 鼠标位置排序，而不是只认父容器。
+   */
+  function preferParentForSiblingEdge(node, parentNode, x, y) {
+    if (!parentNode || parentNode === node) return parentNode
+    var sourceParent = containerParentOf(node)
+    if (!sourceParent || parentNode === sourceParent) return parentNode
+    var candidateParent = containerParentOf(parentNode)
+    if (!candidateParent || candidateParent !== sourceParent) return parentNode
+    var rect = parentNode.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return parentNode
+    var rx = (x - rect.left) / rect.width
+    var ry = (y - rect.top) / rect.height
+    var central = rx > 0.3 && rx < 0.7 && ry > 0.3 && ry < 0.7
+    return central ? parentNode : sourceParent
+  }
+
   /**
    * 求当前指针的落点：候选父容器 + AST 兄弟序号 + 可直接写入的 placement。
    *
@@ -1897,6 +1925,8 @@
           ? stageParentOf(node.parentElement).node
           : null
       }
+      // 同父兄弟的边缘命中 → 按排序处理；中央区域才允许嵌套。
+      parentNode = preferParentForSiblingEdge(node, parentNode, x, y)
       if (!parentNode || parentNode === node || node.contains(parentNode)) {
         return result
       }
