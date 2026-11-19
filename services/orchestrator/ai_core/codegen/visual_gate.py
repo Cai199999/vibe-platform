@@ -137,7 +137,12 @@ def verify_visual_source(
         "files": {
             path: content
             for path, content in files.items()
-            if isinstance(content, str) and path.endswith((".jsx", ".js"))
+            # 只校验应用源码。vite.config.js / inspect_plugin.js 是
+            # 构建工具，允许 Node 内置模块与 Babel 依赖，不能套用
+            # 浏览器端的 import 白名单。
+            if isinstance(content, str)
+            and path.startswith("src/")
+            and path.endswith((".jsx", ".js"))
         },
         "expectedNodeIds": expected,
     }

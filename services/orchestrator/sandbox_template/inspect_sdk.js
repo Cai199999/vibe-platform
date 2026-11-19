@@ -34,6 +34,12 @@
   // token -> {node, startTranslate, selector}；成功提交后由父页面清理。
   // 记录“开始拖拽前的 inline translate”，失败回滚时原样还原。
   var appliedDrags = {}
+  // drag-commit 延后到 HMR 更新后执行：Direct Ops 成功到 Vite 应用源码
+  // 之间有几百毫秒，立刻把内联 translate 归零会让节点先“弹回原位”，
+  // 用户会误以为成功后又回滚。
+  var pendingDragCommits = []
+  var pendingDragCommitTimer = 0
+  var dragCommitHooksBound = false
   // 拖拽松手后浏览器仍会补发一次 click；这里吞掉它，避免误触按钮。
   var suppressClick = false
   var dragTokenSeed = 0
@@ -2045,6 +2051,67 @@
     })
   }
 
+  /** 对单个 token 执行“提交”：清除预览位移与记录。 */
+  function applyDragCommitItem(item) {
+    var commitToken = String((item && item.token) || '')
+    var record = commitToken ? appliedDrags[commitToken] : null
+    if (record) {
+      var commitNode =
+        record.node && record.node.isConnected
+          ? record.node
+          : queryNode(record.selector || item.selector)
+      if (commitNode && commitNode.style) {
+        commitNode.style.translate = record.startTranslate || ''
+      }
+      // 同一节点的旧 token（防抖窗口内的前几次手势）一并清理。
+      clearNodeRecords(null, record.selector || item.selector)
+      if (commitNode) clearNodeRecords(commitNode)
+      return
+    }
+    var fallback = queryNode(item && item.selector)
+    if (fallback && fallback.style) fallback.style.translate = ''
+    clearNodeRecords(null, item && item.selector)
+  }
+
+  function flushDragCommits() {
+    if (pendingDragCommitTimer) {
+      if (window.clearTimeout) window.clearTimeout(pendingDragCommitTimer)
+      else clearTimeout(pendingDragCommitTimer)
+      pendingDragCommitTimer = 0
+    }
+    var items = pendingDragCommits
+    pendingDragCommits = []
+    items.forEach(applyDragCommitItem)
+  }
+
+  /**
+   * 提交延后到 HMR 之后：Vite 应用源码后节点已经到新位置，
+   * 此时再清 inline translate 才不会再视觉上“弹回”。
+   */
+  function scheduleDragCommitFlush(items) {
+    if (!dragCommitHooksBound && typeof window.addEventListener === 'function') {
+      dragCommitHooksBound = true
+      // Vite HMR 客户端在更新前后派发自定义事件；监听不到时由
+      // 2.5s 兜底，避免 iframe 永不刷新时记录泄漏。
+      window.addEventListener('vite:afterUpdate', function () {
+        flushDragCommits()
+      })
+    }
+    for (var index = 0; index < items.length; index += 1) {
+      pendingDragCommits.push(items[index])
+    }
+    if (pendingDragCommitTimer) return
+    pendingDragCommitTimer = window.setTimeout
+      ? window.setTimeout(function () {
+          pendingDragCommitTimer = 0
+          flushDragCommits()
+        }, 2500)
+      : setTimeout(function () {
+          pendingDragCommitTimer = 0
+          flushDragCommits()
+        }, 2500)
+  }
+
   /** 预览侧应用主画布拖拽：同一 token 只记录一次起始 inline。 */
   function applyDragPreview(body) {
     var selector = String(body.selector || '')
@@ -2287,39 +2354,27 @@
       return
     }
     if (data.type === 'drag-rollback') {
+      // 失败回滚优先于任何尚未执行的提交清理。
+      pendingDragCommits = []
+      if (pendingDragCommitTimer) {
+        if (window.clearTimeout) window.clearTimeout(pendingDragCommitTimer)
+        else clearTimeout(pendingDragCommitTimer)
+        pendingDragCommitTimer = 0
+      }
       rollbackDrags(bodyOf(data))
       return
     }
     if (data.type === 'drag-commit') {
       /*
-       * 同步成功：后端已经写入累计 transform。预览阶段的内联 translate
-       * 必须归零，否则“CSS transform + 内联 translate”会叠成双倍位移。
-       * 第二次拖拽从归零后的基线开始，父页面负责累加历史 dx/dy。
+       * 同步成功：后端已经写入代码，但 iframe 还要等 Vite HMR。
+       * 如果立刻把内联 translate 归零，节点会先弹回旧位置，看起来
+       * 像“成功后又回退”。这里延迟到 HMR 更新后再清理。
        */
       var commitBody = bodyOf(data)
       var commitItems = Array.isArray(commitBody.items)
         ? commitBody.items
         : [commitBody]
-      commitItems.forEach(function (item) {
-        var commitToken = String((item && item.token) || '')
-        var record = commitToken ? appliedDrags[commitToken] : null
-        if (record) {
-          var commitNode =
-            record.node && record.node.isConnected
-              ? record.node
-              : queryNode(record.selector || item.selector)
-          if (commitNode && commitNode.style) {
-            commitNode.style.translate = record.startTranslate || ''
-          }
-          // 同一节点的旧 token（防抖窗口内的前几次手势）一并清理。
-          clearNodeRecords(null, record.selector || item.selector)
-          if (commitNode) clearNodeRecords(commitNode)
-          return
-        }
-        var fallback = queryNode(item && item.selector)
-        if (fallback && fallback.style) fallback.style.translate = ''
-        clearNodeRecords(null, item && item.selector)
-      })
+      scheduleDragCommitFlush(commitItems)
       return
     }
     if (data.type === 'move') {

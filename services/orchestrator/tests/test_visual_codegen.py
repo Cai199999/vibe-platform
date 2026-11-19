@@ -192,6 +192,16 @@ class VisualCodegenCompileTests(unittest.TestCase):
         self.assertIn("./visual.css", result.files["src/main.jsx"])
         self.assertIn("'/api'", result.files["vite.config.js"])
         self.assertIn("127.0.0.1:3000", result.files["vite.config.js"])
+        # 生成工程必须带源码插件：前端工程师后续新增的组件文件也要
+        # 获得 data-oid / source map，否则画布只能看不能改。
+        self.assertIn("inspect_plugin.js", result.files)
+        self.assertIn("sourceInspectPlugin", result.files["inspect_plugin.js"])
+        self.assertIn(
+            "sourceInspectPlugin()",
+            result.files["vite.config.js"],
+        )
+        self.assertIn("@babel/core", result.files["package.json"])
+        self.assertIn("@vue/compiler-sfc", result.files["package.json"])
 
     def test_multiple_pages_compile_to_page_switcher(self) -> None:
         first = _node(

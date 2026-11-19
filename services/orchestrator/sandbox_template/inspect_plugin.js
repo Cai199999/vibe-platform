@@ -1101,6 +1101,11 @@ export function sourceInspectPlugin() {
       }
     },
     transformIndexHtml(html) {
+      // Visual CodeGen 的 index.html 已经显式加载 /inspect_sdk.js；
+      // 再注入一份会让 SDK 重复监听、一次手势发两条消息。
+      if (String(html || '').includes('inspect_sdk.js')) {
+        return { html, tags: [] }
+      }
       return {
         html,
         tags: [

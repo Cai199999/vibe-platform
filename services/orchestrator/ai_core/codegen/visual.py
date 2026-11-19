@@ -176,6 +176,7 @@ _TAILWIND_CLASS_RE = re.compile(r"^[A-Za-z0-9:_\-\[\]().,%#/]+$")
 _SOURCE_PLACEHOLDER = "__VISUAL_SOURCE_LINE__"
 SOURCE_FILE = "src/App.jsx"
 _INSPECT_SDK_FILE = "inspect_sdk.js"
+_INSPECT_PLUGIN_FILE = "inspect_plugin.js"
 _SOURCE_MAP_FILE = "vibe-source-map.json"
 
 
@@ -188,17 +189,11 @@ def _oid_for_node(node_id: str) -> str:
     return f"oid_{node_id}"
 
 
-@lru_cache(maxsize=1)
-def _inspect_sdk_source() -> str:
-    """读取沙盒模板里的只读选择 SDK。
-
-    生成的 Vite 工程通过 ``public/inspect_sdk.js`` 自带这份 SDK，避免
-    依赖 ``inspect_plugin.js`` 的 Babel / Vue 依赖，也保证导出包可独立运行。
-    """
+def _template_source(filename: str) -> str:
     candidates = (
-        Path(__file__).resolve().parents[2] / "sandbox_template" / _INSPECT_SDK_FILE,
-        Path("/app/sandbox_template") / _INSPECT_SDK_FILE,
-        Path("/app") / _INSPECT_SDK_FILE,
+        Path(__file__).resolve().parents[2] / "sandbox_template" / filename,
+        Path("/app/sandbox_template") / filename,
+        Path("/app") / filename,
     )
     for path in candidates:
         try:
@@ -208,10 +203,30 @@ def _inspect_sdk_source() -> str:
     return ""
 
 
+@lru_cache(maxsize=1)
+def _inspect_sdk_source() -> str:
+    """读取沙盒模板里的只读选择 SDK（作为插件不可用时的静态兜底）。"""
+    return _template_source(_INSPECT_SDK_FILE)
+
+
+@lru_cache(maxsize=1)
+def _inspect_plugin_source() -> str:
+    """读取构建期源码标记插件。
+
+    Visual CodeGen 必须与存量项目一样经过 Vite 插件：前端工程师在
+    生成后新增的组件文件只有被插件 transform，才能获得 data-oid /
+    source map 身份，否则画布“看得见但改不了”。
+    """
+    return _template_source(_INSPECT_PLUGIN_FILE)
+
+
 def _with_inspect_sdk(files: dict[str, str]) -> dict[str, str]:
     sdk = _inspect_sdk_source()
     if sdk:
         files["public/inspect_sdk.js"] = sdk
+    plugin = _inspect_plugin_source()
+    if plugin:
+        files["inspect_plugin.js"] = plugin
     return files
 
 
@@ -1088,7 +1103,13 @@ def _render_package_json(document: VisualDocument) -> str:
             "react-dom": "18.3.1",
         },
         "devDependencies": {
+            # inspect_plugin.js：为生成后新增的组件文件继续注入
+            # data-oid / source map，保证画布可定位、可编辑。
+            "@babel/core": "7.26.0",
+            "@babel/types": "7.26.0",
             "@vitejs/plugin-react": "4.3.4",
+            "@vue/compiler-dom": "3.5.13",
+            "@vue/compiler-sfc": "3.5.13",
             "vite": "5.4.21",
         },
     }
@@ -1099,9 +1120,12 @@ def _render_vite_config() -> str:
     return (
         "import { defineConfig } from 'vite'\n"
         "import react from '@vitejs/plugin-react'\n"
+        "import { sourceInspectPlugin } from './inspect_plugin.js'\n"
         "\n"
         "export default defineConfig({\n"
-        "  plugins: [react()],\n"
+        "  // 源码标记必须早于 React 编译：生成后新增的组件文件也会自动\n"
+        "  // 获得 data-oid / data-source，画布 Direct Ops 才能定位。\n"
+        "  plugins: [sourceInspectPlugin(), react()],\n"
         "  server: {\n"
         "    host: '0.0.0.0',\n"
         "    port: 5173,\n"

@@ -44,6 +44,8 @@ function loadPlaywright() {
 
 const { chromium } = loadPlaywright()
 const WEB = process.env.WEB_URL || 'http://127.0.0.1:5173'
+const BFF = process.env.BFF_URL || 'http://127.0.0.1:8080'
+const PY_AI = process.env.PY_AI_URL || 'http://127.0.0.1:8100'
 const CHROME =
   process.env.CHROME_BIN ||
   path.join(
@@ -145,6 +147,9 @@ async function tryDirectDelete(page, frame) {
       const rect = node.getBoundingClientRect()
       if (rect.width < 20 || rect.height < 10) return false
       if (node.getAttribute('data-source-kind') === 'container') return false
+      // 优先编辑 CodeGen 的 VisualDocument 节点：页面切换器等 UI 是
+      // map 模板，删除需要按作用域决策，不属于本用例的直连快路径。
+      if (!node.hasAttribute('data-node-id')) return false
       return !node.querySelector('[data-oid]')
     })
     return leaf
@@ -198,6 +203,8 @@ async function tryDirectDelete(page, frame) {
   if (body?.action !== 'DELETE_NODE' || body?.status !== 'SUCCEEDED') {
     fail(`删除组件未成功: ${response.body}`)
   }
+  // 等 HMR 把删除结果落到 iframe，再做下一次手势。
+  await page.waitForTimeout(1500)
 }
 
 async function tryDirectDrag(page, active) {
@@ -219,19 +226,21 @@ async function tryDirectDrag(page, active) {
       node === document.body ||
       ['MAIN', 'BODY'].includes(node.tagName) ||
       node.parentElement === document.body
+    // 只选 VisualDocument 节点；页面切换器等模板 UI 不参与直连拖拽。
+    const visualContainers = containers.filter(
+      (node) => !isRoot(node) && node.hasAttribute('data-node-id'),
+    )
     const source =
-      containers.find(
-        (node) =>
-          !isRoot(node) && (node.textContent || '').includes('SubmitForm'),
-      ) || containers.find((node) => !isRoot(node))
+      visualContainers.find((node) =>
+        (node.textContent || '').includes('SubmitForm'),
+      ) || visualContainers[0]
     const target =
-      containers.find(
+      visualContainers.find(
         (node) =>
           node !== source &&
-          !isRoot(node) &&
           !node.contains(source) &&
           !source?.contains(node),
-      ) || containers.find((node) => node !== source && !node.contains(source))
+      ) || visualContainers.find((node) => node !== source)
     if (!source || !target) return null
     const rectOf = (node) => node.getBoundingClientRect()
     const sourceRect = rectOf(source)
@@ -345,6 +354,214 @@ async function tryDirectDrag(page, active) {
   if (toast.some((text) => text.includes('没有找到可落位的父容器'))) {
     fail('跨父容器拖拽仍然提示“没有找到可落位的父容器”')
   }
+  // 源码写回成功后必须等到 HMR 真正把节点换到新父容器；否则就是
+  // 用户看到的“提示成功但视觉回退”。
+  const afterParent = await waitForParentAfterHmr(
+    active,
+    geometry.source.oid,
+    geometry.target.oid,
+  )
+  log('drag after HMR', {
+    sourceOid: geometry.source.oid,
+    expectedParent: geometry.target.oid,
+    actualParent: afterParent,
+  })
+  if (afterParent !== geometry.target.oid) {
+    await page.screenshot({
+      path: '/tmp/vibe-drag-after-hmr.png',
+      fullPage: true,
+    })
+    fail(
+      `拖拽已写回源码但 iframe 未完成 HMR：实际父容器 ${afterParent}，期望 ${geometry.target.oid}`,
+    )
+  }
+}
+
+let lastDirectRequest = null
+
+async function tryAgentComponentEdit(page, active) {
+  const context = lastDirectRequest || {}
+  const projectId = context.projectId || context.project_id
+  const sandboxId = context.sandboxId || context.sandbox_id
+  if (!projectId || !sandboxId) {
+    fail('没有捕获到 Direct Ops 沙盒上下文，无法模拟前端工程师组件')
+  }
+  const agentSource = `export default function AgentCard() {
+  return (
+    <div data-agent-card style={{ margin: 16, padding: 16, border: '1px solid #cbd5e1', borderRadius: 12 }}>
+      <h3>前端工程师组件</h3>
+      <button type="button">组件按钮</button>
+    </div>
+  )
+}
+`
+  const mainSource = `import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App.jsx'
+import AgentCard from './AgentCard.jsx'
+import './visual.css'
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+    <AgentCard />
+  </React.StrictMode>,
+)
+`
+  const patchResponse = await fetch(
+    `${PY_AI}/api/v1/internal/sandbox/apply-patch`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sandbox_id: sandboxId,
+        files: {
+          'src/AgentCard.jsx': agentSource,
+          'src/main.jsx': mainSource,
+        },
+      }),
+    },
+  )
+  if (!patchResponse.ok) {
+    fail(`写入前端工程师组件失败: ${await patchResponse.text()}`)
+  }
+
+  const deadline = Date.now() + 20000
+  let info = null
+  while (Date.now() < deadline) {
+    let frame = null
+    try {
+      frame = await frameOf(active.locator('.canvas-live-frame'))
+    } catch {
+      // HMR 重载中
+    }
+    if (frame) {
+      info = await frame
+        .evaluate(() => {
+          const read = (node) => {
+            if (!node) return null
+            const oid = node.getAttribute('data-oid') || ''
+            return {
+              oid,
+              nodeId: node.getAttribute('data-node-id') || '',
+              file: node.getAttribute('data-source-file') || '',
+              line: Number(node.getAttribute('data-source-line') || 0),
+              column: Number(node.getAttribute('data-source-column') || 0),
+              text: (node.textContent || '').trim().slice(0, 40),
+            }
+          }
+          const host = document.querySelector('[data-agent-card]')
+          return host
+            ? { host: read(host), heading: read(host.querySelector('h3')) }
+            : null
+        })
+        .catch(() => null)
+      if (info?.heading?.oid) break
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300))
+  }
+  if (!info?.heading?.oid) {
+    fail('前端工程师新增组件未被源码插件标注（无 data-oid）')
+  }
+  if (info.heading.file !== 'src/AgentCard.jsx') {
+    fail(`新增组件锚点文件错误: ${JSON.stringify(info.heading)}`)
+  }
+  log('agent component anchors', JSON.stringify(info, null, 2))
+
+  const revisionResponse = await fetch(
+    `${BFF}/api/v1/direct-ops/revision?projectId=${encodeURIComponent(
+      projectId,
+    )}&sandboxId=${encodeURIComponent(sandboxId)}`,
+  )
+  if (!revisionResponse.ok) {
+    fail(`读取源码 revision 失败: ${await revisionResponse.text()}`)
+  }
+  const { revision } = await revisionResponse.json()
+  const actionId = `dact_agent_edit_${Date.now()}`
+  const actionResponse = await fetch(
+    `${BFF}/api/v1/direct-ops/actions`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        directActionId: actionId,
+        idempotencyKey: `${projectId}:${actionId}`,
+        projectId,
+        sandboxId,
+        tenantId: 'tenant_local',
+        baseRevision: revision,
+        action: 'UPDATE_TEXT',
+        target: {
+          anchorId: 'anc_agent_component',
+          oid: info.heading.oid,
+          selector: `[data-oid="${info.heading.oid}"]`,
+          file: info.heading.file,
+          line: info.heading.line,
+          column: info.heading.column,
+        },
+        payload: { text: '前端工程师组件-已编辑' },
+        options: { source: 'FLOATING_TOOLBAR', dryRun: false },
+      }),
+    },
+  )
+  const actionBody = await actionResponse.json().catch(() => ({}))
+  if (!actionResponse.ok || actionBody.status !== 'SUCCEEDED') {
+    fail(`编辑前端工程师组件失败: ${JSON.stringify(actionBody)}`)
+  }
+  const textDeadline = Date.now() + 15000
+  let text = ''
+  while (Date.now() < textDeadline) {
+    try {
+      const frame = await frameOf(active.locator('.canvas-live-frame'))
+      text = await frame
+        .evaluate(
+          () =>
+            document
+              .querySelector('[data-agent-card] h3')
+              ?.textContent?.trim() || '',
+        )
+        .catch(() => '')
+    } catch {
+      text = ''
+    }
+    if (text.includes('已编辑')) break
+    await new Promise((resolve) => setTimeout(resolve, 300))
+  }
+  if (!text.includes('已编辑')) {
+    fail(`前端工程师组件编辑未通过 HMR 生效: ${text}`)
+  }
+  log('agent component edit', { file: info.heading.file, text })
+}
+
+async function waitForParentAfterHmr(
+  active,
+  oid,
+  expectedParent,
+  timeout = 15000,
+) {
+  const deadline = Date.now() + timeout
+  let last = ''
+  while (Date.now() < deadline) {
+    let frame = null
+    try {
+      frame = await frameOf(active.locator('.canvas-live-frame'))
+    } catch {
+      // HMR 可能正在整页重建 iframe，下一轮重新获取。
+    }
+    if (frame) {
+      last = await frame
+        .evaluate((sourceOid) => {
+          const node = document.querySelector(`[data-oid="${sourceOid}"]`)
+          if (!node) return 'MISSING'
+          const parent = node.parentElement?.closest('[data-oid]')
+          return parent?.getAttribute('data-oid') || ''
+        }, oid)
+        .catch(() => 'DETACHED')
+      if (last === expectedParent) return last
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  return last
 }
 
 let directResponses = []
@@ -453,6 +670,19 @@ async function main() {
   const pageErrors = []
   directResponses = []
   page.on('pageerror', (error) => pageErrors.push(String(error)))
+  page.on('request', (request) => {
+    if (
+      request.method() !== 'POST' ||
+      !request.url().includes('/direct-ops/actions')
+    ) {
+      return
+    }
+    try {
+      lastDirectRequest = JSON.parse(request.postData() || '{}')
+    } catch {
+      // 非 JSON 请求体忽略
+    }
+  })
   page.on('response', async (response) => {
     if (!response.url().includes('/direct-ops/actions')) return
     let body = ''
@@ -606,6 +836,7 @@ async function main() {
     if (process.env.LIVE_DIRECT_OPS !== '0') {
       await tryDirectDelete(page, liveDocumentFrame)
       await tryDirectDrag(page, active)
+      await tryAgentComponentEdit(page, active)
     }
 
     log('reload workspace: state must survive')
