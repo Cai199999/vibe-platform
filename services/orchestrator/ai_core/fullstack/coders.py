@@ -709,12 +709,21 @@ def check_orm_schema(
                 f"Express 会话层表名不一致：index.js TABLE={index_schema.table}，"
                 f"DDL 核心表={table}"
             )
+
         # ---- 多表 JOIN：静态别名必须与 db.js 的 RELATIONS 完全一致 ----
         # 这里检查的是 Express 会话层真正写进 include / 嵌套路由的别名，
         # 而不是 db.js 自洽性：拼错一个字母，Sequelize 运行期才会报
         # "X is not associated to Y"，Applier 必须提前阻断。
+        # URL 路径惯用 kebab-case（job-descriptions），Sequelize alias 惯用
+        # 标识符（job_descriptions / jobdescriptions）。两者语义相同，
+        # 比较前统一去掉分隔符，避免把契约路由误判成代码缺陷。
+        def alias_key(value: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
         nested_expected: set[str] = set()
         include_expected: set[str] = set()
+        nested_display: set[str] = set()
+        include_display: set[str] = set()
         for relation in db_schema.relations:
             parent = relation.parent_table.lower()
             child = relation.child_table.lower()
@@ -723,23 +732,28 @@ def check_orm_schema(
                 relation.parent_alias or _singular_word(relation.parent_table)
             ).lower()
             if parent == str(table).lower():
-                nested_expected.add(child_alias)
+                nested_expected.add(alias_key(child_alias))
+                nested_display.add(child_alias)
             if parent == str(table).lower() or child == str(table).lower():
-                include_expected.update({child_alias, parent_alias})
+                include_expected.update(
+                    {alias_key(child_alias), alias_key(parent_alias)}
+                )
+                include_display.update({child_alias, parent_alias})
         for alias in index_schema.join_aliases:
-            if alias.lower() in _ACTION_PATH_SEGMENTS:
+            key = alias_key(alias)
+            if key in _ACTION_PATH_SEGMENTS:
                 # /users/:id/rewrite 之类的动作端点不是关联别名。
                 continue
-            if alias.lower() not in nested_expected:
+            if key not in nested_expected:
                 issues.append(
                     f"server/index.js 嵌套路由引用了不存在的 JOIN 别名：{alias}"
-                    f"（可用：{'、'.join(sorted(nested_expected)) or '无'}）"
+                    f"（可用：{'、'.join(sorted(nested_display)) or '无'}）"
                 )
         for alias in index_schema.include_aliases:
-            if alias.lower() not in include_expected:
+            if alias_key(alias) not in include_expected:
                 issues.append(
                     f"server/index.js include 引用了不存在的 JOIN 别名：{alias}"
-                    f"（可用：{'、'.join(sorted(include_expected)) or '无'}）"
+                    f"（可用：{'、'.join(sorted(include_display)) or '无'}）"
                 )
     return issues
 

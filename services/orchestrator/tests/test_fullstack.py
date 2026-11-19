@@ -2832,5 +2832,57 @@ def _base_files() -> dict[str, str]:
     }
 
 
+class JoinAliasNormalizationTest(unittest.TestCase):
+    def test_kebab_route_alias_matches_underscore_orm_alias(self) -> None:
+        """URL 段 job-descriptions 与 ORM alias job_descriptions 是同一项。"""
+        ddl = """CREATE TABLE users (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL
+);
+CREATE TABLE job_descriptions (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  user_id BIGINT NOT NULL,
+  title VARCHAR(255) NOT NULL
+);"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(method="GET", path="/api/v1/users"),
+                ArchitectApiRoute(method="POST", path="/api/v1/users"),
+                ArchitectApiRoute(method="GET", path="/api/v1/users/:id"),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/users/:id/job-descriptions",
+                ),
+            ],
+            databaseDdl=ddl,
+            relations=[
+                ArchitectTableRelation(
+                    parentTable="users",
+                    childTable="job_descriptions",
+                    foreignKey="user_id",
+                )
+            ],
+        )
+        dba = generate_dba_bundle(contract)
+        backend = generate_backend_bundle(
+            contract,
+            dba_schema=dba.files["server/schema.core.json"],
+        )
+        files = {**dba.files, **backend.files}
+        tables = {table.name: table.column_names for table in parse_ddl_tables(ddl)}
+
+        messages = check_orm_schema(
+            files,
+            table="users",
+            expected_columns=tables["users"],
+            expected_tables=tables,
+        )
+
+        self.assertFalse(
+            [item for item in messages if "JOIN 别名" in item],
+            messages,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
