@@ -3101,6 +3101,10 @@
   var directDeleteNode = null
   var directDeleteAutoConfirm = false
   var directDeletePending = false
+  // 非快路径删除先让服务端做一次范围分析：循环模板才能弹出
+  // “只删当前数据项 / 删除整个模板”的 HITL，而不是静默全删。
+  var directDeleteNeedsAnalysis = false
+  var directDeleteAnalysisRequested = false
   var directDeletePreviousDisplay = ''
   var directEdit = null
   var directLastTextEdit = null
@@ -3172,6 +3176,10 @@
           Boolean(directTarget.querySelector?.('[data-vibe-created]'))
         // 安全叶子：点击即乐观删除，可撤回；共享/循环/定义节点仍先确认。
         // 无论哪条路径，最终都由 execute 的 ScopePolicy 兜底。
+        directDeleteNeedsAnalysis = !(
+          directDeleteAutoConfirm || directDeleteSource.deleteSafe === true
+        )
+        directDeleteAnalysisRequested = false
         if (directDeleteAutoConfirm || directDeleteSource.deleteSafe === true) {
           commitDirectDelete()
         } else {
@@ -3803,7 +3811,13 @@
     directDeletePreviousDisplay = ''
   }
 
-  /** 确认后立即乐观隐藏 + 直接执行 DELETE_NODE（不再先 analyze）。 */
+  /**
+   * 确认删除：先隐藏节点，再按需请求一次范围分析。
+   *
+   * 快路径（新建节点 / deleteSafe）直接执行 DELETE_NODE；
+   * 其它节点先 analyze：循环模板会返回 HITL 选项（只删数据项 / 删除
+   * 整个模板），避免“删一个却全删”的静默行为。
+   */
   function commitDirectDelete() {
     if (!directDeleteSource || directDeletePending) return
     directDeletePending = true
@@ -3813,6 +3827,14 @@
     if (directDeleteNode && directDeleteNode.isConnected) {
       directDeletePreviousDisplay = directDeleteNode.style.display || ''
       directDeleteNode.style.display = 'none'
+    }
+    if (directDeleteNeedsAnalysis && !directDeleteAnalysisRequested) {
+      directDeleteAnalysisRequested = true
+      post('direct-delete-request', {
+        projectId: directProjectId,
+        source: directDeleteSource,
+      })
+      return
     }
     post('direct-delete-confirmed', {
       projectId: directProjectId,
@@ -4051,16 +4073,32 @@
       var result = data.payload || {}
       if (result.ok || result.status === 'SUCCEEDED') {
         // 快路径成功：节点已被乐观隐藏，等待 HMR 移除；左下角可撤回。
+        directDeleteNeedsAnalysis = false
+        directDeleteAnalysisRequested = false
         showDirectToast('已删除，可点左下角“撤回”')
         return
       }
       if (result.handled || result.status === 'HITL_REQUIRED') {
         // 父页面已弹出 HITL 决策面板，恢复节点显示。
+        directDeleteNeedsAnalysis = false
+        directDeleteAnalysisRequested = false
         restoreDirectDeleteNode()
         return
       }
       if (result.safe === false) {
+        directDeleteNeedsAnalysis = false
+        directDeleteAnalysisRequested = false
         restoreDirectDeleteNode()
+      }
+      if (result.safe && directDeleteAnalysisRequested) {
+        // 分析确认可安全删除：用户点“确认删除”时已完成确认，直接执行。
+        directDeleteAnalysisRequested = false
+        directDeleteNeedsAnalysis = false
+        post('direct-delete-confirmed', {
+          projectId: directProjectId,
+          source: directDeleteSource,
+        })
+        return
       }
       if (result.safe && directDeleteAutoConfirm) {
         directDeleteAutoConfirm = false

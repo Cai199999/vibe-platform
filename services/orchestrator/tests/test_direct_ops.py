@@ -278,7 +278,7 @@ class DirectOperationMoveTest(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertIn("移动到", entries[0].summary)
 
-    def test_repeated_instances_move_all_instances(self) -> None:
+    def test_repeated_instances_move_requires_scope_choice(self) -> None:
         self.sandbox.anchor = {
             **_anchor(shared=True),
             "instanceCount": 6,
@@ -294,9 +294,9 @@ class DirectOperationMoveTest(unittest.TestCase):
 
         response = self.service.execute(_move_payload())
 
-        self.assertEqual(response.status, "SUCCEEDED")
-        self.assertEqual(response.risk, "L0_DIRECT")
-        self.assertEqual(self.sandbox.edits[0]["operation"], "move_node")
+        self.assertEqual(response.status, "HITL_REQUIRED")
+        self.assertTrue(response.decision_id)
+        self.assertEqual(self.sandbox.edits, [])
 
     def test_shared_component_moves_at_call_site(self) -> None:
         self.sandbox.anchor = {
@@ -524,7 +524,7 @@ class DirectOperationDeleteTest(unittest.TestCase):
         self.assertIn("内的节点", entries[0].summary)
         self.assertIn("<h1>", entries[0].summary)
 
-    def test_repeated_instance_delete_removes_source_node(self) -> None:
+    def test_repeated_instance_delete_requires_scope_choice(self) -> None:
         self.sandbox.anchor = {
             **_anchor(shared=True),
             "instanceCount": 4,
@@ -535,9 +535,13 @@ class DirectOperationDeleteTest(unittest.TestCase):
 
         response = self.service.execute(_delete_payload())
 
-        self.assertEqual(response.status, "SUCCEEDED")
-        self.assertEqual(response.risk, "L0_DIRECT")
-        self.assertEqual(self.sandbox.edits[0]["operation"], "delete")
+        self.assertEqual(response.status, "HITL_REQUIRED")
+        self.assertTrue(response.decision_id)
+        self.assertIn(
+            "edit_template",
+            {item["optionId"] for item in response.options},
+        )
+        self.assertEqual(self.sandbox.edits, [])
 
     def test_shared_component_deletes_call_site_instance(self) -> None:
         self.sandbox.anchor = {
@@ -573,7 +577,7 @@ class DirectOperationDeleteTest(unittest.TestCase):
         self.assertEqual(edit["operation"], "modify")
         self.assertIn("empty-placeholder", edit["jsxCode"])
 
-    def test_unsafe_delete_is_blocked(self) -> None:
+    def test_map_delete_requires_scope_choice(self) -> None:
         self.sandbox.anchor = {
             **_anchor(),
             "inMap": True,
@@ -584,9 +588,13 @@ class DirectOperationDeleteTest(unittest.TestCase):
 
         response = self.service.execute(payload)
 
-        self.assertEqual(response.status, "SUCCEEDED")
-        self.assertEqual(response.risk, "L0_DIRECT")
-        self.assertEqual(self.sandbox.edits[0]["operation"], "delete")
+        self.assertEqual(response.status, "HITL_REQUIRED")
+        self.assertTrue(response.decision_id)
+        self.assertIn(
+            "edit_template",
+            {item["optionId"] for item in response.options},
+        )
+        self.assertEqual(self.sandbox.edits, [])
 
     def test_delete_node_count_mismatch_blocks_write(self) -> None:
         original = self.sandbox.apply_ast_edit
@@ -1182,15 +1190,56 @@ class NodeIdentityScopePolicyTest(unittest.TestCase):
         self.assertEqual(decision.scope, "instance")
         self.assertEqual(decision.strategy, "direct")
 
-    def test_map_item_delete_is_direct(self) -> None:
+    def test_map_item_delete_requires_scope_choice(self) -> None:
         from ai_core.direct_ops.scope_policy import decide_scope
 
         decision = decide_scope(
             "DELETE_NODE",
             self._identity(kind="map_item", in_map=True),
         )
-        self.assertTrue(decision.allowed)
-        self.assertEqual(decision.strategy, "direct")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.strategy, "hitl")
+        self.assertEqual(decision.scope, "repeated_template")
+        option_ids = {item["optionId"] for item in decision.options}
+        self.assertIn("edit_template", option_ids)
+        self.assertIn("cancel", option_ids)
+
+    def test_map_item_static_array_offers_remove_data_item(self) -> None:
+        from ai_core.direct_ops.scope_policy import decide_scope
+
+        decision = decide_scope(
+            "DELETE_NODE",
+            self._identity(
+                kind="map_item",
+                in_map=True,
+                raw={"mapSource": {"kind": "variable_array", "count": 3}},
+            ),
+        )
+        self.assertFalse(decision.allowed)
+        option_ids = [item["optionId"] for item in decision.options]
+        self.assertIn("remove_data_item", option_ids)
+        self.assertEqual(
+            next(
+                item
+                for item in decision.options
+                if item["optionId"] == "remove_data_item"
+            )["action"],
+            "AI_DATA_EDIT",
+        )
+
+    def test_map_item_move_requires_template_handoff(self) -> None:
+        from ai_core.direct_ops.scope_policy import decide_scope
+
+        decision = decide_scope(
+            "MOVE_NODE",
+            self._identity(kind="map_item", in_map=True),
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.strategy, "hitl")
+        self.assertIn(
+            "edit_template",
+            {item["optionId"] for item in decision.options},
+        )
 
     def test_route_root_delete_uses_placeholder(self) -> None:
         from ai_core.direct_ops.scope_policy import decide_scope
@@ -1203,7 +1252,7 @@ class NodeIdentityScopePolicyTest(unittest.TestCase):
         self.assertEqual(decision.scope, "replace_root")
         self.assertEqual(decision.strategy, "replace_placeholder")
 
-    def test_repeated_instances_move_all(self) -> None:
+    def test_repeated_instances_move_requires_scope_choice(self) -> None:
         from ai_core.direct_ops.scope_policy import decide_scope
 
         decision = decide_scope(
@@ -1215,8 +1264,12 @@ class NodeIdentityScopePolicyTest(unittest.TestCase):
                 is_shared=True,
             ),
         )
-        self.assertTrue(decision.allowed)
-        self.assertEqual(decision.strategy, "direct")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.strategy, "hitl")
+        self.assertIn(
+            "edit_template",
+            {item["optionId"] for item in decision.options},
+        )
 
 
 class DeleteStaticAnalysisTest(unittest.TestCase):
@@ -1306,8 +1359,10 @@ class DeleteStaticAnalysisTest(unittest.TestCase):
 
         result = service.analyze_delete(payload)
 
-        self.assertTrue(result["safe"])
+        self.assertFalse(result["safe"])
         self.assertTrue(result["inMap"])
+        self.assertEqual(result["strategy"], "hitl")
+        self.assertTrue(result["options"])
 
     def test_map_item_delete_analysis_is_direct(self) -> None:
         sandbox = _FakeSandbox(
@@ -1337,8 +1392,14 @@ class DeleteStaticAnalysisTest(unittest.TestCase):
 
         analysis = service.analyze_delete(payload)
 
-        self.assertNotIn("decisionId", analysis)
-        self.assertEqual(analysis["strategy"], "direct")
+        self.assertIn("decisionId", analysis)
+        self.assertEqual(analysis["strategy"], "hitl")
+        self.assertTrue(analysis["inMap"])
+        self.assertFalse(analysis["safe"])
+        self.assertIn(
+            "edit_template",
+            {item["optionId"] for item in analysis["options"]},
+        )
 
 
 class DirectUndoTest(unittest.TestCase):

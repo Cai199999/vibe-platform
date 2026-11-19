@@ -39,6 +39,7 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 两阶段守卫：BACKEND_BINDING 缺冻结树服务端 422 `ARCHITECT_VISUAL_REQUIRED`；前端缺冻结树时不消费审查包并阻断，旧骨架入口按 `outputPhase=BACKEND_BINDING` 门禁，不再误报缺 frontendRoutes/components。
 - 代码自愈收敛：Applier 诊断带 source 归属，db.js 缺陷回 DBACoder 重建（不再空转 BackendCoder），index.js 缺陷走 LLM；修复以被拦截候选为基线并只读注入 db.js，Coder 输出上限 8192。
 - 生成画布可编辑性：Visual CodeGen 全栈模式不再注入无源码锚点的 FullstackDataPanel / ApiErrorBanner；生成工程自带 inspect_plugin（新增组件文件也会获得 data-oid/source map）；DOM 兜底跨容器移动修正 siblingIndex off-by-one；resolver 支持仅 `data-node-id` 的节点用 manifest.nodeId 反查文件；drag-commit 延后到 Vite HMR 后再清 inline translate，避免“成功后又回弹”。
+- 循环模板：CodeGen 的 repeat 样本改为静态数组常量，删除单项走 DELETE_DATA_ITEM 只移除一个元素；map 内删除/移动改为 HITL（只删数据项 / 删除整模板 / 交给 AI），不再“删一个全删”或移动后回退。
 
 ## 最新验证
 前端 68 项 Vitest；Python 739 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除预览消失 257ms、刷新回灌 3.9s、跨文件 Props 命中 App.jsx 调用点且 UserCard.jsx 未改、Direct MOVE 由真实 SDK 拖段落算出 siblingIndex=2，源码与预览同步重排；拖动中候选父容器框与插入线几何断言通过，松手后提示清零。两阶段全链路 E2E PASS：V0 → 冻结 → BACKEND_BINDING 澄清 → 确认（无旧骨架入口）→ Visual CodeGen → live 画布 → 删除组件 + 跨父容器拖拽均 SUCCEEDED（HMR 后父容器已切换）→ 模拟前端工程师新增组件并被 Direct Ops 编辑生效 → 刷新回灌；call-site E2E 增加定义映射完成等待。

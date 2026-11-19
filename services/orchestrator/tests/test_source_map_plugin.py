@@ -275,6 +275,56 @@ ReactDOM.createRoot(document.getElementById('root')).render(
         self.assertEqual(resolved["status"], "RESOLVED", resolved)
         self.assertEqual(resolved["file"], "src/App.jsx")
 
+    def test_repeat_sample_array_is_static_map_source(self) -> None:
+        """CodeGen 的循环样本常量必须被识别为可直接删除的数据项。"""
+        (self.root / "src" / "App.jsx").write_text(
+            "const ITEMS = [0, 1, 2]\n"
+            "export default function App() {\n"
+            "  return (\n"
+            "    <ul>\n"
+            "      {ITEMS.map((_, index) => (\n"
+            "        <li key={String(index)}>\n"
+            '          <p data-oid="oid_item">item</p>\n'
+            "        </li>\n"
+            "      ))}\n"
+            "    </ul>\n"
+            "  )\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.root / "public").mkdir(parents=True, exist_ok=True)
+        (self.root / "public" / "vibe-source-map.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "files": {},
+                    "nodes": {
+                        "oid_item": {
+                            "oid": "oid_item",
+                            "file": "src/App.jsx",
+                            "line": 7,
+                            "component": "App",
+                            "tag": "p",
+                            "isContainer": False,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        resolved = self._resolve_anchor(
+            {"anchorId": "anc_item", "annotationId": "ann_item", "oid": "oid_item"}
+        )
+
+        self.assertEqual(resolved["status"], "RESOLVED", resolved)
+        self.assertTrue(resolved["inMap"])
+        self.assertEqual(
+            (resolved.get("mapSource") or {}).get("kind"),
+            "variable_array",
+        )
+        self.assertEqual((resolved.get("mapSource") or {}).get("count"), 3)
+
     def test_plugin_injects_oid_and_parent_map(self) -> None:
         source_map = self._run_plugin()
         self.assertEqual(source_map["version"], 1)

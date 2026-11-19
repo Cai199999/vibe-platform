@@ -1209,6 +1209,9 @@ class _ReactCompiler:
         self.warnings: list[str] = []
         self.custom_node_ids: list[str] = []
         self.repeat_node_ids: list[str] = []
+        # 循环样本数组：写成 module 常量后，Direct Ops 的 DELETE_DATA_ITEM
+        # 才能识别“静态数组”并只删一个元素，而不是删掉整个模板。
+        self.repeat_constants: dict[str, int] = {}
 
     # ---------------- 属性 / 样式 ----------------
     def _class_name(self, node: VisualNode) -> str:
@@ -1283,8 +1286,10 @@ class _ReactCompiler:
             )
         pad = " " * indent
         inner = " " * (indent + 2)
+        constant = "__VIBE_REPEAT_" + re.sub(r"[^0-9A-Za-z_]", "_", node.id).upper()
+        self.repeat_constants.setdefault(constant, count)
         lines = [
-            f"{pad}{{Array.from({{ length: {count} }}).map((_, index) => (",
+            f"{pad}{{{constant}.map((_, index) => (",
             f'{inner}<{item_tag} key={{String(index)}} className="visual-repeat-item">',
         ]
         lines.extend(self._render_children(node.children, indent + 4))
@@ -1496,6 +1501,13 @@ class _ReactCompiler:
                     'w-full bg-[var(--color-surface)]" />'
                 )
             lines.extend(["  )", "}", ""])
+
+        if self.repeat_constants:
+            lines.append("// 循环模板样本数据：删除单条时只移除一个数据项。")
+            for name, count in self.repeat_constants.items():
+                values = ", ".join(str(index) for index in range(max(1, count)))
+                lines.append(f"const {name} = [{values}];")
+            lines.append("")
 
         app_source = _fill_source_lines("\n".join(lines))
         node_ids = _collect_document_node_ids(self.document)

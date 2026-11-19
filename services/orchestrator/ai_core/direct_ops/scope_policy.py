@@ -120,6 +120,48 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
                 strategy="replace_placeholder",
                 reasons=["页面根节点不能直接删除，将替换为空占位符"],
             )
+        # 循环模板：所有渲染实例共享同一段源码，直接 DELETE_NODE 会把
+        # 全部项一起删掉。静态数组优先提供“只删当前数据项”；动态数据
+        # 或整模板删除交给 AI，绝不静默全删。
+        if identity.in_map:
+            map_source = identity.raw.get("mapSource") or {}
+            kind = str(map_source.get("kind") or "")
+            options: list[dict[str, Any]] = []
+            reasons = ["该组件位于循环模板内，直接删除会影响全部渲染实例"]
+            if kind in {"array_literal", "variable_array"}:
+                options.append(
+                    _option(
+                        "remove_data_item",
+                        "只删除当前数据项",
+                        "AI_DATA_EDIT",
+                        "保留循环模板，只从静态数据源移除对应元素",
+                    )
+                )
+                reasons.append("可直接从静态数据源删除单个元素")
+            options.append(
+                _option(
+                    "edit_template",
+                    "删除整个循环模板（影响全部实例）",
+                    "DEFINITION",
+                    "需要 AI 修改模板结构",
+                )
+            )
+            options.append(_option("cancel", "取消", "CANCEL"))
+            return ScopeDecision(
+                allowed=False,
+                scope="repeated_template",
+                strategy="hitl",
+                reasons=reasons,
+                options=options,
+            )
+        # 同一源码被渲染多次但没有调用点 / map 信息：删除源节点会
+        # 确定性移除全部实例，必须让用户明确选择。
+        if (
+            _repeated_instances(identity) > 1
+            and not identity.has_call_site
+            and identity.importer_count == 0
+        ):
+            return _template_hitl(identity, "删除")
         # 低级操作不转 Agent：父容器连同子树直接删除；
         # 共享/循环/多实例由前端高亮受影响范围。
         return ScopeDecision(True, "instance", "direct")
@@ -136,6 +178,33 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
                     _option("cancel", "取消", "CANCEL"),
                 ],
             )
+        # 循环模板内的实例共享同一段 JSX；移动模板无法表达“只移动当前
+        # 项”，HMR 后会按数组重新渲染，看起来像成功后又回退。
+        if identity.in_map:
+            return ScopeDecision(
+                allowed=False,
+                scope="repeated_template",
+                strategy="hitl",
+                reasons=[
+                    "循环模板中的项不能单独移动；移动会作用于全部实例",
+                    "请调整数据源顺序，或交给 AI 修改模板结构",
+                ],
+                options=[
+                    _option(
+                        "edit_template",
+                        "交给 AI 调整循环项顺序",
+                        "DEFINITION",
+                    ),
+                    _option("cancel", "取消", "CANCEL"),
+                ],
+            )
+        # 同一源码渲染多次且没有调用点：移动会改到所有实例。
+        if (
+            _repeated_instances(identity) > 1
+            and not identity.has_call_site
+            and identity.importer_count == 0
+        ):
+            return _template_hitl(identity, "移动", visual_option=False)
         # 低级操作不转 Agent：同文件父容器连同子树直接移动。
         return ScopeDecision(True, "instance", "direct")
 

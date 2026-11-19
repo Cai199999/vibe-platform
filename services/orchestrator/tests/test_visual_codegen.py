@@ -163,6 +163,13 @@ class VisualCodegenCompileTests(unittest.TestCase):
         self.assertIn('data-source-kind="container"', source)
         self.assertIn('data-source-kind="element"', source)
         self.assertIn("visual-repeat-item", source)
+        # 循环样本写成静态数组常量，Direct Ops 才能 DELETE_DATA_ITEM
+        # 只删一条，而不是删掉整个模板。
+        self.assertIn("__VIBE_REPEAT_", source)
+        self.assertRegex(
+            source,
+            r"const __VIBE_REPEAT_[A-Z0-9_]+ = \[[0-9, ]+\];",
+        )
         self.assertNotIn("runVisualAction", source)
         self.assertIn("bg-[var(--color-primary)]", source)
         self.assertIn('import "./visual.css"', source)
