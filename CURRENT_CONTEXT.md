@@ -44,6 +44,7 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 低级操作免弹窗：静态数组循环项删除自动转 DELETE_DATA_ITEM 只删一条；动态循环/多实例删除与所有循环项移动直接返回可执行错误，不再弹“安全路径”决策面板。
 - 视觉所见即所得：CREATE_NEW 生成按 relativeTarget.widthPx/heightPx 近似匹配圈选尺寸（±25%），并沿用当前控件/页面圆角字号颜色；Tailwind skill 不再强制 rounded-full。
 - 同父容器排序：拖到兄弟容器边缘按排序处理（共同父容器 + AST 缝隙），只有落在兄弟中央才嵌套；E2E 验证首位顺序按鼠标位置变化。
+- 回退根因：grid 只按 y 判定（横向位置被忽略）→ 按行/列阅读顺序；插件 oid 依赖兄弟序号，移动后身份漂移 → 用 data-*/id/name/key 稳定 oid；resolver 的 callSiteOid/file/range 不再覆盖节点自身 oid，组件定义内部移动/删除不再误判跨文件。
 
 ## 最新验证
 前端 68 项 Vitest；Python 739 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除预览消失 257ms、刷新回灌 3.9s、跨文件 Props 命中 App.jsx 调用点且 UserCard.jsx 未改、Direct MOVE 由真实 SDK 拖段落算出 siblingIndex=2，源码与预览同步重排；拖动中候选父容器框与插入线几何断言通过，松手后提示清零。两阶段全链路 E2E PASS：V0 → 冻结 → BACKEND_BINDING 澄清 → 确认（无旧骨架入口）→ Visual CodeGen → live 画布 → 删除组件 + 跨父容器拖拽均 SUCCEEDED（HMR 后父容器已切换）→ 模拟前端工程师新增组件并被 Direct Ops 编辑生效 → 刷新回灌；call-site E2E 增加定义映射完成等待。

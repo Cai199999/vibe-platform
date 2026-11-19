@@ -753,9 +753,32 @@ function buildJsxPlugin(filename) {
 
           const names = jsxAttributeNames(elementNode)
           const existingOid = jsxStringAttribute(elementNode, 'data-oid')
+          // 显式标识属性（data-* / id / name / key）比兄弟序号稳定：
+          // 组件在容器内换位置时 oid 不能跟着变，否则拖动后身份漂移，
+          // 后续 Direct Ops / HMR 清理会命中旧 selector。
+          const staticProps = jsxStaticProps(elementNode)
+          const stableKey = Object.keys(staticProps)
+            .filter(
+              (key) =>
+                key === 'id' ||
+                key === 'name' ||
+                key === 'key' ||
+                (key.startsWith('data-') &&
+                  !key.startsWith('data-source') &&
+                  key !== 'data-oid'),
+            )
+            .sort()
+            .map((key) => `${key}=${JSON.stringify(staticProps[key])}`)
+            .join('&')
           const oid =
             existingOid ||
-            oidFor(file, component, `${scope}|${signature}|${tag}`)
+            oidFor(
+              file,
+              component,
+              stableKey
+                ? `${scope}|${tag}|${stableKey}`
+                : `${scope}|${signature}|${tag}`,
+            )
 
           recordSourceMapNode({
             oid,

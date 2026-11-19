@@ -325,6 +325,58 @@ ReactDOM.createRoot(document.getElementById('root')).render(
         )
         self.assertEqual((resolved.get("mapSource") or {}).get("count"), 3)
 
+    def test_oid_file_wins_over_call_site_file(self) -> None:
+        """父容器 / 定义内子节点不能被 callSiteOid 覆盖成调用方文件。"""
+        (self.root / "src" / "GridCards.jsx").write_text(
+            "export default function GridCards() {\n"
+            '  return <div data-oid="oid_grid">卡片</div>\n'
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.root / "public").mkdir(parents=True, exist_ok=True)
+        (self.root / "public" / "vibe-source-map.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "files": {},
+                    "nodes": {
+                        "oid_grid": {
+                            "oid": "oid_grid",
+                            "file": "src/GridCards.jsx",
+                            "line": 2,
+                            "component": "GridCards",
+                            "tag": "div",
+                            "isContainer": True,
+                        }
+                    },
+                    "callSites": {
+                        "csoid_grid": {
+                            "oid": "csoid_grid",
+                            "file": "src/main.jsx",
+                            "start": 0,
+                            "end": 20,
+                            "component": "GridCards",
+                            "definitionOid": "oid_grid",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        resolved = self._resolve_anchor(
+            {
+                "anchorId": "anc_parent",
+                "annotationId": "ann_parent",
+                "oid": "oid_grid",
+                "callSiteOid": "csoid_grid",
+                "selector": '[data-oid="oid_grid"]',
+            }
+        )
+
+        self.assertEqual(resolved["status"], "RESOLVED", resolved)
+        self.assertEqual(resolved["file"], "src/GridCards.jsx")
+
     def test_plugin_injects_oid_and_parent_map(self) -> None:
         source_map = self._run_plugin()
         self.assertEqual(source_map["version"], 1)

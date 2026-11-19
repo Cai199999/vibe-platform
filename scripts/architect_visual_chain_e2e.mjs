@@ -670,6 +670,192 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   log('agent component edit', { file: info.heading.file, text })
 }
 
+async function tryGridReorder(page, active) {
+  const context = lastDirectRequest || {}
+  const projectId = context.projectId || context.project_id
+  const sandboxId = context.sandboxId || context.sandbox_id
+  const gridSource = `export default function GridCards() {
+  return (
+    <div
+      data-grid-cards
+      style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12, margin: 16 }}
+    >
+      <div data-card="1" style={{ padding: 16, background: '#fff' }}>卡片一</div>
+      <div data-card="2" style={{ padding: 16, background: '#fff' }}>卡片二</div>
+      <div data-card="3" style={{ padding: 16, background: '#fff' }}>卡片三</div>
+    </div>
+  )
+}
+`
+  const mainSource = `import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App.jsx'
+import AgentCard from './AgentCard.jsx'
+import GridCards from './GridCards.jsx'
+import './visual.css'
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+    <AgentCard />
+    <GridCards />
+  </React.StrictMode>,
+)
+`
+  const patchResponse = await fetch(
+    `${PY_AI}/api/v1/internal/sandbox/apply-patch`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sandbox_id: sandboxId,
+        files: {
+          'src/GridCards.jsx': gridSource,
+          'src/main.jsx': mainSource,
+        },
+      }),
+    },
+  )
+  if (!patchResponse.ok) {
+    fail(`写入 grid 测试组件失败: ${await patchResponse.text()}`)
+  }
+  const deadline = Date.now() + 20000
+  let geometry = null
+  while (Date.now() < deadline) {
+    let frame = null
+    try {
+      frame = await frameOf(active.locator('.canvas-live-frame'))
+    } catch {
+      // HMR 重载中
+    }
+    if (frame) {
+      geometry = await frame
+        .evaluate(() => {
+          const grid = document.querySelector('[data-grid-cards]')
+          if (!grid) return null
+          const cards = Array.from(grid.querySelectorAll('[data-card]'))
+          if (cards.length < 3) return null
+          const rectOf = (node) => node.getBoundingClientRect()
+          const source = cards[2]
+          const target = cards[0]
+          const sourceRect = rectOf(source)
+          const targetRect = rectOf(target)
+          return {
+            gridOid: grid.getAttribute('data-oid') || '',
+            source: {
+              oid: source.getAttribute('data-oid') || '',
+              x: sourceRect.left + sourceRect.width / 2,
+              y: sourceRect.top + sourceRect.height / 2,
+            },
+            target: {
+              oid: target.getAttribute('data-oid') || '',
+              // 第一张卡片的左边缘：同一行内的“排序缝隙”。
+              x: targetRect.left + 2,
+              y: targetRect.top + targetRect.height / 2,
+            },
+          }
+        })
+        .catch(() => null)
+      if (geometry?.source.oid && geometry?.target.oid) break
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300))
+  }
+  if (!geometry?.source.oid) fail('grid 测试组件未被源码插件标注')
+  log('grid reorder geometry', geometry)
+  await ensureDragArmed(page, active)
+  await page.evaluate(() => {
+    window.__vibeDragEvents = []
+    window.addEventListener('message', (event) => {
+      const data = event.data
+      if (data && data.channel === 'vibe-inspect') {
+        window.__vibeDragEvents.push(data)
+      }
+    })
+  })
+  const frame = await frameOf(active.locator('.canvas-live-frame'))
+  await frame.evaluate(({ source, target }) => {
+    const sourceNode = document.querySelector(`[data-oid="${source.oid}"]`)
+    if (!sourceNode) return
+    const dispatch = (node, type, x, y) => {
+      node.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          pointerType: 'mouse',
+          button: 0,
+          buttons: type === 'pointerup' ? 0 : 1,
+          clientX: x,
+          clientY: y,
+        }),
+      )
+    }
+    dispatch(sourceNode, 'pointerdown', source.x, source.y)
+    for (let step = 1; step <= 8; step += 1) {
+      dispatch(
+        document,
+        'pointermove',
+        source.x + ((target.x - source.x) * step) / 8,
+        source.y + ((target.y - source.y) * step) / 8,
+      )
+    }
+    dispatch(document, 'pointerup', target.x, target.y)
+  }, geometry)
+  const response = await waitForDirectResponse(20000)
+  const gridPlacement = await page.evaluate(() =>
+    (window.__vibeDragEvents || [])
+      .filter((item) => item.type === 'drag-end')
+      .map((item) => item.payload?.placement),
+  )
+  log('grid drag placement', gridPlacement)
+  if (!response || response.status !== 200) {
+    let detail = {}
+    try {
+      detail = JSON.parse(response?.body || '{}')
+    } catch {
+      detail = {}
+    }
+    log('grid drag failure detail', {
+      identity: detail.resolvedTarget?.identity,
+      parent: detail.resolvedTarget?.parent,
+    })
+    fail(`grid 拖拽失败: ${response?.body || '无响应'}`)
+  }
+  let body = {}
+  try {
+    body = JSON.parse(response.body)
+  } catch {
+    // 保留原始日志
+  }
+  if (body.status !== 'SUCCEEDED' || body.action !== 'MOVE_NODE') {
+    fail(`grid 拖拽未成功: ${response.body}`)
+  }
+  const orderDeadline = Date.now() + 15000
+  let order = []
+  while (Date.now() < orderDeadline) {
+    try {
+      const live = await frameOf(active.locator('.canvas-live-frame'))
+      order = await live.evaluate(() => {
+        const grid = document.querySelector('[data-grid-cards]')
+        if (!grid) return []
+        return Array.from(grid.querySelectorAll('[data-card]')).map((node) =>
+          node.getAttribute('data-oid'),
+        )
+      })
+    } catch {
+      order = []
+    }
+    if (order[0] === geometry.source.oid) break
+    await new Promise((resolve) => setTimeout(resolve, 300))
+  }
+  log('grid order after HMR', order)
+  if (order[0] !== geometry.source.oid) {
+    fail(
+      `grid 内重排未按鼠标位置生效：期望首位 ${geometry.source.oid}，实际 ${order.join(',')}`,
+    )
+  }
+}
+
 async function waitForParentAfterHmr(
   active,
   oid,
@@ -975,6 +1161,7 @@ async function main() {
       await trySameParentReorder(page, active)
       await tryDirectDrag(page, active)
       await tryAgentComponentEdit(page, active)
+      await tryGridReorder(page, active)
     }
 
     log('reload workspace: state must survive')

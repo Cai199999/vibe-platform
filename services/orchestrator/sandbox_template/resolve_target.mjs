@@ -685,10 +685,11 @@ function resolveOne(anchor, parser, workdir) {
   const callSiteOid = String(anchor.callSiteOid || '').trim()
   const oidNode = sourceMapNodeForOid(workdir, oid)
   const callSite = sourceMapCallSiteForOid(workdir, callSiteOid)
-  // source map 是构建期事实：callSite / oid 命中时文件以地图为准，
-  // 不被旧 file:line 覆盖；地图缺失时才退回前端携带的 file。
+  // source map 是构建期事实：oid 命中时优先使用节点自己所在文件。
+  // callSiteOid 只表示“这个组件实例被写在哪里”，不能覆盖父容器 /
+  // 定义内部子节点自己的文件，否则会解析到错误的文件并误判跨文件移动。
   let file = String(
-    (callSite && callSite.file) || (oidNode && oidNode.file) || anchor.file || '',
+    (oidNode && oidNode.file) || (callSite && callSite.file) || anchor.file || '',
   ).trim()
   if (!file) {
     // 生成工程 / AI 新增节点可能只有 data-node-id：用 manifest 的
@@ -748,16 +749,18 @@ function resolveOne(anchor, parser, workdir) {
       (offsets[1] !== undefined ? innermostAt(index.jsxNodes, offsets[1]) : null)
     : null
 
+  // oid 自己的源码区间优先。callSite 区间属于调用方文件，套到定义
+  // 文件 / 父容器上会 “source map 过期”，表现为找不到父容器。
   const oidRange =
-    callSite && Number.isFinite(Number(callSite.start))
+    oidNode && Number.isFinite(Number(oidNode.start))
       ? {
-          startOffset: Number(callSite.start),
-          endOffset: Number(callSite.end),
+          startOffset: Number(oidNode.start),
+          endOffset: Number(oidNode.end),
         }
-      : oidNode && Number.isFinite(Number(oidNode.start))
+      : callSite && Number.isFinite(Number(callSite.start))
         ? {
-            startOffset: Number(oidNode.start),
-            endOffset: Number(oidNode.end),
+            startOffset: Number(callSite.start),
+            endOffset: Number(callSite.end),
           }
         : anchor.sourceRange &&
             Number.isFinite(Number(anchor.sourceRange.startOffset))
@@ -777,7 +780,9 @@ function resolveOne(anchor, parser, workdir) {
   const oidHasRange = Boolean(
     oidNode && Number.isFinite(Number(oidNode.start)),
   )
-  if (!node && callSiteOid && callSiteHasRange) {
+  if (!node && callSiteOid && callSiteHasRange && !oidNode) {
+    // 仅当目标本身就是 callSiteOid（没有自己的 oid）时才 fail-closed。
+    // 父容器 / 定义内子节点同时带 callSiteOid 时，自己的 oid 才是事实源。
     result.reason = `callSiteOid 源码区间未命中当前 AST，source map 可能已过期: ${callSiteOid}`
     return result
   }

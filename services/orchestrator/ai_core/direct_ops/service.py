@@ -750,6 +750,15 @@ class DirectOperationService:
                 if payload.action == "MOVE_NODE"
                 else anchor
             )
+            # 落点父容器与源 JSX 在同一文件：这是组件定义内部的排序，
+            # 必须编辑源节点本身，不能替换成 callSite（否则会误判跨文件）。
+            if (
+                payload.action == "MOVE_NODE"
+                and parent
+                and parent.get("file")
+                and parent.get("file") == anchor.get("file")
+            ):
+                move_anchor = anchor
             if payload.action == "DELETE_NODE":
                 move_anchor = self._delete_source_anchor(anchor)
             identity = identity_from_anchor(anchor)
@@ -891,6 +900,10 @@ class DirectOperationService:
                     diagnostic={
                         "risk": risk,
                         "sourceFile": anchor.get("file") or "",
+                        "sourceIsRouteRoot": bool(anchor.get("isRouteRoot")),
+                        "sourceRange": anchor.get("range") or {},
+                        "moveAnchorFile": move_anchor.get("file") or "",
+                        "hasCallSiteAnchor": bool(anchor.get("callSiteAnchor")),
                         "parentFile": parent_file,
                         "callSiteFile": call_site_file,
                         "parentShared": parent_shared,
@@ -1080,11 +1093,27 @@ class DirectOperationService:
                 },
             )
         if status != "RESOLVED":
+            logger.warning(
+                "direct resolver target not found oid=%s file=%s line=%s "
+                "column=%s selector=%s reason=%s",
+                target.oid,
+                target.file,
+                target.line,
+                target.column,
+                target.selector,
+                anchor.get("reason") or "",
+            )
             raise DirectActionError(
                 DirectErrorCode.TARGET_NOT_FOUND,
                 "目标组件已失效，请重新选择。",
                 status_code=404,
-                diagnostic={"reason": anchor.get("reason") or ""},
+                diagnostic={
+                    "reason": anchor.get("reason") or "",
+                    "oid": target.oid or "",
+                    "file": target.file or "",
+                    "line": target.line,
+                    "column": target.column,
+                },
             )
         return anchor
 
@@ -1133,6 +1162,11 @@ class DirectOperationService:
             None,
         )
         if parent is None or str(parent.get("status") or "") != "RESOLVED":
+            logger.warning(
+                "direct resolver parent not resolved request=%s result=%s",
+                request,
+                parent,
+            )
             raise DirectActionError(
                 DirectErrorCode.TARGET_NOT_FOUND,
                 "没有找到要移动到的容器，请重新拖拽落位。",
@@ -1145,8 +1179,13 @@ class DirectOperationService:
         payload: DirectActionPayload,
         anchor: dict[str, Any],
     ) -> dict[str, Any]:
-        """共享组件的移动必须落在 callSite，不修改公共组件定义本身。"""
+        """共享组件的“实例根”移动落在 callSite；内部子节点仍在定义文件内移动。"""
         if payload.action != "MOVE_NODE":
+            return anchor
+        # callSiteAnchor 只描述“这个组件实例被写在哪里”。组件内部的
+        # 子节点（isRouteRoot=false）在定义文件里有自己的 JSX 位置，
+        # 不能拿 callSite 当移动目标，否则会被误判为跨文件移动。
+        if not anchor.get("isRouteRoot"):
             return anchor
         call_site = anchor.get("callSiteAnchor")
         if not isinstance(call_site, dict):
@@ -1159,7 +1198,11 @@ class DirectOperationService:
 
     @staticmethod
     def _delete_source_anchor(anchor: dict[str, Any]) -> dict[str, Any]:
-        """共享组件删除当前 callSite 实例，不删除公共组件定义。"""
+        """共享组件的“实例根”删除当前 callSite 实例；内部子节点删定义内的 JSX。"""
+        # 子节点的 callSiteAnchor 指向的是外层组件调用，把它当成删除目标
+        # 会把整个组件实例一起删掉。只有组件根节点才允许落到 callSite。
+        if not anchor.get("isRouteRoot"):
+            return anchor
         call_site = anchor.get("callSiteAnchor")
         if not isinstance(call_site, dict):
             return anchor

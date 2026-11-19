@@ -1421,14 +1421,70 @@
     return result
   }
 
-  /** 主轴方向：flex-row / grid 横向排列时按 x 判定，其余按 y。 */
-  function stageAxisIsRow(parentNode) {
-    if (!parentNode || typeof window.getComputedStyle !== 'function') return false
+  /** 布局主轴：row（横向）、column（纵向）或 grid（二维阅读顺序）。 */
+  function stageLayoutMode(parentNode) {
+    if (!parentNode || typeof window.getComputedStyle !== 'function') {
+      return 'column'
+    }
     var style = window.getComputedStyle(parentNode)
     var display = String(style.display || '')
-    if (display.indexOf('flex') < 0) return false
-    var direction = String(style.flexDirection || 'row')
-    return direction.indexOf('row') === 0
+    if (display.indexOf('grid') >= 0) return 'grid'
+    if (display.indexOf('flex') >= 0) {
+      var direction = String(style.flexDirection || 'row')
+      return direction.indexOf('row') === 0 ? 'row' : 'column'
+    }
+    return 'column'
+  }
+
+  /** 主轴方向：flex-row 按 x 判定，其余（含 grid）按 y 或二维。 */
+  function stageAxisIsRow(parentNode) {
+    return stageLayoutMode(parentNode) === 'row'
+  }
+
+  /**
+   * grid 落位：按阅读顺序找到应插入的兄弟下标。
+   *
+   * 仅按 y 会把同一行里的横向移动全部忽略，看起来像“自动排到固定
+   * 位置”。这里先按 top 分行，再在目标行内按 x 找缝隙。
+   */
+  function gridInsertIndex(entries, x, y) {
+    var rows = []
+    entries.forEach(function (entry, index) {
+      var rect = entry.rect
+      if (!rect || rect.width <= 0 || rect.height <= 0) return
+      var tolerance = Math.max(8, rect.height * 0.5)
+      var row = null
+      for (var i = 0; i < rows.length; i += 1) {
+        if (Math.abs(rows[i].top - rect.top) <= tolerance) {
+          row = rows[i]
+          break
+        }
+      }
+      if (!row) {
+        row = { top: rect.top, bottom: rect.bottom, items: [] }
+        rows.push(row)
+      }
+      row.bottom = Math.max(row.bottom, rect.bottom)
+      row.items.push({ index: index, rect: rect })
+    })
+    if (!rows.length) return entries.length
+    for (var r = 0; r < rows.length; r += 1) {
+      var current = rows[r]
+      var height = current.bottom - current.top
+      var margin = Math.max(6, height * 0.35)
+      if (y < current.top - margin) return current.items[0].index
+      if (y <= current.bottom + margin) {
+        var items = current.items.slice().sort(function (a, b) {
+          return a.rect.left - b.rect.left
+        })
+        for (var itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+          var item = items[itemIndex]
+          if (x < item.rect.left + item.rect.width / 2) return item.index
+        }
+        return items[items.length - 1].index + 1
+      }
+    }
+    return entries.length
   }
 
   /**
@@ -1473,17 +1529,22 @@
       var node = byOid[childOid]
       return { oid: childOid, node: node, rect: node.getBoundingClientRect() }
     })
-    var isRow = stageAxisIsRow(parentNode)
+    var layoutMode = stageLayoutMode(parentNode)
+    var isRow = layoutMode === 'row'
     var point = isRow ? x : y
     var insertIndex = entries.length
-    for (var position = 0; position < entries.length; position += 1) {
-      var rect = entries[position].rect
-      var middle = isRow
-        ? rect.left + rect.width / 2
-        : rect.top + rect.height / 2
-      if (point < middle) {
-        insertIndex = position
-        break
+    if (layoutMode === 'grid') {
+      insertIndex = gridInsertIndex(entries, x, y)
+    } else {
+      for (var position = 0; position < entries.length; position += 1) {
+        var rect = entries[position].rect
+        var middle = isRow
+          ? rect.left + rect.width / 2
+          : rect.top + rect.height / 2
+        if (point < middle) {
+          insertIndex = position
+          break
+        }
       }
     }
     // 视觉缝隙按“源节点仍在原位”的 DOM 顺序算；siblingIndex 则是
@@ -1502,14 +1563,36 @@
     var lineRect
     if (visualIndex < entries.length) {
       var headRect = entries[visualIndex].rect
-      lineRect = isRow
-        ? { x: headRect.left, y: headRect.top, width: 0, height: headRect.height }
-        : { x: headRect.left, y: headRect.top, width: headRect.width, height: 0 }
+      lineRect =
+        isRow || layoutMode === 'grid'
+          ? {
+              x: headRect.left,
+              y: headRect.top,
+              width: 0,
+              height: headRect.height,
+            }
+          : {
+              x: headRect.left,
+              y: headRect.top,
+              width: headRect.width,
+              height: 0,
+            }
     } else {
       var tailRect = entries[entries.length - 1].rect
-      lineRect = isRow
-        ? { x: tailRect.right, y: tailRect.top, width: 0, height: tailRect.height }
-        : { x: tailRect.left, y: tailRect.bottom, width: tailRect.width, height: 0 }
+      lineRect =
+        isRow || layoutMode === 'grid'
+          ? {
+              x: tailRect.right,
+              y: tailRect.top,
+              width: 0,
+              height: tailRect.height,
+            }
+          : {
+              x: tailRect.left,
+              y: tailRect.bottom,
+              width: tailRect.width,
+              height: 0,
+            }
     }
     return {
       anchor: anchorEntry,
@@ -1548,7 +1631,41 @@
         },
       }
     }
-    var isRow = stageAxisIsRow(parentNode)
+    var layoutMode = stageLayoutMode(parentNode)
+    if (layoutMode === 'grid') {
+      var gridIndex = gridInsertIndex(children, x, y)
+      if (gridIndex < children.length) {
+        var gridAnchor = children[gridIndex]
+        return {
+          anchor: gridAnchor,
+          insertPosition: 'before',
+          siblingIndex: gridIndex,
+          siblingCount: children.length,
+          childIndex: gridIndex,
+          insertRect: {
+            x: round2(gridAnchor.rect.left),
+            y: round2(gridAnchor.rect.top),
+            width: 0,
+            height: round2(gridAnchor.rect.height),
+          },
+        }
+      }
+      var gridLast = children[children.length - 1]
+      return {
+        anchor: gridLast,
+        insertPosition: 'after',
+        siblingIndex: children.length,
+        siblingCount: children.length,
+        childIndex: children.length,
+        insertRect: {
+          x: round2(gridLast.rect.right),
+          y: round2(gridLast.rect.top),
+          width: 0,
+          height: round2(gridLast.rect.height),
+        },
+      }
+    }
+    var isRow = layoutMode === 'row'
     var point = isRow ? x : y
     for (var i = 0; i < children.length; i += 1) {
       var rect = children[i].rect
@@ -1598,15 +1715,16 @@
   function slotLineRect(parentNode, slot) {
     if (!parentNode || !slot) return null
     if (slot.lineRect) return slot.lineRect
-    var isRow = stageAxisIsRow(parentNode)
+    var layoutMode = stageLayoutMode(parentNode)
+    var vertical = layoutMode === 'row' || layoutMode === 'grid'
     var parentRect = parentNode.getBoundingClientRect()
     var anchorRect = slot.anchor && slot.anchor.rect
     if (!anchorRect) {
-      return isRow
+      return vertical && layoutMode === 'row'
         ? { x: parentRect.left, y: parentRect.top, width: 0, height: parentRect.height }
         : { x: parentRect.left, y: parentRect.top, width: parentRect.width, height: 0 }
     }
-    if (isRow) {
+    if (vertical) {
       return {
         x: slot.insertPosition === 'after' ? anchorRect.right : anchorRect.left,
         y: anchorRect.top,
@@ -1858,7 +1976,10 @@
     // 3px 视觉线；零宽 / 零高的几何在 render 时补成可见厚度。
     var thickness = 3
     hint.line.style.display = 'block'
-    if (stageAxisIsRow(parentNode)) {
+    // 线方向由几何决定：零宽有高 = 竖线（flex-row / grid），
+    // 有宽零高 = 横线（flex-column）。
+    var vertical = lineRect.width === 0 && lineRect.height > 0
+    if (vertical) {
       hint.line.style.left = round2(lineRect.x - thickness / 2) + 'px'
       hint.line.style.top = round2(lineRect.y) + 'px'
       hint.line.style.width = thickness + 'px'

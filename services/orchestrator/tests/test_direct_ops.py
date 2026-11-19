@@ -303,6 +303,7 @@ class DirectOperationMoveTest(unittest.TestCase):
             **_anchor(shared=True),
             "file": "src/components/Card.jsx",
             "component": "Card",
+            "isRouteRoot": True,
             "callSiteFile": "src/Page.jsx",
             "callSiteAnchor": {
                 "file": "src/Page.jsx",
@@ -543,6 +544,7 @@ class DirectOperationDeleteTest(unittest.TestCase):
         self.sandbox.anchor = {
             **_anchor(shared=True),
             "file": "src/components/Card.jsx",
+            "isRouteRoot": True,
             "callSiteFile": "src/Page.jsx",
             "callSiteAnchor": {
                 "file": "src/Page.jsx",
@@ -557,6 +559,26 @@ class DirectOperationDeleteTest(unittest.TestCase):
         self.assertEqual(response.status, "SUCCEEDED")
         self.assertEqual(response.risk, "L0_DIRECT")
         self.assertEqual(self.sandbox.edits[0]["file"], "src/Page.jsx")
+
+    def test_child_inside_shared_component_deletes_definition_node(self) -> None:
+        """组件内部子节点的 callSite 不是删除目标，否则会删掉整个实例。"""
+        self.sandbox.anchor = {
+            **_anchor(shared=True),
+            "file": "src/components/Card.jsx",
+            "isRouteRoot": False,
+            "callSiteFile": "src/Page.jsx",
+            "callSiteAnchor": {
+                "file": "src/Page.jsx",
+                "range": {"startOffset": 10, "endOffset": 40},
+                "component": "Page",
+                "nodeType": "JSXElement",
+            },
+        }
+
+        response = self.service.execute(_delete_payload())
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(self.sandbox.edits[0]["file"], "src/components/Card.jsx")
 
     def test_root_delete_replaces_with_placeholder(self) -> None:
         self.sandbox.anchor = {
