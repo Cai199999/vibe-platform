@@ -212,6 +212,69 @@ ReactDOM.createRoot(document.getElementById('root')).render(
         )
         return json.loads(output.stdout)["anchors"][0]
 
+    def _resolve_anchor(self, anchor: dict) -> dict:
+        spec = self.root / "spec-anchor.json"
+        spec.write_text(
+            json.dumps(
+                {
+                    "workdir": str(self.root),
+                    "parserRoot": str(TEMPLATE_DIR),
+                    "anchors": [anchor],
+                }
+            ),
+            encoding="utf-8",
+        )
+        output = subprocess.run(
+            ["node", "resolve_target.mjs", str(spec)],
+            cwd=TEMPLATE_DIR,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(output.stdout)["anchors"][0]
+
+    def test_node_id_only_anchor_resolves_from_codegen_map(self) -> None:
+        """生成工程节点只有 data-node-id 时，用 manifest.nodeId 反查文件。"""
+        (self.root / "src" / "App.jsx").write_text(
+            "export default function App() {\n"
+            '  return <main data-node-id="nd_demo">内容</main>\n'
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.root / "public").mkdir(parents=True, exist_ok=True)
+        (self.root / "public" / "vibe-source-map.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "files": {},
+                    "nodes": {
+                        "oid_nd_demo": {
+                            "oid": "oid_nd_demo",
+                            "nodeId": "nd_demo",
+                            "file": "src/App.jsx",
+                            "line": 2,
+                            "component": "App",
+                            "tag": "main",
+                            "isContainer": True,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        resolved = self._resolve_anchor(
+            {
+                "anchorId": "anc_node_id",
+                "annotationId": "ann_node_id",
+                "marker": "nd_demo",
+                "selector": '[data-node-id="nd_demo"]',
+            }
+        )
+
+        self.assertEqual(resolved["status"], "RESOLVED", resolved)
+        self.assertEqual(resolved["file"], "src/App.jsx")
+
     def test_plugin_injects_oid_and_parent_map(self) -> None:
         source_map = self._run_plugin()
         self.assertEqual(source_map["version"], 1)

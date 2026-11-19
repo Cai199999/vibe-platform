@@ -838,6 +838,9 @@ class FullstackGraphRunner:
                         existing_package=self._read_optional(
                             sandbox_id, "package.json"
                         ),
+                        # 冻结虚拟树是唯一前端产物；旧数据面板没有源码锚点，
+                        # 会变成“看得见但删不掉、拖不动”的菜单元件。
+                        include_panel=False,
                     )
                     # 全栈工程以 base_bundle 的 package.json / main.jsx /
                     # vite.config.js 为准；Visual CodeGen 只覆盖 App.jsx、

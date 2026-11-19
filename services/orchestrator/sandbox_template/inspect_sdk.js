@@ -1926,7 +1926,10 @@
       )
       var index = slot.siblingIndex
       if (slot.confidence !== 'ast_index') {
-        if (slot.insertPosition === 'after') index += 1
+        // stageSlotFor 的 siblingIndex 本身就是“插入位置”：
+        // before = 锚点下标，after = children.length。不能再对 after
+        // 额外 +1，否则生成工程（无 childOids、走 DOM 兜底）跨容器移动
+        // 会算出 index=n+1，命中 insertIndex 超出子节点范围。
         if (slot.insertPosition === 'inside_start') index = 0
         if (slot.insertPosition === 'inside_end') index = allChildren.length
         var sourceIndex = allChildren.indexOf(node)

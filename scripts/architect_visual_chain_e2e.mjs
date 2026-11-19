@@ -95,6 +95,7 @@ async function answerClarification(panel) {
 }
 
 async function driveV0(page, panel) {
+  const deadline = Date.now() + 180000
   for (let round = 0; round < 10; round += 1) {
     if (page.url().includes('/visual-canvas')) return
     const outcome = panel.locator('.architect-outcome', {
@@ -105,16 +106,340 @@ async function driveV0(page, panel) {
       await page.waitForURL(/\/visual-canvas/, { timeout: 60000 })
       return
     }
+    if ((await panel.locator('.architect-outcome.is-error').count()) > 0) {
+      fail(`V0 Architect FAILED: ${(await panel.innerText()).slice(-1200)}`)
+    }
+    // 刚重启容器后的首轮分析可能明显慢于常规，等待要覆盖冷启动。
     const form = panel.locator('.architect-clarification')
-    if (await form.count()) {
+    const remaining = Math.max(5000, deadline - Date.now())
+    const appeared = await form
+      .waitFor({ state: 'visible', timeout: Math.min(60000, remaining) })
+      .then(() => true)
+      .catch(() => false)
+    if (appeared) {
       log('answer V0 clarification round', round + 1)
       await answerClarification(panel)
       await page.waitForTimeout(1200)
       continue
     }
-    await page.waitForTimeout(1500)
+    if (page.url().includes('/visual-canvas')) return
   }
-  fail('V0 阶段超过 10 轮仍未产出虚拟画布')
+  const dump = await page.evaluate(() =>
+    sessionStorage.getItem('vibe.architect.v1'),
+  )
+  fail(`V0 阶段超过 10 轮仍未产出虚拟画布: ${String(dump).slice(-1500)}`)
+}
+
+async function frameOf(locator) {
+  const handle = await locator.elementHandle()
+  if (!handle) fail('找不到 live iframe')
+  const frame = await handle.contentFrame()
+  if (!frame) fail('live iframe 尚未加载')
+  return frame
+}
+
+async function tryDirectDelete(page, frame) {
+  const target = await frame.evaluate(() => {
+    const nodes = Array.from(document.querySelectorAll('[data-oid]'))
+    const leaf = nodes.find((node) => {
+      const rect = node.getBoundingClientRect()
+      if (rect.width < 20 || rect.height < 10) return false
+      if (node.getAttribute('data-source-kind') === 'container') return false
+      return !node.querySelector('[data-oid]')
+    })
+    return leaf
+      ? {
+          oid: leaf.getAttribute('data-oid'),
+          tag: leaf.tagName.toLowerCase(),
+          text: (leaf.textContent || '').trim().slice(0, 30),
+        }
+      : null
+  })
+  if (!target) fail('live 画布没有可删除的源码节点')
+  log('direct delete target', target)
+  // Direct Ops 浮层只在 iframe 接管指针的浏览态出现。
+  const interaction = page.locator('[data-canvas-interaction-toggle]')
+  if (
+    (await interaction.count()) > 0 &&
+    (await interaction.getAttribute('aria-pressed')) !== 'true'
+  ) {
+    await interaction.click()
+    await page.waitForTimeout(300)
+  }
+  const selector = `[data-oid="${target.oid}"]`
+  await frame.hover(selector)
+  await frame.waitForSelector('[data-vibe-direct-ui][title="删除组件"]', {
+    state: 'visible',
+    timeout: 5000,
+  })
+  await frame.click('[data-vibe-direct-ui][title="删除组件"]')
+  const confirm = await frame.$('text=确认删除')
+  if (confirm) {
+    log('direct delete: confirm required')
+    await confirm.click()
+  }
+  const response = await waitForDirectResponse()
+  log('direct delete response', response)
+  const toast = await page
+    .locator('.workspace-toast')
+    .allInnerTexts()
+    .catch(() => [])
+  log('direct delete toast', toast)
+  if (!response) fail('删除组件没有返回 Direct Ops 结果')
+  if (response.status !== 200) {
+    fail(`删除组件失败: HTTP ${response.status} ${response.body}`)
+  }
+  let body = null
+  try {
+    body = JSON.parse(response.body)
+  } catch {
+    // 保留原始日志
+  }
+  if (body?.action !== 'DELETE_NODE' || body?.status !== 'SUCCEEDED') {
+    fail(`删除组件未成功: ${response.body}`)
+  }
+}
+
+async function tryDirectDrag(page, active) {
+  const toggle = active.locator('[data-canvas-drag-toggle]')
+  if ((await toggle.count()) === 0) fail('live 画布缺少拖拽模式开关')
+  await toggle.click()
+  // 删除成功后会触发 HMR / iframe 重载，必须重新获取 Frame。
+  const frame = await frameOf(active.locator('.canvas-live-frame'))
+  const geometry = await frame.evaluate(() => {
+    const nodes = Array.from(document.querySelectorAll('[data-oid]'))
+    const visible = nodes.filter((node) => {
+      const rect = node.getBoundingClientRect()
+      return rect.width > 40 && rect.height > 20
+    })
+    const containers = visible.filter(
+      (node) => node.getAttribute('data-source-kind') === 'container',
+    )
+    const isRoot = (node) =>
+      node === document.body ||
+      ['MAIN', 'BODY'].includes(node.tagName) ||
+      node.parentElement === document.body
+    const source =
+      containers.find(
+        (node) =>
+          !isRoot(node) && (node.textContent || '').includes('SubmitForm'),
+      ) || containers.find((node) => !isRoot(node))
+    const target =
+      containers.find(
+        (node) =>
+          node !== source &&
+          !isRoot(node) &&
+          !node.contains(source) &&
+          !source?.contains(node),
+      ) || containers.find((node) => node !== source && !node.contains(source))
+    if (!source || !target) return null
+    const rectOf = (node) => node.getBoundingClientRect()
+    const sourceRect = rectOf(source)
+    const targetRect = rectOf(target)
+    return {
+      source: {
+        oid: source.getAttribute('data-oid'),
+        tag: source.tagName.toLowerCase(),
+        x: sourceRect.left + sourceRect.width / 2,
+        y: sourceRect.top + 10,
+      },
+      target: {
+        oid: target.getAttribute('data-oid'),
+        tag: target.tagName.toLowerCase(),
+        x: targetRect.left + targetRect.width / 2,
+        y: targetRect.bottom - 8,
+      },
+    }
+  })
+  if (!geometry) fail('live 画布没有可跨父容器拖拽的候选节点')
+  log('direct drag geometry', JSON.stringify(geometry, null, 2))
+  const tree = await frame.evaluate(() => {
+    const lines = []
+    const walk = (node, depth) => {
+      if (node.nodeType !== 1) return
+      const oid = node.getAttribute?.('data-oid')
+      if (oid) {
+        lines.push(
+          `${'  '.repeat(depth)}${node.tagName.toLowerCase()} ${oid} ` +
+            `kind=${node.getAttribute('data-source-kind')} ` +
+            `text=${(node.textContent || '').trim().slice(0, 20)}`,
+        )
+      }
+      Array.from(node.children || []).forEach((child) =>
+        walk(child, depth + (oid ? 1 : 0)),
+      )
+    }
+    walk(document.body, 0)
+    return lines.join('\n')
+  })
+  log('live DOM tree\n' + tree)
+  await page.evaluate(() => {
+    window.__vibeDragEvents = []
+    window.addEventListener('message', (event) => {
+      const data = event.data
+      if (data && data.channel === 'vibe-inspect') {
+        window.__vibeDragEvents.push(data)
+      }
+    })
+  })
+  await frame.evaluate(({ source, target }) => {
+    const sourceNode = document.querySelector(`[data-oid="${source.oid}"]`)
+    const targetNode = document.querySelector(`[data-oid="${target.oid}"]`)
+    if (!sourceNode || !targetNode) return
+    const dispatch = (node, type, x, y) => {
+      node.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          pointerType: 'mouse',
+          button: 0,
+          buttons: type === 'pointerup' ? 0 : 1,
+          clientX: x,
+          clientY: y,
+        }),
+      )
+    }
+    dispatch(sourceNode, 'pointerdown', source.x, source.y)
+    for (let step = 1; step <= 8; step += 1) {
+      const x = source.x + ((target.x - source.x) * step) / 8
+      const y = source.y + ((target.y - source.y) * step) / 8
+      dispatch(document, 'pointermove', x, y)
+    }
+    dispatch(document, 'pointerup', target.x, target.y)
+  }, geometry)
+  await page.waitForTimeout(1200)
+  const dragEvents = await page.evaluate(() =>
+    (window.__vibeDragEvents || []).map((item) => ({
+      type: item.type,
+      placement: item.payload?.placement,
+      sourceOid: item.payload?.source?.oid,
+      rect: item.payload?.rect,
+    })),
+  )
+  log('drag events', JSON.stringify(dragEvents.slice(-6), null, 2))
+  const response = await waitForDirectResponse(20000)
+  log('direct drag response', response)
+  const toast = await page
+    .locator('.workspace-toast')
+    .allInnerTexts()
+    .catch(() => [])
+  log('direct drag toast', toast)
+  const dragEnd = [...dragEvents].reverse().find((item) => item.type === 'drag-end')
+  if (!dragEnd?.placement) {
+    fail(`跨父容器拖拽没有算出落点: ${JSON.stringify(dragEnd)}`)
+  }
+  if (!response) fail('跨父容器拖拽没有返回 Direct Ops 结果')
+  if (response.status !== 200) {
+    fail(`跨父容器拖拽失败: HTTP ${response.status} ${response.body}`)
+  }
+  let body = null
+  try {
+    body = JSON.parse(response.body)
+  } catch {
+    // 保留原始日志
+  }
+  if (body?.action !== 'MOVE_NODE' || body?.status !== 'SUCCEEDED') {
+    fail(`跨父容器拖拽未成功: ${response.body}`)
+  }
+  if (toast.some((text) => text.includes('没有找到可落位的父容器'))) {
+    fail('跨父容器拖拽仍然提示“没有找到可落位的父容器”')
+  }
+}
+
+let directResponses = []
+function waitForDirectResponse(timeout = 12000) {
+  const deadline = Date.now() + timeout
+  return (async () => {
+    while (Date.now() < deadline) {
+      if (directResponses.length) return directResponses.shift()
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+    return null
+  })()
+}
+
+async function diagnoseLiveCanvas(page, active) {
+  const frame = await frameOf(active.locator('.canvas-live-frame'))
+  const stats = await frame.evaluate(async () => {
+    const pick = (selector) => document.querySelectorAll(selector).length
+    const nodes = Array.from(document.querySelectorAll('[data-oid]'))
+    let map = null
+    let mapError = ''
+    try {
+      const response = await fetch('/vibe-source-map.json', {
+        cache: 'no-store',
+      })
+      map = await response.json()
+    } catch (error) {
+      mapError = String(error)
+    }
+    const panel = document.querySelector('[data-fullstack-panel]')
+    let panelModule = ''
+    try {
+      const response = await fetch('/src/fullstack-api.jsx', {
+        cache: 'no-store',
+      })
+      panelModule = await response.text()
+    } catch (error) {
+      panelModule = String(error)
+    }
+    return {
+      mapFiles: Object.keys(map?.files || {}),
+      panelModuleHasOid: panelModule.includes('data-oid'),
+      panelModuleSnippet: panelModule.slice(0, 200),
+      counts: {
+        oid: nodes.length,
+        nodeId: pick('[data-node-id]'),
+        sourceFile: pick('[data-source-file]'),
+        containers: pick('[data-source-kind="container"]'),
+      },
+      panel: panel
+        ? {
+            tag: panel.tagName.toLowerCase(),
+            oid: panel.getAttribute('data-oid'),
+            file: panel.getAttribute('data-source-file'),
+            source: panel.getAttribute('data-source'),
+            kind: panel.getAttribute('data-source-kind'),
+            innerOids: panel.querySelectorAll('[data-oid]').length,
+            innerElements: panel.querySelectorAll('*').length,
+            outer: panel.outerHTML.slice(0, 300),
+          }
+        : null,
+      sample: nodes.slice(0, 6).map((node) => ({
+        tag: node.tagName.toLowerCase(),
+        oid: node.getAttribute('data-oid'),
+        nodeId: node.getAttribute('data-node-id'),
+        file: node.getAttribute('data-source-file'),
+        source: node.getAttribute('data-source'),
+        kind: node.getAttribute('data-source-kind'),
+        text: (node.textContent || '').trim().slice(0, 24),
+      })),
+      mapNodes: Object.keys(map?.nodes || {}).length,
+      mapError,
+      bodyBackground: getComputedStyle(document.body).backgroundColor,
+      bodyHeight: document.body.scrollHeight,
+    }
+  })
+  log('live canvas stats', JSON.stringify(stats, null, 2))
+  const parentStats = await page.evaluate(() => ({
+    visualNodes: document.querySelectorAll('.vc-node').length,
+    liveFrames: document.querySelectorAll('.canvas-live-frame').length,
+    stages: document.querySelectorAll('.canvas-stage').length,
+    stageRects: Array.from(
+      document.querySelectorAll('.canvas-stage, .vc-canvas, .visual-canvas'),
+    ).map((node) => ({
+      className: node.className,
+      rect: node.getBoundingClientRect().toJSON(),
+    })),
+  }))
+  log('parent canvas stats', JSON.stringify(parentStats, null, 2))
+  await page.screenshot({
+    path: '/tmp/vibe-live-canvas-diagnose.png',
+    fullPage: true,
+  })
+  log('screenshot saved: /tmp/vibe-live-canvas-diagnose.png')
+  return frame
 }
 
 async function main() {
@@ -126,7 +451,22 @@ async function main() {
   const context = await browser.newContext({ viewport: { width: 1600, height: 1000 } })
   const page = await context.newPage()
   const pageErrors = []
+  directResponses = []
   page.on('pageerror', (error) => pageErrors.push(String(error)))
+  page.on('response', async (response) => {
+    if (!response.url().includes('/direct-ops/actions')) return
+    let body = ''
+    try {
+      body = await response.text()
+    } catch {
+      // 忽略无法读取的响应体
+    }
+    directResponses.push({
+      url: response.url(),
+      status: response.status(),
+      body,
+    })
+  })
 
   try {
     log('open workspace')
@@ -250,6 +590,22 @@ async function main() {
     if (!liveText.trim()) fail('live 画布正文为空')
     if ((await active.locator('.canvas-start-button').count()) !== 0) {
       fail('生成完成后画布仍停留在开始创建态')
+    }
+    const liveDocumentFrame = await frameOf(
+      active.locator('.canvas-live-frame'),
+    )
+    const panelCount = await liveDocumentFrame.evaluate(
+      () => document.querySelectorAll('[data-fullstack-panel]').length,
+    )
+    if (panelCount !== 0) {
+      fail('视觉 CodeGen 仍注入了无源码锚点的 FullstackDataPanel')
+    }
+    if (process.env.LIVE_DIAGNOSE === '1') {
+      await diagnoseLiveCanvas(page, active)
+    }
+    if (process.env.LIVE_DIRECT_OPS !== '0') {
+      await tryDirectDelete(page, liveDocumentFrame)
+      await tryDirectDrag(page, active)
     }
 
     log('reload workspace: state must survive')

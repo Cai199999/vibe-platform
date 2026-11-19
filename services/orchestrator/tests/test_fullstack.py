@@ -881,6 +881,37 @@ CREATE TABLE resumes (
         self.assertIn('"dev:vite": "vite"', patched_package)
         self.assertIn("server/index.js", bundle.files["scripts/dev.mjs"])
 
+    def test_visual_frontend_bundle_skips_unanchored_panel(self) -> None:
+        """Visual CodeGen 全栈模式不能注入没有源码锚点的旧数据面板。"""
+        main = (
+            "import React from 'react'\n"
+            "import { createRoot } from 'react-dom/client'\n"
+            "import App from './App.jsx'\n"
+            "createRoot(document.getElementById('root')).render(<App />)\n"
+        )
+        vite = (
+            "import { defineConfig } from 'vite'\n"
+            "export default defineConfig({\n  server: {\n    port: 5173,\n  },\n})\n"
+        )
+        package = '{"scripts": {"dev": "vite"}, "dependencies": {}}'
+
+        bundle = generate_frontend_bundle(
+            _contract(),
+            existing_main=main,
+            existing_vite=vite,
+            existing_package=package,
+            include_panel=False,
+        )
+
+        self.assertNotIn("src/fullstack-api.jsx", bundle.files)
+        self.assertNotIn("src/api-client.jsx", bundle.files)
+        self.assertNotIn("src/ai-workspace.jsx", bundle.files)
+        self.assertNotIn("src/main.jsx", bundle.files)
+        self.assertIn("scripts/dev.mjs", bundle.files)
+        self.assertIn("'/api'", bundle.files["vite.config.js"])
+        self.assertNotIn("FullstackDataPanel", bundle.summary)
+        self.assertIn("视觉 CodeGen", bundle.summary)
+
     def test_frontend_bundle_requires_react_main(self) -> None:
         with self.assertRaises(ValueError):
             generate_frontend_bundle(

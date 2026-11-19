@@ -82,6 +82,34 @@ function sourceMapNodeForOid(workdir, oid) {
   return map?.nodes?.[oid] || null
 }
 
+/**
+ * 按 codegen 的 data-node-id 反查源码文件。
+ *
+ * 生成工程 / AI 新增节点可能只带 data-node-id，没有 data-oid；此时
+ * oid 查不到地图、前端也没有 data-source-file。manifest 里节点的
+ * nodeId 是稳定事实，必须用它把“缺少目标文件”补回来。
+ */
+function sourceMapNodeForNodeId(workdir, nodeId) {
+  const value = String(nodeId || '').trim()
+  if (!value) return null
+  const map = loadSourceMap(workdir)
+  const nodes = map?.nodes || {}
+  for (const record of Object.values(nodes)) {
+    if (record && record.nodeId === value) return record
+  }
+  return null
+}
+
+/** 从 oid / marker / selector 中提取生成工程的 data-node-id。 */
+function nodeIdFromAnchor(oid, marker, selector) {
+  const direct = String(marker || '').trim()
+  if (direct.startsWith('nd_') || direct.startsWith('node_')) return direct
+  const oidValue = String(oid || '').trim()
+  if (oidValue.startsWith('oid_')) return oidValue.slice(4)
+  const match = /\[data-node-id="([^"]+)"\]/.exec(String(selector || ''))
+  return match ? match[1] : ''
+}
+
 function sourceMapCallSiteForOid(workdir, oid) {
   if (!oid) return null
   const map = loadSourceMap(workdir)
@@ -659,9 +687,18 @@ function resolveOne(anchor, parser, workdir) {
   const callSite = sourceMapCallSiteForOid(workdir, callSiteOid)
   // source map 是构建期事实：callSite / oid 命中时文件以地图为准，
   // 不被旧 file:line 覆盖；地图缺失时才退回前端携带的 file。
-  const file = String(
+  let file = String(
     (callSite && callSite.file) || (oidNode && oidNode.file) || anchor.file || '',
   ).trim()
+  if (!file) {
+    // 生成工程 / AI 新增节点可能只有 data-node-id：用 manifest 的
+    // nodeId 反查文件，避免直接判成“标注缺少目标文件”。
+    const nodeId = nodeIdFromAnchor(oid, anchor.marker, anchor.selector)
+    const mappedByNodeId = sourceMapNodeForNodeId(workdir, nodeId)
+    if (mappedByNodeId && mappedByNodeId.file) {
+      file = String(mappedByNodeId.file).trim()
+    }
+  }
   const result = {
     anchorId: anchor.anchorId,
     annotationId: anchor.annotationId,

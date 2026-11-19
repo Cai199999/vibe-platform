@@ -4400,8 +4400,15 @@ def generate_frontend_bundle(
     existing_main: str | None,
     existing_vite: str | None,
     existing_package: str | None,
+    include_panel: bool = True,
 ) -> GeneratedBundle:
-    """生成 API 面板、开发启动脚本，并注入 main.jsx / vite / package。"""
+    """生成 API 面板、开发启动脚本，并注入 main.jsx / vite / package。
+
+    ``include_panel=False`` 供 Visual CodeGen 全栈模式使用：冻结的虚拟树
+    已经是唯一前端产物，旧模板里的 FullstackDataPanel / ApiErrorBanner
+    没有 data-oid / data-source，会被渲染成“看得见但编辑不了”的 React
+    组件，导致删除 / 拖拽失败。此时只保留 /api 代理与 dev 启动脚本。
+    """
     routes = contract.api_routes or []
     core = core_table_for_contract(contract)
     table = core.name
@@ -4433,21 +4440,20 @@ def generate_frontend_bundle(
         .replace("__DISPLAY_KEY__", display_key)
         .replace("__PAYLOAD_OBJECT__", payload_object)
     )
-    ai_enabled = bool(contract.include_ai_capability)
-    files: dict[str, str] = {
-        "src/fullstack-api.jsx": panel,
-        "src/api-client.jsx": _FRONTEND_API_CLIENT,
-        "scripts/dev.mjs": DEV_SCRIPT_TEMPLATE,
-    }
-    if ai_enabled:
-        files["src/ai-workspace.jsx"] = _FRONTEND_AI_WORKSPACE
+    ai_enabled = bool(contract.include_ai_capability) and include_panel
+    files: dict[str, str] = {"scripts/dev.mjs": DEV_SCRIPT_TEMPLATE}
+    if include_panel:
+        files["src/fullstack-api.jsx"] = panel
+        files["src/api-client.jsx"] = _FRONTEND_API_CLIENT
+        if ai_enabled:
+            files["src/ai-workspace.jsx"] = _FRONTEND_AI_WORKSPACE
 
     if not existing_main:
         raise ValueError(
             "沙盒缺少 src/main.jsx，无法挂载 FullstackDataPanel；"
             "MVP 全栈生成仅支持 React + Vite 项目"
         )
-    if "FullstackDataPanel" not in existing_main:
+    if include_panel and "FullstackDataPanel" not in existing_main:
         if "<App />" not in existing_main:
             raise ValueError("src/main.jsx 中未找到 <App />，无法注入全栈数据面板")
         patched_main = existing_main.replace(
@@ -4466,7 +4472,11 @@ def generate_frontend_bundle(
 
     # AI-Native：把对话 / 上传工作区挂载到应用壳；组件内部已有
     # Loading / Error / Success 三态与 data-source，生成后仍可圈选修改。
-    if ai_enabled and "AIWorkspace" not in files.get("src/main.jsx", existing_main):
+    if (
+        include_panel
+        and ai_enabled
+        and "AIWorkspace" not in files.get("src/main.jsx", existing_main)
+    ):
         base_main = files.get("src/main.jsx", existing_main)
         if "<App />" not in base_main:
             raise ValueError("src/main.jsx 中未找到 <App />，无法注入 AI 工作区")
@@ -4517,8 +4527,12 @@ def generate_frontend_bundle(
     return GeneratedBundle(
         files=files,
         summary=(
-            f"挂载 {entity} 数据面板，/api 代理到 {base}"
-            + ("，含 AI 对话与文件分析界面" if ai_enabled else "")
+            (
+                f"挂载 {entity} 数据面板，/api 代理到 {base}"
+                + ("，含 AI 对话与文件分析界面" if ai_enabled else "")
+            )
+            if include_panel
+            else f"配置 /api 代理到 {base}（视觉 CodeGen 不注入旧数据面板）"
         ),
         metadata={
             "collectionPath": base,
