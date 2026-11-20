@@ -74,20 +74,25 @@ def _output_phase_block(phase: str) -> str:
     if phase == "VISUAL_V0":
         return (
             "\n\n【VISUAL_V0 阶段 · 最高优先级】\n"
-            "- 本轮只产出 VisualDocument 虚拟原型，不设计后端；\n"
+            "- 本轮只产出前端结构与虚拟原型，不设计后端；\n"
             "- api_routes 必须是空数组，database_ddl 必须是空字符串，"
             "relations / component_interactions 必须是空数组；\n"
             "- 不要追问后端框架、数据库引擎、接口风格；这些留到"
             " BACKEND_BINDING 阶段；\n"
             "- contract_markdown 只描述视觉原型、页面结构与假设，"
             "禁止写 API / DDL / 数据库技术栈；\n"
-            "- visual_document 必须完整、合法、可离线编辑；\n"
-            "- 多路由应用必须输出 pages 数组（pageId 以 pg_ 开头、path、"
-            "title、root）；root 镜像第一页，页面节点 ID 全局唯一；\n"
-            "- 首页必须包含 header + main + 至少 3 个业务区块，使用真实文案"
-            "与示例数据，禁止全部占位；\n"
-            '- 页面跳转 interaction 使用 action="navigate"，targetPageId '
-            "指向 pages[].pageId。"
+            "- **visual_document 必须输出空对象 {}**：平台会根据 "
+            "frontend_routes / page_layout / components 确定性生成虚拟树；"
+            "禁止在 JSON 里重复输出整棵树，避免契约超出模型输出上限；\n"
+            "- frontend_routes / page_layout / components 必须完整描述页面："
+            "首页包含 header + main + 至少 3 个业务区块，components 写清名称、"
+            "区域、角色与真实文案 / 示例数据，禁止全部占位；\n"
+            "- 多路由应用把页面写进 frontend_routes；V0 确定性骨架先渲染首页，"
+            "其余页面进入画布后补充；\n"
+            "- 页面跳转 interaction 使用 action=\"navigate\"，targetPageId "
+            "指向 frontend_routes 中的页面 path；\n"
+            "- 输出预算：contract_markdown ≤ 1200 字，components ≤ 12 项，"
+            "frontend_routes ≤ 5 项，page_layout ≤ 6 项；禁止输出重复章节。"
         )
     if phase == "BACKEND_BINDING":
         return (
@@ -1360,13 +1365,47 @@ class DeepSeekArchitectLLM(ArchitectLLM):
         system += _engineering_standards_block()
         system += _changelog_block(context)
         human = _contract_human(context)
-        return self._generate_with_repair(
+        draft = self._generate_with_repair(
             task="architect_contract",
             system=system,
             human=human,
             json_schema=None,
             parse=lambda raw: _parse_contract_draft(_extract_json(raw)),
             label="契约",
+        )
+        return self._ensure_v0_visual(context, draft)
+
+    def _ensure_v0_visual(
+        self,
+        context: ArchitectContext,
+        draft: ContractDraft,
+    ) -> ContractDraft:
+        """V0 的虚拟树由确定性骨架生成，模型只输出结构字段。
+
+        让模型直接输出完整 VisualDocument 很容易在 8192 token 处被截断，
+        且布局字段一旦越界就会触发多轮修复。这里改为：
+          - 模型负责 frontend_routes / page_layout / components 等紧凑结构；
+          - 平台复用 ``build_visual_document_from_contract`` 生成合法虚拟树。
+        """
+        if context.output_phase != "VISUAL_V0":
+            return draft
+        visual = build_visual_document_from_contract(
+            title=context.project_name or "未命名页面",
+            page_layout=draft.page_layout,
+            components=draft.components,
+            project_id=context.project_id,
+            interactions=[],
+            api_routes=[],
+            frontend_routes=draft.frontend_routes,
+        )
+        return replace(
+            draft,
+            api_routes=[],
+            database_ddl="",
+            relations=[],
+            component_interactions=[],
+            tech_stack={},
+            visual_document=visual,
         )
 
     def revise_contract(
@@ -1418,7 +1457,9 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             f"校验反馈:\n{feedback[:3000]}"
         )
         raw = self._invoke("architect_contract", system, human)
-        return _parse_contract_draft(_extract_json(raw))
+        return self._ensure_v0_visual(
+            context, _parse_contract_draft(_extract_json(raw))
+        )
 
     def summarize_history(self, text: str, max_chars: int = 200) -> str:
         """用廉价模型把长对话压缩为核心需求与约束。"""
