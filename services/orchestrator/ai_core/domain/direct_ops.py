@@ -26,6 +26,10 @@ DirectActionKind = Literal[
     "MOVE_DATA_ITEM",
     "ADD_COMPONENT",
     "MOVE_NODE",
+    # Alt 自由定位：脱离流式布局，写 position:absolute + left/top。
+    "MOVE_FREE",
+    # 显式尺寸模式：Hug / Fill / Fixed，按父布局映射 Tailwind 类名。
+    "SET_SIZE",
     # 冻结 VisualDocument 一次性编译为真实 React 工程。
     "VISUAL_CODEGEN",
 ]
@@ -188,7 +192,7 @@ class DirectActionPayload(CamelModel):
                     "sticky",
                 }:
                     raise ValueError("不允许直接设置绝对/固定定位")
-        if self.action in {"MOVE_NODE", "MOVE_DATA_ITEM"}:
+        if self.action in {"MOVE_NODE", "MOVE_DATA_ITEM", "MOVE_FREE"}:
             placement = self.target.placement or {}
             if not isinstance(placement, dict) or not (
                 placement.get("parentSelector")
@@ -198,10 +202,79 @@ class DirectActionPayload(CamelModel):
                 raise ValueError(
                     "MOVE_NODE 必须在 target.placement 中提供父容器定位信息"
                 )
+        if self.action == "MOVE_FREE":
+            placement = self.target.placement or {}
+            for key in ("freeLeft", "freeTop"):
+                raw = placement.get(key)
+                if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                    raise ValueError(f"MOVE_FREE 必须提供数字 placement.{key}")
+                if abs(float(raw)) > 20000:
+                    raise ValueError(f"MOVE_FREE 的 placement.{key} 超出范围")
+            for key in ("freeWidthPx", "freeHeightPx"):
+                raw = placement.get(key)
+                if raw in (None, ""):
+                    continue
+                if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                    raise ValueError(f"MOVE_FREE 的 placement.{key} 必须是数字")
+                if not (0 < float(raw) <= 4000):
+                    raise ValueError(
+                        f"MOVE_FREE 的 placement.{key} 必须在 1..4000 之间"
+                    )
+            mode = str(placement.get("mode") or "free")
+            if mode != "free":
+                raise ValueError("MOVE_FREE 的 placement.mode 必须是 free")
         if self.action == "ADD_COMPONENT":
             component_type = str(self.payload.get("componentType") or "").strip()
             if not component_type:
                 raise ValueError("ADD_COMPONENT 必须提供 payload.componentType")
+            size = self.payload.get("size")
+            if size is not None and not isinstance(size, dict):
+                raise ValueError("ADD_COMPONENT 的 payload.size 必须是对象")
+            if isinstance(size, dict):
+                for key in ("widthPx", "heightPx"):
+                    value = size.get(key)
+                    if value in (None, ""):
+                        continue
+                    if isinstance(value, bool) or not isinstance(
+                        value, (int, float)
+                    ):
+                        raise ValueError(f"payload.size.{key} 必须是数字")
+                    if not (0 < float(value) <= 4000):
+                        raise ValueError(
+                            f"payload.size.{key} 必须在 1..4000 像素之间"
+                        )
+        if self.action == "SET_SIZE":
+            width = self.payload.get("width")
+            height = self.payload.get("height")
+            if not isinstance(width, dict) and not isinstance(height, dict):
+                raise ValueError("SET_SIZE 必须提供 payload.width 或 payload.height")
+            for axis_name, axis in (("width", width), ("height", height)):
+                if axis is None:
+                    continue
+                if not isinstance(axis, dict):
+                    raise ValueError(f"SET_SIZE 的 payload.{axis_name} 必须是对象")
+                mode = str(axis.get("mode") or "").strip().lower()
+                if mode not in {"hug", "fill", "fixed"}:
+                    raise ValueError(
+                        f"SET_SIZE 的 {axis_name}.mode 只能是 hug / fill / fixed"
+                    )
+                if mode == "fixed":
+                    raw = axis.get("value", axis.get("px"))
+                    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                        raise ValueError(
+                            f"SET_SIZE 的 {axis_name}.value 在 fixed 模式下必须是数字"
+                        )
+                    if not (0 < float(raw) <= 4000):
+                        raise ValueError(
+                            f"SET_SIZE 的 {axis_name}.value 必须在 1..4000 之间"
+                        )
+            layout = self.payload.get("parentLayout")
+            if layout is not None and not isinstance(layout, dict):
+                raise ValueError("SET_SIZE 的 payload.parentLayout 必须是对象")
+            if isinstance(layout, dict):
+                display = str(layout.get("display") or "")
+                if len(display) > 32:
+                    raise ValueError("SET_SIZE 的 parentLayout.display 过长")
         return self
 
 

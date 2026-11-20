@@ -486,6 +486,11 @@ class ArchitectContract(CamelModel):
     frontend_routes: list[dict[str, Any]] = Field(default_factory=list)
     page_layout: list[dict[str, Any]] = Field(default_factory=list)
     components: list[dict[str, Any]] = Field(default_factory=list)
+    # 架构师阶段从 VisualDocument 抽取的组件默认样式（primary_button /
+    # secondary_button / login_button / input / card ...）。前端样式澄清
+    # 选中“和现有主按钮一致”时直接把它作为 reference，保证与最终显示的
+    # Tailwind 类一致，不再依赖用户额外点选。
+    component_styles: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # 双轨制项目模式：存量项目禁止 VisualDocument / 前端 CodeGen。
     project_mode: ProjectMode = "NEW_PROJECT"
     # 两阶段产出阶段：最终契约通常来自 BACKEND_BINDING。

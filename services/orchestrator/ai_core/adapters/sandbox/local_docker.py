@@ -65,6 +65,9 @@ GITIGNORE_CONTENT = (
     "*.sqlite\n"
     "*.sqlite3\n"
     "*.db\n"
+    # 构建期生成物：inspect_plugin 在每次 HMR 后重写，绝不能让它
+    # 把主工作树弄脏、阻塞 begin_draft 的 clean-tree 校验。
+    "vibe-source-map.json\n"
 )
 # 写入 .git/info/exclude：兼容本次升级前已创建、且 .gitignore 不含上述
 # 临时文件规则的旧沙盒，避免它们在下一次 checkpoint 时偶发失败。
@@ -80,6 +83,7 @@ GIT_EXCLUDE_CONTENT = (
     "*.sqlite\n"
     "*.sqlite3\n"
     "*.db\n"
+    "vibe-source-map.json\n"
 )
 FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 # 草稿 ID 由服务端生成，必须严格校验后才能拼进 shell 命令。
@@ -980,9 +984,21 @@ class LocalDockerSandbox(SandboxProvider):
 
             # 未提交的已跟踪文件不会进入 worktree；若存在，说明上一轮
             # 没有正常收口，继续创建草稿会让审批结果与用户所见不一致。
+            # 例外：vibe-source-map.json 是构建期生成物，inspect_plugin
+            # 会在每次 HMR 后重写它；它不属于用户/模型修改，必须排除在
+            # clean-tree 判定之外，否则下一次 Agent Run 会概率性被拒。
             code, output = self._exec(
                 container,
-                ["git", "status", "--porcelain", "--untracked-files=no"],
+                [
+                    "git",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=no",
+                    "--",
+                    ".",
+                    ":(exclude)vibe-source-map.json",
+                    ":(exclude)public/vibe-source-map.json",
+                ],
                 workdir=workdir,
             )
             if code != 0:
@@ -1974,6 +1990,7 @@ class LocalDockerSandbox(SandboxProvider):
             "delete_array_item",
             "move_array_item",
             "move_node",
+            "position_free",
         }:
             raise SandboxError(f"不支持的 AST 编辑操作: {operation or '(空)'}")
 
@@ -2004,6 +2021,12 @@ class LocalDockerSandbox(SandboxProvider):
             "fromIndex": edit.get("fromIndex"),
             "toIndex": edit.get("toIndex"),
             "style": dict(edit.get("style") or {}),
+            # Direct Ops POSITION_FREE 专用：节点相对父容器的像素坐标与
+            # 视觉尺寸；普通操作忽略。
+            "left": edit.get("left"),
+            "top": edit.get("top"),
+            "width": edit.get("width"),
+            "height": edit.get("height"),
         }
         # 同文件多编辑：服务端把前一条结果作为下一条输入，绝不接受模型传入。
         override = edit.get("contentOverride")

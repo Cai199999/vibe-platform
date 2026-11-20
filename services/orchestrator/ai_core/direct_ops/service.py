@@ -28,6 +28,12 @@ from ai_core.direct_ops.failure_router import (
     route_add_component,
 )
 from ai_core.direct_ops.scope_policy import ScopeDecision, decide_scope
+from ai_core.direct_ops.sizing import (
+    apply_add_size_context,
+    merge_size_classes,
+    normalize_axis,
+    parse_class_name,
+)
 from ai_core.direct_ops.source_sync import SourceSnapshotSync
 from ai_core.direct_ops.source_sync_queue import (
     ensure_source_sync_retry_worker,
@@ -741,9 +747,28 @@ class DirectOperationService:
                     )
             parent = (
                 self._resolve_parent(payload, anchor)
-                if payload.action == "MOVE_NODE"
+                if payload.action in {"MOVE_NODE", "MOVE_FREE"}
                 else None
             )
+            if payload.action == "MOVE_FREE":
+                if parent is None:
+                    raise DirectActionError(
+                        DirectErrorCode.UNSAFE_OPERATION,
+                        "没有找到自由定位的父容器，请重新拖拽落位。",
+                        status_code=409,
+                    )
+                if parent.get("file") != anchor.get("file"):
+                    raise DirectActionError(
+                        DirectErrorCode.UNSAFE_OPERATION,
+                        "自由定位只支持同一文件内的父容器，请改用 AI 修改。",
+                        status_code=409,
+                    )
+                if anchor.get("inMap"):
+                    raise DirectActionError(
+                        DirectErrorCode.UNSAFE_OPERATION,
+                        "循环项不支持自由定位，请使用流式排序。",
+                        status_code=409,
+                    )
             # 循环项在同一个循环容器内拖动 = 数据项重排，而不是移动模板。
             if (
                 payload.action == "MOVE_NODE"
@@ -1444,6 +1469,39 @@ class DirectOperationService:
                 "anchorRange": anchor.get("range") or {},
                 "style": dict(payload.payload.get("style") or {}),
             }
+        elif payload.action == "SET_SIZE":
+            width = normalize_axis(payload.payload.get("width"))
+            height = normalize_axis(payload.payload.get("height"))
+            if width is None and height is None:
+                raise DirectActionError(
+                    DirectErrorCode.ACTION_INVALID,
+                    "SET_SIZE 至少需要宽或高的尺寸模式",
+                    status_code=400,
+                )
+            has_attr, is_static, source_class = parse_class_name(
+                anchor.get("nodeSource")
+            )
+            if has_attr and not is_static:
+                raise DirectActionError(
+                    DirectErrorCode.ROUTE_TO_LLM,
+                    "该组件的 className 是动态表达式，请交给 AI 调整尺寸。",
+                    status_code=422,
+                )
+            # 源码是唯一事实：没有 className 就从空开始，绝不把运行时
+            # DOM 上的类名反写回源码（可能包含构建期注入的类）。
+            base_class = source_class if has_attr else ""
+            merged_class = merge_size_classes(
+                base_class,
+                width,
+                height,
+                payload.payload.get("parentLayout"),
+            )
+            edit = {
+                "operation": "update_props",
+                "file": file,
+                "anchorRange": anchor.get("range") or {},
+                "props": {"className": merged_class},
+            }
         elif payload.action == "MOVE_DATA_ITEM":
             map_source = anchor.get("mapSource") or {}
             if str(map_source.get("kind") or "") not in {
@@ -1556,6 +1614,33 @@ class DirectOperationService:
                 "insertPosition": position,
                 "insertIndex": index,
             }
+        elif payload.action == "MOVE_FREE":
+            if parent is None:
+                raise DirectActionError(
+                    DirectErrorCode.UNSAFE_OPERATION,
+                    "没有找到自由定位的父容器，请重新拖拽落位。",
+                    status_code=409,
+                )
+            placement = payload.target.placement or {}
+            try:
+                left = round(float(placement.get("freeLeft")), 2)
+                top = round(float(placement.get("freeTop")), 2)
+            except (TypeError, ValueError):
+                raise DirectActionError(
+                    DirectErrorCode.ACTION_INVALID,
+                    "自由定位缺少有效坐标",
+                    status_code=400,
+                ) from None
+            edit = {
+                "operation": "position_free",
+                "file": file,
+                "anchorRange": anchor.get("range") or {},
+                "targetRange": parent.get("range") or {},
+                "left": left,
+                "top": top,
+                "width": placement.get("freeWidthPx"),
+                "height": placement.get("freeHeightPx"),
+            }
         elif payload.action == "ADD_COMPONENT":
             component_type = str(payload.payload.get("componentType") or "")
             template = COMPONENT_TEMPLATES.get(component_type)
@@ -1584,6 +1669,16 @@ class DirectOperationService:
             jsx_code = apply_style_context(
                 template.jsx,
                 payload.payload.get("styleContext"),
+            )
+            # 尺寸契约：优先使用用户圈选区域的真实像素；没有圈选信息时
+            # 按组件类型给最小高度兜底，避免空 div 高度塌陷成“长条”。
+            size = payload.payload.get("size")
+            size = size if isinstance(size, dict) else {}
+            jsx_code = apply_add_size_context(
+                jsx_code,
+                component_type,
+                size.get("widthPx"),
+                size.get("heightPx"),
             )
             # 新节点必须立刻拥有可回解的身份：oid 给 SDK / source map，
             # node-id 给生成工程 resolver；两者都由本次动作唯一派生。
@@ -1732,6 +1827,11 @@ class DirectOperationService:
                 f"将 {component} 移动到 "
                 f"{placement.get('parentSelector') or placement.get('parentFile') or '新容器'}"
             )
+        elif payload.action == "MOVE_FREE":
+            summary = (
+                f"将 {component} 自由定位到 "
+                f"({placement.get('freeLeft')}, {placement.get('freeTop')})"
+            )
         elif payload.action == "ADD_COMPONENT":
             summary = (
                 f"在 {component} 中新增 "
@@ -1748,6 +1848,15 @@ class DirectOperationService:
             summary = f"更新 {component} 的样式类"
         elif payload.action == "UPDATE_STYLE":
             summary = f"更新 {component} 的 inline style"
+        elif payload.action == "SET_SIZE":
+            width = payload.payload.get("width") or {}
+            height = payload.payload.get("height") or {}
+            parts = [
+                f"{label} {axis.get('mode')}"
+                for label, axis in (("宽", width), ("高", height))
+                if isinstance(axis, dict) and axis.get("mode")
+            ]
+            summary = f"调整 {component} 的尺寸（{' / '.join(parts) or '无变化'}）"
         elif payload.action == "DELETE_DATA_ITEM":
             summary = (
                 f"删除 {component} 对应数据源的第 "

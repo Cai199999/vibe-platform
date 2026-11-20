@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from dataclasses import replace
@@ -34,6 +35,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from ai_core.a2a import A2A_LOG, build_feedback
 from ai_core.agent.events import EventSink, NullEventSink
 from ai_core.codegen.visual import (
     VisualCodegenError,
@@ -105,6 +107,26 @@ FULLSTACK_NODE_ORDER = [
     "SandboxRestart",
 ]
 FRONTEND_NODE_ORDER = ["FrontendCoder", "BuildVerifier", "SandboxRestart"]
+
+
+def _diagnostic_fingerprint(messages: Any) -> str:
+    """诊断指纹：同一组问题重复出现时，需要结合候选产物判断是否收敛。"""
+    joined = "\n".join(
+        str(item).strip() for item in (messages or ()) if str(item).strip()
+    )
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def _candidate_fingerprint(files: Any) -> str:
+    """被拦截候选产物的指纹；模型改了代码但诊断相同，仍允许再试一次。"""
+    if not isinstance(files, dict) or not files:
+        return ""
+    joined = "\n".join(
+        f"{path}:{content}"
+        for path, content in sorted(files.items())
+        if isinstance(content, str)
+    )
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 # Supervisor 激活的专属专家子图：只跑与目标 Agent 相关的节点。
 BACKEND_NODE_ORDER = ["DBACoder", "BackendCoder", "BuildVerifier", "SandboxRestart"]
 DBA_NODE_ORDER = ["DBACoder", "SandboxRestart"]
@@ -232,6 +254,12 @@ class FullstackState(TypedDict, total=False):
     # Applier / 一致性诊断原文：下一次 BackendCoder 把这段错误反馈给 LLM。
     applier_feedback: list[str]
     applier_feedback_attempt: int
+    # 上一次 Applier 诊断指纹：连续两次完全一致说明模型没有改到根因，
+    # 再重试也不会收敛，直接升级给 Architect 复核契约。
+    applier_fingerprint: str
+    # 上一次被拦截候选产物的指纹；诊断相同但产物变了，仍允许再迭代一次，
+    # 避免把“模型正在逐步修”误判成死循环。
+    applier_candidate_fingerprint: str
     # 上一轮被 Applier 拦截的候选产物。下一轮 LLM 修复以此为基线，
     # 避免每轮都从模板重置、反复引入同类缺陷。
     applier_previous_files: dict[str, str]
@@ -450,6 +478,26 @@ class FullstackGraphRunner:
             summary = bundle.summary
             self._emit_outputs("DBACoder", bundle, state)
             self._node_completed("DBACoder", state, summary, bundle.files, started)
+            # DBACoder → BackendCoder：持久化层重建完成后回执，后端可以
+            # 按新的 schema.core.json / DDL 重新绑定 ORM 与路由。
+            if (
+                state.get("needs_dba_repair")
+                or int(state.get("consistency_dba_repair_count") or 0) > 0
+            ):
+                self._publish_a2a(
+                    state,
+                    from_agent="DBACoder",
+                    to_agent="BackendCoder",
+                    kind="schema_ready",
+                    requested_action="REBIND_ORM",
+                    summary="DDL / ORM 已按契约重建，后端可重新绑定",
+                    evidence=sorted(bundle.files),
+                    contract_id=contract.contract_id,
+                    payload={
+                        "dbaFiles": sorted(bundle.files),
+                        "table": table,
+                    },
+                )
             return {
                 "dba_files": sorted(bundle.files),
                 "table": table,
@@ -511,7 +559,9 @@ class FullstackGraphRunner:
             try:
                 files = self._write_bundle(state, bundle)
             except ApplierSafetyBlock as exc:
-                blocked = self._handle_applier_block(state, exc, started)
+                blocked = self._handle_applier_block(
+                    state, exc, started, bundle.files
+                )
                 # 只有回 BackendCoder 重写时才保留本次候选，作为下一轮
                 # LLM 修复的基线；DBACoder 重建会重新生成持久化层。
                 if blocked.get("needs_backend_retry"):
@@ -691,6 +741,7 @@ class FullstackGraphRunner:
         state: FullstackState,
         exc: ApplierSafetyBlock,
         started: float,
+        candidate_files: Any = None,
     ) -> dict[str, Any]:
         """Applier 拦截后的归因与重试决策。
 
@@ -712,6 +763,25 @@ class FullstackGraphRunner:
             mode=options.mode,
             code_issues=report.messages(),
         )
+        # Applier → 具体 Coder：把可执行的诊断送到能修它的人手里。
+        # db.js 只能由 DBACoder 重建；index.js 才回 BackendCoder。
+        target_agent = "DBACoder" if db_only else "BackendCoder"
+        self._publish_a2a(
+            state,
+            from_agent="Applier",
+            to_agent=target_agent,
+            kind="schema_repair" if db_only else "code_repair",
+            requested_action="REGENERATE_DB" if db_only else "REPAIR_CODE",
+            summary=report.summary(),
+            evidence=report.messages(),
+            contract_id=contract.contract_id,
+            payload={
+                "attempt": retry_count,
+                "maxAttempts": MAX_APPLIER_REPAIRS,
+                "defectKind": audit.defect_kind,
+                "issues": [issue.to_dict() for issue in report.issues],
+            },
+        )
         self._emit(
             "fullstack.applier.blocked",
             {
@@ -728,6 +798,19 @@ class FullstackGraphRunner:
         if not audit.ok:
             if retry_count > 0:
                 FULLSTACK_METRICS.record_contract_misretry()
+            # BackendCoder → Architect：代码侧诊断已证明契约本身缺字段 /
+            # 缺 JOIN，继续重试代码只会重复失败，自动发起契约修订请求。
+            self._publish_a2a(
+                state,
+                from_agent="BackendCoder",
+                to_agent="Architect",
+                kind="contract_revision",
+                requested_action="REVISE_CONTRACT",
+                summary=audit.summary(),
+                evidence=report.messages(),
+                contract_id=contract.contract_id,
+                payload=audit.payload(),
+            )
             self._node_failed("BackendCoder", state, RuntimeError(audit.summary()))
             raise FullstackContractContradictionError(audit, node="BackendCoder")
         # 校验器本身不可用（缺 node / Babel）属于环境缺陷，重跑生成器
@@ -737,7 +820,73 @@ class FullstackGraphRunner:
         ):
             self._node_failed("BackendCoder", state, RuntimeError(report.summary()))
             raise FullstackBuildError("ORM AST 校验器不可用，Applier 拒绝落盘")
+        # 诊断与候选产物都完全一致 = 模型没有改到任何有效内容；再花一次
+        # LLM 重试也不会收敛。若候选变了（即使诊断相同），说明模型仍在
+        # 迭代，允许消耗第二轮重试。
+        fingerprint = _diagnostic_fingerprint(report.messages())
+        candidate_fingerprint = _candidate_fingerprint(candidate_files)
+        previous_fingerprint = str(state.get("applier_fingerprint") or "")
+        previous_candidate = str(
+            state.get("applier_candidate_fingerprint") or ""
+        )
+        if (
+            retry_count > 0
+            and previous_fingerprint == fingerprint
+            and previous_candidate == candidate_fingerprint
+        ):
+            self._publish_a2a(
+                state,
+                from_agent="BackendCoder",
+                to_agent="Architect",
+                kind="contract_review",
+                requested_action="REVIEW_CONTRACT",
+                summary=(
+                    "代码自愈未收敛：连续两次 Applier 诊断与候选产物完全一致，"
+                    "重试无法修复，请复核契约中的嵌套路由 / relations"
+                ),
+                evidence=report.messages(),
+                contract_id=contract.contract_id,
+                payload={
+                    "attempt": retry_count,
+                    "maxAttempts": MAX_APPLIER_REPAIRS,
+                    "fingerprint": fingerprint,
+                    "candidateFingerprint": candidate_fingerprint,
+                    "issues": [issue.to_dict() for issue in report.issues],
+                },
+            )
+            self._node_failed(
+                "BackendCoder",
+                state,
+                RuntimeError("Applier 诊断未收敛: " + report.summary()),
+            )
+            raise FullstackGenerationError(
+                "Applier AST 门禁诊断连续两次完全一致，代码自愈无法收敛："
+                + "；".join(report.messages()),
+                node="BackendCoder",
+            )
         if retry_count >= MAX_APPLIER_REPAIRS:
+            # 代码自愈 2/2 耗尽：把完整诊断升级给 Architect，让架构师判断
+            # 是契约字段/JOIN 仍不完整，还是需要调整契约约束；不能直接
+            # 把“后端工程师修不动”当成无解错误。
+            self._publish_a2a(
+                state,
+                from_agent="BackendCoder",
+                to_agent="Architect",
+                kind="contract_review",
+                requested_action="REVIEW_CONTRACT",
+                summary=(
+                    f"Applier AST 门禁连续拦截，代码自愈 {MAX_APPLIER_REPAIRS}/"
+                    f"{MAX_APPLIER_REPAIRS} 次耗尽：{report.summary()}"
+                ),
+                evidence=report.messages(),
+                contract_id=contract.contract_id,
+                payload={
+                    "attempt": retry_count,
+                    "maxAttempts": MAX_APPLIER_REPAIRS,
+                    "audit": audit.payload(),
+                    "issues": [issue.to_dict() for issue in report.issues],
+                },
+            )
             self._node_failed("BackendCoder", state, RuntimeError(report.summary()))
             raise FullstackGenerationError(
                 "Applier AST 门禁连续拦截，代码自愈耗尽："
@@ -789,6 +938,10 @@ class FullstackGraphRunner:
             ),
             "applier_feedback_attempt": 0 if db_only else next_count,
             "applier_previous_files": {},
+            # 记录本轮诊断 + 候选产物指纹；下一次两者都一字不差时
+            # 直接升级给 Architect，不再空转重试。
+            "applier_fingerprint": fingerprint,
+            "applier_candidate_fingerprint": candidate_fingerprint,
             "consistency_ok": False,
         }
 
@@ -970,6 +1123,19 @@ class FullstackGraphRunner:
                     state.get("run_id"),
                     [problem.code for problem in contract_audit.problems],
                 )
+                self._publish_a2a(
+                    state,
+                    from_agent="ConsistencyVerifier",
+                    to_agent="Architect",
+                    kind="contract_revision",
+                    requested_action="REVISE_CONTRACT",
+                    summary=contract_audit.summary(),
+                    evidence=[
+                        problem.message for problem in contract_audit.problems
+                    ],
+                    contract_id=contract.contract_id,
+                    payload=contract_audit.payload(),
+                )
                 self._node_failed(
                     "ConsistencyVerifier", state, RuntimeError(contract_audit.summary())
                 )
@@ -1122,6 +1288,27 @@ class FullstackGraphRunner:
                 MAX_ORM_REPAIRS,
                 state.get("run_id"),
             )
+            self._publish_a2a(
+                state,
+                from_agent="ConsistencyVerifier",
+                to_agent="DBACoder",
+                kind="schema_repair",
+                requested_action="REGENERATE_ORM",
+                summary=(
+                    "ORM 模型与迁移 DDL 字段错位，请按 DDL 重写持久化层"
+                ),
+                evidence=[
+                    issue.message
+                    for issue in report.issues
+                    if issue.fix_action == "REGENERATE_ORM"
+                ],
+                contract_id=contract.contract_id,
+                payload={
+                    "attempt": next_count,
+                    "maxAttempts": MAX_ORM_REPAIRS,
+                    "report": report.to_dict(),
+                },
+            )
             self._emit(
                 "fullstack.consistency.repair",
                 {
@@ -1168,6 +1355,25 @@ class FullstackGraphRunner:
                 next_count,
                 MAX_JOIN_REPAIRS,
                 state.get("run_id"),
+            )
+            self._publish_a2a(
+                state,
+                from_agent="ConsistencyVerifier",
+                to_agent="BackendCoder",
+                kind="route_repair",
+                requested_action="REPAIR_BACKEND_JOIN",
+                summary="JOIN 别名 / include 关系与契约不一致，请重建后端 JOIN",
+                evidence=[
+                    issue.message
+                    for issue in report.issues
+                    if issue.fix_action == "REPAIR_BACKEND_JOIN"
+                ],
+                contract_id=contract.contract_id,
+                payload={
+                    "attempt": next_count,
+                    "maxAttempts": MAX_JOIN_REPAIRS,
+                    "report": report.to_dict(),
+                },
             )
             self._emit(
                 "fullstack.consistency.repair",
@@ -1227,6 +1433,22 @@ class FullstackGraphRunner:
                 MAX_CONSISTENCY_REPAIRS,
                 state.get("run_id"),
             )
+            self._publish_a2a(
+                state,
+                from_agent="ConsistencyVerifier",
+                to_agent="BackendCoder",
+                kind="route_repair",
+                requested_action="ADD_BACKEND_ROUTE",
+                summary=f"前端请求缺失 {len(missing_routes)} 条后端路由，请补齐",
+                evidence=[str(item) for item in missing_routes],
+                contract_id=contract.contract_id,
+                payload={
+                    "attempt": next_count,
+                    "maxAttempts": MAX_CONSISTENCY_REPAIRS,
+                    "missingRoutes": missing_routes,
+                    "report": report.to_dict(),
+                },
+            )
             self._emit(
                 "fullstack.consistency.repair",
                 {
@@ -1274,10 +1496,40 @@ class FullstackGraphRunner:
                 state.get("run_id"),
                 [problem.code for problem in final_audit.problems],
             )
+            self._publish_a2a(
+                state,
+                from_agent="ConsistencyVerifier",
+                to_agent="Architect",
+                kind="contract_revision",
+                requested_action="REVISE_CONTRACT",
+                summary=final_audit.summary(),
+                evidence=[problem.message for problem in final_audit.problems],
+                contract_id=contract.contract_id,
+                payload=final_audit.payload(),
+            )
             self._node_failed(
                 "ConsistencyVerifier", state, RuntimeError(final_audit.summary())
             )
             raise FullstackContractContradictionError(final_audit)
+        # 契约本身能通过审计，但代码侧的自愈次数已耗尽：把剩余差异交给
+        # Architect 复核契约约束是否有歧义，避免“无限重跑代码”。
+        self._publish_a2a(
+            state,
+            from_agent="ConsistencyVerifier",
+            to_agent="Architect",
+            kind="contract_review",
+            requested_action="REVIEW_CONTRACT",
+            summary=(
+                f"一致性问题自愈耗尽（{len(report.issues)} 处仍未解决）："
+                f"{report.summary()}"
+            ),
+            evidence=[issue.message for issue in report.issues],
+            contract_id=contract.contract_id,
+            payload={
+                "report": report.to_dict(),
+                "attempt": repair_count,
+            },
+        )
         self._node_failed("ConsistencyVerifier", state, ConsistencyError(report))
         raise FullstackConsistencyError(report)
 
@@ -1677,6 +1929,35 @@ class FullstackGraphRunner:
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         self._event_sink.emit(event_type, payload)
+
+    def _publish_a2a(
+        self,
+        state: FullstackState,
+        *,
+        from_agent: str,
+        to_agent: str,
+        kind: str,
+        requested_action: str,
+        summary: str,
+        evidence: Any = (),
+        contract_id: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """发布一条统一的 Agent-to-Agent 反馈并写入运行级日志。"""
+        feedback = build_feedback(
+            run_id=str(state.get("run_id") or ""),
+            from_agent=from_agent,
+            to_agent=to_agent,
+            kind=kind,
+            requested_action=requested_action,
+            summary=summary,
+            evidence=evidence if isinstance(evidence, (list, tuple)) else (evidence,),
+            contract_id=contract_id,
+            payload=payload,
+        )
+        item = A2A_LOG.publish(feedback)
+        self._emit("a2a.feedback", item)
+        return item
 
 
 __all__ = [

@@ -14,6 +14,57 @@ export function isVisualReferenceText(text) {
   return REFERENCE_INTENT_RE.test(String(text || ''))
 }
 
+/**
+ * 样式澄清里的“和现有主按钮一致”等 quick option 必须取真实 reference。
+ *
+ * 普通业务澄清的 quick option 追求一键提交；但样式选项的文案本身就是
+ * 指代式回答（“和…一致”），如果直接提交文本，Coder 拿不到主按钮的
+ * class / computed style，只能复刻颜色。这里只对 `style.*` 问题返回 true，
+ * 其余问题保持原有“一键提交”行为。
+ */
+export function shouldPickReference(questionId, value) {
+  return (
+    String(questionId || '').startsWith('style.') &&
+    isVisualReferenceText(value)
+  )
+}
+
+/** 样式 quick option → Architect 默认样式 key。 */
+export function styleDefaultKey(questionId, value) {
+  if (!String(questionId || '').startsWith('style.')) return ''
+  const text = String(value || '')
+  if (/次要|secondary|描边|幽灵|ghost|outline/i.test(text)) {
+    return 'secondary_button'
+  }
+  if (/登录|login|sign\s*in/i.test(text)) return 'login_button'
+  if (/主按钮|主色|primary|主要/i.test(text)) return 'primary_button'
+  if (/按钮|button/i.test(text)) return 'button'
+  return ''
+}
+
+/**
+ * Architect 默认样式 → 后端 VisualReference 契约。
+ *
+ * 字段形状与 buildVisualReference 保持一致；只是来源从“用户点选的 DOM”
+ * 变成 Architecture 阶段写入 VisualDocument 的真实 Tailwind 类。
+ */
+export function referenceFromComponentStyle(style, fallbackLabel = '默认组件样式') {
+  if (!style || typeof style !== 'object') return null
+  const classes = Array.isArray(style.classes)
+    ? style.classes.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+  if (!classes.length && !style.styles) return null
+  return {
+    kind: 'visual_reference',
+    label: style.label || fallbackLabel,
+    tag: style.tag || '',
+    classes: classes.slice(0, 60),
+    styles: { ...(style.styles || {}) },
+    source: style.source || null,
+    capturedAt: new Date().toISOString(),
+  }
+}
+
 /** SDK picked 载荷 → 后端 VisualReference 契约。 */
 export function buildVisualReference(payload) {
   if (!payload?.source?.file) return null

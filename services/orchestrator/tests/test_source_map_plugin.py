@@ -549,6 +549,83 @@ export default function App() {
         self.assertLess(content.index("name: 'C'"), content.index("name: 'A'"))
         self.assertLess(content.index("name: 'A'"), content.index("name: 'B'"))
 
+    def test_position_free_writes_absolute_and_parent_relative(self) -> None:
+        source = """export default function App() {
+  return (
+    <main className="page">
+      <h1>标题</h1>
+    </main>
+  )
+}
+"""
+        (self.root / "src" / "App.jsx").write_text(source, encoding="utf-8")
+        source_map = self._run_plugin()
+        main = next(
+            item for item in source_map["nodes"].values() if item["tag"] == "main"
+        )
+        heading = next(
+            item for item in source_map["nodes"].values() if item["tag"] == "h1"
+        )
+        main_anchor = self._resolve(main["oid"])
+        heading_anchor = self._resolve(heading["oid"])
+
+        edited = self._run_ast_edit(
+            {
+                "file": "src/App.jsx",
+                "operation": "position_free",
+                "anchorRange": heading_anchor["range"],
+                "targetRange": main_anchor["range"],
+                "left": 120,
+                "top": 40,
+                "width": 200,
+                "height": 60,
+            }
+        )
+
+        self.assertEqual(edited["status"], "OK", edited)
+        content = edited["content"]
+        self.assertIn('position: "absolute"', content)
+        self.assertIn('left: "120px"', content)
+        self.assertIn('top: "40px"', content)
+        self.assertIn('margin: 0', content)
+        self.assertIn('zIndex: 20', content)
+        self.assertIn('transform: "none"', content)
+        self.assertIn('width: "200px"', content)
+        self.assertIn('height: "60px"', content)
+        self.assertIn('position: "relative"', content)
+
+    def test_position_free_skips_parent_when_already_positioned(self) -> None:
+        source = """export default function App() {
+  return (
+    <main className="relative">
+      <h1>标题</h1>
+    </main>
+  )
+}
+"""
+        (self.root / "src" / "App.jsx").write_text(source, encoding="utf-8")
+        source_map = self._run_plugin()
+        main = next(
+            item for item in source_map["nodes"].values() if item["tag"] == "main"
+        )
+        heading = next(
+            item for item in source_map["nodes"].values() if item["tag"] == "h1"
+        )
+
+        edited = self._run_ast_edit(
+            {
+                "file": "src/App.jsx",
+                "operation": "position_free",
+                "anchorRange": self._resolve(heading["oid"])["range"],
+                "targetRange": self._resolve(main["oid"])["range"],
+                "left": 10,
+                "top": 10,
+            }
+        )
+
+        self.assertEqual(edited["status"], "OK", edited)
+        self.assertNotIn('position: "relative"', edited["content"])
+
     def test_multiple_call_sites_are_ordered_and_conditional_marked(self) -> None:
         (self.root / "src" / "UserCard.jsx").write_text(
             """export default function UserCard({ title }) {

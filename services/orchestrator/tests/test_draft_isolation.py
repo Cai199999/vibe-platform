@@ -142,6 +142,21 @@ class LocalDockerDraftLifecycleTest(unittest.TestCase):
         self.assertIn("未提交修改", str(ctx.exception))
         self.assertEqual(sandbox._drafts, {})
 
+    def test_dirty_check_excludes_generated_source_map(self) -> None:
+        """构建期 source map 重写不能阻塞下次 begin_draft。"""
+        sandbox, state = _fake_docker_sandbox()
+
+        sandbox.begin_draft("sbx_1")
+
+        status_call = next(
+            call
+            for call in state["calls"]
+            if "status --porcelain" in " ".join(call["argv"])
+        )
+        argv = status_call["argv"]
+        self.assertIn(":(exclude)vibe-source-map.json", argv)
+        self.assertIn(":(exclude)public/vibe-source-map.json", argv)
+
     def test_begin_draft_rejects_concurrent_draft_on_same_sandbox(self) -> None:
         sandbox, _state = _fake_docker_sandbox()
         sandbox.begin_draft("sbx_1")

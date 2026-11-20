@@ -54,6 +54,9 @@ export const EMPTY_FULLSTACK = {
   failureKind: null,
   needsClarification: false,
   clarification: null,
+  // A2A 反馈：Applier / ConsistencyVerifier → Coder / Architect，
+  // 以及 Architect 的契约确认回执。完整列表由事件与失败快照合并去重。
+  a2a: [],
   // 风险自适应门禁：L1 黄色告警 / L3 绿色通过徽标。
   qualityTier: null,
   qualityLabel: null,
@@ -156,6 +159,8 @@ export const EMPTY_ARCHITECT = {
   contract: null,
   citations: [],
   messages: [],
+  // Architect 流里的 A2A 回执：契约修订开始 / 契约确认后通知 BackendCoder。
+  a2a: [],
   sourceOrigin: null,
   error: null,
   submitting: false,
@@ -233,6 +238,27 @@ function appendMessage(messages, entry) {
   return [...messages, entry].slice(-80)
 }
 
+/**
+ * A2A 反馈按 feedbackId 去重并保留最近 30 条。
+ *
+ * 同一个反馈可能同时出现在 `a2a.feedback` 事件和 `fullstack.failed`
+ * 的 `a2aFeedback` 快照里；前端必须去重，否则错误卡片会重复展示。
+ */
+function mergeA2A(list, items) {
+  const next = Array.isArray(list) ? [...list] : []
+  const seen = new Set(
+    next.map((item) => item?.feedbackId).filter(Boolean),
+  )
+  const incoming = Array.isArray(items) ? items : items ? [items] : []
+  incoming.forEach((item) => {
+    if (!item || typeof item !== 'object') return
+    if (item.feedbackId && seen.has(item.feedbackId)) return
+    if (item.feedbackId) seen.add(item.feedbackId)
+    next.push(item)
+  })
+  return next.slice(-30)
+}
+
 function questionSummary(payload) {
   const questions = Array.isArray(payload?.questions) ? payload.questions : []
   if (questions.length === 0) return '需要补充一些关键信息后才能继续。'
@@ -269,6 +295,11 @@ export function reduceArchitect(state, event) {
   }
 
   switch (event.type) {
+    case 'a2a.feedback':
+      return {
+        ...base,
+        a2a: mergeA2A(state.a2a, payload),
+      }
     case 'architect.started':
       return {
         ...base,
@@ -597,6 +628,11 @@ function reduceFullstack(state, event) {
   }
 
   switch (event.type) {
+    case 'a2a.feedback':
+      return {
+        ...base,
+        a2a: mergeA2A(current.a2a, payload),
+      }
     case 'fullstack.started':
       return {
         ...base,
@@ -604,6 +640,8 @@ function reduceFullstack(state, event) {
         status: 'RUNNING',
         mode: payload.mode ?? current.mode ?? 'fullstack',
         starting: false,
+        // 新一轮生成从空的 A2A 列表开始，避免上一轮的契约请求残留。
+        a2a: [],
         sandboxId: payload.sandboxId ?? current.sandboxId,
         previewUrl: payload.previewUrl ?? current.previewUrl,
         qualityTier: payload.qualityTier ?? current.qualityTier ?? null,
@@ -751,6 +789,9 @@ function reduceFullstack(state, event) {
         error: payload.error || '全栈代码生成失败',
         errorCode: payload.errorCode ?? null,
         failureKind: payload.failureKind ?? null,
+        // 失败快照里带完整 A2A 记录（与 a2a.feedback 事件去重合并）。
+        a2a: mergeA2A(current.a2a, payload.a2aFeedback),
+
         qualityTier: payload.qualityTier ?? current.qualityTier ?? null,
         warnings: Array.isArray(payload.warnings) ? payload.warnings : current.warnings,
         needsClarification: Boolean(payload.needsClarification),

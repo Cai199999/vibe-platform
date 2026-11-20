@@ -7411,6 +7411,34 @@ body.is-viewport-panning * {
   font-size: 10px !important;
 }
 
+/* A2A 交互时间线：Applier / Coder / Architect 之间的诊断与回执。 */
+.architect-a2a {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 9px;
+  border: 1px dashed rgba(56, 189, 248, 0.35);
+  border-radius: 8px;
+  background: rgba(56, 189, 248, 0.06);
+  color: #cbd5e1;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.architect-a2a-title {
+  color: #bae6fd;
+  font-weight: 600;
+}
+
+.architect-a2a-item strong {
+  color: #e2e8f0;
+}
+
+.architect-a2a .architect-ghost {
+  align-self: flex-start;
+  margin-top: 2px;
+}
+
 .architect-fullstack-error .architect-ghost {
   align-self: flex-start;
   margin-top: 6px;

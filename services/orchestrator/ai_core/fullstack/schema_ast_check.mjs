@@ -578,15 +578,34 @@ function collectRelations(ast, bindings, errors, coreTable, coreColumns, related
 /**
  * 静态提取 Express 会话层实际使用的 JOIN 别名。
  *
- * Sequelize 的 include / 嵌套子资源查询全部依赖 ``as`` 别名：
+ * Sequelize 的 include / 关联查询全部依赖 ``as`` 别名：
  *  - ``listRelatedRecords(request.params.id, 'resumes', ...)``；
- *  - ``app.get('/api/v1/users/:id/resumes', ...)``；
+ *  - ``createRelatedRecord(..., 'resumes', ...)``；
  *  - ``{ include: [{ model, as: 'resumes' }] }``。
  *
  * 别名写错不会被语法检查发现，却会在运行期抛
  * ``resumes is not associated to users``；Applier 必须在落盘前拦截。
- * 因此这里只收集静态字符串，动态拼接一律交给静态性错误处理。
+ * 因此这里只收集**真正作为关联参数**的静态字符串；单纯的路由路径
+ * ``/users/:id/rewrite`` 是动作端点，不参与别名校验。
  */
+/** 路由处理函数是否真的调用了关联查询（而不是纯动作端点）。 */
+function handlerUsesRelations(node) {
+  if (!node) return false
+  let found = false
+  walk(node, (inner) => {
+    if (found || inner.type !== 'CallExpression') return
+    const callee = inner.callee
+    if (
+      callee.type === 'Identifier' &&
+      (callee.name === 'listRelatedRecords' ||
+        callee.name === 'createRelatedRecord')
+    ) {
+      found = true
+    }
+  })
+  return found
+}
+
 function collectJoinReferences(ast, bindings, coreTable, relations) {
   const nested = []
   const includes = []
@@ -627,6 +646,10 @@ function collectJoinReferences(ast, bindings, coreTable, relations) {
           addNested(readStatic(node.arguments[1]))
         }
       }
+      // 只把“处理函数确实使用关联查询”的 /:id/<segment> 路由段当成
+      // 别名。crawl / tailor / submit 这类纯动作端点同样使用该 URL 形状，
+      // 但处理函数不调用 listRelatedRecords / createRelatedRecord；
+      // 把它们误判成别名会让任何新业务动词都被门禁拦截。
       if (
         callee.type === 'MemberExpression' &&
         !callee.computed &&
@@ -634,10 +657,18 @@ function collectJoinReferences(ast, bindings, coreTable, relations) {
         ['get', 'post', 'put', 'patch', 'delete'].includes(callee.property.name)
       ) {
         const path = readStatic(node.arguments[0])
-        // 只接受 /:id/<segment> 形式的嵌套路径；segment 是子资源别名
-        // 还是动作端点（rewrite / submit）由 Python 侧按关系集合裁决。
         const match = path.match(/\/:([A-Za-z_][\w]*)\/([A-Za-z_][\w-]*)\/?$/)
-        if (match) addNested(match[2])
+        if (match) {
+          const handler = node.arguments[node.arguments.length - 1]
+          let target = handler
+          if (
+            handler?.type === 'Identifier' &&
+            bindings.has(handler.name)
+          ) {
+            target = bindings.get(handler.name)
+          }
+          if (handlerUsesRelations(target)) addNested(match[2])
+        }
       }
       // include 对象里的 as 别名：{ model, as: 'resumes' }
       for (const argument of node.arguments) {

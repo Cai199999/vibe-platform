@@ -60,6 +60,8 @@ function ProjectWorkspaceInner({
   dragSyncActive = false,
   // 批量拖拽草稿：数量 > 0 时显示悬浮操作条；保存中禁用全部按钮。
   layoutDraftCount = 0,
+  // Direct Ops 离线缓冲：删除 / 拖拽移动待提交数量。
+  directOpsCount = 0,
   // 视觉暂存的新增组件：只存在于前端，保存布局时才一次性写入代码。
   pendingAdditions = [],
   onRemovePendingAddition,
@@ -998,6 +1000,9 @@ function ProjectWorkspaceInner({
               onStartCreate={onStartCreate}
               onRetryBootstrap={onFrontendBootstrap}
               onOpenArchitect={onArchitectOpen}
+              // Architect 的 VisualDocument 默认组件样式；样式澄清
+              // “和现有主按钮一致”直接生成 reference，无需手动点选。
+              componentStyles={architectState?.contract?.componentStyles ?? null}
               annotations={annotations}
               onAnnotationAdd={onAnnotationAdd}
               onAnnotationIntentChange={onAnnotationIntentChange}
@@ -1127,7 +1132,9 @@ function ProjectWorkspaceInner({
 
         {/* 画布草稿条：位移与新增组件都只暂存在前端，
             点击【保存布局】时才合并成一次 BATCH_LAYOUT 写入代码。 */}
-        {(layoutDraftCount > 0 || pendingAdditions.length > 0) && (
+        {(layoutDraftCount > 0 ||
+          pendingAdditions.length > 0 ||
+          directOpsCount > 0) && (
           <div
             className={`layout-draft-bar has-additions ${
               layoutSaving ? 'is-saving' : ''
@@ -1147,13 +1154,15 @@ function ProjectWorkspaceInner({
                   {layoutSaving
                     ? '正在同步画布变更...'
                     : `📝 当前有 ${
-                        layoutDraftCount + pendingAdditions.length
-                      } 个未保存的组件变更`}
+                        layoutDraftCount +
+                        pendingAdditions.length +
+                        directOpsCount
+                      } 个未保存的画布变更`}
                 </strong>
                 <span>
                   {layoutSaving
-                    ? 'Agent 正在生成合并补丁，请稍候'
-                    : '保存后一次性写入代码，可继续在画布上调整'}
+                    ? '正在按顺序提交画布变更，请稍候'
+                    : '提交后按顺序写入代码，可继续在画布上调整'}
                 </span>
               </span>
             </div>
@@ -1196,7 +1205,11 @@ function ProjectWorkspaceInner({
                 onClick={onSaveLayout}
                 disabled={layoutSaving}
               >
-                {layoutSaving ? '同步中…' : '保存布局'}
+                {layoutSaving
+                  ? '同步中…'
+                  : directOpsCount > 0
+                    ? '提交修改'
+                    : '保存布局'}
               </button>
             </div>
           </div>
@@ -1204,7 +1217,8 @@ function ProjectWorkspaceInner({
 
         {dragSyncActive &&
           layoutDraftCount === 0 &&
-          pendingAdditions.length === 0 && (
+          pendingAdditions.length === 0 &&
+          directOpsCount === 0 && (
             <div className="canvas-sync-hint" role="status" aria-live="polite">
               <span className="mini-spinner" aria-hidden="true" />
               代码同步中...

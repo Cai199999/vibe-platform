@@ -7,11 +7,16 @@
  *   - MOVE_NODE 使用 inside_index 的“移动后最终序号”语义，
  *     同父容器内移动不会出现“超过子节点范围”或假成功；
  *   - 写回后 HMR 预览顺序变化，BFF 快照同步为同一顺序；
- *   - 未被移动的兄弟节点内容保持不变。
+ *   - 未被移动的兄弟节点内容保持不变；
+ *   - 拖拽期间源节点 position:fixed + stub 占位，stub 不拦截命中；
+ *   - 抓上半部向下拖仍按鼠标位置落位（MOVE_E2E_GRAB_RATIO=0.25）；
+ *   - 尺寸面板发出 Fill / Fixed 消息契约，SET_SIZE 写入 Tailwind 尺寸类；
+ *   - ADD_COMPONENT 接收圈选尺寸并写入初始宽高；
+ *   - Alt 拖拽发出 free placement，MOVE_FREE 写入 absolute + 父容器 relative。
  *
  * 运行：
  *   NODE_PATH=/tmp/vibe-e2e/node_modules \
- *   node scripts/direct_move_e2e.mjs
+ *   MOVE_E2E_GRAB_RATIO=0.25 node scripts/direct_move_e2e.mjs
  */
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -53,6 +58,9 @@ const WEB = process.env.WEB_URL || 'http://127.0.0.1:5173'
 const BFF = process.env.BFF_URL || 'http://127.0.0.1:8080'
 const WORK = process.env.MOVE_E2E_WORK || '/tmp/vibe-direct-move-e2e'
 const ZIP = path.join(WORK, 'project.zip')
+// 抓取点高度比例：0.5 = 正中；0.25 用于回归“抓上半部向下拖”时
+// 源节点自身 rect 不得再参与中点比较。
+const GRAB_RATIO = Number(process.env.MOVE_E2E_GRAB_RATIO || 0.5)
 const CHROME =
   process.env.CHROME_BIN ||
   path.join(
@@ -222,18 +230,21 @@ async function main() {
         )
       })
       // 拖段落本身到末尾：块级节点必须移动自身，而不是上溯到 main。
-      const dragGeom = await previewPage.evaluate((oid) => {
-        const node = document.querySelector(`[data-oid="${oid}"]`)
-        const rect = node.getBoundingClientRect()
-        const button = document.querySelector('button')
-        const buttonRect = button.getBoundingClientRect()
-        return {
-          startX: rect.left + rect.width / 2,
-          startY: rect.top + rect.height / 2,
-          endX: buttonRect.left + buttonRect.width / 2,
-          endY: buttonRect.bottom + 4,
-        }
-      }, paragraph.oid)
+      const dragGeom = await previewPage.evaluate(
+        ({ oid, ratio }) => {
+          const node = document.querySelector(`[data-oid="${oid}"]`)
+          const rect = node.getBoundingClientRect()
+          const button = document.querySelector('button')
+          const buttonRect = button.getBoundingClientRect()
+          return {
+            startX: rect.left + rect.width / 2,
+            startY: rect.top + rect.height * ratio,
+            endX: buttonRect.left + buttonRect.width / 2,
+            endY: buttonRect.bottom + 4,
+          }
+        },
+        { oid: paragraph.oid, ratio: GRAB_RATIO },
+      )
       await previewPage.mouse.move(dragGeom.startX, dragGeom.startY)
       await previewPage.mouse.down()
       await previewPage.mouse.move(dragGeom.endX, dragGeom.endY, { steps: 12 })
@@ -254,6 +265,27 @@ async function main() {
         null,
         { timeout: 5000 },
       )
+      // Onlook 式拖拽：源节点脱离文档流、原位置有 stub 占位，
+      // 且 stub 不能拦截 elementFromPoint。
+      const dragShell = await previewPage.evaluate((oid) => {
+        const node = document.querySelector(`[data-oid="${oid}"]`)
+        const stub = document.querySelector('[data-vibe-drag-stub="true"]')
+        return {
+          stub: Boolean(stub),
+          stubPointerEvents: stub
+            ? getComputedStyle(stub).pointerEvents
+            : '',
+          sourcePosition: node ? getComputedStyle(node).position : '',
+        }
+      }, paragraph.oid)
+      log('drag shell', JSON.stringify(dragShell))
+      if (!dragShell.stub) throw new Error('drag stub should exist')
+      if (dragShell.stubPointerEvents !== 'none') {
+        throw new Error('drag stub must not intercept hits')
+      }
+      if (dragShell.sourcePosition !== 'fixed') {
+        throw new Error('dragged node should be lifted out of flow')
+      }
       const hint = await previewPage.evaluate(
         ({ parentOid }) => {
           const toRect = (node) => node.getBoundingClientRect().toJSON()
@@ -286,11 +318,15 @@ async function main() {
         throw new Error(`drag hint line mismatch: ${JSON.stringify(hint)}`)
       }
       await previewPage.mouse.up()
-      const hintsAfterDrop = await previewPage.evaluate(
-        () => document.querySelectorAll('[data-vibe-drag-hint]').length,
-      )
-      if (hintsAfterDrop !== 0) {
+      const hintsAfterDrop = await previewPage.evaluate(() => ({
+        hints: document.querySelectorAll('[data-vibe-drag-hint]').length,
+        stubs: document.querySelectorAll('[data-vibe-drag-stub="true"]').length,
+      }))
+      if (hintsAfterDrop.hints !== 0) {
         throw new Error('drag hint should be cleared after drop')
+      }
+      if (hintsAfterDrop.stubs !== 0) {
+        throw new Error('drag stub should be removed after drop')
       }
       const dragEnd = await previewPage
         .waitForFunction(
@@ -325,6 +361,171 @@ async function main() {
         throw new Error(
           `sdk drag placement wrong: ${JSON.stringify(sdkPlacement)}`,
         )
+      }
+
+      // --- 任务三：Alt 自由定位的 SDK 消息契约 ---
+      await previewPage.keyboard.down('Alt')
+      const freeGeom = await previewPage.evaluate((oid) => {
+        const node = document.querySelector(`[data-oid="${oid}"]`)
+        const rect = node.getBoundingClientRect()
+        return {
+          startX: rect.left + rect.width / 2,
+          startY: rect.top + rect.height / 2,
+          endX: rect.left + rect.width / 2 + 90,
+          endY: rect.top + rect.height / 2 + 40,
+        }
+      }, heading.oid)
+      await previewPage.mouse.move(freeGeom.startX, freeGeom.startY)
+      await previewPage.mouse.down()
+      await previewPage.mouse.move(freeGeom.endX, freeGeom.endY, { steps: 10 })
+      await previewPage.mouse.up()
+      await previewPage.keyboard.up('Alt')
+      const freeEnd = await previewPage
+        .waitForFunction(
+          () => {
+            const events = (window.__vibeDragEvents || []).filter(
+              (item) => item.type === 'drag-end',
+            )
+            return events.length >= 2 ? events[events.length - 1] : null
+          },
+          null,
+          { timeout: 20000 },
+        )
+        .then((handle) => handle.jsonValue())
+      const freePlacement = freeEnd?.payload?.placement || {}
+      log('free drag payload', JSON.stringify({
+        free: freeEnd?.payload?.free,
+        mode: freePlacement.mode,
+        parentOid: freePlacement.parentOid,
+        left: freePlacement.freeLeft,
+        top: freePlacement.freeTop,
+        width: freePlacement.freeWidthPx,
+      }))
+      if (freeEnd?.payload?.free !== true) {
+        throw new Error('alt drag should mark free=true')
+      }
+      if (freePlacement.mode !== 'free') {
+        throw new Error('alt drag placement mode should be free')
+      }
+      if (freePlacement.parentOid !== main.oid) {
+        throw new Error('alt drag parent should be main')
+      }
+      if (
+        !Number.isFinite(freePlacement.freeLeft) ||
+        !Number.isFinite(freePlacement.freeTop) ||
+        !(Number(freePlacement.freeWidthPx) > 0)
+      ) {
+        throw new Error(
+          `alt drag coordinates invalid: ${JSON.stringify(freePlacement)}`,
+        )
+      }
+
+      // --- 任务二：尺寸面板 UI（Hug / Fill / Fixed）发出的消息契约 ---
+      await previewPage.evaluate(() => {
+        window.__vibeDragEvents = []
+        window.postMessage(
+          {
+            channel: 'vibe-inspect',
+            type: 'direct-mode',
+            enabled: true,
+            projectId: 'e2e',
+          },
+          '*',
+        )
+      })
+      await previewPage.waitForTimeout(80)
+      const sizeUi = await previewPage.evaluate(async (oid) => {
+        const node = document.querySelector(`[data-oid="${oid}"]`)
+        if (!node) return { ok: false, reason: 'node missing' }
+        node.dispatchEvent(
+          new MouseEvent('mouseover', { bubbles: true, cancelable: true }),
+        )
+        const waitFor = async (fn, timeout = 5000) => {
+          const deadline = Date.now() + timeout
+          while (Date.now() < deadline) {
+            const value = fn()
+            if (value) return value
+            await new Promise((resolve) => setTimeout(resolve, 50))
+          }
+          return null
+        }
+        const visible = (el) => Boolean(el) && el.style.display !== 'none'
+        const undo = await waitFor(() =>
+          Array.from(
+            document.querySelectorAll('[data-vibe-direct-ui]'),
+          ).find((el) => visible(el) && String(el.textContent).includes('撤回')),
+        )
+        if (!undo) return { ok: false, reason: 'direct mode not armed' }
+        const sizeButton = await waitFor(() =>
+          Array.from(
+            document.querySelectorAll('[data-vibe-direct-ui]'),
+          ).find(
+            (el) =>
+              el.tagName === 'BUTTON' &&
+              visible(el) &&
+              String(el.title || '').includes('调整尺寸'),
+          ),
+        )
+        if (!sizeButton) {
+          return {
+            ok: false,
+            reason: 'size button not visible',
+            nodeSource: node.getAttribute('data-source'),
+            oid: node.getAttribute('data-oid'),
+            uiCount: document.querySelectorAll('[data-vibe-direct-ui]').length,
+          }
+        }
+        sizeButton.click()
+        const panel = await waitFor(() => {
+          const node = document.querySelector(
+            '[data-vibe-size-panel="true"]',
+          )
+          return visible(node) ? node : null
+        })
+        if (!panel) return { ok: false, reason: 'size panel not visible' }
+        panel
+          .querySelector('[data-vibe-size-mode="fill"][data-axis="width"]')
+          .click()
+        panel
+          .querySelector('[data-vibe-size-mode="fixed"][data-axis="height"]')
+          .click()
+        const input = panel.querySelector(
+          '[data-vibe-size-value][data-axis="height"]',
+        )
+        input.value = '80'
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        panel.querySelector('[data-vibe-size-apply="true"]').click()
+        const event = await waitFor(() =>
+          (window.__vibeDragEvents || []).find(
+            (item) => item.type === 'direct-size-update',
+          ),
+        )
+        return {
+          ok: Boolean(event),
+          payload: event?.payload || null,
+        }
+      }, heading.oid)
+      log('size ui payload', JSON.stringify({
+        ok: sizeUi.ok,
+        width: sizeUi.payload?.width,
+        height: sizeUi.payload?.height,
+        parentDisplay: sizeUi.payload?.parentLayout?.display,
+        selector: sizeUi.payload?.source?.selector,
+      }))
+      if (!sizeUi.ok) {
+        throw new Error(`size panel failed: ${JSON.stringify(sizeUi)}`)
+      }
+      if (sizeUi.payload?.width?.mode !== 'fill') {
+        throw new Error('size panel width mode should be fill')
+      }
+      if (
+        sizeUi.payload?.height?.mode !== 'fixed' ||
+        Number(sizeUi.payload?.height?.value) !== 80
+      ) {
+        throw new Error('size panel height mode should be fixed 80')
+      }
+      if (sizeUi.payload?.source?.selector !== `[data-oid="${heading.oid}"]`) {
+        throw new Error('size panel target selector mismatch')
       }
     } finally {
       await previewPage.close()
@@ -421,6 +622,304 @@ async function main() {
     }
     const previewMs = Date.now() - previewStarted
 
+    // --- 任务二：SET_SIZE 后端闭环（Fill 宽 + Fixed 高）---
+    const sizeRevisionResponse = await fetch(
+      `${BFF}/api/v1/direct-ops/revision?projectId=${projectId}` +
+        `&sandboxId=${imported.sandboxId}`,
+    )
+    if (!sizeRevisionResponse.ok) {
+      throw new Error(`size revision failed: ${await sizeRevisionResponse.text()}`)
+    }
+    const sizeRevision = (await sizeRevisionResponse.json()).revision
+    const sizeActionId = `dact_size_${Date.now()}`
+    const sizeResponse = await fetch(`${BFF}/api/v1/direct-ops/actions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        directActionId: sizeActionId,
+        idempotencyKey: `${projectId}:${sizeActionId}`,
+        projectId,
+        sandboxId: imported.sandboxId,
+        tenantId: 'tenant_local',
+        baseRevision: sizeRevision,
+        action: 'SET_SIZE',
+        target: {
+          anchorId: 'anc_size_e2e',
+          oid: heading.oid,
+          selector: `[data-oid="${heading.oid}"]`,
+          file: 'src/App.jsx',
+        },
+        payload: {
+          width: { mode: 'fill' },
+          height: { mode: 'fixed', value: 80 },
+          parentLayout: { display: 'block', flexDirection: 'row' },
+        },
+        options: { source: 'FLOATING_TOOLBAR', dryRun: false },
+      }),
+    })
+    const sizeBody = await sizeResponse.json()
+    if (sizeResponse.status !== 200 || sizeBody.status !== 'SUCCEEDED') {
+      throw new Error(`direct size failed: ${JSON.stringify(sizeBody)}`)
+    }
+    let sizedSource = ''
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const response = await fetch(
+        `${BFF}/api/v1/project-sources/${projectId}?tenantId=tenant_local`,
+      )
+      if (response.ok) {
+        const body = await response.json()
+        sizedSource = body.files?.['src/App.jsx'] || ''
+        if (
+          sizedSource.includes('w-full') &&
+          sizedSource.includes('h-[80px]') &&
+          sizedSource.includes('标题一')
+        ) {
+          break
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    if (
+      !sizedSource.includes('w-full') ||
+      !sizedSource.includes('h-[80px]')
+    ) {
+      throw new Error(`SET_SIZE source not persisted: ${sizedSource}`)
+    }
+
+    // --- 任务一：ADD_COMPONENT 接收圈选尺寸并写入初始宽高 ---
+    const addRevisionResponse = await fetch(
+      `${BFF}/api/v1/direct-ops/revision?projectId=${projectId}` +
+        `&sandboxId=${imported.sandboxId}`,
+    )
+    if (!addRevisionResponse.ok) {
+      throw new Error(`add revision failed: ${await addRevisionResponse.text()}`)
+    }
+    const addRevision = (await addRevisionResponse.json()).revision
+    const addActionId = `dact_add_size_${Date.now()}`
+    const addResponse = await fetch(`${BFF}/api/v1/direct-ops/actions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        directActionId: addActionId,
+        idempotencyKey: `${projectId}:${addActionId}`,
+        projectId,
+        sandboxId: imported.sandboxId,
+        tenantId: 'tenant_local',
+        baseRevision: addRevision,
+        action: 'ADD_COMPONENT',
+        target: {
+          anchorId: 'anc_add_size_e2e',
+          oid: main.oid,
+          selector: `[data-oid="${main.oid}"]`,
+          file: 'src/App.jsx',
+        },
+        payload: {
+          componentType: 'Container',
+          size: { widthPx: 200, heightPx: 50 },
+        },
+        options: { source: 'FLOATING_TOOLBAR', dryRun: false },
+      }),
+    })
+    const addBody = await addResponse.json()
+    if (addResponse.status !== 200 || addBody.status !== 'SUCCEEDED') {
+      throw new Error(`direct add size failed: ${JSON.stringify(addBody)}`)
+    }
+    let addedSource = ''
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const response = await fetch(
+        `${BFF}/api/v1/project-sources/${projectId}?tenantId=tenant_local`,
+      )
+      if (response.ok) {
+        const body = await response.json()
+        addedSource = body.files?.['src/App.jsx'] || ''
+        if (
+          addedSource.includes('vibe-direct-container') &&
+          addedSource.includes('w-[200px]') &&
+          addedSource.includes('h-[50px]')
+        ) {
+          break
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    for (const marker of ['vibe-direct-container', 'w-[200px]', 'h-[50px]', 'min-h-[30px]']) {
+      if (!addedSource.includes(marker)) {
+        throw new Error(`ADD_COMPONENT size missing ${marker}: ${addedSource}`)
+      }
+    }
+
+    // --- 任务三：MOVE_FREE 后端闭环（absolute + 父容器 relative）---
+    const freeRevisionResponse = await fetch(
+      `${BFF}/api/v1/direct-ops/revision?projectId=${projectId}` +
+        `&sandboxId=${imported.sandboxId}`,
+    )
+    if (!freeRevisionResponse.ok) {
+      throw new Error(`free revision failed: ${await freeRevisionResponse.text()}`)
+    }
+    const freeRevision = (await freeRevisionResponse.json()).revision
+    const freeActionId = `dact_free_${Date.now()}`
+    const freeResponse = await fetch(`${BFF}/api/v1/direct-ops/actions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        directActionId: freeActionId,
+        idempotencyKey: `${projectId}:${freeActionId}`,
+        projectId,
+        sandboxId: imported.sandboxId,
+        tenantId: 'tenant_local',
+        baseRevision: freeRevision,
+        action: 'MOVE_FREE',
+        target: {
+          anchorId: 'anc_free_e2e',
+          oid: heading.oid,
+          selector: `[data-oid="${heading.oid}"]`,
+          file: 'src/App.jsx',
+          placement: {
+            parentSelector: `[data-oid="${main.oid}"]`,
+            parentOid: main.oid,
+            parentFile: 'src/App.jsx',
+            mode: 'free',
+            freeLeft: 120.5,
+            freeTop: 40,
+            freeWidthPx: 300,
+            freeHeightPx: 60,
+          },
+        },
+        payload: {},
+        options: { source: 'FLOATING_TOOLBAR', dryRun: false },
+      }),
+    })
+    const freeBody = await freeResponse.json()
+    if (freeResponse.status !== 200 || freeBody.status !== 'SUCCEEDED') {
+      throw new Error(`MOVE_FREE failed: ${JSON.stringify(freeBody)}`)
+    }
+    let freeSource = ''
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const response = await fetch(
+        `${BFF}/api/v1/project-sources/${projectId}?tenantId=tenant_local`,
+      )
+      if (response.ok) {
+        const body = await response.json()
+        freeSource = body.files?.['src/App.jsx'] || ''
+        if (
+          freeSource.includes('position: "absolute"') &&
+          freeSource.includes('position: "relative"') &&
+          freeSource.includes('left: "120.5px"')
+        ) {
+          break
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    for (const marker of [
+      'position: "absolute"',
+      'position: "relative"',
+      'left: "120.5px"',
+      'top: "40px"',
+      'width: "300px"',
+      'height: "60px"',
+      'transform: "none"',
+    ]) {
+      if (!freeSource.includes(marker)) {
+        throw new Error(`MOVE_FREE source missing ${marker}: ${freeSource}`)
+      }
+    }
+
+    // --- 离线缓冲：删除入队 -> 提交修改 -> 不重建 iframe，靠 HMR 生效 ---
+    let liveFrame = null
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      liveFrame = page.frames().find((item) => item.url().includes(host))
+      if (liveFrame) {
+        const exists = await liveFrame
+          .evaluate(() =>
+            Boolean(document.querySelector('.vibe-direct-container')),
+          )
+          .catch(() => false)
+        if (exists) break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    if (!liveFrame) throw new Error('workspace live frame not found')
+    const containerVisible = await liveFrame
+      .evaluate(() => Boolean(document.querySelector('.vibe-direct-container')))
+      .catch(() => false)
+    if (!containerVisible) {
+      throw new Error('added container not visible in workspace frame')
+    }
+    await liveFrame.evaluate(() => {
+      window.__vibeNoReloadMarker = 'buffer'
+    })
+    const deleteClicked = await liveFrame.evaluate(() => {
+      const node = document.querySelector('.vibe-direct-container')
+      if (!node) return false
+      node.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, cancelable: true }),
+      )
+      const deadline = Date.now() + 5000
+      return new Promise((resolve) => {
+        const timer = setInterval(() => {
+          const button = [
+            ...document.querySelectorAll('[data-vibe-direct-ui]'),
+          ].find(
+            (el) =>
+              el.tagName === 'BUTTON' &&
+              String(el.title || '').includes('删除组件') &&
+              el.style.display !== 'none',
+          )
+          if (button) {
+            clearInterval(timer)
+            button.click()
+            resolve(true)
+            return
+          }
+          if (Date.now() > deadline) {
+            clearInterval(timer)
+            resolve(false)
+          }
+        }, 50)
+      })
+    })
+    if (!deleteClicked) {
+      throw new Error('delete button not clickable in workspace frame')
+    }
+    const draftBar = page.locator('[data-layout-draft-bar]')
+    await draftBar.waitFor({ state: 'visible', timeout: 15000 })
+    const draftText = await draftBar.innerText()
+    if (!draftText.includes('未保存的画布变更')) {
+      throw new Error(`draft bar text wrong: ${draftText}`)
+    }
+    const saveLabel = await draftBar.locator('.layout-draft-save').innerText()
+    if (!saveLabel.includes('提交修改')) {
+      throw new Error(`buffered delete save label wrong: ${saveLabel}`)
+    }
+    await draftBar.locator('.layout-draft-save').click()
+    await draftBar.waitFor({ state: 'hidden', timeout: 60000 })
+    let bufferSource = ''
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      const response = await fetch(
+        `${BFF}/api/v1/project-sources/${projectId}?tenantId=tenant_local`,
+      )
+      if (response.ok) {
+        const body = await response.json()
+        bufferSource = body.files?.['src/App.jsx'] || ''
+        if (!bufferSource.includes('vibe-direct-container')) break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    if (bufferSource.includes('vibe-direct-container')) {
+      throw new Error(`buffered delete not persisted: ${bufferSource}`)
+    }
+    const noReloadMarker = await liveFrame
+      .evaluate(() => window.__vibeNoReloadMarker || '')
+      .catch(() => '')
+    log('buffered delete', {
+      persisted: true,
+      noReload: noReloadMarker === 'buffer',
+    })
+    if (noReloadMarker !== 'buffer') {
+      throw new Error('iframe was rebuilt after buffered delete (marker lost)')
+    }
+
     const result = {
       projectId,
       mainOid: main.oid,
@@ -429,6 +928,10 @@ async function main() {
       source,
       previewText: text,
       previewMs,
+      sizeApplied: sizedSource.includes('h-[80px]'),
+      addSized: addedSource.includes('w-[200px]'),
+      freeApplied: freeSource.includes('position: "absolute"'),
+      bufferDeleteNoReload: true,
       directTimings: directBody.timings,
       pageErrors,
     }

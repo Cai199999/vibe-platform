@@ -8,7 +8,11 @@ import {
 } from '../workspace/annotationActions.js'
 import {
   collectReferenceText,
+  formatReferenceComment,
   isVisualReferenceText,
+  referenceFromComponentStyle,
+  shouldPickReference,
+  styleDefaultKey,
 } from '../workspace/visualReference.js'
 import {
   buildPlacementPatch,
@@ -434,6 +438,8 @@ function AnnotationPopover({
   submitting,
   // 审批未决时禁止修改标注 / 发起新 Run，但聊天记录仍可查看。
   blocked = false,
+  // Architect 默认组件样式（primary_button / secondary_button ...）。
+  componentStyles = null,
   pending,
   pendingAction,
   active,
@@ -652,17 +658,34 @@ function AnnotationPopover({
     const overrides = { [questionId]: value }
     setAnswers((previous) => ({ ...previous, ...overrides }))
     if (answersAreComplete(overrides)) {
-      // 结构化 quick option 本身已经是服务端预置的确定性选项，
-      // 文案里即使出现“和现有主按钮一致”也不该再切到画布取色：
-      // 那会让“一键选择，立即继续”变成“还要再点一个组件”。
-      submitClarification('', overrides, { skipReference: true })
+      // 优先使用 Architect 在 VisualDocument 里定义的默认组件样式：
+      // “和现有主按钮一致”直接变成结构化 reference，与最终显示的
+      // Tailwind 类一致，无需用户再点选。没有默认样式时回退到取色。
+      const defaultKey = styleDefaultKey(questionId, value)
+      const defaultStyle =
+        defaultKey && componentStyles
+          ? componentStyles[defaultKey] || componentStyles.button
+          : null
+      const reference = referenceFromComponentStyle(
+        defaultStyle,
+        defaultKey === 'secondary_button'
+          ? '次要按钮'
+          : defaultKey === 'login_button'
+            ? '登录按钮'
+            : '主按钮',
+      )
+      submitClarification('', overrides, {
+        reference,
+        skipReference:
+          Boolean(reference) || !shouldPickReference(questionId, value),
+      })
     }
   }
 
   const submitClarification = (
     comment = replyText,
     overrides = {},
-    { skipReference = false } = {},
+    { skipReference = false, reference = null } = {},
   ) => {
     const replyValue = String(comment || '').trim()
     // 用户直接在主输入栏回复时，把它补进第一个缺失的必填问题；
@@ -709,6 +732,13 @@ function AnnotationPopover({
       })
       .filter(Boolean)
     const finalComment = injected ? '' : replyValue
+    // Architect 默认样式已经是结构化 reference：直接提交，无需再取色。
+    const referenceComment = reference
+      ? formatReferenceComment(reference)
+      : ''
+    const commentWithReference = [finalComment, referenceComment]
+      .filter(Boolean)
+      .join('；')
     // 指代式回答（“和登录按钮一样”）交给模型只会脑补样式：先冻结
     // 本轮答案，切换到画布取色模式，等 SDK 抓到真实类名后再提交。
     const referenceText = collectReferenceText(replyValue, payload)
@@ -716,6 +746,7 @@ function AnnotationPopover({
       referenceBypass?.annotationId === annotation.id &&
       referenceBypass?.text === referenceText
     if (
+      !reference &&
       !skipReference &&
       !pickingReference &&
       !bypassed &&
@@ -739,7 +770,8 @@ function AnnotationPopover({
       annotation.id,
       clarification,
       payload,
-      finalComment,
+      commentWithReference,
+      reference || undefined,
     )
     // 回答已进入 chatHistory，清空输入框准备下一轮追问。
     setReply('')
@@ -1228,6 +1260,9 @@ function CanvasStage({
   // 可视化选型：等用户点选参考组件时，画布保持 inspect 模式并显示提示。
   referencePick = null,
   referenceBypass = null,
+  // Architect 从 VisualDocument 抽取的组件默认样式；样式 quick option
+  // 可直接用它生成 reference，无需用户再点选主按钮。
+  componentStyles = null,
   onReferenceRequest,
   onReferenceCancel,
   onAnnotationRollback,
@@ -2883,6 +2918,7 @@ function CanvasStage({
                   clarificationPending={Boolean(clarification)}
                   referencePick={referencePick}
                   referenceBypass={referenceBypass}
+                  componentStyles={componentStyles}
                   onReferenceRequest={onReferenceRequest}
                   onReferenceCancel={onReferenceCancel}
                   clarification={

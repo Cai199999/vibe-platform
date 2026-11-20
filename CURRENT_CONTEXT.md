@@ -46,9 +46,19 @@ React+Vite → Java21 BFF → Python3.12 FastAPI/LangGraph → Docker 沙盒；�
 - 同父容器排序：拖到兄弟容器边缘按排序处理（共同父容器 + AST 缝隙），只有落在兄弟中央才嵌套；E2E 验证首位顺序按鼠标位置变化。
 - 回退根因：grid 只按 y 判定（横向位置被忽略）→ 按行/列阅读顺序；插件 oid 依赖兄弟序号，移动后身份漂移 → 用 data-*/id/name/key 稳定 oid；resolver 的 callSiteOid/file/range 不再覆盖节点自身 oid，组件定义内部移动/删除不再误判跨文件。
 - 循环项编辑：CodeGen repeat 包装层带 data-repeat-template/index；拖拽循环项自动转 MOVE_DATA_ITEM 重排静态数据数组，resolver 回传 instance 序号；E2E 验证列表项拖到首位 [丙,甲,乙] 源码与 HMR 一致。
+- 拖拽落位（Onlook 式）：拖拽开始即把源节点 `position:fixed` 脱离文档流，原位置放同尺寸 stub 占位；落点几何排除源节点与 stub，只用指针与剩余兄弟的中点/网格缝隙计算序号，修复“抓上半部向下拖永远回原位 / 自动吸到最近组件”。drag-end 后恢复文档流并保留 inline translate，仍由 drag-commit 在 HMR 后清零。
+- 新增组件尺寸契约：ADD_COMPONENT 接收圈选 `size.widthPx/heightPx`，写入 `w-[Npx] h-[Npx] min-h-[30px]`；无圈选时按类型兜底（Container 120 / Card 96 / 其他 30），`visual.css` 补 `.vibe-direct-*` 基础 min-height 与 padding，杜绝空 div 长条。
+- SET_SIZE 尺寸模式：画布悬浮工具栏提供 Hug / Fill / Fixed；后端按父容器 display/flex-direction 映射 `w-fit`、`w-full`、`flex-1 min-w-0`、`self-stretch`、`min-h-full`、`h-full`，先移除冲突尺寸类；动态 className 返回 `ROUTE_TO_LLM`。
+- Alt 自由定位：SDK 按住 Alt 拖拽跳过流式落点，按源节点视觉矩形与最近源码父容器算 `freeLeft/freeTop`；新增 `MOVE_FREE` + AST `position_free`，一次写节点 `position:absolute; left/top; width/height; transform:none; margin:0` 与父容器 `position:relative`；跨文件 / 循环项拒绝，仅该动作放行绝对定位，UPDATE_STYLE 仍禁止 `position:absolute`。
+- A2A 双向反馈：新增统一 `a2a.feedback` 事件与运行级日志；Applier/ConsistencyVerifier 把诊断回传 BackendCoder/DBACoder，契约矛盾或代码自愈 2/2 耗尽时自动向 Architect 发 `REVISE_CONTRACT/REVIEW_CONTRACT`；Architect 修订开始与契约确认时回传 BackendCoder；失败事件带完整 `a2aFeedback`，前端错误卡片展示交互时间线并可一键触发契约修订。
+- JOIN 别名校验收敛：只收集真正传给 `listRelatedRecords/createRelatedRecord/include.as` 的别名，`/:id/crawl` 等动作端点不再被误报；代码别名若来自契约嵌套路由但缺 relation，直接判 `CONTRACT_DEFECT`；诊断与候选产物同时与上一轮完全一致时短路重试并升级 Architect，避免 2/2 空转。
+- Direct Ops 离线缓冲：删除 / 拖拽移动先入队（SDK 乐观隐藏 / 保留 translate），点【提交修改】按入队顺序逐条提交，每条重新取 revision；成功后由 HMR 生效，不再逐条重建 iframe；【撤销】恢复隐藏节点与位移。缓冲与暂存布局共用同一保存动作，仍不改变各 Direct Op 后端逻辑。
+- 草稿/预览收敛：`begin_draft` 的 clean-tree 检查排除构建期生成物 `vibe-source-map.json`（`.gitignore` / `.git/info/exclude` 同步补充）；prepare 阶段失败时保留上一次有效 `sandboxId/previewUrl/commitHash`，不再把画布冲成空白。
+- 样式预设取色：`style.*` 澄清里的“和现有主按钮一致 / 和登录按钮一样”等 quick option 不再 `skipReference`，进入既有 reference 取色流程，Coder 获得真实 `tailwindClasses/computed style`；普通业务 quick option 仍一键提交。
+- 架构师默认样式：契约新增 `componentStyles`，确认时从 VisualDocument 用 CodeGen 的 `_tailwind_classes` 抽取 `primary_button/secondary_button/login_button/input...`；前端样式 quick option 优先直接生成结构化 reference（无需再点选），无默认时回退取色。修复 clarification answer 的 `reference` 在 projectActions 映射中被丢弃的问题。
 
 ## 最新验证
-前端 68 项 Vitest；Python 739 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除预览消失 257ms、刷新回灌 3.9s、跨文件 Props 命中 App.jsx 调用点且 UserCard.jsx 未改、Direct MOVE 由真实 SDK 拖段落算出 siblingIndex=2，源码与预览同步重排；拖动中候选父容器框与插入线几何断言通过，松手后提示清零。两阶段全链路 E2E PASS：V0 → 冻结 → BACKEND_BINDING 澄清 → 确认（无旧骨架入口）→ Visual CodeGen → live 画布 → 删除组件 + 跨父容器拖拽均 SUCCEEDED（HMR 后父容器已切换）→ 模拟前端工程师新增组件并被 Direct Ops 编辑生效 → 刷新回灌；call-site E2E 增加定义映射完成等待。
+前端 72 项 Vitest；Python 793 项全通过；BFF 23 项 Maven 测试；浏览器 E2E PASS：OID 4/4、删除预览消失 257ms、刷新回灌 3.9s、跨文件 Props 命中 App.jsx 调用点且 UserCard.jsx 未改、Direct MOVE 由真实 SDK 拖段落算出 siblingIndex=2，源码与预览同步重排；拖动中候选父容器框与插入线几何断言通过，松手后提示清零。两阶段全链路 E2E PASS：V0 → 冻结 → BACKEND_BINDING 澄清 → 确认（无旧骨架入口）→ Visual CodeGen → live 画布 → 删除组件 + 跨父容器拖拽均 SUCCEEDED（HMR 后父容器已切换）→ 模拟前端工程师新增组件并被 Direct Ops 编辑生效 → 刷新回灌；call-site E2E 增加定义映射完成等待。Direct MOVE E2E 新增上半部抓取回归：`MOVE_E2E_GRAB_RATIO=0.25` 向下拖到末尾仍得到 siblingIndex=2，拖拽中 stub 存在且 pointer-events:none。Direct MOVE E2E 追加尺寸闭环：尺寸面板发出 Fill/Fixed 消息，SET_SIZE 写入 `w-full h-[80px]`，ADD_COMPONENT 带圈选尺寸写入 `w-[200px] h-[50px] min-h-[30px]`；Alt 拖拽发出 `free:true + mode:free`，MOVE_FREE 写入节点 absolute 与父容器 relative。A2A：Applier→DBACoder / BackendCoder、Consistency→Coder、Coder→Architect（契约修订/复核）、Architect→BackendCoder（修订开始/契约确认）均有单测覆盖，失败事件携带 `a2aFeedback`。别名校验：动作端点不产生 JOIN 别名；契约嵌套路由缺 relation 判 CONTRACT_DEFECT；诊断+候选双指纹相同才短路重试。Direct MOVE E2E 追加离线缓冲：删除入队 → 提交修改 → 源码已删且 iframe marker 未丢（noReload=true），证明不再全量重建。草稿检查：真实沙盒中修改 `vibe-source-map.json` 后 raw status 为 M、带 exclude 的 status 为空，确认不再阻塞 begin_draft。
 
 ## 真假边界
 DeepSeek 真实调用；鉴权 Mock；BFF 仅源码快照持久化（Run/指标仍无持久化）；沙盒无 gVisor；未云端部署。

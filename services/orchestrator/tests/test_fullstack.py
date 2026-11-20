@@ -1656,6 +1656,18 @@ class GraphTests(unittest.TestCase):
             event for event in events if event.type == "fullstack.consistency.repair"
         ]
         self.assertEqual(repairs, [])
+        from ai_core.a2a import A2A_LOG
+
+        a2a = A2A_LOG.list_for_run("fsk_contract_contradiction")
+        revision = [
+            item
+            for item in a2a
+            if item["toAgent"] == "Architect"
+            and item["requestedAction"] == "REVISE_CONTRACT"
+        ]
+        self.assertTrue(revision, a2a)
+        self.assertEqual(revision[0]["fromAgent"], "ConsistencyVerifier")
+        self.assertIn("resumes/summary", revision[0]["payload"]["prompt"])
 
     def test_resume_assistant_business_actions_are_all_registered(self) -> None:
         """回归用户用例：抓取 / 改写 / 投递 / 对话四个业务动作必须独立对齐。"""
@@ -2016,6 +2028,121 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(result["applier_retry_count"], 1)
         # DBA 重建不需要把旧诊断塞给 LLM。
         self.assertEqual(result["applier_feedback"], [])
+        from ai_core.a2a import A2A_LOG
+
+        a2a = A2A_LOG.list_for_run("fsk_db_route")
+        self.assertTrue(
+            any(
+                item["fromAgent"] == "Applier"
+                and item["toAgent"] == "DBACoder"
+                and item["kind"] == "schema_repair"
+                for item in a2a
+            ),
+            a2a,
+        )
+
+    def test_applier_exhaustion_escalates_to_architect(self) -> None:
+        """代码自愈 2/2 耗尽后，必须把诊断升级给 Architect 复核契约。"""
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        runner = FullstackGraphRunner(sandbox, event_sink=RunEventBuffer("x"))
+        report = OrmSyntaxReport(
+            applicable=True,
+            multi_table=False,
+            issues=(
+                OrmDiagnostic(
+                    code="JOIN_ALIAS_MISMATCH",
+                    message="JOIN 引用了契约中不存在的别名",
+                    source="server/index.js",
+                ),
+            ),
+            tables=("app_records",),
+        )
+        state = {
+            "run_id": "fsk_applier_exhausted",
+            "contract": _master_detail_contract(),
+            "applier_retry_count": 2,
+        }
+        from ai_core.fullstack.graph import FullstackGenerationError
+
+        with self.assertRaises(FullstackGenerationError) as ctx:
+            runner._handle_applier_block(
+                state,
+                ApplierSafetyBlock(report),
+                time.monotonic(),
+            )
+        self.assertEqual(ctx.exception.node, "BackendCoder")
+
+        from ai_core.a2a import A2A_LOG
+
+        a2a = A2A_LOG.list_for_run("fsk_applier_exhausted")
+        review = [
+            item
+            for item in a2a
+            if item["fromAgent"] == "BackendCoder"
+            and item["toAgent"] == "Architect"
+        ]
+        self.assertTrue(review, a2a)
+        self.assertEqual(review[-1]["requestedAction"], "REVIEW_CONTRACT")
+        self.assertEqual(review[-1]["kind"], "contract_review")
+
+    def test_identical_diagnostics_short_circuit_retry(self) -> None:
+        """连续两次诊断一字不差时，不再浪费第二轮 LLM 修复。"""
+        sandbox = _MemorySandbox()
+        sandbox.files = _base_files()
+        runner = FullstackGraphRunner(sandbox, event_sink=RunEventBuffer("x"))
+        report = OrmSyntaxReport(
+            applicable=True,
+            multi_table=False,
+            issues=(
+                OrmDiagnostic(
+                    code="JOIN_ALIAS_MISMATCH",
+                    message="嵌套路由引用了不存在的 JOIN 别名：applications",
+                    source="server/index.js",
+                ),
+            ),
+            tables=("app_records",),
+        )
+        first_state = {
+            "run_id": "fsk_applier_fingerprint",
+            "contract": _master_detail_contract(),
+            "applier_retry_count": 0,
+        }
+        first = runner._handle_applier_block(
+            first_state,
+            ApplierSafetyBlock(report),
+            time.monotonic(),
+        )
+        fingerprint = first["applier_fingerprint"]
+        self.assertTrue(fingerprint)
+        self.assertEqual(first["applier_retry_count"], 1)
+
+        from ai_core.fullstack.graph import FullstackGenerationError
+
+        second_state = {
+            **first_state,
+            "applier_retry_count": 1,
+            "applier_fingerprint": fingerprint,
+        }
+        with self.assertRaises(FullstackGenerationError) as ctx:
+            runner._handle_applier_block(
+                second_state,
+                ApplierSafetyBlock(report),
+                time.monotonic(),
+            )
+        self.assertIn("无法收敛", str(ctx.exception))
+
+        from ai_core.a2a import A2A_LOG
+
+        a2a = A2A_LOG.list_for_run("fsk_applier_fingerprint")
+        review = [
+            item
+            for item in a2a
+            if item["toAgent"] == "Architect"
+            and item["requestedAction"] == "REVIEW_CONTRACT"
+        ]
+        self.assertTrue(review, a2a)
+        self.assertEqual(review[-1]["payload"]["fingerprint"], fingerprint)
 
     def test_second_repair_uses_previous_failed_candidate(self) -> None:
         """第二轮修复必须以“上一轮被拦截的产物”为基线，而不是重置模板。
@@ -2169,7 +2296,10 @@ class GraphTests(unittest.TestCase):
                     }
                 )
 
-        self.assertIn("Applier AST 门禁连续拦截", str(ctx.exception))
+        # 第一次模板 + 一次 LLM 修复失败后，第二次写入仍是同一诊断：
+        # 指纹短路不会再浪费第二轮 LLM，但同样必须报错而不是伪装修复。
+        self.assertIn("Applier AST 门禁", str(ctx.exception))
+        self.assertIn("无法收敛", str(ctx.exception))
         # 沙盒从未写入被拦截的 server/index.js。
         self.assertNotIn("server/index.js", sandbox.files)
         failed_events = [
@@ -2178,7 +2308,7 @@ class GraphTests(unittest.TestCase):
             if event.type == "fullstack.applier.llm_repair"
             and event.payload["status"] == "FAILED"
         ]
-        self.assertEqual(len(failed_events), 2)
+        self.assertEqual(len(failed_events), 1)
 
     def test_consistency_join_repair_passes_feedback_to_llm(self) -> None:
         """一致性检查发现 JOIN 关系错位时，同样把诊断交给 LLM。
@@ -2647,6 +2777,17 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(failed.payload["failureKind"], "CONTRACT")
         self.assertEqual(failed.payload["defectKind"], "CONTRACT_DEFECT")
         self.assertIn("metrics", failed.payload)
+        # 失败事件必须带完整 A2A 记录，前端才能直接展示“谁向架构师提出了
+        # 什么”，并一键触发契约修订。
+        a2a = failed.payload.get("a2aFeedback") or []
+        self.assertTrue(
+            any(
+                item["toAgent"] == "Architect"
+                and item["requestedAction"] == "REVISE_CONTRACT"
+                for item in a2a
+            ),
+            a2a,
+        )
         self.assertEqual(sandbox.verified, [])
 
     def test_nested_route_without_child_table_requires_contract_revision(
@@ -2881,6 +3022,98 @@ CREATE TABLE job_descriptions (
         self.assertFalse(
             [item for item in messages if "JOIN 别名" in item],
             messages,
+        )
+
+    def test_action_nested_route_is_not_join_defect(self) -> None:
+        """动作端点 /:id/crawl 不能被 Applier 当成 JOIN 别名误报。"""
+        ddl = """CREATE TABLE users (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL
+);
+CREATE TABLE job_descriptions (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  user_id BIGINT NOT NULL,
+  title VARCHAR(255) NOT NULL
+);"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(method="GET", path="/api/v1/users"),
+                ArchitectApiRoute(method="POST", path="/api/v1/users"),
+                ArchitectApiRoute(method="GET", path="/api/v1/users/:id"),
+                ArchitectApiRoute(
+                    method="GET", path="/api/v1/users/:id/job-descriptions"
+                ),
+            ],
+            databaseDdl=ddl,
+            relations=[
+                ArchitectTableRelation(
+                    parentTable="users",
+                    childTable="job_descriptions",
+                    foreignKey="user_id",
+                )
+            ],
+        )
+        dba = generate_dba_bundle(contract)
+        backend = generate_backend_bundle(
+            contract,
+            dba_schema=dba.files["server/schema.core.json"],
+        )
+        files = {**dba.files, **backend.files}
+        files["server/index.js"] += (
+            "\napp.post('/api/v1/users/:id/crawl', asyncHandler(async (request, response) => {\n"
+            "  response.json({ ok: true })\n"
+            "}))\n"
+        )
+        tables = {table.name: table.column_names for table in parse_ddl_tables(ddl)}
+
+        messages = check_orm_schema(
+            files,
+            table="users",
+            expected_columns=tables["users"],
+            expected_tables=tables,
+        )
+
+        self.assertFalse(
+            [item for item in messages if "JOIN 别名" in item],
+            messages,
+        )
+
+    def test_alias_from_contract_nested_route_is_contract_defect(self) -> None:
+        """代码使用的别名来自契约嵌套路由但缺 relation → CONTRACT_DEFECT。"""
+        from ai_core.fullstack.contract_audit import audit_contract
+
+        ddl = """CREATE TABLE users (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL
+);"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(method="GET", path="/api/v1/users"),
+                ArchitectApiRoute(method="POST", path="/api/v1/users"),
+                ArchitectApiRoute(method="GET", path="/api/v1/users/:id"),
+                ArchitectApiRoute(
+                    method="GET", path="/api/v1/users/:id/applications"
+                ),
+            ],
+            databaseDdl=ddl,
+        )
+        audit = audit_contract(
+            contract,
+            mode="fullstack",
+            code_issues=[
+                "server/index.js 嵌套路由引用了不存在的 JOIN 别名：applications"
+                "（可用：无）"
+            ],
+        )
+
+        self.assertFalse(audit.ok)
+        self.assertEqual(audit.defect_kind, "CONTRACT_DEFECT")
+        self.assertTrue(
+            any(
+                "applications" in problem.message
+                for problem in audit.problems
+            ),
+            audit.problems,
         )
 
 

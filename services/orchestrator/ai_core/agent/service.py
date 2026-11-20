@@ -2016,7 +2016,9 @@ class RunExecutionService:
                     "retryable": code
                     in {"SANDBOX_DOCKER_UNAVAILABLE", "INTERNAL_ERROR"},
                     "retryCount": 0,
-                    "sandboxId": None,
+                    # 尽量保留已知沙盒 ID；前端会据此保留上一次有效
+                    # previewUrl，避免 prepare 失败把画布清空。
+                    "sandboxId": active.request.sandbox_id or None,
                 },
                 envelope,
             ),

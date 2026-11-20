@@ -280,6 +280,108 @@ def _nested_resource_pairs(routes: Iterable[str]) -> list[tuple[str, str]]:
     return pairs
 
 
+_ALIAS_ISSUE = re.compile(
+    r"不存在的\s*JOIN\s*别名[：:]\s*([^\s（(]+)"
+)
+
+
+def _alias_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def _aliases_from_code_issues(code_issues: Iterable[str]) -> list[str]:
+    """从 Applier 诊断里提取“代码实际引用了、但 RELATIONS 没有”的别名。"""
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for message in code_issues:
+        for match in _ALIAS_ISSUE.finditer(str(message or "")):
+            alias = match.group(1).strip().strip("'\"")
+            key = _alias_key(alias)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            aliases.append(alias)
+    return aliases
+
+
+def _nested_route_segments(routes: Iterable[str]) -> set[str]:
+    """契约里所有 ``/:id/<segment>`` 的子段（归一化后）。"""
+    segments: set[str] = set()
+    for route in routes:
+        parts = [
+            segment
+            for segment in _normalize_path(route).split("/")
+            if segment
+        ]
+        for index, part in enumerate(parts):
+            if not part.startswith(":") or index + 1 >= len(parts):
+                continue
+            segments.add(_alias_key(parts[index + 1]))
+    return segments
+
+
+def _audit_alias_contract_gaps(
+    contract: ArchitectContract,
+    code_issues: Iterable[str],
+) -> list[ContractProblem]:
+    """把“代码引用了契约嵌套路由、但 RELATIONS 没有该关联”判为契约缺陷。
+
+    这是对 ``_audit_nested_routes`` 的补充：契约的嵌套路由可能使用单数
+    别名或不符合“复数集合”启发式，但 Applier 已经拿到了代码实际使用的
+    别名；只要该别名出现在契约的嵌套路由里、且 RELATIONS 没有它，就说明
+    重写代码无法收敛，必须回到 Architect 补 relation 或改路由。
+    """
+    aliases = _aliases_from_code_issues(code_issues)
+    if not aliases:
+        return []
+    declared = _nested_route_segments(
+        route.path for route in contract.api_routes or []
+    )
+    if not declared:
+        return []
+    tables = parse_ddl_table_columns(contract.database_ddl)
+    relations, _ = normalize_table_relations(
+        tables or {},
+        contract.relations,
+        derive_when_empty=True,
+    )
+    related: set[str] = set()
+    for relation in relations:
+        for value in (
+            relation.child_table,
+            relation.parent_table,
+        ):
+            key = _alias_key(value)
+            if key:
+                related.add(key)
+        # 父表在 Sequelize 里常用单数别名（direction / user）。
+        parent = str(relation.parent_table or "")
+        if parent.endswith("s"):
+            related.add(_alias_key(parent[:-1]))
+    problems: list[ContractProblem] = []
+    for alias in aliases:
+        key = _alias_key(alias)
+        if key in related or key not in declared:
+            continue
+        # 动作动词不是关联别名；只有集合型子资源才按契约缺陷处理。
+        if not _looks_like_collection(alias):
+            continue
+        problems.append(
+            ContractProblem(
+                code="missing_relation",
+                message=(
+                    f"契约的嵌套路由把 {alias} 当作子资源，但 relations 中"
+                    "没有对应关联；重写后端代码无法补出关系"
+                ),
+                hint=(
+                    f"在 relations 中声明 parentTable / childTable 与 {alias} "
+                    "的关联，或把该路由改成动作端点 / 顶层资源"
+                ),
+            )
+        )
+    return problems
+
+
 def _audit_nested_routes(
     contract: ArchitectContract,
     tables: dict[str, tuple[str, ...]],
@@ -504,9 +606,16 @@ def audit_contract(
     在归因为 ``CODE_DEFECT`` 时把证据一并回传，避免“契约没问题”变成
     无法解释的断言。
     """
+    issues = tuple(
+        str(item) for item in code_issues if str(item).strip()
+    )
     problems = [
         *_audit_database(contract, mode),
         *_audit_routes(contract, mode),
+        # 代码侧已经把“实际引用了哪些 JOIN 别名”带回来了：若该别名来自
+        # 契约声明的嵌套路由、但 RELATIONS 没有它，就是契约缺陷而不是
+        # 代码缺陷，避免把 BackendCoder 的重试预算浪费在无法收敛的修复上。
+        *_audit_alias_contract_gaps(contract, issues),
     ]
     # 去掉同一问题的重复项（例如交互与路由检查命中同一条路径）。
     unique: dict[tuple[str, str], ContractProblem] = {}
@@ -514,7 +623,7 @@ def audit_contract(
         unique.setdefault((problem.code, problem.message), problem)
     return ContractAudit(
         problems=tuple(unique.values()),
-        code_issues=tuple(str(item) for item in code_issues if str(item).strip()),
+        code_issues=issues,
     )
 
 

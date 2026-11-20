@@ -48,6 +48,31 @@ DDL_TABLES = {
 }
 
 
+class JoinAliasRouteTest(unittest.TestCase):
+    def test_action_nested_route_is_not_join_alias(self) -> None:
+        """crawl / tailor 这类动作端点不能因为 URL 形状被当成关联别名。"""
+        index = """
+app.post('/api/v1/directions/:id/crawl', asyncHandler(async (request, response) => {
+  response.json({ ok: true })
+}))
+"""
+        schema = analyze_js_files({"server/index.js": index})["server/index.js"]
+        self.assertEqual(schema.join_aliases, ())
+
+    def test_related_helper_alias_is_still_collected(self) -> None:
+        index = """
+app.get('/api/v1/directions/:id/jobDescriptions', asyncHandler(async (request, response) => {
+  const result = await listRelatedRecords(request.params.id, 'jobDescriptions', {
+    page: 1,
+    size: 10,
+  })
+  response.json(result)
+}))
+"""
+        schema = analyze_js_files({"server/index.js": index})["server/index.js"]
+        self.assertIn("jobDescriptions", schema.join_aliases)
+
+
 class SchemaAstTest(unittest.TestCase):
     def test_babel_ast_extracts_table_and_columns(self) -> None:
         result = analyze_js_files(

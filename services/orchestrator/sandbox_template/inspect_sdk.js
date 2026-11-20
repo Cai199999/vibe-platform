@@ -29,6 +29,11 @@
   // 直接拖拽布局：由父页面显式开启，避免普通浏览时点击按钮误触发位移。
   var dragArmed = false
   var dragState = null
+  // Onlook 式占位块：拖拽期间把源节点改成 position:fixed 脱离文档流，
+  // 原位置用 stub 占住，避免兄弟节点回流后污染落点几何计算。
+  var dragStub = null
+  var dragStubParent = null
+  var DRAG_STUB_ATTR = 'data-vibe-drag-stub'
   // 拖拽中的候选父容器高亮 + 插入线（Onlook 式实时落点预览）。
   var dragHint = null
   // token -> {node, startTranslate, selector}；成功提交后由父页面清理。
@@ -1525,10 +1530,20 @@
     for (var index = 0; index < order.length; index += 1) {
       if (!byOid[order[index]]) return null
     }
-    var entries = order.map(function (childOid) {
+    // 落点几何只看“移除源节点后”的兄弟列表：源节点无论仍在 DOM
+    // （absolute）还是已 fixed 成浮层，都不能参与中点比较，否则判断结果
+    // 会退化成“抓取点在上半还是下半”，与鼠标位置无关。
+    var searchOrder = sourceOid
+      ? order.filter(function (childOid) {
+          return childOid !== sourceOid
+        })
+      : order
+    var entries = searchOrder.map(function (childOid) {
       var node = byOid[childOid]
       return { oid: childOid, node: node, rect: node.getBoundingClientRect() }
     })
+    // 只有源节点一个子节点：交给 stageSlotFor 的空子节点分支。
+    if (!entries.length) return null
     var layoutMode = stageLayoutMode(parentNode)
     var isRow = layoutMode === 'row'
     var point = isRow ? x : y
@@ -1547,13 +1562,7 @@
         }
       }
     }
-    // 视觉缝隙按“源节点仍在原位”的 DOM 顺序算；siblingIndex 则是
-    // 移动后（源节点已移除）的最终序号，两者不能混用。
-    var visualIndex = insertIndex
-    if (sourceOid) {
-      var sourceIndex = order.indexOf(sourceOid)
-      if (sourceIndex >= 0 && insertIndex > sourceIndex) insertIndex -= 1
-    }
+    // 序号已经是“源节点移除后”的最终位置，直接交给 MOVE_NODE。
     var anchorEntry =
       insertIndex < entries.length
         ? entries[insertIndex]
@@ -1561,8 +1570,8 @@
     // 插入线落在“视觉缝隙”：中间取后继节点的起始边，
     // 末尾取最后一个节点的结束边（列取 top/bottom，行取 left/right）。
     var lineRect
-    if (visualIndex < entries.length) {
-      var headRect = entries[visualIndex].rect
+    if (insertIndex < entries.length) {
+      var headRect = entries[insertIndex].rect
       lineRect =
         isRow || layoutMode === 'grid'
           ? {
@@ -1611,9 +1620,19 @@
     }
   }
 
-  function stageSlotFor(parentNode, children, x, y, sourceOid) {
+  function stageSlotFor(parentNode, children, x, y, sourceOid, sourceNode) {
     var astSlot = astSiblingSlot(parentNode, x, y, sourceOid)
     if (astSlot) return astSlot
+    // DOM 兜底同样排除源节点与拖拽占位块，索引即“移除源节点后”的序号。
+    var visibleChildren = []
+    for (var childIndex = 0; childIndex < children.length; childIndex += 1) {
+      var child = children[childIndex]
+      if (!child || !child.node) continue
+      if (sourceNode && child.node === sourceNode) continue
+      if (isDragStubNode(child.node)) continue
+      visibleChildren.push(child)
+    }
+    children = visibleChildren
     var parentRect = parentNode.getBoundingClientRect()
     if (!children.length) {
       var atTop = y < parentRect.top + parentRect.height / 2
@@ -2114,18 +2133,12 @@
         x,
         y,
         state.source && state.source.oid,
+        node,
       )
-      var index = slot.siblingIndex
-      if (slot.confidence !== 'ast_index') {
-        // stageSlotFor 的 siblingIndex 本身就是“插入位置”：
-        // before = 锚点下标，after = children.length。不能再对 after
-        // 额外 +1，否则生成工程（无 childOids、走 DOM 兜底）跨容器移动
-        // 会算出 index=n+1，命中 insertIndex 超出子节点范围。
-        if (slot.insertPosition === 'inside_start') index = 0
-        if (slot.insertPosition === 'inside_end') index = allChildren.length
-        var sourceIndex = allChildren.indexOf(node)
-        if (sourceIndex >= 0 && index > sourceIndex) index -= 1
-      }
+      // stageSlotFor 返回的 siblingIndex 已经基于“移除源节点后”的兄弟
+      // 列表：before = 锚点下标，after / inside_end = 过滤后的长度。
+      // 与 MOVE_NODE 的语义一致，不再做 after +1 / source -1 补偿。
+      var index = Math.max(0, Number(slot.siblingIndex) || 0)
       result.parentNode = parentNode
       result.parentSource = parentSource
       result.slot = slot
@@ -2187,6 +2200,8 @@
     if (!dragState) return
     var state = dragState
     dragState = null
+    // 取消时也要撤掉 stub 并把 position:fixed 还原，否则节点会留在浮层上。
+    restoreDragPresentation(state)
     applyInlineTranslate(
       state.node,
       state.baseX,
@@ -2890,15 +2905,251 @@
    * ------------------------------------------------------------------
    * 拖拽模式下左键按下即锁定一个 data-source 节点：
    *   - 位移超过 4px 才真正开始，避免把普通点击误判成拖拽；
-   *   - 拖拽中只改 inline `translate`，不碰 width / height / layout，
-   *     页面不会回流，手感与设计工具一致；
-   *   - 松手后保留 inline 位移等待后端 HMR；失败时父页面发
+   *   - 真正开始后把节点改成 position:fixed 脱离文档流，并在原位置插入
+   *     一个同尺寸 stub 占位（Onlook 的做法）。源节点不再参与兄弟几何，
+   *     落点只由剩余兄弟 + 指针位置决定，不会“自动吸到最近的组件”；
+   *   - 拖拽中仍只改 inline `translate` 跟随指针，stub 按落点移动；
+   *   - 松手后恢复文档流并保留 inline 位移等待后端 HMR；失败时父页面发
    *     drag-rollback，按 token 还原到拖拽前的位置。
    * 中键平移仍由上面的 pan-* 协议负责，两者互不干扰。
    */
+
+  /** 判断节点是否是拖拽占位块（不能参与父容器 / 兄弟命中）。 */
+  function isDragStubNode(node) {
+    return Boolean(
+      node &&
+        node.getAttribute &&
+        node.getAttribute(DRAG_STUB_ATTR) === 'true',
+    )
+  }
+
+  /** 拖拽期间的“真实兄弟”：排除源节点自身与占位块。 */
+  function dragSiblingList(parentNode, sourceNode) {
+    if (!parentNode || !parentNode.children) return []
+    var result = []
+    var children = parentNode.children
+    for (var index = 0; index < children.length; index += 1) {
+      var child = children[index]
+      if (!child) continue
+      if (sourceNode && child === sourceNode) continue
+      if (isDragStubNode(child)) continue
+      result.push(child)
+    }
+    return result
+  }
+
+  function captureDragInlineStyle(node) {
+    return {
+      position: node.style.position || '',
+      left: node.style.left || '',
+      top: node.style.top || '',
+      width: node.style.width || '',
+      height: node.style.height || '',
+      margin: node.style.margin || '',
+      boxSizing: node.style.boxSizing || '',
+      zIndex: node.style.zIndex || '',
+    }
+  }
+
+  function restoreDragInlineStyle(node, saved) {
+    if (!node || !node.style || !saved) return
+    node.style.position = saved.position
+    node.style.left = saved.left
+    node.style.top = saved.top
+    node.style.width = saved.width
+    node.style.height = saved.height
+    node.style.margin = saved.margin
+    node.style.boxSizing = saved.boxSizing
+    node.style.zIndex = saved.zIndex
+  }
+
+  /** 原位置占位：尺寸 / 外边距复制源节点，保证源节点脱离文档流后不回流。 */
+  function createDragStub(el) {
+    removeDragStub()
+    var parent = el && el.parentElement
+    if (!parent) return null
+    var rect = el.getBoundingClientRect()
+    var styles = window.getComputedStyle(el)
+    var stub = document.createElement('div')
+    stub.setAttribute(DRAG_STUB_ATTR, 'true')
+    var display = String(styles.display || '')
+    // 保持源节点的布局角色：inline 元素不能换成 block，否则占位会换行。
+    if (display.indexOf('inline') === 0 && display !== 'inline-block') {
+      display = 'inline-block'
+    }
+    if (display) stub.style.display = display
+    stub.style.width = round2(rect.width) + 'px'
+    stub.style.height = round2(rect.height) + 'px'
+    stub.style.margin = styles.margin
+    stub.style.boxSizing = 'border-box'
+    stub.style.borderRadius = styles.borderRadius
+    stub.style.flex = styles.flex
+    stub.style.alignSelf = styles.alignSelf
+    stub.style.gridColumn = styles.gridColumn
+    stub.style.gridRow = styles.gridRow
+    stub.style.pointerEvents = 'none'
+    stub.style.backgroundColor = 'rgba(56, 189, 248, 0.10)'
+    stub.style.boxShadow = 'inset 0 0 0 1px rgba(56, 189, 248, 0.38)'
+    parent.insertBefore(stub, el)
+    dragStub = stub
+    dragStubParent = parent
+    return stub
+  }
+
+  function removeDragStub() {
+    if (dragStub && dragStub.parentElement) {
+      dragStub.parentElement.removeChild(dragStub)
+    }
+    dragStub = null
+    dragStubParent = null
+  }
+
+  /**
+   * 让源节点脱离文档流，并冻结在拖拽开始时的视觉位置。
+   *
+   * 只有 static / relative 元素需要 fixed + stub；absolute / fixed 本来
+   * 就不占布局，直接排除出落点几何即可。已有 inline translate 属于上一
+   * 次未提交的预览位移，先清掉再由本次手势重新叠加，避免双倍偏移。
+   */
+  function liftDragNode(state) {
+    var node = state && state.node
+    if (!node || !node.style) return
+    if (state.dragLifted) return
+    state.dragLifted = true
+    state.savedInlineStyle = captureDragInlineStyle(node)
+    var styles = window.getComputedStyle(node)
+    var position = String(styles.position || 'static')
+    state.flowPreview = position === 'static' || position === 'relative'
+    if (!state.flowPreview) return
+    node.style.translate = ''
+    var before = node.getBoundingClientRect()
+    createDragStub(node)
+    node.style.position = 'fixed'
+    node.style.left = round2(before.left) + 'px'
+    node.style.top = round2(before.top) + 'px'
+    node.style.width = round2(before.width) + 'px'
+    node.style.height = round2(before.height) + 'px'
+    node.style.margin = '0'
+    node.style.boxSizing = 'border-box'
+    node.style.zIndex = '1000'
+    // 元素自身可能带 transform / 滚动，left/top 再按实际渲染矩形校正一次。
+    var after = node.getBoundingClientRect()
+    node.style.left = round2(before.left + before.left - after.left) + 'px'
+    node.style.top = round2(before.top + before.top - after.top) + 'px'
+  }
+
+  /** 松手 / 取消：撤掉 stub，把源节点放回文档流（translate 由调用方接管）。 */
+  function restoreDragPresentation(state) {
+    removeDragStub()
+    if (state && state.node && state.savedInlineStyle) {
+      restoreDragInlineStyle(state.node, state.savedInlineStyle)
+      state.savedInlineStyle = null
+    }
+  }
+
+  /**
+   * Alt 自由定位：按“源节点当前视觉矩形 - 最近源码容器矩形”计算
+   * 相对父容器的 left/top，并带上视觉宽高，避免转成 absolute 后收缩。
+   *
+   * 父容器取源节点当前所在的最近源码容器（不做跨容器重挂载）；写回时
+   * 后端会补 position: relative，并保留节点尺寸。
+   */
+  function buildFreePlacement(state, node) {
+    if (!node || !node.parentElement) return null
+    var parentNode = containerParentOf(node)
+    if (!parentNode) {
+      var fallback = stageParentOf(node.parentElement)
+      parentNode = fallback && fallback.node ? fallback.node : null
+    }
+    if (!parentNode || parentNode === node || node.contains(parentNode)) {
+      return null
+    }
+    var parentSource = readSource(parentNode)
+    if (
+      !parentSource ||
+      !hasSourceAnchor(parentSource) ||
+      !parentSource.selector ||
+      !parentSource.file
+    ) {
+      return null
+    }
+    var nodeRect = node.getBoundingClientRect()
+    var parentRect = parentNode.getBoundingClientRect()
+    var parentStyle = window.getComputedStyle(parentNode)
+    var borderLeft = parseFloat(parentStyle.borderLeftWidth) || 0
+    var borderTop = parseFloat(parentStyle.borderTopWidth) || 0
+    return {
+      parentSelector: parentSource.selector,
+      parentOid: parentSource.oid || '',
+      parentCallSiteOid: parentSource.callSiteOid || '',
+      parentFile: parentSource.file,
+      parentLine: parentSource.line,
+      parentColumn: parentSource.column,
+      parentComponent: parentSource.component,
+      parentInstance: parentSource.instance,
+      parentInstanceCount: parentSource.instanceCount,
+      mode: 'free',
+      freeLeft: round2(nodeRect.left - parentRect.left - borderLeft),
+      freeTop: round2(nodeRect.top - parentRect.top - borderTop),
+      freeWidthPx: round2(nodeRect.width),
+      freeHeightPx: round2(nodeRect.height),
+      parentPosition: String(parentStyle.position || 'static'),
+    }
+  }
+
+  /**
+   * 把 stub 移到最后一帧的落点缝隙。
+   *
+   * 只在目标仍是原父容器时移动——跨容器会把两边布局同时搅乱，此时
+   * 保留原槽位、由插入线提示目标即可。索引来自真实兄弟列表（已排除
+   * 源节点与 stub），因此和写入源码的 siblingIndex 同义。
+   */
+  function positionDragStub(state, drop) {
+    if (!dragStub || !drop || !drop.parentNode) return false
+    if (drop.parentNode !== dragStubParent) return false
+    var siblings = dragSiblingList(drop.parentNode, state && state.node)
+    var index = Number(drop.placement && drop.placement.siblingIndex)
+    if (!Number.isFinite(index)) index = siblings.length
+    index = Math.max(0, Math.min(index, siblings.length))
+    var anchor = siblings[index] || null
+    if (
+      dragStub.parentElement === drop.parentNode &&
+      dragStub.nextSibling === anchor
+    ) {
+      return false
+    }
+    drop.parentNode.insertBefore(dragStub, anchor)
+    return true
+  }
+
   /** 按帧刷新拖拽位移与落点预览：父页面只需要最新位置。 */
   function flushDragMove(state) {
     if (!state || !state.node) return
+    // Alt 自由定位：不参与流式落点计算；stub 放回源节点的原始槽位，
+    // 页面布局保持稳定，节点本体继续用 fixed + translate 跟手。
+    if (state.altFree) {
+      if (
+        dragStub &&
+        dragStub.parentElement === dragStubParent &&
+        dragStub.nextSibling !== state.node
+      ) {
+        dragStubParent.insertBefore(dragStub, state.node)
+      }
+      clearDragHint()
+      state.lastRect = rectOf(state.node)
+      post('drag-move', {
+        token: state.token,
+        selector: state.selector,
+        source: state.source,
+        dx: state.dx,
+        dy: state.dy,
+        inlineX: state.baseX + state.dx,
+        inlineY: state.baseY + state.dy,
+        rect: state.lastRect,
+        free: true,
+      })
+      return
+    }
     var drop = computeDrop(
       state,
       state.node,
@@ -2906,8 +3157,22 @@
       state.pointerY,
     )
     // 只有能算出确定性 placement 时才画提示，避免“高亮了却不落位”。
-    if (drop.placement) drawDragHint(drop.parentNode, drop.slot)
-    else clearDragHint()
+    if (drop.placement) {
+      // stub 移动会让兄弟回流；插入线必须基于回流后的最新 rect，
+      // 否则用户会看到“线停在旧位置”。
+      if (positionDragStub(state, drop)) {
+        drop = computeDrop(
+          state,
+          state.node,
+          state.pointerX,
+          state.pointerY,
+        )
+      }
+      if (drop.placement) drawDragHint(drop.parentNode, drop.slot)
+      else clearDragHint()
+    } else {
+      clearDragHint()
+    }
     state.lastRect = rectOf(state.node)
     post('drag-move', {
       token: state.token,
@@ -2963,6 +3228,11 @@
         startPointerEvents: target.style.pointerEvents || '',
         frame: 0,
         lastRect: rectOf(target),
+        dragLifted: false,
+        flowPreview: false,
+        savedInlineStyle: null,
+        // Alt 自由定位：松手时写 position:absolute，而不是流式序号。
+        altFree: Boolean(event.altKey),
       }
       // 阻止浏览器把图片 / 链接解释成 HTML5 drag，但先不 preventDefault：
       // 用户只是单击时，按钮仍应收到正常 click。
@@ -2988,6 +3258,9 @@
         if (state.node && state.node.style) {
           state.node.style.pointerEvents = 'none'
         }
+        // Onlook 式：源节点脱离文档流 + 原位置 stub 占位，兄弟几何不再
+        // 被“跟着鼠标走的源节点”污染。
+        liftDragNode(state)
         try {
           window.getSelection().removeAllRanges()
         } catch (error) {
@@ -3011,6 +3284,7 @@
       state.dy = dy
       state.pointerX = event.clientX
       state.pointerY = event.clientY
+      state.altFree = Boolean(event.altKey)
       if (!state.node || !state.node.isConnected) {
         // HMR 可能整棵替换节点；新节点同样要退出命中测试。
         state.node = queryNode(state.selector)
@@ -3071,6 +3345,7 @@
       ? state.node
       : queryNode(state.selector)
     if (!node) {
+      removeDragStub()
       restoreDragPointerEvents(state)
       post('drag-cancel', {
         token: state.token,
@@ -3079,6 +3354,21 @@
       })
       settlePendingDragDisarm()
       return
+    }
+    // Direct Ops：默认换算为“父容器 + 子节点序号”的流式落点；按住 Alt
+    // 时改为相对父容器的自由坐标，由 MOVE_FREE 写 absolute + left/top。
+    var freeMode = Boolean(event.altKey) || state.altFree === true
+    var placement = freeMode
+      ? buildFreePlacement(state, node)
+      : computeDrop(state, node, event.clientX, event.clientY).placement
+    // 恢复文档流并撤掉 stub；随后用 inline translate 保留拖拽后的视觉
+    // 位置，等 HMR 应用源码后再由 drag-commit 清零。
+    if (state.node === node) restoreDragPresentation(state)
+    else removeDragStub()
+    // 先恢复命中测试再发消息，避免节点带着 pointer-events:none 进入 HMR。
+    restoreDragPointerEvents(state)
+    if (node !== state.node && node.style) {
+      node.style.pointerEvents = state.startPointerEvents || ''
     }
     applyInlineTranslate(node, state.baseX + state.dx, state.baseY + state.dy)
     // 保留起始 inline：同步失败时父页面按 token 精确还原。
@@ -3090,16 +3380,6 @@
       selector: state.selector,
       startTranslate:
         inherited === null ? state.startTranslate : inherited,
-    }
-    // Direct Ops：松手位置换算为确定性父容器 + 子节点序号。
-    // 父页面据此直接调用 MOVE_NODE，不经过 Agent / LLM。
-    // 复用拖动中的 computeDrop：预览里高亮的容器就是这里写入的容器。
-    var drop = computeDrop(state, node, event.clientX, event.clientY)
-    var placement = drop.placement
-    // 先恢复命中测试再发消息，避免节点带着 pointer-events:none 进入 HMR。
-    restoreDragPointerEvents(state)
-    if (node !== state.node && node.style) {
-      node.style.pointerEvents = state.startPointerEvents || ''
     }
     post('drag-end', {
       token: state.token,
@@ -3114,6 +3394,7 @@
       inlineY: round2(state.baseY + state.dy),
       startTranslate: state.startTranslate,
       rect: rectOf(node),
+      free: freeMode,
       placement: placement,
     })
     settlePendingDragDisarm()
@@ -3264,6 +3545,10 @@
   var directProjectId = ''
   var directBound = false
   var directDeleteBtn = null
+  // 尺寸工具栏：Hug / Fill / Fixed 三种模式，走 SET_SIZE 确定性动作。
+  var directSizeBtn = null
+  var directSizePanel = null
+  var directSizeState = null
   var directPropsPanel = null
   var directPropsSource = null
   var directClassPanel = null
@@ -3291,6 +3576,43 @@
   var directDeleteNeedsAnalysis = false
   var directDeleteAnalysisRequested = false
   var directDeletePreviousDisplay = ''
+  // 离线缓冲：已乐观隐藏、等待父页面【提交修改】的删除项。
+  // 每项记录节点、源码锚点与原始 display，撤销缓冲时逐个恢复。
+  var directPendingDeletes = []
+
+  function rememberPendingDelete(node, source, previousDisplay) {
+    if (!node || !source) return
+    directPendingDeletes.push({
+      node: node,
+      source: source,
+      previousDisplay: previousDisplay || '',
+    })
+  }
+
+  function pendingDeleteKey(source) {
+    return String((source && source.selector) || '')
+  }
+
+  function restorePendingDeletes(source) {
+    var key = source ? pendingDeleteKey(source) : ''
+    for (var index = directPendingDeletes.length - 1; index >= 0; index -= 1) {
+      var item = directPendingDeletes[index]
+      if (key && pendingDeleteKey(item.source) !== key) continue
+      if (item.node && item.node.isConnected) {
+        item.node.style.display = item.previousDisplay || ''
+      }
+      directPendingDeletes.splice(index, 1)
+    }
+  }
+
+  function commitPendingDeletes(source) {
+    var key = source ? pendingDeleteKey(source) : ''
+    for (var index = directPendingDeletes.length - 1; index >= 0; index -= 1) {
+      var item = directPendingDeletes[index]
+      if (key && pendingDeleteKey(item.source) !== key) continue
+      directPendingDeletes.splice(index, 1)
+    }
+  }
   var directEdit = null
   var directLastTextEdit = null
 
@@ -3372,6 +3694,23 @@
         }
       })
     }
+    if (!directSizeBtn) {
+      directSizeBtn = directEl(
+        'button',
+        'position:fixed;display:none;z-index:2147483645;width:22px;height:22px;' +
+          'border-radius:11px;border:1px solid rgba(96,165,250,.65);' +
+          'background:rgba(15,23,42,.92);color:#bfdbfe;font-size:12px;' +
+          'line-height:20px;padding:0;cursor:pointer;pointer-events:auto;',
+        '⇔',
+      )
+      directSizeBtn.title = '调整尺寸（Hug / Fill / Fixed）'
+      directSizeBtn.addEventListener('click', function (event) {
+        event.preventDefault()
+        event.stopPropagation()
+        openDirectSizePanel()
+      })
+    }
+    ensureDirectSizePanel()
     if (!directPlusBtn) {
       directPlusBtn = directEl(
         'button',
@@ -3558,6 +3897,264 @@
       projectId: directProjectId,
       source: directPropsSource,
       props: props,
+    })
+  }
+
+  /* ------------------------------------------------------------------
+   * 尺寸面板：Hug（适应内容）/ Fill（填满父容器）/ Fixed（固定像素）。
+   * SDK 只负责采集模式、像素与父容器 computed layout；Tailwind 类名
+   * 映射由后端 SET_SIZE 统一决定，避免前后端两套规则漂移。
+   * ------------------------------------------------------------------ */
+  function directModeFromInline(value) {
+    var text = String(value || '').trim().toLowerCase()
+    if (!text || text === 'auto') return ''
+    if (text === 'fit-content' || text === 'min-content' || text === 'max-content') {
+      return 'hug'
+    }
+    if (text.indexOf('%') >= 0) {
+      return parseFloat(text) >= 99.5 ? 'fill' : 'hug'
+    }
+    if (text.indexOf('px') > 0) return 'fixed'
+    return ''
+  }
+
+  /**
+   * 推断当前尺寸模式：inline style 优先，其次看 Tailwind 类。
+   *
+   * 生成组件大多用 `w-full` / `w-[200px]` / `flex-1`，只看 inline
+   * style 会把它们全部误判成 Hug，用户一打开面板就会把原尺寸改掉。
+   */
+  function directSizeModeOf(node, axis) {
+    var inlineMode = directModeFromInline(node.style[axis])
+    if (inlineMode) return inlineMode
+    var classes = String(node.getAttribute('class') || '').split(/\s+/)
+    var hasClass = function (name) {
+      return classes.indexOf(name) >= 0
+    }
+    if (hasClass('flex-1') || hasClass('grow')) return 'fill'
+    if (axis === 'height' && hasClass('self-stretch')) return 'fill'
+    var prefix = axis === 'width' ? 'w-' : 'h-'
+    if (hasClass(prefix + 'full')) return 'fill'
+    if (hasClass(prefix + 'fit')) return 'hug'
+    for (var index = 0; index < classes.length; index += 1) {
+      var token = classes[index]
+      if (token.indexOf(prefix + '[') === 0) return 'fixed'
+      if (new RegExp('^' + prefix + '\\d').test(token)) return 'fixed'
+    }
+    return 'hug'
+  }
+
+  function directSizePx(node, axis) {
+    var inline = String(node.style[axis] || '').trim()
+    var match = inline.match(/^(-?[\d.]+)px$/)
+    if (match) {
+      return Math.max(1, Math.min(4000, Math.round(parseFloat(match[1]) || 1)))
+    }
+    var rect = node.getBoundingClientRect()
+    var value = axis === 'width' ? rect.width : rect.height
+    return Math.max(1, Math.min(4000, Math.round(value || 1)))
+  }
+
+  function directSizeModeButton(axis, mode, label) {
+    var button = document.createElement('button')
+    button.type = 'button'
+    button.textContent = label
+    button.setAttribute('data-vibe-size-mode', mode)
+    button.setAttribute('data-axis', axis)
+    button.style.cssText =
+      'padding:3px 6px;border-radius:5px;border:1px solid rgba(148,163,184,.3);' +
+      'background:transparent;color:#cbd5e1;font-size:11px;cursor:pointer;'
+    button.addEventListener('click', function (event) {
+      event.preventDefault()
+      event.stopPropagation()
+      if (!directSizeState) return
+      directSizeState[axis + 'Mode'] = mode
+      renderDirectSizeState()
+    })
+    return button
+  }
+
+  function directSizeRow(axis, label) {
+    var row = document.createElement('div')
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;margin:7px 0;'
+    var name = document.createElement('span')
+    name.textContent = label
+    name.style.cssText = 'width:16px;color:#94a3b8;'
+    row.appendChild(name)
+    var group = document.createElement('div')
+    group.style.cssText = 'display:flex;gap:2px;'
+    ;[
+      ['hug', 'Hug'],
+      ['fill', 'Fill'],
+      ['fixed', 'Fixed'],
+    ].forEach(function (pair) {
+      group.appendChild(directSizeModeButton(axis, pair[0], pair[1]))
+    })
+    row.appendChild(group)
+    var input = document.createElement('input')
+    input.type = 'number'
+    input.min = '1'
+    input.max = '4000'
+    input.step = '1'
+    input.setAttribute('data-vibe-size-value', 'true')
+    input.setAttribute('data-axis', axis)
+    input.style.cssText =
+      'width:52px;padding:3px 5px;border-radius:5px;' +
+      'border:1px solid rgba(148,163,184,.3);background:rgba(2,6,23,.6);' +
+      'color:#e2e8f0;font-size:11px;'
+    input.addEventListener('input', function () {
+      if (!directSizeState) return
+      directSizeState[axis + 'Px'] = Math.max(
+        1,
+        Math.min(4000, Math.round(Number(input.value) || 1)),
+      )
+    })
+    row.appendChild(input)
+    var unit = document.createElement('span')
+    unit.textContent = 'px'
+    unit.style.cssText = 'color:#64748b;font-size:10px;'
+    row.appendChild(unit)
+    return row
+  }
+
+  function ensureDirectSizePanel() {
+    if (directSizePanel) return directSizePanel
+    var panel = directEl(
+      'div',
+      'position:fixed;display:none;z-index:2147483647;width:232px;padding:10px 12px;' +
+        'border-radius:10px;border:1px solid rgba(96,165,250,.35);' +
+        'background:rgba(15,23,42,.98);color:#e2e8f0;font-size:12px;' +
+        'pointer-events:auto;box-shadow:0 10px 30px rgba(0,0,0,.45);',
+    )
+    panel.setAttribute('data-vibe-size-panel', 'true')
+    var head = document.createElement('div')
+    head.style.cssText =
+      'display:flex;align-items:center;justify-content:space-between;' +
+      'margin-bottom:2px;'
+    var title = document.createElement('span')
+    title.textContent = '尺寸'
+    title.style.cssText = 'font-weight:600;color:#e2e8f0;'
+    var close = document.createElement('button')
+    close.type = 'button'
+    close.textContent = '×'
+    close.style.cssText =
+      'border:0;background:transparent;color:#94a3b8;font-size:14px;' +
+      'cursor:pointer;padding:0 2px;'
+    close.addEventListener('click', function (event) {
+      event.preventDefault()
+      event.stopPropagation()
+      panel.style.display = 'none'
+    })
+    head.appendChild(title)
+    head.appendChild(close)
+    panel.appendChild(head)
+    panel.appendChild(directSizeRow('width', '宽'))
+    panel.appendChild(directSizeRow('height', '高'))
+    var actions = document.createElement('div')
+    actions.style.cssText = 'display:flex;justify-content:flex-end;margin-top:8px;'
+    var apply = document.createElement('button')
+    apply.type = 'button'
+    apply.textContent = '应用'
+    apply.setAttribute('data-vibe-size-apply', 'true')
+    apply.style.cssText =
+      'padding:4px 12px;border-radius:6px;border:1px solid rgba(96,165,250,.7);' +
+      'background:rgba(96,165,250,.22);color:#dbeafe;font-size:11px;' +
+      'cursor:pointer;pointer-events:auto;'
+    apply.addEventListener('click', function (event) {
+      event.preventDefault()
+      event.stopPropagation()
+      applyDirectSize()
+    })
+    actions.appendChild(apply)
+    panel.appendChild(actions)
+    directSizePanel = panel
+    return panel
+  }
+
+  function renderDirectSizeState() {
+    if (!directSizePanel || !directSizeState) return
+    ;['width', 'height'].forEach(function (axis) {
+      var activeMode = directSizeState[axis + 'Mode']
+      var buttons = directSizePanel.querySelectorAll(
+        '[data-vibe-size-mode][data-axis="' + axis + '"]',
+      )
+      for (var index = 0; index < buttons.length; index += 1) {
+        var active =
+          buttons[index].getAttribute('data-vibe-size-mode') === activeMode
+        buttons[index].style.borderColor = active
+          ? 'rgba(96,165,250,.9)'
+          : 'rgba(148,163,184,.3)'
+        buttons[index].style.background = active
+          ? 'rgba(96,165,250,.18)'
+          : 'transparent'
+        buttons[index].style.color = active ? '#bfdbfe' : '#cbd5e1'
+      }
+      var input = directSizePanel.querySelector(
+        '[data-vibe-size-value][data-axis="' + axis + '"]',
+      )
+      if (input) {
+        input.value = String(directSizeState[axis + 'Px'] || '')
+        var fixed = activeMode === 'fixed'
+        input.disabled = !fixed
+        input.style.opacity = fixed ? '1' : '.45'
+      }
+    })
+  }
+
+  function openDirectSizePanel() {
+    if (!directTarget || !directTarget.isConnected) {
+      showDirectToast('目标已失效，请重新选择组件')
+      return
+    }
+    ensureDirectSizePanel()
+    var rect = directTarget.getBoundingClientRect()
+    directSizeState = {
+      widthMode: directSizeModeOf(directTarget, 'width'),
+      heightMode: directSizeModeOf(directTarget, 'height'),
+      widthPx: directSizePx(directTarget, 'width'),
+      heightPx: directSizePx(directTarget, 'height'),
+    }
+    renderDirectSizeState()
+    // 面板压在目标左上角，指针从工具栏移入面板时仍停留在目标上，
+    // 不会被 mouseover 其它节点误关。
+    directSizePanel.style.left =
+      Math.max(8, Math.min(rect.left, window.innerWidth - 248)) + 'px'
+    directSizePanel.style.top =
+      Math.max(8, Math.min(rect.top + 26, window.innerHeight - 168)) + 'px'
+    directSizePanel.style.display = 'block'
+  }
+
+  function applyDirectSize() {
+    if (!directTarget || !directTarget.isConnected || !directSizeState) {
+      showDirectToast('目标已失效，请重新选择组件')
+      return
+    }
+    var source = readSource(directTarget)
+    if (!source || !hasSourceAnchor(source)) {
+      showDirectToast('目标没有源码锚点，无法调整尺寸')
+      return
+    }
+    var state = directSizeState
+    var parent = directTarget.parentElement
+    var parentStyle = parent ? window.getComputedStyle(parent) : null
+    directSizePanel.style.display = 'none'
+    showDirectToast('正在保存尺寸…')
+    post('direct-size-update', {
+      projectId: directProjectId,
+      source: source,
+      className: String(directTarget.getAttribute('class') || ''),
+      width: {
+        mode: state.widthMode,
+        value: state.widthMode === 'fixed' ? state.widthPx : null,
+      },
+      height: {
+        mode: state.heightMode,
+        value: state.heightMode === 'fixed' ? state.heightPx : null,
+      },
+      parentLayout: {
+        display: parentStyle ? parentStyle.display : 'block',
+        flexDirection: parentStyle ? parentStyle.flexDirection : 'column',
+      },
     })
   }
 
@@ -3872,6 +4469,8 @@
     clearSubtreeHighlight()
     if (directOutline) directOutline.style.display = 'none'
     if (directDeleteBtn) directDeleteBtn.style.display = 'none'
+    if (directSizeBtn) directSizeBtn.style.display = 'none'
+    if (directSizePanel) directSizePanel.style.display = 'none'
     if (directPropsPanel) directPropsPanel.style.display = 'none'
     if (directClassPanel) directClassPanel.style.display = 'none'
     if (directStylePanel) directStylePanel.style.display = 'none'
@@ -3929,6 +4528,9 @@
     directDeleteBtn.style.left = placed.left + 'px'
     directDeleteBtn.style.top = placed.top + 'px'
     directDeleteBtn.style.display = 'block'
+    directSizeBtn.style.left = Math.max(2, placed.left - 26) + 'px'
+    directSizeBtn.style.top = placed.top + 'px'
+    directSizeBtn.style.display = 'block'
     renderSubtreeHighlight(sourceNode)
 
     var isContainer =
@@ -4021,6 +4623,13 @@
       })
       return
     }
+    // 父页面会先入队、等用户点【提交修改】再执行 DELETE_NODE；
+    // 这里记下被隐藏的节点，撤销缓冲时恢复。
+    rememberPendingDelete(
+      directDeleteNode,
+      directDeleteSource,
+      directDeletePreviousDisplay,
+    )
     post('direct-delete-confirmed', {
       projectId: directProjectId,
       source: directDeleteSource,
@@ -4253,13 +4862,30 @@
       setDirectMode(directValue !== false)
       return
     }
+    if (data.type === 'direct-buffer-discard') {
+      // 父页面撤销待提交缓冲：恢复所有被乐观隐藏的删除节点。
+      directDeletePending = false
+      directDeleteNeedsAnalysis = false
+      directDeleteAnalysisRequested = false
+      restorePendingDeletes(null)
+      showDirectToast('已撤销待提交的删除')
+      return
+    }
     if (data.type === 'direct-delete-result') {
       directDeletePending = false
       var result = data.payload || {}
+      var resultSource = result.source || directDeleteSource
+      if (result.pending) {
+        directDeleteNeedsAnalysis = false
+        directDeleteAnalysisRequested = false
+        showDirectToast('已加入待提交，点【提交修改】生效')
+        return
+      }
       if (result.ok || result.status === 'SUCCEEDED') {
         // 快路径成功：节点已被乐观隐藏，等待 HMR 移除；左下角可撤回。
         directDeleteNeedsAnalysis = false
         directDeleteAnalysisRequested = false
+        commitPendingDeletes(resultSource)
         showDirectToast('已删除，可点左下角“撤回”')
         return
       }
@@ -4267,18 +4893,25 @@
         // 父页面已弹出 HITL 决策面板，恢复节点显示。
         directDeleteNeedsAnalysis = false
         directDeleteAnalysisRequested = false
+        restorePendingDeletes(resultSource)
         restoreDirectDeleteNode()
         return
       }
       if (result.safe === false) {
         directDeleteNeedsAnalysis = false
         directDeleteAnalysisRequested = false
+        restorePendingDeletes(resultSource)
         restoreDirectDeleteNode()
       }
       if (result.safe && directDeleteAnalysisRequested) {
         // 分析确认可安全删除：用户点“确认删除”时已完成确认，直接执行。
         directDeleteAnalysisRequested = false
         directDeleteNeedsAnalysis = false
+        rememberPendingDelete(
+          directDeleteNode,
+          directDeleteSource,
+          directDeletePreviousDisplay,
+        )
         post('direct-delete-confirmed', {
           projectId: directProjectId,
           source: directDeleteSource,
@@ -4287,6 +4920,11 @@
       }
       if (result.safe && directDeleteAutoConfirm) {
         directDeleteAutoConfirm = false
+        rememberPendingDelete(
+          directDeleteNode,
+          directDeleteSource,
+          directDeletePreviousDisplay,
+        )
         post('direct-delete-confirmed', {
           projectId: directProjectId,
           source: directDeleteSource,
@@ -4309,6 +4947,8 @@
         }
         panel.style.display = 'block'
       } else {
+        restorePendingDeletes(resultSource)
+        restoreDirectDeleteNode()
         showDirectToast(
           '已拦截：' + ((result.reasons || []).join('；') || '该组件不可直接删除'),
         )

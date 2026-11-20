@@ -50,6 +50,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from ai_core.adapters.checkpoint import get_checkpointer_provider
+from ai_core.a2a import A2A_LOG, build_feedback
 from ai_core.ports.checkpoint import CheckpointerProvider
 from ai_core.agent.events import EventSink, NullEventSink
 from ai_core.agent.memory import IntentClassifier, compress_architect_history
@@ -1417,6 +1418,23 @@ class ArchitectGraphRunner:
                 contract.quality_tier = tier  # type: ignore[assignment]
             contract.status = "CONFIRMED"
             contract.decided_at = datetime.now(timezone.utc)
+            # 从 VisualDocument 抽默认组件样式；类名复用 CodeGen 的
+            # _tailwind_classes，保证“架构师默认 = 最终显示”。
+            if getattr(contract, "visual_document", None) is not None:
+                try:
+                    from ai_core.codegen.visual_defaults import (
+                        component_style_defaults,
+                    )
+
+                    contract.component_styles = component_style_defaults(
+                        contract.visual_document
+                    )
+                except Exception:  # noqa: BLE001 - 默认样式失败不能阻断确认
+                    logger.warning(
+                        "提取组件默认样式失败 contract=%s",
+                        state.get("contract_id"),
+                        exc_info=True,
+                    )
             payload = contract.model_dump(mode="json", by_alias=True)
         else:
             payload = {}
@@ -1434,6 +1452,28 @@ class ArchitectGraphRunner:
                 f"architect.contract.confirmed:{state.get('contract_id')}:"
                 f"{int(state.get('contract_revision_count') or 0)}"
             ),
+        )
+        # Architect → BackendCoder：契约确认 / 修订完成，这是反向 A2A 的
+        # 回执。前端据此知道“架构师已回应后端诊断”，并可一键用新契约重跑。
+        revision = int(state.get("contract_revision_count") or 0)
+        comment = str(state.get("contract_feedback") or "").strip()
+        self._publish_a2a(
+            state,
+            from_agent="Architect",
+            to_agent="BackendCoder",
+            kind="contract_confirmed",
+            requested_action="GENERATE_WITH_CONTRACT",
+            summary=(
+                f"契约已确认（revision {revision}），后端可据此生成/重生成"
+            ),
+            evidence=[comment] if comment else (),
+            contract_id=str(state.get("contract_id") or ""),
+            payload={
+                "status": "CONFIRMED",
+                "revision": revision,
+                "comment": comment,
+                "qualityTier": state.get("quality_tier"),
+            },
         )
         return {"contract": payload, "status": "CONFIRMED"}
 
@@ -1548,6 +1588,39 @@ class ArchitectGraphRunner:
             self._event_sink.emit(event_type, payload, dedupe_key=dedupe_key)
         except Exception:  # noqa: BLE001 - 事件失败不能打断主流程
             logger.warning("failed to emit %s", event_type, exc_info=True)
+
+    def _publish_a2a(
+        self,
+        state: ArchitectState,
+        *,
+        from_agent: str,
+        to_agent: str,
+        kind: str,
+        requested_action: str,
+        summary: str,
+        evidence: Any = (),
+        contract_id: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Architect 侧的 A2A 回传：契约确认 / 修订完成后通知编码 Agent。"""
+        feedback = build_feedback(
+            run_id=str(state.get("run_id") or ""),
+            from_agent=from_agent,
+            to_agent=to_agent,
+            kind=kind,
+            requested_action=requested_action,
+            summary=summary,
+            evidence=evidence if isinstance(evidence, (list, tuple)) else (evidence,),
+            contract_id=contract_id,
+            payload=payload,
+        )
+        item = A2A_LOG.publish(feedback)
+        self._emit(
+            "a2a.feedback",
+            item,
+            dedupe_key=f"a2a:{item['feedbackId']}",
+        )
+        return item
 
 
 # ------------------------------------------------------------

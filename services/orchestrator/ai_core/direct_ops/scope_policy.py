@@ -234,6 +234,10 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
         # 低级操作不转 Agent；共享/循环/多实例由前端高亮提示。
         return ScopeDecision(True, "instance", "direct")
 
+    if action == "MOVE_FREE":
+        # 只改当前节点的定位样式；跨文件 / 循环项由服务层额外校验。
+        return ScopeDecision(True, "instance", "direct")
+
     if action == "UPDATE_PROPS":
         if identity.is_call_site:
             # 低级操作不转 Agent；循环/多实例由前端高亮提示影响范围。
@@ -251,6 +255,10 @@ def decide_scope(action: str, identity: NodeIdentity) -> ScopeDecision:
 
     if action == "UPDATE_STYLE":
         # 低级操作不转 Agent；共享/循环影响由前端高亮提示。
+        return ScopeDecision(True, "instance", "direct")
+
+    if action == "SET_SIZE":
+        # 只改当前节点的 className 尺寸类；共享/循环影响由前端高亮提示。
         return ScopeDecision(True, "instance", "direct")
 
     if action == "ADD_COMPONENT":

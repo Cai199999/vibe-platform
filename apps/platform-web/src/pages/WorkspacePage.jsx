@@ -1117,14 +1117,17 @@ function resultFromTerminalEvent(run, event) {
   return {
     runId: event.runId,
     status,
-    sandboxId: payload.sandboxId ?? '',
+    // prepare 阶段失败（例如 begin_draft 被脏工作树拒绝）不会返回
+    // sandboxId / previewUrl；必须保留上一次有效值，否则实时画布会被
+    // 空字符串冲掉、表现为“画布直接消失”。正常终态仍以 payload 为准。
+    sandboxId: payload.sandboxId ?? run.result?.sandboxId ?? '',
     // 拒绝 / 取消的 previewUrl 带 cache-busting，iframe 会强制刷新回滚后的代码。
-    previewUrl: payload.previewUrl ?? '',
-    commitHash: payload.commitHash ?? null,
-    baselineCommit: payload.baselineCommit ?? null,
+    previewUrl: payload.previewUrl ?? run.result?.previewUrl ?? '',
+    commitHash: payload.commitHash ?? run.result?.commitHash ?? null,
+    baselineCommit: payload.baselineCommit ?? run.result?.baselineCommit ?? null,
     retryCount: payload.retryCount ?? 0,
     turnCount: payload.turnCount ?? 0,
-    commits: payload.commits ?? [],
+    commits: payload.commits ?? run.result?.commits ?? [],
     assistantMessage:
       payload.assistantMessage ||
       payload.message ||
@@ -1591,6 +1594,178 @@ export default function WorkspacePage() {
   // 前端只画半透明预览，不写代码；用户点【保存布局】后才与位移一起提交。
   const pendingAdditionsRef = useRef(new Map())
   const [pendingAdditions, setPendingAdditions] = useState({})
+  // ---- Direct Ops 离线缓冲 ----
+  // 删除 / 拖拽移动先入队（画面已由 SDK 乐观更新），用户点【提交修改】
+  // 后按入队顺序逐条执行；不逐条重建 iframe，靠 Vite HMR 增量生效。
+  // projectId -> [{ kind, action, target, token, selector, reply, label }]
+  const directOpsQueueRef = useRef(new Map())
+  const directOpsInflightRef = useRef(new Set())
+  const [directOpsCounts, setDirectOpsCounts] = useState({})
+  const [directOpsSaving, setDirectOpsSaving] = useState({})
+
+  const publishDirectOps = (projectId) => {
+    if (!workspaceMountedRef.current) return
+    const count = directOpsQueueRef.current.get(projectId)?.length ?? 0
+    setDirectOpsCounts((previous) =>
+      previous[projectId] === count ? previous : { ...previous, [projectId]: count },
+    )
+  }
+
+  const enqueueDirectOp = (projectId, item) => {
+    if (!projectId || !item) return
+    const list = directOpsQueueRef.current.get(projectId) || []
+    if (item.kind === 'move' && item.selector) {
+      // 同一组件连续拖动只保留最后一次：两次位移都是相对“尚未提交的
+      // 源码”算出来的，逐条执行会叠加成双倍位移。
+      const existing = list.findIndex(
+        (current) => current.kind === 'move' && current.selector === item.selector,
+      )
+      if (existing >= 0) {
+        list[existing] = { ...item, id: list[existing].id }
+        directOpsQueueRef.current.set(projectId, list)
+        publishDirectOps(projectId)
+        return
+      }
+    }
+    list.push(item)
+    directOpsQueueRef.current.set(projectId, list)
+    publishDirectOps(projectId)
+  }
+
+  const discardDirectOps = (projectId) => {
+    const list = directOpsQueueRef.current.get(projectId) || []
+    if (!list.length) return 0
+    const moveItems = list.filter((item) => item.kind === 'move')
+    const hasDelete = list.some((item) => item.kind === 'delete')
+    if (moveItems.length) {
+      triggerDragRollback(
+        projectId,
+        moveItems.map((item) => ({ token: item.token, selector: item.selector })),
+        `已撤销 ${moveItems.length} 个待提交的移动`,
+        'info',
+      )
+    }
+    if (hasDelete) {
+      list
+        .filter((item) => item.kind === 'delete')
+        .forEach((item) =>
+          item.reply?.postMessage?.(
+            {
+              channel: 'vibe-inspect',
+              type: 'direct-buffer-discard',
+              payload: {},
+            },
+            '*',
+          ),
+        )
+    }
+    directOpsQueueRef.current.delete(projectId)
+    publishDirectOps(projectId)
+    return list.length
+  }
+
+  /**
+   * 按顺序提交 Direct Ops 缓冲区。每条都重新取 revision，保证前一条
+   * 写入后才能计算下一条的 baseRevision。
+   */
+  const submitDirectOps = async (projectId) => {
+    let remaining = [...(directOpsQueueRef.current.get(projectId) || [])]
+    if (!remaining.length) return true
+    if (directOpsInflightRef.current.has(projectId)) return false
+    directOpsInflightRef.current.add(projectId)
+    setDirectOpsSaving((previous) => ({ ...previous, [projectId]: true }))
+    let submitted = 0
+    try {
+      while (remaining.length) {
+        const item = remaining[0]
+        let result = null
+        let failure = null
+        try {
+          result = await handleDirectAction(projectId, {
+            action: item.action,
+            dryRun: false,
+            target: item.target,
+            payload: {},
+            silent: true,
+            skipRefresh: true,
+          })
+        } catch (cause) {
+          failure = cause
+        }
+        if (failure || (result?.status !== 'SUCCEEDED' && result?.status !== 'HITL_REQUIRED')) {
+          remaining = remaining.slice(1)
+          directOpsQueueRef.current.set(projectId, remaining)
+          publishDirectOps(projectId)
+          if (item.kind === 'move') {
+            triggerDragRollback(
+              projectId,
+              [{ token: item.token, selector: item.selector }],
+              `提交失败：${failure?.message || result?.status || '未知错误'}`,
+            )
+          } else if (item.kind === 'delete') {
+            item.reply?.postMessage?.(
+              {
+                channel: 'vibe-inspect',
+                type: 'direct-delete-result',
+                payload: {
+                  safe: false,
+                  reasons: [
+                    String(failure?.message || result?.status || '删除未完成'),
+                  ],
+                  source: item.target,
+                },
+              },
+              '*',
+            )
+          }
+          showToast(
+            'error',
+            `提交失败，剩余 ${remaining.length} 项已保留：${
+              failure?.message || result?.status || '未知错误'
+            }`,
+          )
+          return false
+        }
+        if (result?.status === 'HITL_REQUIRED') {
+          // handleDirectAction 已弹出决策面板；该条交给决策流程，
+          // 从队列移除，避免用户选择后重复执行。
+          remaining = remaining.slice(1)
+          directOpsQueueRef.current.set(projectId, remaining)
+          publishDirectOps(projectId)
+          continue
+        }
+        if (item.kind === 'move') {
+          setDragCommits((previous) => ({
+            ...previous,
+            [projectId]: {
+              nonce: (previous[projectId]?.nonce ?? 0) + 1,
+              items: [{ token: item.token, selector: item.selector }],
+            },
+          }))
+        } else if (item.kind === 'delete') {
+          item.reply?.postMessage?.(
+            {
+              channel: 'vibe-inspect',
+              type: 'direct-delete-result',
+              payload: { ok: true, status: 'SUCCEEDED', committed: true },
+            },
+            '*',
+          )
+        }
+        submitted += 1
+        remaining = remaining.slice(1)
+        directOpsQueueRef.current.set(projectId, remaining)
+        publishDirectOps(projectId)
+      }
+      if (submitted > 0) {
+        showToast('success', `已提交 ${submitted} 项画布修改`)
+      }
+      return true
+    } finally {
+      directOpsInflightRef.current.delete(projectId)
+      setDirectOpsSaving((previous) => ({ ...previous, [projectId]: false }))
+    }
+  }
   // 防止【保存布局】在 React 下一次渲染前被双击触发两次 Run。
   const layoutSaveInflightRef = useRef(new Set())
   // 布局提交可能被样式澄清打断：保存 snapshot，等恢复后的 Run 成功再
@@ -1657,9 +1832,10 @@ export default function WorkspacePage() {
       annotationAbortRef.current.clear()
       snapshotDiffAbortRef.current.forEach((controller) => controller.abort())
       snapshotDiffAbortRef.current.clear()
-      // 组件卸载后丢弃所有未保存的布局 / 新增组件草稿。
+      // 组件卸载后丢弃所有未保存的布局 / 新增组件 / Direct Ops 草稿。
       pendingLayoutChangesRef.current.clear()
       pendingAdditionsRef.current.clear()
+      directOpsQueueRef.current.clear()
     }
   }, [])
 
@@ -1961,6 +2137,32 @@ export default function WorkspacePage() {
   }
 
   /**
+   * 圈选区域 → ADD_COMPONENT 初始尺寸。
+   *
+   * 沙盒内的 ➕ 新增只知道自己挂在哪个容器上；用户真正圈出的尺寸在
+   * annotation.relativeRect 里。按父容器 selector 找最近一条带像素尺寸
+   * 的标注，作为新组件的初始宽高；找不到就交给后端类型兜底。
+   */
+  const findAnnotationSizeForTarget = (projectId, source) => {
+    const selector = String(source?.selector || '')
+    if (!selector) return null
+    const annotations = runStatesRef.current?.[projectId]?.annotations || []
+    for (let index = annotations.length - 1; index >= 0; index -= 1) {
+      const annotation = annotations[index]
+      const relative = annotation?.relativeRect
+      const widthPx = Number(relative?.widthPx)
+      const heightPx = Number(relative?.heightPx)
+      if (!(widthPx > 0) || !(heightPx > 0)) continue
+      const targets = [
+        annotation?.addTarget?.selector,
+        annotation?.target?.selector,
+      ].filter(Boolean)
+      if (targets.includes(selector)) return { widthPx, heightPx }
+    }
+    return null
+  }
+
+  /**
    * 接收沙盒内联 Direct Ops 的消息：
    *  - direct-add：内联 ➕ 新增基础组件
    *  - direct-delete-request / confirmed：删除分析 / 确认删除
@@ -1981,6 +2183,10 @@ export default function WorkspacePage() {
       if (data.type === 'direct-add') {
         const payload = data.payload || {}
         const targetProjectId = payload.projectId || activeTabId
+        const size = findAnnotationSizeForTarget(
+          targetProjectId,
+          payload.source,
+        )
         void handleDirectAction(targetProjectId, {
           action: 'ADD_COMPONENT',
           dryRun: false,
@@ -1988,6 +2194,7 @@ export default function WorkspacePage() {
           payload: {
             componentType: payload.componentType,
             styleContext: payload.styleContext || {},
+            ...(size ? { size } : {}),
           },
         }).catch((cause) => {
           reply(event.source, 'direct-result', {
@@ -2099,6 +2306,45 @@ export default function WorkspacePage() {
           })
         return
       }
+      if (data.type === 'direct-size-update') {
+        const payload = data.payload || {}
+        const targetProjectId = payload.projectId || activeTabId
+        void handleDirectAction(targetProjectId, {
+          action: 'SET_SIZE',
+          dryRun: false,
+          target: payload.source,
+          payload: {
+            width: payload.width || null,
+            height: payload.height || null,
+            className: payload.className || '',
+            parentLayout: payload.parentLayout || {},
+          },
+        })
+          .then((result) => {
+            if (result?.status === 'SUCCEEDED') {
+              reply(event.source, 'direct-result', {
+                ok: true,
+                message: '尺寸已保存',
+              })
+              return
+            }
+            reply(event.source, 'direct-result', {
+              ok: false,
+              requiresHuman: result?.status === 'HITL_REQUIRED',
+              message:
+                result?.status === 'HITL_REQUIRED'
+                  ? '该操作会影响多个实例，请选择修改范围'
+                  : `尺寸保存未完成：${result?.status || '未知状态'}`,
+            })
+          })
+          .catch((cause) => {
+            reply(event.source, 'direct-result', {
+              ok: false,
+              message: `尺寸保存失败：${cause?.message || cause}`,
+            })
+          })
+        return
+      }
       if (data.type === 'direct-delete-request') {
         const payload = data.payload || {}
         const targetProjectId = payload.projectId || activeTabId
@@ -2131,42 +2377,21 @@ export default function WorkspacePage() {
       if (data.type === 'direct-delete-confirmed') {
         const payload = data.payload || {}
         const targetProjectId = payload.projectId || activeTabId
-        // 快路径：本地确认后直接执行；HITL 由 execute 返回后再弹面板。
-        directDecisionSourceRef.current = event.source
-        void handleDirectAction(targetProjectId, {
+        // 离线缓冲：SDK 已乐观隐藏节点，这里只入队；用户点【提交修改】
+        // 后按顺序执行 DELETE_NODE，不再逐条重建 iframe。
+        enqueueDirectOp(targetProjectId, {
+          id: newId('dop'),
+          kind: 'delete',
           action: 'DELETE_NODE',
-          dryRun: false,
           target: payload.source,
+          reply: event.source,
+          label: `删除 ${payload.source?.component || payload.source?.tag || '组件'}`,
         })
-          .then((result) => {
-            if (result?.status === 'HITL_REQUIRED') {
-              reply(event.source, 'direct-delete-result', {
-                ...result,
-                handled: true,
-              })
-              return
-            }
-            if (result?.status === 'SUCCEEDED') {
-              directDecisionSourceRef.current = null
-              reply(event.source, 'direct-delete-result', {
-                ok: true,
-                status: 'SUCCEEDED',
-              })
-              return
-            }
-            directDecisionSourceRef.current = null
-            reply(event.source, 'direct-delete-result', {
-              safe: false,
-              reasons: [result?.status || '删除未完成'],
-            })
-          })
-          .catch((cause) => {
-            directDecisionSourceRef.current = null
-            reply(event.source, 'direct-delete-result', {
-              safe: false,
-              reasons: [String(cause?.message || cause)],
-            })
-          })
+        reply(event.source, 'direct-delete-result', {
+          ok: true,
+          pending: true,
+        })
+        showToast('info', '已加入待提交，点击【提交修改】生效')
         return
       }
       if (data.type === 'direct-undo') {
@@ -2239,6 +2464,10 @@ export default function WorkspacePage() {
       throw new Error('缺少沙盒，无法执行直接操作')
     }
     const dryRun = Boolean(request.dryRun)
+    // 离线缓冲队列按顺序提交时：不逐条弹成功 toast，也不重建整个
+    // iframe；代码写入后由 Vite HMR 增量更新。
+    const silent = Boolean(request.silent)
+    const skipRefresh = Boolean(request.skipRefresh)
     let revision = ''
     if (!dryRun) {
       const revisionPayload = await fetchDirectRevision(
@@ -2284,14 +2513,18 @@ export default function WorkspacePage() {
     try {
       const result = await submitDirectAction(payload, session?.token)
       if (result.status === 'SUCCEEDED') {
-        showToast(
-          'success',
-          `直接修改已保存（${result.latencyMs}ms）`,
-        )
-        setPreviewRefresh((previous) => ({
-          ...previous,
-          [projectId]: (previous[projectId] ?? 0) + 1,
-        }))
+        if (!silent) {
+          showToast(
+            'success',
+            `直接修改已保存（${result.latencyMs}ms）`,
+          )
+        }
+        if (!skipRefresh) {
+          setPreviewRefresh((previous) => ({
+            ...previous,
+            [projectId]: (previous[projectId] ?? 0) + 1,
+          }))
+        }
       } else if (result.status === 'DRY_RUN') {
         showToast(
           'info',
@@ -5900,9 +6133,15 @@ export default function WorkspacePage() {
 
   /** 【撤销】清空位移与新增组件草稿，并恢复 DOM 内联位移。 */
   const handleUndoLayout = (projectId) => {
+    // 离线缓冲的删除 / 移动也要一起撤销：移动发 drag-rollback，
+    // 删除让 SDK 恢复被乐观隐藏的节点。
+    const discarded = discardDirectOps(projectId)
     const pending = pendingLayoutChangesRef.current.get(projectId)
     const additions = pendingAdditionsRef.current.get(projectId)
-    if (!pending?.size && !additions?.size) return
+    if (!pending?.size && !additions?.size) {
+      if (discarded) showToast('info', `已撤销 ${discarded} 项待提交的修改`)
+      return
+    }
     if (dragSyncStates[projectId]) return
     const items = pending?.size
       ? [...pending.values()].map((item) => ({
@@ -6007,11 +6246,21 @@ export default function WorkspacePage() {
    * 返回值用于“进入架构澄清 / 重新生成”前的自动统一提交。
    */
   const handleSaveLayout = async (projectId) => {
+    // 先按顺序提交 Direct Ops 离线缓冲（删除 / 拖拽移动），再提交
+    // 暂存的新增组件与位移批次；两者都走同一套 revision / 写锁。
+    const hasDirectOps =
+      (directOpsQueueRef.current.get(projectId)?.length ?? 0) > 0
+    if (hasDirectOps) {
+      const submitted = await submitDirectOps(projectId)
+      if (!submitted) return false
+    }
     const pending = pendingLayoutChangesRef.current.get(projectId)
     const additionMap = pendingAdditionsRef.current.get(projectId)
     const batch = pending?.size ? [...pending.values()] : []
     const additions = additionMap?.size ? [...additionMap.values()] : []
-    if (batch.length === 0 && additions.length === 0) return true
+    if (batch.length === 0 && additions.length === 0) {
+      return true
+    }
     if (layoutSaveInflightRef.current.has(projectId)) return false
     const project = projects.find((item) => item.id === projectId)
     const run = runStates[projectId] ?? EMPTY_RUN
@@ -6162,37 +6411,21 @@ export default function WorkspacePage() {
       },
       placement,
     })
-    // 拖拽不走 Agent：松手后直接调用确定性 MOVE_NODE。
-    void handleDirectAction(projectId, {
-      action: 'MOVE_NODE',
-      dryRun: false,
+    // 拖拽不走 Agent：普通拖拽走 MOVE_NODE；按住 Alt 时走 MOVE_FREE，
+    // 由后端写 position:absolute + left/top，并保证父容器 relative。
+    // 离线缓冲：先入队，SDK 保留 inline translate；点【提交修改】后
+    // 按顺序执行，成功才发 drag-commit 清位移。
+    const freeMode = placement?.mode === 'free'
+    enqueueDirectOp(projectId, {
+      id: newId('dop'),
+      kind: 'move',
+      action: freeMode ? 'MOVE_FREE' : 'MOVE_NODE',
       target: { ...source, placement },
-      payload: {},
+      token: payload.token,
+      selector,
+      label: `移动 ${source.component || source.tag || '组件'}`,
     })
-      .then(() => {
-        // 通知 SDK 丢弃临时 translate，并刷新预览等待 HMR。
-        setDragCommits((previous) => ({
-          ...previous,
-          [projectId]: {
-            nonce: (previous[projectId]?.nonce ?? 0) + 1,
-            items: [{ token: payload.token, selector }],
-          },
-        }))
-      })
-      .catch((cause) => {
-        console.warn('[direct-drag] move failed', {
-          projectId,
-          selector,
-          source,
-          placement,
-          error: cause,
-        })
-        triggerDragRollback(
-          projectId,
-          [{ token: payload.token, selector }],
-          `移动失败：${cause?.message || cause}`,
-        )
-      })
+    showToast('info', '已加入待提交，点击【提交修改】生效')
   }
 
   /** 用户取消拖拽（pointercancel）：SDK 已自行还原，不产生草稿。 */
@@ -7133,6 +7366,7 @@ export default function WorkspacePage() {
           clarification,
           answers,
           comment,
+          reference,
         ) =>
           call(
             'handleClarificationAnswer',
@@ -7140,6 +7374,7 @@ export default function WorkspacePage() {
             clarification,
             answers,
             comment,
+            reference,
           ),
         onAnnotationRollback: (annotationId, message) =>
           call('handleAnnotationRollback', annotationId, message),
@@ -7379,9 +7614,12 @@ export default function WorkspacePage() {
                 layoutDraftCount={
                   pendingLayoutChanges[project.id]?.length ?? 0
                 }
+                directOpsCount={directOpsCounts[project.id] ?? 0}
                 pendingAdditions={pendingAdditions[project.id] ?? []}
                 layoutSaving={
-                  Boolean(dragSyncStates[project.id]) || run.submitting
+                  Boolean(dragSyncStates[project.id]) ||
+                  Boolean(directOpsSaving[project.id]) ||
+                  run.submitting
                 }
                 agentCatalog={agentCatalog}
                 agentToken={session?.token}

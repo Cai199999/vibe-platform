@@ -99,47 +99,6 @@ _CREATE_TABLE = re.compile(
     re.IGNORECASE,
 )
 _COLUMN_LINE = re.compile(r"^\s*[`\"]?([a-zA-Z0-9_]+)[`\"]?\s+")
-# 形如 /api/v1/users/:id/<segment> 的路径段若是动作端点，就不是 JOIN
-# 子资源别名。未列出的未知段仍按别名校验，避免漏掉真正的拼写错误。
-_ACTION_PATH_SEGMENTS = {
-    "analyze",
-    "analyse",
-    "apply",
-    "approve",
-    "batch",
-    "cancel",
-    "confirm",
-    "detail",
-    "details",
-    "download",
-    "execute",
-    "export",
-    "generate",
-    "health",
-    "import",
-    "login",
-    "logout",
-    "preview",
-    "process",
-    "publish",
-    "refresh",
-    "register",
-    "reject",
-    "reset",
-    "retry",
-    "rewrite",
-    "run",
-    "search",
-    "send",
-    "start",
-    "status",
-    "stop",
-    "stream",
-    "submit",
-    "test",
-    "upload",
-    "validate",
-}
 _COLUMN_STOPWORDS = {
     "key",
     "unique",
@@ -739,11 +698,12 @@ def check_orm_schema(
                     {alias_key(child_alias), alias_key(parent_alias)}
                 )
                 include_display.update({child_alias, parent_alias})
+        # join_aliases 只包含真正传给 listRelatedRecords /
+        # createRelatedRecord / include.as 的别名，已不再包含“/:id/动词”
+        # 形状的路由段；因此这里不需要动作白名单，任何别名都必须能在
+        # RELATIONS 里找到对应项。
         for alias in index_schema.join_aliases:
             key = alias_key(alias)
-            if key in _ACTION_PATH_SEGMENTS:
-                # /users/:id/rewrite 之类的动作端点不是关联别名。
-                continue
             if key not in nested_expected:
                 issues.append(
                     f"server/index.js 嵌套路由引用了不存在的 JOIN 别名：{alias}"

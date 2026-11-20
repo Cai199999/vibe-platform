@@ -276,6 +276,7 @@ function FullstackGeneration({
   onGenerate,
   onExport,
   onReclarify,
+  a2a = [],
   exporting = false,
   projectMode = 'NEW_PROJECT',
 }) {
@@ -295,6 +296,33 @@ function FullstackGeneration({
     : []
   const clarificationPrompt =
     clarification.prompt || state.error || '请修改契约后重新澄清'
+  // A2A：合并 Architect 流（契约回执）与 Fullstack 流（诊断/修复请求）。
+  const a2aFeedback = (() => {
+    const seen = new Set()
+    const merged = []
+    ;[...(Array.isArray(a2a) ? a2a : []), ...(Array.isArray(state.a2a) ? state.a2a : [])]
+      .forEach((item) => {
+        if (!item || typeof item !== 'object') return
+        const key = item.feedbackId || `${item.fromAgent}:${item.kind}:${item.summary}`
+        if (seen.has(key)) return
+        seen.add(key)
+        merged.push(item)
+      })
+    return merged.slice(-6)
+  })()
+  const revisionRequest = [...a2aFeedback]
+    .reverse()
+    .find(
+      (item) =>
+        item?.toAgent === 'Architect' &&
+        ['REVISE_CONTRACT', 'REVIEW_CONTRACT'].includes(item.requestedAction),
+    )
+  const revisionPrompt =
+    revisionRequest?.payload?.prompt ||
+    revisionRequest?.payload?.audit?.prompt ||
+    [revisionRequest?.summary, ...(revisionRequest?.evidence || [])]
+      .filter(Boolean)
+      .join('\n')
   const [clarifyOpen, setClarifyOpen] = useState(false)
 
   useEffect(() => {
@@ -492,6 +520,35 @@ function FullstackGeneration({
               onClick={() => setClarifyOpen(true)}
             >
               查看需要修改的契约内容
+            </button>
+          )}
+        </div>
+      )}
+
+      {a2aFeedback.length > 0 && (
+        <div className="architect-a2a" data-a2a-feedback>
+          <span className="architect-a2a-title">A2A 交互</span>
+          {a2aFeedback.map((item, index) => (
+            <span
+              className="architect-a2a-item"
+              key={item.feedbackId || `${item.fromAgent}-${index}`}
+            >
+              <strong>
+                {item.fromAgent} → {item.toAgent}
+              </strong>
+              {' · '}
+              {item.kind}
+              {item.summary ? ` · ${item.summary}` : ''}
+            </span>
+          ))}
+          {revisionRequest && (
+            <button
+              type="button"
+              className="architect-ghost"
+              data-a2a-revise-contract
+              onClick={() => onReclarify?.(revisionPrompt)}
+            >
+              让架构工程师修订契约
             </button>
           )}
         </div>
@@ -1931,6 +1988,7 @@ export default function ArchitectPanel({
                       onGenerate={onFullstackGenerate}
                       onExport={onExport}
                       onReclarify={(prompt) => onDecide?.('REVISE', prompt)}
+                      a2a={state.a2a}
                       exporting={exporting}
                       projectMode={projectMode}
                     />

@@ -252,6 +252,19 @@ class ArchitectFlowTest(unittest.TestCase):
         self.assertFalse(harness.outcome.interrupted)
         event_types = [event.type for event in harness.buffer.snapshot()]
         self.assertIn("architect.contract.confirmed", event_types)
+        # Architect → BackendCoder 的反向 A2A 回执必须随确认一起发出。
+        a2a_events = [
+            event
+            for event in harness.buffer.snapshot()
+            if event.type == "a2a.feedback"
+        ]
+        self.assertTrue(a2a_events)
+        self.assertEqual(a2a_events[-1].payload["fromAgent"], "Architect")
+        self.assertEqual(a2a_events[-1].payload["toAgent"], "BackendCoder")
+        self.assertEqual(
+            a2a_events[-1].payload["requestedAction"],
+            "GENERATE_WITH_CONTRACT",
+        )
 
     def test_script_never_requires_frontend(self) -> None:
         harness = ArchitectHarness()

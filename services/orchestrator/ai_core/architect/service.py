@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ai_core.adapters.checkpoint import get_checkpointer_provider
+from ai_core.a2a import A2A_LOG, build_feedback
 from ai_core.ports.checkpoint import CheckpointerProvider
 from ai_core.agent.events import RunEventBuffer, get_event_buffer
 from ai_core.architect.graph import (
@@ -674,6 +675,28 @@ class ArchitectService:
                     f"architect.contract.revision:"
                     f"{contract.contract_id}:{revision_count + 1}"
                 ),
+            )
+            # Architect → BackendCoder：确认收到后端诊断，开始修订契约。
+            # 与后续 contract_confirmed 一起构成完整的反向回执。
+            ack = build_feedback(
+                run_id=run_id,
+                from_agent="Architect",
+                to_agent="BackendCoder",
+                kind="contract_revision_started",
+                requested_action="WAIT_FOR_CONTRACT",
+                summary=f"收到后端诊断，开始修订契约（revision {revision_count + 1}）",
+                evidence=[request.comment.strip()],
+                contract_id=contract.contract_id,
+                payload={
+                    "revision": revision_count + 1,
+                    "comment": request.comment.strip(),
+                },
+            )
+            A2A_LOG.publish(ack)
+            active.buffer.emit(
+                "a2a.feedback",
+                ack.to_dict(),
+                dedupe_key=f"a2a:{ack.feedback_id}",
             )
             threading.Thread(
                 target=self._revision_worker,

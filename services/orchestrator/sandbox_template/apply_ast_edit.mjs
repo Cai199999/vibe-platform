@@ -333,6 +333,151 @@ function fail(code, message, details = {}) {
   return { status: 'ERROR', code, message, details }
 }
 
+/** 读取 JSX 元素上的静态字符串属性；动态表达式时 dynamic=true。 */
+function jsxAttributeString(opening, name) {
+  const attribute = (opening?.attributes || []).find(
+    (item) =>
+      item.type === 'JSXAttribute' && item.name?.name === name,
+  )
+  if (!attribute) return { found: false, value: '', dynamic: false }
+  const value = attribute.value
+  if (!value) return { found: true, value: '', dynamic: false }
+  if (value.type === 'StringLiteral') {
+    return { found: true, value: value.value, dynamic: false }
+  }
+  const expression =
+    value.type === 'JSXExpressionContainer' ? value.expression : null
+  if (expression?.type === 'StringLiteral') {
+    return { found: true, value: expression.value, dynamic: false }
+  }
+  if (
+    expression?.type === 'TemplateLiteral' &&
+    (expression.expressions || []).length === 0
+  ) {
+    return {
+      found: true,
+      value: (expression.quasis || [])
+        .map((quasi) => quasi.value?.cooked || '')
+        .join(''),
+      dynamic: false,
+    }
+  }
+  return { found: true, value: '', dynamic: true }
+}
+
+/**
+ * 计算 style 属性的替换区间与文本；null = 无需修改。
+ *
+ * 与 update_style 相同的静态对象合并规则，供 position_free 同时修改
+ * 目标节点与父容器使用。
+ */
+function buildStyleChange(code, target, patch, failOnDynamic) {
+  const opening = target?.openingElement
+  if (!opening) return { error: '目标不是 JSX 元素' }
+  const styleAttribute = (opening.attributes || []).find(
+    (attribute) =>
+      attribute.type === 'JSXAttribute' &&
+      attribute.name?.name === 'style',
+  )
+  let existingProperties = []
+  if (styleAttribute) {
+    if (
+      styleAttribute.value?.type !== 'JSXExpressionContainer' ||
+      styleAttribute.value.expression?.type !== 'ObjectExpression'
+    ) {
+      if (failOnDynamic) {
+        return { error: '现有 style 不是静态对象，不能安全叠加定位' }
+      }
+    } else {
+      existingProperties = styleAttribute.value.expression.properties || []
+    }
+  }
+  const updated = new Set(Object.keys(patch))
+  const parts = []
+  for (const property of existingProperties) {
+    if (
+      property.type === 'ObjectProperty' &&
+      !property.computed &&
+      property.key?.name &&
+      updated.has(property.key.name)
+    ) {
+      continue
+    }
+    parts.push(code.slice(property.start, property.end))
+  }
+  for (const [name, value] of Object.entries(patch)) {
+    if (value === null) continue
+    if (typeof value === 'number') {
+      parts.push(`${name}: ${value}`)
+    } else {
+      const escaped = String(value)
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/</g, '\\u003c')
+        .replace(/>/g, '\\u003e')
+      parts.push(`${name}: "${escaped}"`)
+    }
+  }
+  const styleText =
+    parts.length > 0 ? `style={{ ${parts.join(', ')} }}` : ''
+  if (styleAttribute) {
+    return {
+      start: styleAttribute.start,
+      end: styleAttribute.end,
+      text: styleText,
+    }
+  }
+  if (!styleText) return null
+  const insertAt = opening.end - (opening.selfClosing ? 2 : 1)
+  return { start: insertAt, end: insertAt, text: ` ${styleText}` }
+}
+
+/** 父容器是否已经是定位上下文；不是时才补 position: relative。 */
+function parentPositionState(container) {
+  const opening = container?.openingElement
+  if (!opening) return { error: '父容器不是 JSX 元素' }
+  const styleAttribute = (opening.attributes || []).find(
+    (attribute) =>
+      attribute.type === 'JSXAttribute' &&
+      attribute.name?.name === 'style',
+  )
+  if (styleAttribute) {
+    if (
+      styleAttribute.value?.type !== 'JSXExpressionContainer' ||
+      styleAttribute.value.expression?.type !== 'ObjectExpression'
+    ) {
+      return { error: '父容器 style 不是静态对象，无法确认定位上下文' }
+    }
+    for (const property of styleAttribute.value.expression.properties || []) {
+      if (
+        property.type !== 'ObjectProperty' ||
+        property.computed ||
+        property.key?.name !== 'position'
+      ) {
+        continue
+      }
+      if (property.value?.type === 'StringLiteral') {
+        return {
+          positioned: !['', 'static'].includes(property.value.value),
+        }
+      }
+      return { error: '父容器 position 是动态值，无法确认定位上下文' }
+    }
+  }
+  const classInfo = jsxAttributeString(opening, 'className')
+  if (!classInfo.dynamic) {
+    const tokens = classInfo.value.split(/\s+/)
+    if (
+      tokens.some((token) =>
+        ['absolute', 'fixed', 'relative', 'sticky'].includes(token),
+      )
+    ) {
+      return { positioned: true }
+    }
+  }
+  return { positioned: false }
+}
+
 function main() {
   const specPath = process.argv[2]
   if (!specPath) throw new Error('缺少 spec.json 路径')
@@ -720,6 +865,95 @@ function main() {
     }
     if (countJsxNodes(nextAst) !== countJsxNodes(ast)) {
       return fail('STYLE_SCOPE_MISMATCH', '样式更新前后 JSX 节点数量不一致')
+    }
+    return {
+      status: 'OK',
+      content: next,
+      nodeCountBefore: countJsxNodes(ast),
+      nodeCountAfter: countJsxNodes(nextAst),
+    }
+  }
+
+  // ---- Direct Ops：POSITION_FREE ----
+  // Alt 拖拽：目标节点转为 absolute，父容器补 position: relative。
+  // 两个 style 修改在同一次切片里完成（先改后面的偏移，再改前面的），
+  // 避免二次编辑导致锚点区间失效。
+  if (operation === 'position_free') {
+    const source = findExactNode(ast, spec.anchorRange)
+    if (!source || !JSX_TYPES.has(source.type) || !source.openingElement) {
+      return fail('ANCHOR_RANGE_MISMATCH', '自由定位目标必须是 JSX 元素')
+    }
+    const container = findExactNode(ast, spec.targetRange)
+    if (!container || !JSX_TYPES.has(container.type) || !container.openingElement) {
+      return fail('ANCHOR_RANGE_MISMATCH', '自由定位父容器必须是 JSX 元素')
+    }
+    if (source === container) {
+      return fail('INVALID_FREE_PARENT', '不能以节点自身作为定位父容器')
+    }
+    if (!(container.start < source.start && source.end <= container.end)) {
+      return fail('INVALID_FREE_PARENT', '父容器区间必须完整包含目标节点')
+    }
+    const left = Number(spec.left)
+    const top = Number(spec.top)
+    if (
+      !Number.isFinite(left) ||
+      !Number.isFinite(top) ||
+      Math.abs(left) > 20000 ||
+      Math.abs(top) > 20000
+    ) {
+      return fail('INVALID_POSITION', '自由定位坐标非法或超出范围')
+    }
+    const nodePatch = {
+      position: 'absolute',
+      left: `${Math.round(left * 100) / 100}px`,
+      top: `${Math.round(top * 100) / 100}px`,
+      margin: 0,
+      zIndex: 20,
+      // 拖拽前可能带有居中 / 位移 transform；保留会让 left/top 重复偏移。
+      transform: 'none',
+    }
+    const width = Number(spec.width)
+    const height = Number(spec.height)
+    if (Number.isFinite(width) && width > 0) {
+      nodePatch.width = `${Math.round(width)}px`
+    }
+    if (Number.isFinite(height) && height > 0) {
+      nodePatch.height = `${Math.round(height)}px`
+    }
+    const nodeChange = buildStyleChange(code, source, nodePatch, true)
+    if (nodeChange?.error) {
+      return fail('INVALID_STYLE', nodeChange.error)
+    }
+    const positionState = parentPositionState(container)
+    if (positionState?.error) {
+      return fail('INVALID_FREE_PARENT', positionState.error)
+    }
+    const parentChange = positionState.positioned
+      ? null
+      : buildStyleChange(code, container, { position: 'relative' }, true)
+    if (parentChange?.error) {
+      return fail('INVALID_FREE_PARENT', parentChange.error)
+    }
+    const changes = [nodeChange, parentChange]
+      .filter(Boolean)
+      .sort((a, b) => b.start - a.start)
+    let next = code
+    for (const change of changes) {
+      next =
+        `${next.slice(0, change.start)}${change.text}` +
+        next.slice(change.end)
+    }
+    let nextAst
+    try {
+      nextAst = parseCode(next, file, parser)
+    } catch (error) {
+      return fail(
+        'INVALID_POSITION',
+        `自由定位后文件无法解析: ${error.message}`,
+      )
+    }
+    if (countJsxNodes(nextAst) !== countJsxNodes(ast)) {
+      return fail('INVALID_POSITION', '自由定位前后 JSX 节点数量不一致')
     }
     return {
       status: 'OK',

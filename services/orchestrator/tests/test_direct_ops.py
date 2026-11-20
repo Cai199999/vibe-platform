@@ -1083,6 +1083,224 @@ class DirectOperationAddTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, DirectErrorCode.TOOL_FAILED)
         self.assertEqual(self.sandbox.patches, [])
 
+    def test_add_component_applies_selection_size(self) -> None:
+        self.service.execute(
+            _add_payload(
+                payload={
+                    "componentType": "Container",
+                    "size": {"widthPx": 200, "heightPx": 50},
+                }
+            )
+        )
+
+        jsx = self.sandbox.edits[0]["jsxCode"]
+        self.assertIn("w-[200px]", jsx)
+        self.assertIn("h-[50px]", jsx)
+        self.assertIn("min-h-[30px]", jsx)
+
+    def test_add_component_gets_type_default_min_height(self) -> None:
+        self.service.execute(
+            _add_payload(payload={"componentType": "Container"})
+        )
+
+        jsx = self.sandbox.edits[0]["jsxCode"]
+        self.assertIn("min-h-[120px]", jsx)
+
+
+class DirectOperationSetSizeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryChangeLogStore(max_entries=20)
+        self.store.clear()
+        self.anchor = dict(_anchor())
+        self.anchor.update(
+            {
+                "file": "src/App.jsx",
+                "component": "App",
+                "nodeType": "JSXElement",
+                "nodeSource": '<div className="flex gap-2 text-sm">卡片</div>',
+                "range": {
+                    "startLine": 4,
+                    "startColumn": 7,
+                    "endLine": 4,
+                    "endColumn": 50,
+                    "startOffset": 40,
+                    "endOffset": 83,
+                },
+            }
+        )
+        self.sandbox = _FakeSandbox(anchor=self.anchor)
+        self.service = DirectOperationService(
+            sandbox=self.sandbox,  # type: ignore[arg-type]
+            settings=_Settings(),  # type: ignore[arg-type]
+        )
+        self.service._changelog = self.store
+
+    def tearDown(self) -> None:
+        from ai_core.direct_ops import service as service_module
+
+        with service_module._COMPLETED_LOCK:
+            service_module._COMPLETED.clear()
+
+    def _payload(self, payload: dict[str, Any]) -> DirectActionPayload:
+        return DirectActionPayload.model_validate(
+            {
+                "directActionId": "dact_size",
+                "idempotencyKey": "proj_direct:dact_size",
+                "projectId": PROJECT_ID,
+                "sandboxId": SANDBOX_ID,
+                "tenantId": "tenant_local",
+                "baseRevision": BASE_SHA,
+                "action": "SET_SIZE",
+                "target": {
+                    "anchorId": "anc_size",
+                    "file": "src/App.jsx",
+                    "selector": "[data-oid='oid_card']",
+                    "instance": 1,
+                    "instanceCount": 1,
+                },
+                "payload": payload,
+                "options": {"source": "FLOATING_TOOLBAR", "dryRun": False},
+            }
+        )
+
+    def test_set_size_maps_fill_and_fixed_by_parent_layout(self) -> None:
+        response = self.service.execute(
+            self._payload(
+                {
+                    "width": {"mode": "fill"},
+                    "height": {"mode": "fixed", "value": 80},
+                    "parentLayout": {
+                        "display": "flex",
+                        "flexDirection": "column",
+                    },
+                }
+            )
+        )
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        self.assertEqual(self.sandbox.edits[0]["operation"], "update_props")
+        class_name = self.sandbox.edits[0]["props"]["className"]
+        self.assertIn("w-full", class_name)
+        self.assertIn("h-[80px]", class_name)
+        self.assertIn("flex", class_name)
+        self.assertIn("gap-2", class_name)
+        self.assertIn("text-sm", class_name)
+
+    def test_set_size_rejects_dynamic_class_name(self) -> None:
+        self.anchor["nodeSource"] = (
+            '<div className={clsx("w-full")}>卡片</div>'
+        )
+
+        with self.assertRaises(DirectActionError) as ctx:
+            self.service.execute(
+                self._payload({"width": {"mode": "fill"}})
+            )
+
+        self.assertEqual(ctx.exception.code, DirectErrorCode.ROUTE_TO_LLM)
+        self.assertEqual(self.sandbox.edits, [])
+
+
+class DirectOperationMoveFreeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryChangeLogStore(max_entries=20)
+        self.store.clear()
+        self.anchor = dict(_anchor())
+        self.anchor.update(
+            {
+                "file": "src/App.jsx",
+                "component": "App",
+                "nodeSource": '<div className="flex gap-2">卡片</div>',
+                "range": {
+                    "startLine": 4,
+                    "startColumn": 7,
+                    "endLine": 4,
+                    "endColumn": 50,
+                    "startOffset": 40,
+                    "endOffset": 83,
+                },
+            }
+        )
+        self.sandbox = _FakeSandbox(anchor=self.anchor)
+        self.service = DirectOperationService(
+            sandbox=self.sandbox,  # type: ignore[arg-type]
+            settings=_Settings(),  # type: ignore[arg-type]
+        )
+        self.service._changelog = self.store
+
+    def tearDown(self) -> None:
+        from ai_core.direct_ops import service as service_module
+
+        with service_module._COMPLETED_LOCK:
+            service_module._COMPLETED.clear()
+
+    def _payload(self, placement: dict[str, Any]) -> DirectActionPayload:
+        return DirectActionPayload.model_validate(
+            {
+                "directActionId": "dact_free",
+                "idempotencyKey": "proj_direct:dact_free",
+                "projectId": PROJECT_ID,
+                "sandboxId": SANDBOX_ID,
+                "tenantId": "tenant_local",
+                "baseRevision": BASE_SHA,
+                "action": "MOVE_FREE",
+                "target": {
+                    "anchorId": "anc_free",
+                    "oid": "oid_card",
+                    "selector": "[data-oid='oid_card']",
+                    "file": "src/App.jsx",
+                    "placement": placement,
+                },
+                "payload": {},
+                "options": {"source": "FLOATING_TOOLBAR", "dryRun": False},
+            }
+        )
+
+    def test_move_free_emits_position_free_edit(self) -> None:
+        response = self.service.execute(
+            self._payload(
+                {
+                    "parentSelector": "[data-oid='oid_main']",
+                    "parentOid": "oid_main",
+                    "parentFile": "src/App.jsx",
+                    "mode": "free",
+                    "freeLeft": 120.5,
+                    "freeTop": -20,
+                    "freeWidthPx": 200,
+                    "freeHeightPx": 60,
+                }
+            )
+        )
+
+        self.assertEqual(response.status, "SUCCEEDED")
+        edit = self.sandbox.edits[0]
+        self.assertEqual(edit["operation"], "position_free")
+        self.assertEqual(edit["file"], "src/App.jsx")
+        self.assertEqual(edit["left"], 120.5)
+        self.assertEqual(edit["top"], -20.0)
+        self.assertEqual(edit["width"], 200)
+        self.assertEqual(edit["height"], 60)
+        self.assertEqual(edit["anchorRange"], self.anchor["range"])
+
+    def test_move_free_rejects_loop_items(self) -> None:
+        self.anchor["inMap"] = True
+
+        with self.assertRaises(DirectActionError) as ctx:
+            self.service.execute(
+                self._payload(
+                    {
+                        "parentSelector": "[data-oid='oid_main']",
+                        "parentOid": "oid_main",
+                        "parentFile": "src/App.jsx",
+                        "mode": "free",
+                        "freeLeft": 10,
+                        "freeTop": 10,
+                    }
+                )
+            )
+
+        self.assertEqual(ctx.exception.code, DirectErrorCode.UNSAFE_OPERATION)
+        self.assertEqual(self.sandbox.edits, [])
+
 
 class DirectOperationServiceTest(unittest.TestCase):
     def setUp(self) -> None:

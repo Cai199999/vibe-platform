@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ai_core.agent.events import RunEventBuffer, get_event_buffer
+from ai_core.a2a import A2A_LOG, build_feedback
 from ai_core.architect.service import find_architect_contract
 from ai_core.codegen.visual import VisualCodegenError, compile_visual_document
 from ai_core.codegen.visual_gate import VisualCodegenGateUnavailable
@@ -292,6 +293,25 @@ class FullstackService:
         warnings: list[str] = []
         if not audit.ok:
             if policy.blocking:
+                # 生成前预审计也要走 A2A：这是最早发现契约矛盾的路径，
+                # 如果只发失败事件，前端就看不到“谁向架构师提出修订”。
+                feedback = build_feedback(
+                    run_id=active.run_id,
+                    from_agent="ConsistencyVerifier",
+                    to_agent="Architect",
+                    kind="contract_revision",
+                    requested_action="REVISE_CONTRACT",
+                    summary=audit.summary(),
+                    evidence=[problem.message for problem in audit.problems],
+                    contract_id=active.contract.contract_id,
+                    payload=audit.payload(),
+                )
+                A2A_LOG.publish(feedback)
+                active.buffer.emit(
+                    "a2a.feedback",
+                    feedback.to_dict(),
+                    dedupe_key=f"a2a:{feedback.feedback_id}",
+                )
                 self._complete_failure(
                     active,
                     audit.summary(),
@@ -386,6 +406,7 @@ class FullstackService:
                     "infraFiles": list(outcome.get("infra_files") or []),
                     # 四个核心指标的当前聚合快照，便于前端 / 监控直接消费。
                     "metrics": FULLSTACK_METRICS.snapshot(),
+                    "a2aFeedback": A2A_LOG.list_for_run(active.run_id),
                     "elapsedMs": int((time.monotonic() - started) * 1000),
                 },
                 dedupe_key=f"fullstack.completed:{active.run_id}",
@@ -489,6 +510,9 @@ class FullstackService:
                     "defectKind": defect_kind,
                     "needsClarification": needs_clarification,
                     "clarification": clarification or {},
+                    # 完整 A2A 交互记录：前端据此展示“谁向谁提出了什么”，
+                    # 并可从 revise/review 请求直接回到架构师修订契约。
+                    "a2aFeedback": A2A_LOG.list_for_run(active.run_id),
                     "metrics": FULLSTACK_METRICS.snapshot(),
                 },
                 envelope,
