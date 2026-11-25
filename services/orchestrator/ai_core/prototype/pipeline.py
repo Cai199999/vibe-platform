@@ -25,9 +25,12 @@ from ai_core.prototype.runtime import (
     ticket_row,
     write_event,
 )
-from ai_core.prototype.spec import default_ticket_spec
+from ai_core.prototype.spec import ApplicationSpec, default_ticket_spec
 
-ROOT = Path(__file__).resolve().parents[4]
+_PARENTS = Path(__file__).resolve().parents
+# 仓库内：services/orchestrator/ai_core/prototype → parents[4] 是仓库根；
+# 容器内：/app/ai_core/prototype → parents[2] 是 /app。
+ROOT = _PARENTS[4] if len(_PARENTS) > 4 else _PARENTS[2]
 
 
 class RecordingSink:
@@ -49,12 +52,14 @@ def run_full_flow(
     *,
     output_root: Path | None = None,
     run_id: str | None = None,
+    spec: ApplicationSpec | None = None,
 ) -> dict[str, Any]:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_id = run_id or f"ff_{stamp}_{uuid.uuid4().hex[:8]}"
     run_dir = (output_root or (ROOT / "reports" / "full-flow")) / run_id
     workspace = run_dir / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
+    spec = spec or default_ticket_spec()
 
     sink = RecordingSink()
     bridge = CollaborationBridge(sink=sink)
@@ -78,7 +83,6 @@ def run_full_flow(
         )
 
     # 1. Architect 接收需求，补齐场景
-    spec = default_ticket_spec()
     assign("DBACoder", "task_db", "准备表结构与迁移")
     assign("BackendCoder", "task_api", "生成业务接口")
     assign("Consumer", "task_worker", "接入事件消费与幂等")

@@ -144,4 +144,18 @@ public class ArchitectController {
     public ResponseEntity<JsonNode> collaboration(@PathVariable String runId) {
         return architectService.collaboration(runId);
     }
+
+    /** 多服务生成原型入口。 */
+    @PostMapping("/multi-service/generate")
+    public ResponseEntity<JsonNode> generateMultiService(
+            @RequestBody(required = false) JsonNode body
+    ) {
+        return architectService.generateMultiService(body);
+    }
+
+    /** 读取多服务生成结果。 */
+    @GetMapping("/multi-service/runs/{runId}")
+    public ResponseEntity<JsonNode> multiServiceRun(@PathVariable String runId) {
+        return architectService.multiServiceRun(runId);
+    }
 }

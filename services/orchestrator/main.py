@@ -21,6 +21,7 @@ from ai_core.api.architect import router as architect_router
 from ai_core.api.collaboration import router as collaboration_router
 from ai_core.api.direct_ops import router as direct_ops_router
 from ai_core.api.fullstack import router as fullstack_router
+from ai_core.api.generated_apps import router as generated_apps_router
 from ai_core.api.runs import router as runs_router
 from ai_core.api.sandbox import router as sandbox_router
 from ai_core.api.source_analysis import router as source_analysis_router
@@ -89,6 +90,7 @@ app.include_router(direct_ops_router)
 app.include_router(architect_router)
 app.include_router(collaboration_router)
 app.include_router(fullstack_router)
+app.include_router(generated_apps_router)
 app.include_router(supervisor_router)
 app.include_router(visual_agent_router)
 app.include_router(source_analysis_router)

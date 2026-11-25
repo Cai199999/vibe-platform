@@ -24,6 +24,10 @@ public class ArchitectService {
     private static final String RUN_PATH = "/api/v1/internal/architect/runs/{runId}";
     private static final String COLLABORATION_PATH =
             "/api/v1/internal/collaboration/runs/{runId}";
+    private static final String GENERATED_APP_PATH =
+            "/api/v1/internal/generated-apps/generate";
+    private static final String GENERATED_APP_RUN_PATH =
+            "/api/v1/internal/generated-apps/runs/{runId}";
     private static final String CLARIFICATION_ANSWER_PATH =
             "/api/v1/internal/architect/runs/{runId}/clarifications/"
                     + "{clarificationId}/answers";
@@ -138,6 +142,26 @@ public class ArchitectService {
                 aiCoreInteractiveRestClient,
                 COLLABORATION_PATH,
                 "architect collaboration snapshot",
+                runId
+        );
+    }
+
+    /** 多服务生成原型：同步生成并返回摘要（可能耗时数秒）。 */
+    public ResponseEntity<JsonNode> generateMultiService(JsonNode body) {
+        return postJson(
+                aiCoreRunRestClient,
+                GENERATED_APP_PATH,
+                body,
+                "multi-service generate"
+        );
+    }
+
+    /** 读取一次多服务生成结果。 */
+    public ResponseEntity<JsonNode> multiServiceRun(String runId) {
+        return getJson(
+                aiCoreInteractiveRestClient,
+                GENERATED_APP_RUN_PATH,
+                "multi-service run",
                 runId
         );
     }

@@ -22,6 +22,7 @@ import {
 } from '../workspace/documentCenter.js'
 import ContractViewer from './ContractViewer.jsx'
 import { fetchCollaborationRecord } from '../workspace/collaborationClient.js'
+import { generateMultiService } from '../workspace/generatedAppsClient.js'
 import {
   collaborationFromSnapshot,
   mergeCollaboration,
@@ -360,6 +361,25 @@ function FullstackGeneration({
     serverCollaboration,
   ).slice(-8)
   const [collaborationFilter, setCollaborationFilter] = useState('all')
+  const [multiService, setMultiService] = useState({
+    loading: false,
+    error: '',
+    result: null,
+  })
+  const runMultiService = async () => {
+    if (multiService.loading) return
+    setMultiService({ loading: true, error: '', result: null })
+    try {
+      const result = await generateMultiService({ name: 'ticket-copilot' })
+      setMultiService({ loading: false, error: '', result })
+    } catch (error) {
+      setMultiService({
+        loading: false,
+        error: error?.message || '多服务生成失败',
+        result: null,
+      })
+    }
+  }
   const loadedRunRef = useRef('')
   const filteredCollaboration = visibleCollaboration.filter(
     (item) => collaborationFilter === 'all' || item.kind === collaborationFilter,
@@ -699,6 +719,40 @@ function FullstackGeneration({
           )}
         </div>
       )}
+
+      <div className="architect-multiservice" data-multi-service>
+        <span className="architect-multiservice-title">多服务生成（原型）</span>
+        <span className="architect-multiservice-hint">
+          固定工单蓝图：Kafka + 消费者 + LangGraph Agent + OTel
+        </span>
+        <button
+          type="button"
+          className="architect-ghost"
+          data-generate-multi-service
+          disabled={multiService.loading}
+          onClick={runMultiService}
+        >
+          {multiService.loading ? '生成中…' : '生成多服务应用'}
+        </button>
+        {multiService.error && (
+          <span className="architect-collab-error" role="alert">
+            {multiService.error}
+          </span>
+        )}
+        {multiService.result && (
+          <span className="architect-multiservice-result">
+            {multiService.result.status}
+            {' · '}产物 {multiService.result.artifacts}
+            {' · '}幂等{' '}
+            {String(
+              multiService.result.verification?.idempotency?.secondDuplicate,
+            )}
+            {multiService.result.delivery?.manifest?.imageDigest
+              ? ` · ${multiService.result.delivery.manifest.imageDigest.slice(0, 19)}…`
+              : ''}
+          </span>
+        )}
+      </div>
 
       {needsClarification && clarifyOpen && (
         <div

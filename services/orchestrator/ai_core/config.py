@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     collaboration_fastpath_ttl_seconds: float = 3600.0
     collaboration_fastpath_max_steps: int = 100
     collaboration_fastpath_edges_path: str = "config/collaboration/fastpath_edges.yaml"
+    # 多服务生成原型的产物根目录（容器内 /tmp，接口直接回传摘要）。
+    generated_apps_root: str = "/tmp/vibe-generated-apps"
 
     # Direct Ops 提交后把最新源码同步到 BFF 持久化快照。
     bff_base_url: str = "http://java-bff:8080"
