@@ -64,6 +64,8 @@ TASK_CAPABILITY: dict[str, Capability] = {
     "architect_contract": "strong",
     # 影子助手是只读解释，短输出，走廉价模型即可。
     "architect_helper": "fast",
+    # 方案侦察：抽取领域 / 能力 / 检索词，短结构化 JSON，走廉价模型。
+    "solution_discovery": "fast",
     # 离线画布局部节点生成：短结构化 JSON，走廉价模型。
     "visual_node": "fast",
 }
@@ -79,6 +81,7 @@ TASK_SETTING_FIELD: dict[str, str] = {
     "architect_analyze": "model_architect_analyze_name",
     "architect_contract": "model_architect_contract_name",
     "architect_helper": "model_architect_helper_name",
+    "solution_discovery": "model_solution_discovery_name",
 }
 
 # Architect 的结构化输出包含完整契约与 VisualDocument，DeepSeek 默认

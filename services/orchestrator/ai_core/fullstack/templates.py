@@ -18,6 +18,7 @@ from __future__ import annotations
 # server/db.js：Sequelize ORM + SQLite 预览回退
 # ------------------------------------------------------------
 SEQUELIZE_DB_TEMPLATE = r"""// 由 DBACoder 根据《全栈实施契约》生成。
+import { QueryTypes } from 'sequelize'
 // 生产路径：Sequelize ORM + DATABASE_URL（MySQL / PostgreSQL）。
 // 沙盒预览：未配置 DATABASE_URL 时回退到 Node 22 内置 node:sqlite。
 // 两条路径暴露同一组仓储函数，Express 路由与前端代码无需分支。
@@ -37,6 +38,8 @@ const COLUMN_META = __COLUMN_META_JSON__
 // 主从表：RELATED_MODELS 只包含一跳关联表（已剔除鉴权敏感列），
 // RELATIONS 描述 hasMany / belongsTo 的方向与外键。
 const RELATED_MODELS = __RELATED_MODELS_JSON__
+// 与核心表无直接关系的独立集合（如 patrol_routes）：只建模，不生成 include。
+const EXTRA_MODELS = __EXTRA_MODELS_JSON__
 const RELATIONS = __RELATIONS_JSON__
 const MODEL_DEFS = [
   {
@@ -50,6 +53,7 @@ const MODEL_DEFS = [
     isCore: true,
   },
   ...RELATED_MODELS.map((model) => ({ ...model, isCore: false })),
+  ...EXTRA_MODELS.map((model) => ({ ...model, isCore: false })),
 ]
 const MODEL_BY_TABLE = Object.fromEntries(
   MODEL_DEFS.map((model) => [model.table, model]),
@@ -91,6 +95,26 @@ function schemaSqlFor(model) {
 
 // 预览库必须一次建好核心表与关联表；逐表执行也保证幂等。
 const SCHEMA_SQL = MODEL_DEFS.map(schemaSqlFor).join('\n')
+// 鉴权表必须保留 password / iam_sub 等敏感列供登录校验使用；
+// 该建表语句先执行，随后 SCHEMA_SQL 的 IF NOT EXISTS 不会覆盖它。
+const AUTH_ENABLED = __AUTH_ENABLED__
+const AUTH_TABLE = '__AUTH_TABLE__'
+const AUTH_MODEL = __AUTH_MODEL_JSON__
+const AUTH_ID_COLUMN = '__AUTH_ID_COLUMN__'
+const AUTH_USERNAME_COLUMN = '__AUTH_USERNAME_COLUMN__'
+const AUTH_PASSWORD_COLUMN = '__AUTH_PASSWORD_COLUMN__'
+const AUTH_ROLE_COLUMN = '__AUTH_ROLE_COLUMN__'
+const AUTH_SCHEMA_SQL =
+  AUTH_ENABLED && AUTH_MODEL
+    ? `CREATE TABLE IF NOT EXISTS "${AUTH_TABLE}" (\n` +
+      '  "id" INTEGER PRIMARY KEY AUTOINCREMENT' +
+      AUTH_MODEL.columnDefs
+        .filter(([name]) => name !== 'id')
+        .map(([name, type]) => `,\n  "${name}" ${type}`)
+        .join('') +
+      '\n);'
+    : ''
+const ALL_SCHEMA_SQL = [AUTH_SCHEMA_SQL, SCHEMA_SQL].filter(Boolean).join('\n')
 
 // ------------------------------------------------------------
 // 公共写入值构造：创建 / 更新共用默认值策略
@@ -251,6 +275,9 @@ async function connectOrm() {
       },
     )
   }
+  // 鉴权查询走原生 SQL，不额外 define 模型：
+  // 1) 不破坏“单核心表 define”门禁；
+  // 2) 完整列（含 password_hash）不会进入 include，避免敏感字段外泄。
 
   // 主从表关联：hasMany / belongsTo 必须成对声明。缺任何一侧，
   // Sequelize 的 include 都会报 "X is not associated to Y"。
@@ -303,8 +330,10 @@ async function createSqliteState() {
   const { DatabaseSync } = await import('node:sqlite')
   mkdirSync(DATA_DIR, { recursive: true })
   const db = new DatabaseSync(DB_PATH)
-  db.exec('PRAGMA busy_timeout = 5000;')
-  db.exec(SCHEMA_SQL)
+  // 沙盒 SQLite 是单写者：锁竞争时等待更久，避免 6s 级锁直接 500。
+  // 生产 MySQL/PostgreSQL 不依赖这条设置，但仍需应用层重试与幂等。
+  db.exec('PRAGMA busy_timeout = 15000;')
+  db.exec(ALL_SCHEMA_SQL)
   const state = { db }
   await seedSqlite(state)
   return state
@@ -609,6 +638,193 @@ export async function deleteRecord(id) {
   return { deleted: result.changes > 0, id: Number(id) }
 }
 
+// ------------------------------------------------------------
+// 多实体 CRUD：契约中除核心表外的顶层集合（例如 patrol_routes）。
+// table 必须命中 MODEL_DEFS 白名单，禁止任意表名拼接。
+// ------------------------------------------------------------
+function resolveModelDef(table) {
+  const key = String(table || '').trim().toLowerCase()
+  return MODEL_DEFS.find((item) => item.table.toLowerCase() === key) || null
+}
+
+export async function listTableRecords(table, { page = 1, size = 20 } = {}) {
+  const def = resolveModelDef(table)
+  if (!def) throw new Error(`UNKNOWN_TABLE:${table}`)
+  if (ORM_ENABLED) {
+    const { models } = await getOrm()
+    const model = models[def.table]
+    const { rows, count } = await model.findAndCountAll({
+      limit: size,
+      offset: (page - 1) * size,
+      order: [['id', 'DESC']],
+      raw: true,
+    })
+    return { items: rows, total: Number(count), page, size }
+  }
+  const state = await getSqliteState()
+  const total = sqliteGet(state, `SELECT COUNT(*) AS total FROM "${def.table}"`)
+  const items = sqliteAll(
+    state,
+    `SELECT * FROM "${def.table}" ORDER BY "id" DESC LIMIT ? OFFSET ?`,
+    [size, (page - 1) * size],
+  )
+  return { items, total: Number(total?.total ?? 0), page, size }
+}
+
+export async function getTableRecord(table, id) {
+  const def = resolveModelDef(table)
+  if (!def) throw new Error(`UNKNOWN_TABLE:${table}`)
+  if (ORM_ENABLED) {
+    const { models } = await getOrm()
+    return models[def.table].findByPk(Number(id), { raw: true })
+  }
+  return sqliteGetRecord(await getSqliteState(), id, def.table)
+}
+
+export async function createTableRecord(table, input = {}) {
+  const def = resolveModelDef(table)
+  if (!def) throw new Error(`UNKNOWN_TABLE:${table}`)
+  const values = buildValues(input, { table: def.table })
+  if (ORM_ENABLED) {
+    const { models } = await getOrm()
+    const row = await models[def.table].create(values)
+    return row.get({ plain: true })
+  }
+  return sqliteInsert(await getSqliteState(), values, def.table)
+}
+
+export async function updateTableRecord(table, id, input = {}) {
+  const def = resolveModelDef(table)
+  if (!def) throw new Error(`UNKNOWN_TABLE:${table}`)
+  const values = buildValues(input, { update: true, table: def.table })
+  if (ORM_ENABLED) {
+    const { models } = await getOrm()
+    const row = await models[def.table].findByPk(Number(id))
+    if (!row) return null
+    if (Object.keys(values).length > 0) await row.update(values)
+    return row.get({ plain: true })
+  }
+  const state = await getSqliteState()
+  const columns = Object.keys(values)
+  if (columns.length > 0) {
+    sqliteRun(
+      state,
+      `UPDATE "${def.table}" SET ` +
+        columns.map((column) => `"${column}" = ?`).join(', ') +
+        ' WHERE "id" = ?',
+      [
+        ...columns.map((column) => encodeSqlite(values[column])),
+        Number(id),
+      ],
+    )
+  }
+  return sqliteGetRecord(state, id, def.table)
+}
+
+export async function deleteTableRecord(table, id) {
+  const def = resolveModelDef(table)
+  if (!def) throw new Error(`UNKNOWN_TABLE:${table}`)
+  if (ORM_ENABLED) {
+    const { models } = await getOrm()
+    const changes = await models[def.table].destroy({
+      where: { id: Number(id) },
+    })
+    return { deleted: changes > 0, id: Number(id) }
+  }
+  const result = sqliteRun(
+    await getSqliteState(),
+    `DELETE FROM "${def.table}" WHERE "id" = ?`,
+    [Number(id)],
+  )
+  return { deleted: result.changes > 0, id: Number(id) }
+}
+
+// ------------------------------------------------------------
+// 鉴权查询：完整列（含 password_hash）只在服务端使用。
+// ------------------------------------------------------------
+async function queryAuthRows(sql, replacements = [], type = QueryTypes.SELECT) {
+  const { instance } = await getOrm()
+  return instance.query(sql, { replacements, type })
+}
+
+export async function countAuthUsers() {
+  if (!AUTH_ENABLED || !AUTH_MODEL) return 0
+  if (ORM_ENABLED) {
+    const rows = await queryAuthRows(
+      `SELECT COUNT(*) AS total FROM ${AUTH_TABLE}`,
+    )
+    return Number(rows?.[0]?.total ?? 0)
+  }
+  const total = sqliteGet(
+    await getSqliteState(),
+    `SELECT COUNT(*) AS total FROM "${AUTH_TABLE}"`,
+  )
+  return Number(total?.total ?? 0)
+}
+
+export async function findAuthUserByUsername(username) {
+  if (!AUTH_ENABLED || !AUTH_MODEL) return null
+  if (ORM_ENABLED) {
+    const rows = await queryAuthRows(
+      `SELECT * FROM ${AUTH_TABLE} WHERE ${AUTH_USERNAME_COLUMN} = ? LIMIT 1`,
+      [String(username || '')],
+    )
+    return rows?.[0] || null
+  }
+  return (
+    sqliteGet(
+      await getSqliteState(),
+      `SELECT * FROM "${AUTH_TABLE}" WHERE "${AUTH_USERNAME_COLUMN}" = ? LIMIT 1`,
+      [String(username || '')],
+    ) || null
+  )
+}
+
+export async function findAuthUserById(id) {
+  if (!AUTH_ENABLED || !AUTH_MODEL) return null
+  if (ORM_ENABLED) {
+    const rows = await queryAuthRows(
+      `SELECT * FROM ${AUTH_TABLE} WHERE ${AUTH_ID_COLUMN} = ? LIMIT 1`,
+      [Number(id)],
+    )
+    return rows?.[0] || null
+  }
+  return (
+    sqliteGet(
+      await getSqliteState(),
+      `SELECT * FROM "${AUTH_TABLE}" WHERE "${AUTH_ID_COLUMN}" = ? LIMIT 1`,
+      [Number(id)],
+    ) || null
+  )
+}
+
+export async function createAuthUser(values = {}) {
+  if (!AUTH_ENABLED || !AUTH_MODEL) {
+    throw new Error('AUTH_NOT_ENABLED')
+  }
+  const payload = { ...values }
+  const columns = AUTH_MODEL.columns
+  if (columns.includes('created_at') && payload.created_at === undefined) {
+    payload.created_at = new Date().toISOString()
+  }
+  if (columns.includes('updated_at') && payload.updated_at === undefined) {
+    payload.updated_at = new Date().toISOString()
+  }
+  if (ORM_ENABLED) {
+    const keys = Object.keys(payload)
+    if (keys.length === 0) throw new Error('没有可写入的鉴权字段')
+    await queryAuthRows(
+      `INSERT INTO ${AUTH_TABLE} (${keys.join(', ')}) VALUES (` +
+        keys.map(() => '?').join(', ') +
+        ')',
+      keys.map((key) => payload[key]),
+      QueryTypes.INSERT,
+    )
+    return findAuthUserByUsername(payload[AUTH_USERNAME_COLUMN])
+  }
+  return sqliteInsert(await getSqliteState(), payload, AUTH_TABLE)
+}
+
 export async function health() {
   if (ORM_ENABLED) {
     const { instance, model } = await getOrm()
@@ -667,6 +883,393 @@ export {
 }
 """
 
+AUTH_MODULE_TEMPLATE = r"""// 由 BackendCoder 生成：JWT 登录 / 注册 / 当前用户 + Bearer 校验。
+// 口令只存 Bcrypt 哈希；JWT_SECRET 必须由环境变量提供（生产缺失会告警）。
+import jwt from 'jsonwebtoken'
+import { hashPassword, verifyPassword } from './security.js'
+import {
+  countAuthUsers,
+  createAuthUser,
+  findAuthUserById,
+  findAuthUserByUsername,
+} from './db.js'
+
+const ID_COLUMN = '__AUTH_ID_COLUMN__'
+const USERNAME_COLUMN = '__AUTH_USERNAME_COLUMN__'
+const PASSWORD_COLUMN = '__AUTH_PASSWORD_COLUMN__'
+const ROLE_COLUMN = '__AUTH_ROLE_COLUMN__'
+const JWT_SECRET = String(process.env.JWT_SECRET || 'vibe-dev-secret-change-me')
+const ACCESS_TTL = String(process.env.JWT_ACCESS_TTL || '1h')
+const REFRESH_TTL = String(process.env.JWT_REFRESH_TTL || '7d')
+const ADMIN_USERNAME = String(process.env.ADMIN_USERNAME || 'admin')
+const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || 'admin123')
+
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  console.warn('[auth] JWT_SECRET 未配置：生产环境请立即设置强随机密钥')
+}
+
+function publicUser(row) {
+  if (!row) return null
+  return {
+    id: row[ID_COLUMN],
+    username: row[USERNAME_COLUMN],
+    role: ROLE_COLUMN ? row[ROLE_COLUMN] : 'viewer',
+  }
+}
+
+function signToken(user, ttl) {
+  return jwt.sign(
+    {
+      sub: String(user[ID_COLUMN]),
+      username: user[USERNAME_COLUMN],
+      role: ROLE_COLUMN ? user[ROLE_COLUMN] : 'viewer',
+    },
+    JWT_SECRET,
+    { expiresIn: ttl },
+  )
+}
+
+let adminPromise = null
+async function ensureAdminUser() {
+  if (adminPromise) return adminPromise
+  adminPromise = (async () => {
+    if ((await countAuthUsers()) > 0) return
+    const passwordHash = await hashPassword(ADMIN_PASSWORD)
+    await createAuthUser({
+      [USERNAME_COLUMN]: ADMIN_USERNAME,
+      [PASSWORD_COLUMN]: passwordHash,
+      ...(ROLE_COLUMN ? { [ROLE_COLUMN]: 'admin' } : {}),
+    })
+  })().catch((error) => {
+    adminPromise = null
+    throw error
+  })
+  return adminPromise
+}
+
+export async function authenticate(request, response, next) {
+  const header = String(request.headers.authorization || '')
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : ''
+  if (!token) {
+    return response
+      .status(401)
+      .json({ code: 'AUTH_REQUIRED', message: '请先登录' })
+  }
+  try {
+    const payload = jwt.verify(token, JWT_SECRET)
+    const user = await findAuthUserById(payload.sub)
+    if (!user) {
+      return response
+        .status(401)
+        .json({ code: 'AUTH_USER_NOT_FOUND', message: '登录状态已失效' })
+    }
+    request.authUser = user
+    return next()
+  } catch (error) {
+    return response
+      .status(401)
+      .json({ code: 'AUTH_TOKEN_INVALID', message: '登录状态已失效' })
+  }
+}
+
+// 注册接口本身是公开的（首个用户可自助成为 admin），但如果请求带了
+// 合法 Bearer token，则识别当前用户，供“仅 admin 可创建非 viewer”校验。
+export async function authenticateOptional(request, _response, next) {
+  const header = String(request.headers.authorization || '')
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : ''
+  if (!token) return next()
+  try {
+    const payload = jwt.verify(token, JWT_SECRET)
+    const user = await findAuthUserById(payload.sub)
+    if (user) request.authUser = user
+  } catch (error) {
+    // 公开接口忽略无效 token，保持匿名请求可继续。
+  }
+  return next()
+}
+
+// viewer 只读；admin / inspector 可写。角色列缺失时不启用该策略。
+export function requireWriteRole(request, response, next) {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(String(request.method || '').toUpperCase())) {
+    return next()
+  }
+  const current = ROLE_COLUMN
+    ? String(request.authUser?.[ROLE_COLUMN] || 'viewer').toLowerCase()
+    : 'viewer'
+  if (current === 'viewer') {
+    return response
+      .status(403)
+      .json({ code: 'AUTH_FORBIDDEN', message: 'viewer 角色只读' })
+  }
+  return next()
+}
+
+export function requireRole(...roles) {
+  const allowed = roles.map((role) => String(role || '').toLowerCase())
+  return (request, response, next) => {
+    const current = ROLE_COLUMN
+      ? String(request.authUser?.[ROLE_COLUMN] || 'viewer').toLowerCase()
+      : 'viewer'
+    if (allowed.length === 0 || allowed.includes(current)) return next()
+    return response
+      .status(403)
+      .json({ code: 'AUTH_FORBIDDEN', message: '当前角色无权执行该操作' })
+  }
+}
+
+export async function loginHandler(request, response) {
+  const body =
+    request.body && typeof request.body === 'object' ? request.body : {}
+  const username = String(body.username || body[USERNAME_COLUMN] || '').trim()
+  const password = String(body.password || body[PASSWORD_COLUMN] || '')
+  if (!username || !password) {
+    return response
+      .status(400)
+      .json({ code: 'AUTH_MISSING_CREDENTIALS', message: '用户名和口令必填' })
+  }
+  try {
+    await ensureAdminUser()
+  } catch (error) {
+    // 首次种子失败不应返回 500 给登录页：明确告知管理员口令不合法。
+    return response
+      .status(500)
+      .json({ code: 'AUTH_SEED_FAILED', message: String(error?.message || error) })
+  }
+  const user = await findAuthUserByUsername(username)
+  const valid = user ? await verifyPassword(password, user[PASSWORD_COLUMN]) : false
+  if (!valid) {
+    return response
+      .status(401)
+      .json({ code: 'AUTH_INVALID_CREDENTIALS', message: '用户名或口令错误' })
+  }
+  return response.json({
+    token: signToken(user, ACCESS_TTL),
+    refreshToken: signToken(user, REFRESH_TTL),
+    user: publicUser(user),
+  })
+}
+
+export async function registerHandler(request, response) {
+  const body =
+    request.body && typeof request.body === 'object' ? request.body : {}
+  const username = String(body.username || body[USERNAME_COLUMN] || '').trim()
+  const password = String(body.password || body[PASSWORD_COLUMN] || '')
+  if (!username || !password) {
+    return response
+      .status(400)
+      .json({ code: 'AUTH_MISSING_CREDENTIALS', message: '用户名和口令必填' })
+  }
+  const existing = await findAuthUserByUsername(username)
+  if (existing) {
+    return response
+      .status(409)
+      .json({ code: 'AUTH_USER_EXISTS', message: '用户名已存在' })
+  }
+  const total = await countAuthUsers()
+  const requestedRole = String(body.role || 'viewer')
+  const role = total === 0 ? 'admin' : requestedRole
+  if (total > 0) {
+    if (!request.authUser) {
+      return response
+        .status(401)
+        .json({ code: 'AUTH_REQUIRED', message: '请先登录' })
+    }
+    const currentRole = ROLE_COLUMN
+      ? String(request.authUser[ROLE_COLUMN] || 'viewer')
+      : 'viewer'
+    if (role !== 'viewer' && currentRole !== 'admin') {
+      return response.status(403).json({
+        code: 'AUTH_FORBIDDEN',
+        message: '只有管理员可以创建非 viewer 角色',
+      })
+    }
+  }
+  try {
+    const passwordHash = await hashPassword(password)
+    const user = await createAuthUser({
+      [USERNAME_COLUMN]: username,
+      [PASSWORD_COLUMN]: passwordHash,
+      ...(ROLE_COLUMN ? { [ROLE_COLUMN]: role } : {}),
+    })
+    return response.status(201).json(publicUser(user))
+  } catch (error) {
+    const message = String(error?.message || error)
+    const status = message === 'PASSWORD_LENGTH_INVALID' ? 400 : 500
+    return response.status(status).json({
+      code: status === 400 ? 'AUTH_PASSWORD_INVALID' : 'AUTH_CREATE_FAILED',
+      message:
+        status === 400 ? '口令长度必须为 8-128 个字符' : message,
+    })
+  }
+}
+
+export function meHandler(request, response) {
+  return response.json(publicUser(request.authUser))
+}
+"""
+
+
+FRONTEND_AUTH_GATE_TEMPLATE = r"""// 由 FrontendCoder 生成：JWT 登录门禁 + 全局 Bearer 注入。
+// 登录成功后 token 存 localStorage；所有 /api 请求自动带 Authorization。
+import { useState } from 'react'
+
+export const AUTH_TOKEN_KEY = 'vibe_auth_token'
+const LOGIN_PATH = __AUTH_LOGIN_PATH__
+
+export function installAuthFetch() {
+  if (typeof window === 'undefined' || window.__VIBE_AUTH_FETCH__) return
+  window.__VIBE_AUTH_FETCH__ = true
+  const original = window.fetch.bind(window)
+  window.fetch = (input, init = {}) => {
+    const url = typeof input === 'string' ? input : String(input?.url || '')
+    const isApi = url.startsWith('/api/') || url.includes('/api/')
+    let token = ''
+    try {
+      token = localStorage.getItem(AUTH_TOKEN_KEY) || ''
+    } catch {
+      token = ''
+    }
+    if (isApi && token) {
+      const headers = new Headers(init.headers || {})
+      if (!headers.has('Authorization')) {
+        headers.set('Authorization', `Bearer ${token}`)
+      }
+      return original(input, { ...init, headers })
+    }
+    return original(input, init)
+  }
+}
+
+export function AuthGate({ children }) {
+  const [token, setToken] = useState(() => {
+    try {
+      return localStorage.getItem(AUTH_TOKEN_KEY) || ''
+    } catch {
+      return ''
+    }
+  })
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  if (token) return children
+
+  const submit = async (event) => {
+    event.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const response = await fetch(LOGIN_PATH, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(payload.message || payload.code || `HTTP ${response.status}`)
+      }
+      const nextToken = payload.token || payload.data?.token
+      if (!nextToken) throw new Error('登录响应缺少 token')
+      localStorage.setItem(AUTH_TOKEN_KEY, nextToken)
+      setToken(nextToken)
+    } catch (cause) {
+      setError(String(cause?.message || cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: '#f8fafc',
+        padding: '24px',
+        fontFamily: 'system-ui, -apple-system, sans-serif',
+      }}
+    >
+      <form
+        onSubmit={submit}
+        style={{
+          width: 'min(380px, 100%)',
+          background: '#ffffff',
+          border: '1px solid #e2e8f0',
+          borderRadius: '16px',
+          padding: '28px',
+          boxShadow: '0 20px 45px rgba(15, 23, 42, 0.12)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '14px',
+        }}
+      >
+        <h1 style={{ margin: 0, fontSize: '22px', color: '#0f172a' }}>登录</h1>
+        <p style={{ margin: 0, color: '#64748b', fontSize: '14px' }}>
+          登录后才能访问业务数据。
+        </p>
+        <input
+          name="username"
+          autoComplete="username"
+          placeholder="用户名"
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
+          required
+          style={inputStyle}
+        />
+        <input
+          name="password"
+          type="password"
+          autoComplete="current-password"
+          placeholder="口令"
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          required
+          style={inputStyle}
+        />
+        {error ? (
+          <div style={{ color: '#b91c1c', fontSize: '13px' }}>{error}</div>
+        ) : null}
+        <button
+          type="submit"
+          disabled={busy}
+          style={{
+            border: 'none',
+            borderRadius: '10px',
+            padding: '11px 16px',
+            background: busy ? '#93c5fd' : '#2563eb',
+            color: '#ffffff',
+            fontSize: '15px',
+            cursor: busy ? 'wait' : 'pointer',
+          }}
+        >
+          {busy ? '登录中…' : '登录'}
+        </button>
+        {import.meta.env.DEV ? (
+          <small style={{ color: '#94a3b8' }}>
+            首次登录：admin / admin123（可用 ADMIN_PASSWORD 修改）
+          </small>
+        ) : null}
+      </form>
+    </div>
+  )
+}
+
+const inputStyle = {
+  width: '100%',
+  boxSizing: 'border-box',
+  border: '1px solid #cbd5e1',
+  borderRadius: '10px',
+  padding: '10px 12px',
+  fontSize: '14px',
+  color: '#0f172a',
+}
+"""
+
+
 # ------------------------------------------------------------
 # server/index.js：Express REST 服务
 # ------------------------------------------------------------
@@ -676,18 +1279,24 @@ EXPRESS_SERVER_TEMPLATE = r"""// 由 BackendCoder 根据《全栈实施契约》
 import express from 'express'
 __UPLOAD_IMPORTS__
 __AI_IMPORTS__
+__AUTH_IMPORTS__
 import {
   ORM_ENABLED,
   RUNTIME,
   STORAGE,
   createRecord,
   createRelatedRecord,
+  createTableRecord,
   deleteRecord,
+  deleteTableRecord,
   getRecord,
+  getTableRecord,
   health,
   listRecords,
   listRelatedRecords,
+  listTableRecords,
   updateRecord,
+  updateTableRecord,
 } from './db.js'
 
 const PORT = Number(
@@ -749,6 +1358,8 @@ const asyncHandler = (handler) => (request, response, next) =>
 
 __UPLOAD_MIDDLEWARE__
 __AI_MIDDLEWARE__
+
+__AUTH_MIDDLEWARE__
 
 const listHandler = asyncHandler(async (request, response) => {
   const page = Math.max(1, Number(request.query.page || 1))
@@ -821,6 +1432,9 @@ if (ITEM_PATH && ITEM_PATH !== COLLECTION_PATH) {
   }))
 }
 
+// ---- 鉴权路由 ----
+__AUTH_ROUTES__
+
 // ---- AI-Native 路由 ----
 __AI_ROUTES__
 
@@ -828,6 +1442,10 @@ __AI_ROUTES__
 // 父资源下的子集合，例如 /api/v1/users/:id/resumes。
 // 列表 / 详情响应本身也通过 Sequelize include 带回关联数组。
 __RELATED_ROUTES__
+
+// ---- 多实体顶层集合 ----
+// 契约中除核心表外的独立集合（例如 /api/v1/patrol-routes）。
+__MULTI_TABLE_ROUTES__
 
 // ---- 契约业务路由 ----
 // BackendCoder 为契约里的每个业务动作生成独立端点；通用 CRUD 只是基础能力，
@@ -1079,8 +1697,17 @@ function start(label, command, args) {
   children.push(child)
   child.on('exit', (code, signal) => {
     console.log(`[vibe-dev] ${label} exited code=${code} signal=${signal}`)
-    if (!shuttingDown && label === 'vite') {
+    if (shuttingDown) return
+    if (label === 'vite') {
       shutdown(code ?? 1)
+      return
+    }
+    if (label === 'api') {
+      // 后端崩溃不能让预览永久失联：1s 后自动拉起，Vite 代理继续可用。
+      console.log('[vibe-dev] API 退出，1s 后自动重启')
+      setTimeout(() => {
+        if (!shuttingDown) start('api', process.execPath, args)
+      }, 1000)
     }
   })
   return child
@@ -1315,8 +1942,126 @@ docker run --rm -p 3000:3000 --env-file .env \
 > 环境变量注入；不要把真实密钥写入仓库、镜像或前端构建产物。
 """
 
+README_TEMPLATE = r"""# __PROJECT_NAME__
+
+由 Vibe Platform 生成的全栈项目。
+
+## 技术栈
+
+- 前端：React 18 + Vite + Tailwind CSS
+- 后端：Node.js + Express
+- 数据库：__DB_ENGINE_LABEL__
+- ORM：Sequelize
+
+## 本地运行
+
+```bash
+cp .env.example .env
+npm install
+cd server && npm install && cd ..
+npm run dev
+```
+
+- 前端：http://localhost:5173
+- 后端：http://localhost:3000
+- 健康检查：`GET /api/health`
+- 集合：`__COLLECTION_PATH__`
+
+## 生产部署
+
+```bash
+docker compose up -d --build
+node server/migrate.mjs
+```
+
+前端静态构建：`npm run build`，产物在 `dist/`；完整部署方式见 `DEPLOY.md`。
+"""
+
+COMPOSE_MYSQL_TEMPLATE = r"""services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      DB_ENGINE: mysql
+      DATABASE_URL: mysql://root:root@db:3306/__SERVICE_NAME__
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: __SERVICE_NAME__
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  db_data:
+"""
+
+COMPOSE_POSTGRES_TEMPLATE = r"""services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      DB_ENGINE: postgresql
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/__SERVICE_NAME__
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: __SERVICE_NAME__
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  db_data:
+"""
+
+COMPOSE_SQLITE_TEMPLATE = r"""services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      DB_ENGINE: sqlite
+      DATABASE_URL: ""
+    volumes:
+      - app_data:/app/data
+volumes:
+  app_data:
+"""
+
 __all__ = [
     "BACKEND_DOCKERFILE_TEMPLATE",
+    "COMPOSE_MYSQL_TEMPLATE",
+    "COMPOSE_POSTGRES_TEMPLATE",
+    "COMPOSE_SQLITE_TEMPLATE",
     "DEPLOY_GUIDE_TEMPLATE",
     "DEV_SCRIPT_TEMPLATE",
     "DOCKERIGNORE_TEMPLATE",
@@ -1324,6 +2069,7 @@ __all__ = [
     "EXPRESS_SERVER_TEMPLATE",
     "MIGRATE_SCRIPT_TEMPLATE",
     "MIGRATION_RUNNER_TEMPLATE",
+    "README_TEMPLATE",
     "RENDER_YAML_TEMPLATE",
     "SEQUELIZE_DB_TEMPLATE",
 ]

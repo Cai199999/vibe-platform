@@ -1,0 +1,44 @@
+# 平台可执行栈：契约默认值与 CodeGen 模板必须一致。
+#
+# 这是“平台能力”配置，不是行业配置。Architect 在用户未指定技术栈时
+# 从这里取默认值；用户指定了平台不支持的栈时，必须显式提示或写入
+# assumptions，不能静默换成另一套模板。
+
+default:
+  frontend: React + Vite + Tailwind CSS
+  backend: Node.js + Express
+  database: MySQL
+  orm: Sequelize
+  migration: SQL migration
+  deploy: Docker
+
+executable:
+  backend:
+    - node
+    - node.js
+    - express
+  orm:
+    - sequelize
+  database:
+    - mysql
+    - postgresql
+    - sqlite
+  frontend:
+    - react
+    - vite
+    - tailwind
+
+# 契约里出现这些词时，说明选型无法被当前 CodeGen 模板直接执行。
+known_unsupported:
+  backend:
+    - spring
+    - java
+    - django
+    - flask
+    - rails
+    - laravel
+    - ".net"
+  orm:
+    - jpa
+    - hibernate
+    - mybatis

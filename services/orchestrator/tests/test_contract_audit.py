@@ -142,6 +142,50 @@ class ContractAuditTest(unittest.TestCase):
         )
         self.assertIn("job_descriptions", problem.hint)
 
+    def test_relation_alias_is_valid_nested_resource(self) -> None:
+        """relations.alias=images 指向 facility_images，嵌套路由不得误判缺表。"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/facilities",
+                    description="设施列表",
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/facilities/{facility_id}/images",
+                    description="设施影像",
+                ),
+            ],
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="FacilityList",
+                    event="load",
+                    api_route="GET /api/v1/facilities",
+                    logic="加载设施",
+                )
+            ],
+            relations=[
+                ArchitectTableRelation(
+                    parentTable="facilities",
+                    childTable="facility_images",
+                    foreignKey="facility_id",
+                    alias="images",
+                )
+            ],
+            databaseDdl=(
+                "CREATE TABLE facilities ("
+                "id BIGINT PRIMARY KEY, name VARCHAR(64));"
+                "CREATE TABLE facility_images ("
+                "id BIGINT PRIMARY KEY, facility_id BIGINT,"
+                " file_name VARCHAR(128));"
+            ),
+        )
+
+        audit = audit_contract(contract)
+
+        self.assertTrue(audit.ok, audit.summary())
+
     def test_auth_action_routes_map_to_users_table(self) -> None:
         """登录 / 注册是 users 表上的动作，不得要求 DDL 存在 auth 表。"""
         contract = _contract(

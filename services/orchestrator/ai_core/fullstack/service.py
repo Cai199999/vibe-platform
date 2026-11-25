@@ -28,11 +28,22 @@ from typing import Any
 from ai_core.agent.events import RunEventBuffer, get_event_buffer
 from ai_core.a2a import A2A_LOG, build_feedback
 from ai_core.architect.service import find_architect_contract
+from ai_core.codegen.bindings import apply_contract_interactions
+from ai_core.codegen.stack_dependencies import (
+    contract_stack_text,
+    resolve_stack_dependencies,
+)
 from ai_core.codegen.visual import VisualCodegenError, compile_visual_document
+from ai_core.codegen.visual_extensions import (
+    extension_dependencies,
+    load_visual_extensions,
+)
 from ai_core.codegen.visual_gate import VisualCodegenGateUnavailable
 from ai_core.domain.architect import ArchitectContract
 from ai_core.error_envelope import attach_error_envelope, envelope_from_code
 from ai_core.project_lock import ProjectBusyError, project_write_lock
+from ai_core.run_guard import get_run_guard
+from ai_core.persistence.run_store import get_run_store
 from ai_core.config import get_settings
 from ai_core.direct_ops.changelog import get_change_log_store
 from ai_core.domain.direct_ops import ChangeLogEntry
@@ -241,6 +252,12 @@ class FullstackService:
         mode = request.options.mode
         # 每种模式只广播自己真实执行的节点，前端进度条不会出现“假节点”。
         nodes = MODE_NODE_ORDERS.get(mode, MODE_NODE_ORDERS["fullstack"])
+        active.buffer.attach_snapshot(
+            "fullstack",
+            lambda a=active: self.snapshot(a.run_id).model_dump(
+                mode="json", by_alias=True
+            ),
+        )
         active.buffer.emit(
             "fullstack.started",
             {
@@ -260,7 +277,7 @@ class FullstackService:
             dedupe_key=f"fullstack.started:{run_id}",
         )
         threading.Thread(
-            target=self._run_worker,
+            target=get_run_guard().wrap(self._run_worker),
             args=(active,),
             name=f"fullstack-{run_id}",
             daemon=True,
@@ -611,8 +628,25 @@ class FullstackService:
         source_files = dict(request.source.files)
         visual_document = request.visual_document or contract.visual_document
         if request.options.mode == "frontend" and visual_document is not None:
+            visual_document = apply_contract_interactions(
+                visual_document,
+                contract.component_interactions,
+            )
+            extensions = load_visual_extensions()
+            stack = resolve_stack_dependencies(contract_stack_text(contract))
+            dependencies = {
+                **stack.dependencies,
+                **extension_dependencies(extensions),
+            }
             try:
-                compiled = compile_visual_document(visual_document)
+                compiled = compile_visual_document(
+                    visual_document,
+                    include_interactions=True,
+                    extra_dependencies=dependencies,
+                    extra_dev_dependencies=stack.dev_dependencies,
+                    extra_imports=list(stack.imports),
+                    visual_extensions=extensions,
+                )
             except VisualCodegenGateUnavailable as exc:
                 raise FullstackVisualCodegenError(
                     f"CodeGen AST 门禁不可用: {exc}"
@@ -662,7 +696,17 @@ class FullstackService:
     def snapshot(self, run_id: str) -> FullstackRunSnapshot:
         active = get_active_fullstack_run(run_id)
         if active is None:
-            raise FullstackRunNotFoundError(f"Fullstack Run 不存在: {run_id}")
+            stored = get_run_store().load_snapshot("fullstack", run_id)
+            if stored is None:
+                raise FullstackRunNotFoundError(f"Fullstack Run 不存在: {run_id}")
+            restored = FullstackRunSnapshot.model_validate(stored)
+            if restored.status not in {"SUCCEEDED", "FAILED"}:
+                restored.status = "FAILED"
+                restored.error = (
+                    restored.error or "服务重启，生成任务已中断，请重新发起。"
+                )
+                restored.error_code = restored.error_code or "RUN_INTERRUPTED"
+            return restored
         with _ACTIVE_LOCK:
             return FullstackRunSnapshot(
                 run_id=active.run_id,

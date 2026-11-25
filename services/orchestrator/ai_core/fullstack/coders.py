@@ -32,14 +32,20 @@ from ai_core.fullstack.schema_ast import (
     analyze_js_files,
 )
 from ai_core.fullstack.templates import (
+    AUTH_MODULE_TEMPLATE,
     BACKEND_DOCKERFILE_TEMPLATE,
+    COMPOSE_MYSQL_TEMPLATE,
+    COMPOSE_POSTGRES_TEMPLATE,
+    COMPOSE_SQLITE_TEMPLATE,
     DEPLOY_GUIDE_TEMPLATE,
     DEV_SCRIPT_TEMPLATE,
     DOCKERIGNORE_TEMPLATE,
     ENV_EXAMPLE_TEMPLATE,
     EXPRESS_SERVER_TEMPLATE,
+    FRONTEND_AUTH_GATE_TEMPLATE,
     MIGRATE_SCRIPT_TEMPLATE,
     MIGRATION_RUNNER_TEMPLATE,
+    README_TEMPLATE,
     RENDER_YAML_TEMPLATE,
     SEQUELIZE_DB_TEMPLATE,
 )
@@ -691,8 +697,10 @@ def check_orm_schema(
                 relation.parent_alias or _singular_word(relation.parent_table)
             ).lower()
             if parent == str(table).lower():
-                nested_expected.add(alias_key(child_alias))
-                nested_display.add(child_alias)
+                # 契约嵌套路由可能使用子表资源名（stock-movements），
+                # 而 Sequelize alias 可能是更短的 movements；两者都合法。
+                nested_expected.update({alias_key(child_alias), alias_key(child)})
+                nested_display.update({child_alias, child})
             if parent == str(table).lower() or child == str(table).lower():
                 include_expected.update(
                     {alias_key(child_alias), alias_key(parent_alias)}
@@ -937,6 +945,11 @@ _NON_COLLECTION_SUFFIXES = (
     "/login",
     "/logout",
     "/register",
+    # 当前用户 / 会话端点不是 CRUD 集合根。
+    "/me",
+    "/current",
+    "/profile",
+    "/session",
     "/upload",
     "/download",
     "/export",
@@ -1087,18 +1100,35 @@ def collection_path(routes: Iterable[ArchitectApiRoute]) -> str:
         for route in route_list
         if _is_collection_candidate(str(route.path or ""))
     ]
-    # 同一路径可能同时有 GET/POST，去重但保留声明顺序。
     unique_static = list(dict.fromkeys(static_routes))
-
-    for route in route_list:
-        path = str(route.path or "").split("?", 1)[0].strip()
-        if str(route.method or "").upper() == "GET" and _is_collection_candidate(path):
-            return path
-
     if unique_static:
-        # 优先选择段数最少的资源根路径（``/api/v1/resumes`` 优先于
-        # ``/api/v1/resumes/imports`` 这类子资源）。
-        return sorted(unique_static, key=lambda item: (item.count("/"), len(item)))[0]
+        # 按该资源下的 CRUD 路由数量评分，而不是“第一个 GET”。
+        # 例：契约先声明管理员 GET /users，但业务表 facilities 有完整 CRUD，
+        # 核心表应选 facilities；纯用户管理应用则 users 分数最高。
+        def _score(path: str) -> int:
+            return sum(
+                1
+                for route in route_list
+                if str(route.method or "").upper()
+                in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+                and (
+                    str(route.path or "").split("?", 1)[0].strip() == path
+                    or str(route.path or "")
+                    .split("?", 1)[0]
+                    .strip()
+                    .startswith(path + "/")
+                )
+            )
+
+        return sorted(
+            unique_static,
+            key=lambda item: (
+                -_score(item),
+                _is_system_table(_path_resource(item)),
+                item.count("/"),
+                len(item),
+            ),
+        )[0]
 
     # 没有静态路由时，从任意 /api/ 路径推导第一段资源名：
     # ``/api/v1/tasks/{task_id}/stream`` → ``/api/v1/tasks``。
@@ -1341,12 +1371,8 @@ def build_relation_schema(
     by_name = {table.name.lower(): table for table in tables}
     by_name.setdefault(core.name.lower(), core)
     relations = resolve_contract_relations(contract, by_name.values(), core.name)
-    table_payloads: list[dict[str, Any]] = []
-    names = [core.name, *related_table_names(relations, core.name)]
-    for name in names:
-        table = by_name.get(name.lower())
-        if table is None:
-            continue
+
+    def payload_for(table: DdlTable) -> dict[str, Any]:
         is_core = table.name.lower() == core.name.lower()
         visible = _public_columns(table, is_core=is_core)
         column_defs = [(column.name, column.sqlite_type) for column in visible]
@@ -1360,24 +1386,43 @@ def build_relation_schema(
             if is_core
             else display_key
         )
-        table_payloads.append(
-            {
-                "table": table.name,
-                "entity": entity,
-                "isCore": is_core,
-                "columns": column_names,
-                "columnDefs": column_defs,
-                "columnMeta": {
-                    column.name: _column_payload(column) for column in visible
-                },
-                "displayKey": display_key,
-                "payloadKey": payload_key,
-            }
-        )
+        return {
+            "table": table.name,
+            "entity": entity,
+            "isCore": is_core,
+            "columns": column_names,
+            "columnDefs": column_defs,
+            "columnMeta": {column.name: _column_payload(column) for column in visible},
+            "displayKey": display_key,
+            "payloadKey": payload_key,
+        }
+
+    # tables 保持“核心表 + 一跳关联表”，供 Sequelize include 与嵌套路由；
+    # extraTables 承载与核心表无直接关系的独立集合（如 patrol_routes），
+    # 让多实体 CRUD 也能落到真实模型，而不污染 RELATIONS。
+    related_names = [
+        core.name,
+        *related_table_names(relations, core.name),
+    ]
+    related_lower = {name.lower() for name in related_names}
+    table_payloads = [
+        payload_for(by_name[name.lower()])
+        for name in related_names
+        if name.lower() in by_name
+    ]
+    extra_payloads = [
+        payload_for(table)
+        for name, table in by_name.items()
+        if name not in related_lower
+    ]
     relation_payloads = [
         _relation_payload(relation, core.name) for relation in relations
     ]
-    return {"tables": table_payloads, "relations": relation_payloads}
+    return {
+        "tables": table_payloads,
+        "relations": relation_payloads,
+        "extraTables": extra_payloads,
+    }
 
 
 # ------------------------------------------------------------
@@ -1420,10 +1465,12 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
     related_models = [
         payload for payload in table_payloads if not payload.get("isCore")
     ]
+    extra_models = list(relation_schema.get("extraTables") or [])
     parsed_tables = {
         item.name.lower(): item for item in parse_ddl_tables(contract.database_ddl)
     }
     parsed_tables.setdefault(core.name.lower(), core)
+    auth = build_auth_support(contract, parsed_tables.values())
     ddl = (contract.database_ddl or "").strip()
     if ddl and not ddl.endswith(";"):
         ddl += ";"
@@ -1446,9 +1493,21 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
         "__RELATED_MODELS_JSON__": json.dumps(
             related_models, ensure_ascii=False, indent=2
         ),
+        "__EXTRA_MODELS_JSON__": json.dumps(extra_models, ensure_ascii=False, indent=2),
         "__RELATIONS_JSON__": json.dumps(
             relation_payloads, ensure_ascii=False, indent=2
         ),
+        "__AUTH_ENABLED__": "true" if auth["enabled"] else "false",
+        "__AUTH_TABLE__": auth["table"].name if auth["table"] else "",
+        "__AUTH_MODEL_JSON__": (
+            json.dumps(auth["model"], ensure_ascii=False, indent=2)
+            if auth["model"]
+            else "null"
+        ),
+        "__AUTH_ID_COLUMN__": auth["columns"].get("id", ""),
+        "__AUTH_USERNAME_COLUMN__": auth["columns"].get("username", ""),
+        "__AUTH_PASSWORD_COLUMN__": auth["columns"].get("password", ""),
+        "__AUTH_ROLE_COLUMN__": auth["columns"].get("role", ""),
         "__DISPLAY_KEY__": display_key,
         "__PAYLOAD_KEY__": payload_key,
         "__SEED_ROWS_JSON__": json.dumps(
@@ -1479,6 +1538,7 @@ def generate_dba_bundle(contract: ArchitectContract) -> GeneratedBundle:
         # BackendCoder 用这两项生成 Sequelize include 与嵌套路由。
         "tables": table_payloads,
         "relations": relation_payloads,
+        "extraTables": extra_models,
         "source": "databaseDdl",
         "contractId": contract.contract_id,
     }
@@ -1691,6 +1751,239 @@ def build_security_support(contract: ArchitectContract) -> dict[str, Any]:
         "files": {"server/security.js": _SECURITY_MODULE},
         "dependencies": {"bcryptjs": BCRYPT_VERSION},
         "skillId": WEB_BEST_PRACTICES_SKILL_ID,
+    }
+
+
+def _find_auth_table(tables: Iterable[DdlTable]) -> DdlTable | None:
+    """找到承载账号 / 口令 / 角色的表（通常是 users）。"""
+    for table in tables:
+        columns = [column.name for column in table.columns]
+        lowered = {name.lower() for name in columns}
+        has_password = any(_AUTH_COLUMN.search(name) for name in columns)
+        has_identity = bool(
+            lowered & {"username", "user_name", "email", "login", "account", "phone"}
+        )
+        if has_password and has_identity:
+            return table
+    return None
+
+
+def _auth_column(
+    columns: Iterable[str],
+    candidates: tuple[str, ...],
+    *,
+    contains: bool = False,
+) -> str:
+    names = list(columns)
+    lowered = {name.lower(): name for name in names}
+    for candidate in candidates:
+        if candidate in lowered:
+            return lowered[candidate]
+    if contains:
+        for name in names:
+            if any(candidate in name.lower() for candidate in candidates):
+                return name
+    return ""
+
+
+def _auth_model_payload(table: DdlTable) -> dict[str, Any]:
+    column_defs = [(column.name, column.sqlite_type) for column in table.columns]
+    names = [name for name, _ in column_defs]
+    display_key = _pick_display_column(names)
+    return {
+        "table": table.name,
+        "entity": "AuthUser",
+        "isCore": False,
+        "columns": names,
+        "columnDefs": column_defs,
+        "columnMeta": {
+            column.name: _column_payload(column) for column in table.columns
+        },
+        "displayKey": display_key,
+        "payloadKey": display_key,
+    }
+
+
+def build_auth_support(
+    contract: ArchitectContract,
+    tables: Iterable[DdlTable],
+) -> dict[str, Any]:
+    """按契约生成 JWT/RBAC 后端资产与前端登录门禁。
+
+    只有契约显式声明 login / register / me 且 DDL 存在账号表时启用；
+    否则保持原有 Mock / 无鉴权行为，避免给普通 CRUD 项目强加登录。
+    """
+    table_list = list(tables)
+    auth_table = _find_auth_table(table_list)
+    routes = list(contract.api_routes or [])
+    login = next(
+        (
+            route
+            for route in routes
+            if str(route.method or "").upper() == "POST"
+            and (
+                str(route.path or "").rstrip("/").lower().endswith("/login")
+                or "登录" in str(route.description or "")
+            )
+        ),
+        None,
+    )
+    register = next(
+        (
+            route
+            for route in routes
+            if str(route.method or "").upper() == "POST"
+            and (
+                str(route.path or "").rstrip("/").lower().endswith("/register")
+                or "注册" in str(route.description or "")
+            )
+        ),
+        None,
+    )
+    me = next(
+        (
+            route
+            for route in routes
+            if str(route.method or "").upper() == "GET"
+            and (
+                str(route.path or "").rstrip("/").lower().endswith(("/me", "/profile"))
+                or "当前用户" in str(route.description or "")
+            )
+        ),
+        None,
+    )
+    enabled = bool(auth_table and (login or register or me))
+    if not enabled:
+        return {
+            "enabled": False,
+            "table": None,
+            "model": None,
+            "columns": {},
+            "imports": "",
+            "middleware": "",
+            "routes": "",
+            "registered": [],
+            "dependencies": {},
+            "login_path": "",
+        }
+
+    assert auth_table is not None
+    columns = [column.name for column in auth_table.columns]
+    password_column = _auth_column(
+        columns,
+        ("password_hash", "password", "passwd", "pwd", "password_digest"),
+        contains=True,
+    )
+    username_column = _auth_column(
+        columns,
+        ("username", "user_name", "email", "login", "account", "phone"),
+        contains=True,
+    )
+    role_column = _auth_column(columns, ("role", "user_role", "role_name"))
+    id_column = _auth_column(columns, ("id",)) or (
+        next(
+            (column.name for column in auth_table.columns if column.is_primary),
+            "id",
+        )
+    )
+    if not password_column or not username_column:
+        return {
+            "enabled": False,
+            "table": None,
+            "model": None,
+            "columns": {},
+            "imports": "",
+            "middleware": "",
+            "routes": "",
+            "registered": [],
+            "dependencies": {},
+            "login_path": "",
+        }
+
+    login_path = _express_path(str(login.path)) if login else ""
+    register_path = _express_path(str(register.path)) if register else ""
+    me_path = _express_path(str(me.path)) if me else ""
+    public_paths = {
+        path
+        for path in (
+            login_path,
+            register_path,
+            "/api/health",
+            *(
+                _express_path(str(route.path))
+                for route in routes
+                if str(route.path or "").rstrip("/").lower().endswith("/health")
+            ),
+        )
+        if path
+    }
+    route_lines: list[str] = []
+    registered: list[tuple[str, str, str]] = []
+    if login_path:
+        route_lines.append(f"app.post({json.dumps(login_path)}, loginHandler)")
+        registered.append(("POST", login_path, "express.auth"))
+    if register_path:
+        route_lines.append(
+            f"app.post({json.dumps(register_path)}, authenticateOptional,"
+            " registerHandler)"
+        )
+        registered.append(("POST", register_path, "express.auth"))
+    if me_path:
+        route_lines.append(f"app.get({json.dumps(me_path)}, authenticate, meHandler)")
+        registered.append(("GET", me_path, "express.auth"))
+    role_guard = (
+        "return authenticate(request, response, () =>\n"
+        "    requireWriteRole(request, response, next),\n"
+        "  )\n"
+        if role_column
+        else "return authenticate(request, response, next)\n"
+    )
+    middleware = (
+        "// JWT 全局门禁：/api 默认要求 Bearer token；登录 / 注册 / 健康检查除外。\n"
+        f"const PUBLIC_AUTH_PATHS = {json.dumps(sorted(public_paths), ensure_ascii=False)}\n"
+        "app.use((request, response, next) => {\n"
+        "  const path = String(request.path || '')\n"
+        "  if (!path.startsWith('/api')) return next()\n"
+        "  if (\n"
+        "    PUBLIC_AUTH_PATHS.some(\n"
+        "      (item) => path === item || path.startsWith(item + '/'),\n"
+        "    )\n"
+        "  ) {\n"
+        "    return next()\n"
+        "  }\n"
+        f"  {role_guard}"
+        "})\n"
+    )
+    import_names = [
+        "authenticate",
+        "authenticateOptional",
+        "loginHandler",
+        "meHandler",
+        "registerHandler",
+    ]
+    if role_column:
+        import_names.append("requireWriteRole")
+    imports = (
+        "import {\n"
+        + "".join(f"  {name},\n" for name in import_names)
+        + "} from './auth.js'\n"
+    )
+    return {
+        "enabled": True,
+        "table": auth_table,
+        "model": _auth_model_payload(auth_table),
+        "columns": {
+            "id": id_column,
+            "username": username_column,
+            "password": password_column,
+            "role": role_column,
+        },
+        "imports": imports,
+        "middleware": middleware,
+        "routes": "\n".join(route_lines),
+        "registered": registered,
+        "dependencies": {"jsonwebtoken": "^9.0.2"},
+        "login_path": login_path,
     }
 
 
@@ -2264,6 +2557,231 @@ app.post('{path}', asyncHandler(async (request, response) => {{
 }}))"""
 
 
+def _api_segments(path: str) -> list[str]:
+    segments = [
+        segment
+        for segment in str(path or "").split("?", 1)[0].strip("/").split("/")
+        if segment
+    ]
+    if segments[:1] == ["api"]:
+        segments = segments[1:]
+        if segments[:1] in (["v1"], ["v2"]):
+            segments = segments[1:]
+    return segments
+
+
+def _table_route_target(
+    path: str,
+    method: str,
+    tables: Iterable[DdlTable],
+    core_table: str,
+) -> tuple[str, DdlTable, str] | None:
+    """识别契约里的顶层集合 / 详情路由对应的 DDL 表。
+
+    只接受 MODEL_DEFS 中可安全公开的表；含 password / token 等敏感列的
+    表（users 等）留给鉴权链路，不在这里暴露通用 CRUD。
+    """
+    segments = _api_segments(path)
+    if not segments:
+        return None
+    table = next(
+        (
+            item
+            for item in tables
+            if _singular_word(item.name) == _singular_word(segments[0])
+        ),
+        None,
+    )
+    if table is None or table.name.lower() == core_table.lower():
+        return None
+    if any(
+        marker in column.name.lower()
+        for column in table.columns
+        for marker in _SENSITIVE_COLUMN_MARKERS
+    ):
+        return None
+    if len(segments) == 1 and method in {"GET", "POST"}:
+        return ("collection", table, "")
+    if (
+        len(segments) == 2
+        and segments[1].startswith(("{", ":"))
+        and method in {"GET", "PUT", "PATCH", "DELETE"}
+    ):
+        return ("item", table, segments[1].strip("{}:"))
+    return None
+
+
+def _relation_route_target(
+    path: str,
+    method: str,
+    core: DdlTable,
+    relations: Iterable[ArchitectTableRelation],
+) -> tuple[ArchitectTableRelation, str, str] | None:
+    segments = _api_segments(path)
+    if len(segments) != 3 or not segments[1].startswith(("{", ":")):
+        return None
+    if _singular_word(segments[0]) != _singular_word(core.name):
+        return None
+    if method not in {"GET", "POST"}:
+        return None
+    child = _singular_word(segments[2])
+    for relation in relations:
+        if relation.parent_table.lower() != core.name.lower():
+            continue
+        alias = _relation_alias(relation, core.name)
+        if child in {
+            _singular_word(alias),
+            _singular_word(relation.child_table),
+        }:
+            return (relation, alias, segments[1].strip("{}:"))
+    return None
+
+
+def _multi_entity_route_code(
+    route: ArchitectApiRoute,
+    target: tuple[str, DdlTable, str],
+    upload: dict[str, Any],
+) -> str:
+    kind, table, param = target
+    method = str(route.method).upper()
+    path = _express_path(str(route.path or ""))
+    path_js = json.dumps(path, ensure_ascii=False)
+    table_js = json.dumps(table.name, ensure_ascii=False)
+    if kind == "collection" and method == "GET":
+        body = (
+            "  const page = Math.max(1, Number(request.query.page || 1))\n"
+            "  const size = Math.min(100, Math.max(1,"
+            " Number(request.query.size || 20)))\n"
+            f"  const result = await listTableRecords({table_js},"
+            " { page, size })\n"
+            f"  response.json({{ ...result, table: {table_js} }})\n"
+        )
+    elif kind == "collection" and method == "POST":
+        body = (
+            "  const record = await createTableRecord(\n"
+            f"    {table_js},\n"
+            "    request.body && typeof request.body === 'object'"
+            " ? request.body : {},\n"
+            "  )\n"
+            "  response.status(201).json({ ...record, success: true })\n"
+        )
+    elif method == "GET":
+        body = (
+            f"  const record = await getTableRecord({table_js},"
+            f" request.params.{param})\n"
+            "  if (!record) {\n"
+            "    return response\n"
+            "      .status(404)\n"
+            "      .json({ code: 'RECORD_NOT_FOUND', message: '记录不存在' })\n"
+            "  }\n"
+            "  response.json(record)\n"
+        )
+    elif method in {"PUT", "PATCH"}:
+        body = (
+            f"  const record = await updateTableRecord(\n"
+            f"    {table_js},\n"
+            f"    request.params.{param},\n"
+            "    request.body && typeof request.body === 'object'"
+            " ? request.body : {},\n"
+            "  )\n"
+            "  if (!record) {\n"
+            "    return response\n"
+            "      .status(404)\n"
+            "      .json({ code: 'RECORD_NOT_FOUND', message: '记录不存在' })\n"
+            "  }\n"
+            "  response.json(record)\n"
+        )
+    else:
+        body = (
+            f"  response.json(await deleteTableRecord({table_js},"
+            f" request.params.{param}))\n"
+        )
+    middleware = (
+        upload["post_middleware"]
+        if kind == "collection" and method == "POST" and upload.get("enabled")
+        else ""
+    )
+    return (
+        f"// 多实体 CRUD：{table.name}\n"
+        f"app.{method.lower()}({path_js}, {middleware}"
+        "asyncHandler(async (request, response) => {\n"
+        f"{body}"
+        "}))\n"
+    )
+
+
+def _relation_entity_route_code(
+    route: ArchitectApiRoute,
+    target: tuple[ArchitectTableRelation, str, str],
+    upload: dict[str, Any],
+) -> str:
+    relation, alias, param = target
+    method = str(route.method).upper()
+    path = _express_path(str(route.path or ""))
+    path_js = json.dumps(path, ensure_ascii=False)
+    alias_js = json.dumps(alias, ensure_ascii=False)
+    if method == "GET":
+        body = (
+            "  const page = Math.max(1, Number(request.query.page || 1))\n"
+            "  const size = Math.min(100, Math.max(1,"
+            " Number(request.query.size || 20)))\n"
+            f"  const result = await listRelatedRecords(\n"
+            f"    request.params.{param}, {alias_js}, {{ page, size }}\n"
+            "  )\n"
+            "  if (!result) {\n"
+            "    return response\n"
+            "      .status(404)\n"
+            "      .json({ code: 'PARENT_NOT_FOUND', message: '父记录不存在' })\n"
+            "  }\n"
+            f"  response.json({{ ...result, relation: {alias_js} }})\n"
+        )
+        middleware = ""
+    else:
+        body = (
+            f"  const record = await createRelatedRecord(\n"
+            f"    request.params.{param},\n"
+            f"    {alias_js},\n"
+            "    request.body && typeof request.body === 'object'"
+            " ? request.body : {},\n"
+            "  )\n"
+            "  if (!record) {\n"
+            "    return response\n"
+            "      .status(404)\n"
+            "      .json({ code: 'PARENT_NOT_FOUND', message: '父记录不存在' })\n"
+            "  }\n"
+            "  response.status(201).json({ ...record, success: true })\n"
+        )
+        middleware = upload["post_middleware"] if upload.get("enabled") else ""
+    return (
+        f"// 主从表真实 CRUD：{relation.parent_table} -> {relation.child_table}\n"
+        f"app.{method.lower()}({path_js}, {middleware}"
+        "asyncHandler(async (request, response) => {\n"
+        f"{body}"
+        "}))\n"
+    )
+
+
+def _health_route_code(route: ArchitectApiRoute) -> str:
+    method = str(route.method).upper()
+    path = _express_path(str(route.path or ""))
+    if method != "GET" or not path.rstrip("/").endswith("/health"):
+        return ""
+    path_js = json.dumps(path, ensure_ascii=False)
+    return (
+        "// 契约健康检查：真实探测数据库，而不是固定 200。\n"
+        f"app.get({path_js}, asyncHandler(async (_request, response) => {{\n"
+        "  try {\n"
+        "    response.json(await health())\n"
+        "  } catch (error) {\n"
+        "    response.status(503).json({\n"
+        "      status: 'degraded',\n"
+        "      message: String(error?.message || error),\n"
+        "    })\n"
+        "  }\n"
+        "}))\n"
+    )
+
+
 def generate_backend_bundle(
     contract: ArchitectContract,
     *,
@@ -2304,14 +2822,35 @@ def generate_backend_bundle(
     # 主从表：只把“核心表作为父表”的一对多关系暴露为嵌套集合路由。
     # 核心表作为子表时，列表 / 详情通过 belongsTo include 带回父对象。
     relations = _resolve_backend_relations(contract, core, dba_schema)
+    all_tables = parse_ddl_tables(contract.database_ddl) or [core]
+    auth = build_auth_support(contract, all_tables)
     relation_payloads = [_relation_payload(item, table) for item in relations]
     child_relations = [
         payload
         for payload in relation_payloads
         if str(payload["parentTable"]).lower() == table.lower()
     ]
+    # 契约显式声明的嵌套路由优先：它们会走多实体真实 CRUD，使用契约里
+    # 的参数名（:facility_id）。此时不再生成默认的 /:id/<alias> 路由，
+    # 避免同一资源注册两次、并被先注册的默认路由截走。
+    declared_relation_aliases: set[str] = set()
+    for route in routes:
+        target = _relation_route_target(
+            str(route.path or ""),
+            str(route.method or "GET").upper(),
+            core,
+            relations,
+        )
+        if target is not None:
+            declared_relation_aliases.add(target[1])
+    generic_child_relations = [
+        payload
+        for payload in child_relations
+        if str(payload["childAlias"]) not in declared_relation_aliases
+    ]
     related_routes = "\n\n".join(
-        _related_route_code(payload, express_base) for payload in child_relations
+        _related_route_code(payload, express_base)
+        for payload in generic_child_relations
     )
 
     replacements = {
@@ -2328,6 +2867,9 @@ def generate_backend_bundle(
         "__AI_IMPORTS__": ai["imports"],
         "__AI_MIDDLEWARE__": ai["middleware"],
         "__AI_ROUTES__": ai["routes"],
+        "__AUTH_IMPORTS__": auth["imports"],
+        "__AUTH_MIDDLEWARE__": auth["middleware"],
+        "__AUTH_ROUTES__": auth["routes"] or "// 契约未声明鉴权路由。",
         "__RELATED_ROUTES__": related_routes or "// 契约未声明主从表关联。",
     }
     server_code = EXPRESS_SERVER_TEMPLATE
@@ -2350,7 +2892,7 @@ def generate_backend_bundle(
     if detail and detail != express_base:
         for method in ("GET", "PUT", "PATCH", "DELETE"):
             registered.append((method, detail, "express.item"))
-    for payload in child_relations:
+    for payload in generic_child_relations:
         nested = f"{express_base}/:id/{payload['childAlias']}"
         registered.append(("GET", nested, "express.relation"))
         registered.append(("POST", nested, "express.relation"))
@@ -2360,6 +2902,39 @@ def generate_backend_bundle(
         if key not in registered_keys:
             registered.append((method, path, source))
             registered_keys.add(key)
+    for method, path, source in auth["registered"]:
+        key = (method, path)
+        if key not in registered_keys:
+            registered.append((method, path, source))
+            registered_keys.add(key)
+
+    # 多实体：顶层集合与主从嵌套路由优先生成真实 CRUD，只有无法落到
+    # 具体表的业务动作才退回 Mock。健康检查改为真实探测数据库。
+    multi_snippets: list[str] = []
+    for route in routes:
+        method = str(route.method or "GET").upper()
+        path = _express_path(str(route.path or ""))
+        key = (method, path)
+        if key in registered_keys:
+            continue
+        snippet = _health_route_code(route)
+        if not snippet:
+            table_target = _table_route_target(
+                str(route.path or ""), method, all_tables, table
+            )
+            if table_target is not None:
+                snippet = _multi_entity_route_code(route, table_target, upload)
+        if not snippet:
+            relation_target = _relation_route_target(
+                str(route.path or ""), method, core, relations
+            )
+            if relation_target is not None:
+                snippet = _relation_entity_route_code(route, relation_target, upload)
+        if not snippet:
+            continue
+        multi_snippets.append(snippet)
+        registered.append((method, path, "express.multi_entity"))
+        registered_keys.add(key)
 
     business_snippets: list[str] = []
     for route in routes:
@@ -2371,6 +2946,10 @@ def generate_backend_bundle(
         business_snippets.append(_business_route_code(route, upload))
         registered.append((method, path, "express.contract"))
         registered_keys.add(key)
+    server_code = server_code.replace(
+        "__MULTI_TABLE_ROUTES__",
+        "\n".join(multi_snippets) or "// 契约未声明多实体集合。",
+    )
     server_code = server_code.replace(
         "__CONTRACT_BUSINESS_ROUTES__",
         "\n".join(business_snippets) or "// 契约未声明额外业务路由。",
@@ -2416,11 +2995,33 @@ def generate_backend_bundle(
         "\n发布前必须执行迁移：\n\n"
         "```bash\ndocker run --rm --env-file .env <image> node server/migrate.mjs\n```\n"
     )
+    if auth["enabled"]:
+        readme += (
+            "\n## 鉴权\n\n"
+            "- 首次登录默认 `admin / admin123`，可用 `ADMIN_USERNAME` / "
+            "`ADMIN_PASSWORD` 覆盖。\n"
+            "- 生产必须设置 `JWT_SECRET`；`viewer` 只读，`admin` / "
+            "`inspector` 可写。\n"
+            "- 相关环境变量：`JWT_SECRET`、`ADMIN_USERNAME`、"
+            "`ADMIN_PASSWORD`、`JWT_ACCESS_TTL`。\n"
+        )
 
+    auth_files: dict[str, str] = {}
+    if auth["enabled"]:
+        auth_code = AUTH_MODULE_TEMPLATE
+        for key, value in {
+            "__AUTH_ID_COLUMN__": auth["columns"].get("id", "id"),
+            "__AUTH_USERNAME_COLUMN__": auth["columns"].get("username", ""),
+            "__AUTH_PASSWORD_COLUMN__": auth["columns"].get("password", ""),
+            "__AUTH_ROLE_COLUMN__": auth["columns"].get("role", ""),
+        }.items():
+            auth_code = auth_code.replace(key, value)
+        auth_files["server/auth.js"] = auth_code
     files = {
         "server/index.js": server_code,
         "server/README.md": readme,
         **security["files"],
+        **auth_files,
         # 前后端联调的唯一事实来源：BuildVerifier / 前端生成都读取该清单，
         # 任何一端改路由都必须同时更新，避免路径漂移。
         "server/api-routes.json": json.dumps(
@@ -2462,6 +3063,7 @@ def generate_backend_bundle(
                     **({"multer": upload["dependency"]} if upload["enabled"] else {}),
                     **ai["dependencies"],
                     **security["dependencies"],
+                    **auth["dependencies"],
                 },
                 "scripts": {
                     "start": "node index.js",
@@ -4458,6 +5060,36 @@ def generate_frontend_bundle(
         patched_main = "import AIWorkspace from './ai-workspace.jsx'\n" + patched_main
         files["src/main.jsx"] = patched_main
 
+    # 契约含登录 / 注册 / 当前用户时，前端加 JWT 门禁：
+    # 未登录只渲染登录表单，登录后所有 /api 请求自动带 Bearer token。
+    frontend_auth = build_auth_support(
+        contract, parse_ddl_tables(contract.database_ddl)
+    )
+    if frontend_auth["enabled"]:
+        auth_gate = FRONTEND_AUTH_GATE_TEMPLATE.replace(
+            "__AUTH_LOGIN_PATH__",
+            json.dumps(frontend_auth["login_path"], ensure_ascii=False),
+        )
+        files["src/auth.jsx"] = auth_gate
+        base_main = files.get("src/main.jsx", existing_main)
+        if "AuthGate" not in base_main:
+            if "<App />" not in base_main:
+                raise ValueError("src/main.jsx 中未找到 <App />，无法注入登录门禁")
+            patched_main = base_main.replace(
+                "<App />", "<AuthGate><App /></AuthGate>", 1
+            )
+            patched_main = (
+                "import { AuthGate, installAuthFetch } from './auth.jsx'\n"
+                + patched_main
+            )
+            patched_main = re.sub(
+                r"((?:ReactDOM\.)?createRoot\()",
+                "installAuthFetch()\n\n\\1",
+                patched_main,
+                count=1,
+            )
+            files["src/main.jsx"] = patched_main
+
     if existing_vite is None:
         raise ValueError("沙盒缺少 vite.config.js，无法配置 /api 反向代理")
     if "proxy" not in existing_vite or "'/api'" not in existing_vite:
@@ -4552,6 +5184,12 @@ def generate_infra_bundle(contract: ArchitectContract) -> GeneratedBundle:
 
     env_example = render(ENV_EXAMPLE_TEMPLATE)
     deploy_guide = render(DEPLOY_GUIDE_TEMPLATE)
+    readme = render(README_TEMPLATE)
+    compose_template = {
+        "postgresql": COMPOSE_POSTGRES_TEMPLATE,
+        "sqlite": COMPOSE_SQLITE_TEMPLATE,
+    }.get(engine, COMPOSE_MYSQL_TEMPLATE)
+    compose = render(compose_template)
     if contract.include_ai_capability:
         env_example += (
             "\n# ---- AI-Native（OpenAI）----\n"
@@ -4571,12 +5209,15 @@ def generate_infra_bundle(contract: ArchitectContract) -> GeneratedBundle:
         "render.yaml": render(RENDER_YAML_TEMPLATE),
         ".env.example": env_example,
         "DEPLOY.md": deploy_guide,
+        "README.md": readme,
+        "docker-compose.yml": compose,
     }
     return GeneratedBundle(
         files=files,
         summary=(
             f"生成一键部署配置（{engine_label}）：Dockerfile、"
-            "render.yaml、.env.example、DEPLOY.md"
+            "docker-compose.yml、render.yaml、.env.example、"
+            "DEPLOY.md、README.md"
         ),
         metadata={
             "table": table,

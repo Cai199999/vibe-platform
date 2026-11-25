@@ -46,6 +46,10 @@ from ai_core.fullstack.coders import (
     parse_ddl_tables,
 )
 from ai_core.fullstack.applier import Applier, ApplierSafetyBlock
+from ai_core.fullstack.templates import (
+    DEV_SCRIPT_TEMPLATE,
+    SEQUELIZE_DB_TEMPLATE,
+)
 from ai_core.fullstack.consistency import verify_consistency
 from ai_core.fullstack.diagnostics import OrmDiagnostic, OrmSyntaxReport
 from ai_core.fullstack.graph import (
@@ -511,6 +515,184 @@ CREATE TABLE resumes (
             },
         )
 
+    def test_multi_entity_routes_use_real_crud_not_mock(self) -> None:
+        """顶层独立表与主从子表都必须落真实 CRUD；健康检查真实探测。"""
+        ddl = """CREATE TABLE facilities (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE facility_images (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  facility_id BIGINT NOT NULL,
+  file_name VARCHAR(255),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE patrol_routes (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/facilities",
+                    description="设施列表",
+                ),
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/facilities",
+                    description="创建设施",
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/facilities/{facility_id}",
+                    description="设施详情",
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/facilities/{facility_id}/images",
+                    description="设施影像",
+                ),
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/facilities/{facility_id}/images",
+                    description="上传设施影像",
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/patrol-routes",
+                    description="巡检路线列表",
+                ),
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/patrol-routes",
+                    description="创建巡检路线",
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/patrol-routes/{route_id}",
+                    description="巡检路线详情",
+                ),
+                ArchitectApiRoute(
+                    method="PUT",
+                    path="/api/v1/patrol-routes/{route_id}",
+                    description="更新巡检路线",
+                ),
+                ArchitectApiRoute(
+                    method="DELETE",
+                    path="/api/v1/patrol-routes/{route_id}",
+                    description="删除巡检路线",
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/health",
+                    description="健康检查",
+                ),
+            ],
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="FacilityList",
+                    event="load",
+                    api_route="GET /api/v1/facilities",
+                    logic="加载设施",
+                )
+            ],
+            relations=[
+                ArchitectTableRelation(
+                    parentTable="facilities",
+                    childTable="facility_images",
+                    foreignKey="facility_id",
+                    alias="images",
+                )
+            ],
+            databaseDdl=ddl,
+        )
+        dba = generate_dba_bundle(contract)
+        db_code = dba.files["server/db.js"]
+        self.assertIn("const EXTRA_MODELS", db_code)
+        self.assertIn("patrol_routes", db_code)
+        self.assertIn("listTableRecords", db_code)
+
+        backend = generate_backend_bundle(
+            contract,
+            dba_schema=json.loads(dba.files["server/schema.core.json"]),
+        )
+        index_code = backend.files["server/index.js"]
+        self.assertIn("listTableRecords(", index_code)
+        self.assertIn("createTableRecord(", index_code)
+        self.assertIn("updateTableRecord(", index_code)
+        self.assertIn("deleteTableRecord(", index_code)
+        self.assertIn('"patrol_routes"', index_code)
+        self.assertIn("listRelatedRecords(", index_code)
+        self.assertIn('"images"', index_code)
+        self.assertIn("await health()", index_code)
+        # 契约显式路由优先，不能再注册默认的 /:id/<alias> 副本。
+        self.assertNotIn("/api/v1/facilities/:id/images", index_code)
+        self.assertNotIn("沙盒 Mock 响应", index_code)
+
+    def test_nested_route_segment_can_use_child_table_name(self) -> None:
+        """路由用 stock-movements、alias 用 movements 时不得误判 JOIN 别名。"""
+        ddl = """CREATE TABLE products (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL
+);
+CREATE TABLE stock_movements (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  product_id BIGINT NOT NULL,
+  kind VARCHAR(32)
+);"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/products",
+                    description="商品列表",
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/products/{product_id}/stock-movements",
+                    description="库存流水",
+                ),
+            ],
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="ProductList",
+                    event="load",
+                    api_route="GET /api/v1/products",
+                    logic="加载商品",
+                )
+            ],
+            relations=[
+                ArchitectTableRelation(
+                    parentTable="products",
+                    childTable="stock_movements",
+                    foreignKey="product_id",
+                    alias="movements",
+                )
+            ],
+            databaseDdl=ddl,
+        )
+        dba = generate_dba_bundle(contract)
+        backend = generate_backend_bundle(
+            contract,
+            dba_schema=json.loads(dba.files["server/schema.core.json"]),
+        )
+        messages = check_orm_schema(
+            {**dba.files, **backend.files},
+            table="products",
+            expected_columns=["id", "name"],
+            expected_tables={
+                "products": {"id", "name"},
+                "stock_movements": {"id", "product_id", "kind"},
+            },
+        )
+        self.assertFalse(
+            any("JOIN 别名" in message for message in messages),
+            messages,
+        )
+
     def test_missing_ddl_never_falls_back_to_users_or_name(self) -> None:
         """无 DDL 时兜底字段必须是中性的 title/created_at。"""
         self.assertEqual(extract_table_name("-- 没有 DDL"), "app_records")
@@ -556,6 +738,51 @@ CREATE TABLE resumes (
     def test_collection_path_prefers_get_collection_route(self) -> None:
         contract = _contract()
         self.assertEqual(collection_path(contract.api_routes), "/api/v1/todos")
+
+    def test_collection_path_skips_current_user_endpoint(self) -> None:
+        """``/users/me`` 是会话端点，不能把核心 CRUD 绑到它上面。"""
+        routes = [
+            ArchitectApiRoute(
+                method="POST", path="/api/v1/users/register", description="注册"
+            ),
+            ArchitectApiRoute(
+                method="POST", path="/api/v1/users/login", description="登录"
+            ),
+            ArchitectApiRoute(
+                method="GET", path="/api/v1/users/me", description="当前用户"
+            ),
+            ArchitectApiRoute(
+                method="GET", path="/api/v1/facilities", description="设施列表"
+            ),
+            ArchitectApiRoute(
+                method="POST", path="/api/v1/facilities", description="创建设施"
+            ),
+        ]
+        self.assertEqual(collection_path(routes), "/api/v1/facilities")
+
+    def test_core_table_prefers_business_collection_over_users(self) -> None:
+        """管理员用户列表不能把核心表从 facilities 抢走。"""
+        contract = _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="GET", path="/api/v1/users", description="用户列表"
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/facilities",
+                    description="设施列表",
+                ),
+            ],
+            databaseDdl=(
+                "CREATE TABLE users ("
+                "id BIGINT PRIMARY KEY, username VARCHAR(64),"
+                " password VARCHAR(255));"
+                "CREATE TABLE facilities ("
+                "id BIGINT PRIMARY KEY, name VARCHAR(128));"
+            ),
+        )
+        self.assertEqual(collection_path(contract.api_routes), "/api/v1/facilities")
+        self.assertEqual(core_table_for_contract(contract).name, "facilities")
 
     def test_collection_path_never_uses_parameterized_stream_route(self) -> None:
         """回归：``/api/v1/tasks/{task_id}/stream`` 不是集合路由。
@@ -1086,8 +1313,13 @@ CREATE TABLE resumes (
                 "render.yaml",
                 ".env.example",
                 "DEPLOY.md",
+                "README.md",
+                "docker-compose.yml",
             },
         )
+        self.assertIn("## 本地运行", bundle.files["README.md"])
+        self.assertIn("services:", bundle.files["docker-compose.yml"])
+        self.assertIn("restart: unless-stopped", bundle.files["docker-compose.yml"])
         dockerfile = bundle.files["Dockerfile"]
         # 多阶段构建：deps 只装生产依赖，runtime 只复制 node_modules 与源码。
         self.assertIn("FROM node:22-alpine AS deps", dockerfile)
@@ -1134,6 +1366,174 @@ CREATE TABLE resumes (
         self.assertNotIn("DB_AUTO_MIGRATE", deploy)
         self.assertNotIn("sync() 建表", deploy)
         self.assertEqual(bundle.metadata["databaseEngine"], "mysql")
+
+    def test_dev_script_restarts_api_after_crash(self) -> None:
+        self.assertIn("API 退出，1s 后自动重启", DEV_SCRIPT_TEMPLATE)
+        self.assertIn("start('api', process.execPath, args)", DEV_SCRIPT_TEMPLATE)
+
+    def test_sqlite_busy_timeout_tolerates_lock_contention(self) -> None:
+        """锁竞争回归：busy_timeout 必须覆盖 6s 级独占锁，避免直接 500。"""
+        self.assertIn("PRAGMA busy_timeout = 15000;", SEQUELIZE_DB_TEMPLATE)
+
+
+class AuthCodegenTests(unittest.TestCase):
+    """JWT/RBAC：契约声明的登录链路必须生成真实实现，而不是 Mock。"""
+
+    DDL = """CREATE TABLE users (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  username VARCHAR(64) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  role VARCHAR(32) NOT NULL DEFAULT 'viewer',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE facilities (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE facility_images (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  facility_id BIGINT NOT NULL,
+  file_name VARCHAR(255),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE inspection_routes (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);"""
+
+    MAIN = (
+        "import React from 'react'\n"
+        "import ReactDOM from 'react-dom/client'\n"
+        "import App from './App.jsx'\n"
+        "ReactDOM.createRoot(document.getElementById('root')).render(\n"
+        "  <React.StrictMode>\n"
+        "    <App />\n"
+        "  </React.StrictMode>,\n"
+        ")\n"
+    )
+    VITE = "export default { server: { } }\n"
+    PACKAGE = '{"dependencies": {}}'
+
+    def _contract(self) -> ArchitectContract:
+        return _contract(
+            apiRoutes=[
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/users/register",
+                    description="注册用户",
+                ),
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/users/login",
+                    description="登录签发 JWT",
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/users/me",
+                    description="获取当前用户",
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/facilities",
+                    description="设施列表",
+                ),
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/facilities",
+                    description="创建设施",
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/facilities/{facility_id}",
+                    description="设施详情",
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/facilities/{facility_id}/images",
+                    description="设施影像",
+                ),
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/facilities/{facility_id}/images",
+                    description="上传设施影像",
+                ),
+                ArchitectApiRoute(
+                    method="GET",
+                    path="/api/v1/inspection-routes",
+                    description="巡检路线列表",
+                ),
+                ArchitectApiRoute(
+                    method="POST",
+                    path="/api/v1/inspection-routes",
+                    description="创建巡检路线",
+                ),
+            ],
+            componentInteractions=[
+                ArchitectComponentInteraction(
+                    component="FacilityList",
+                    event="load",
+                    api_route="GET /api/v1/facilities",
+                    logic="加载设施",
+                )
+            ],
+            relations=[
+                ArchitectTableRelation(
+                    parentTable="facilities",
+                    childTable="facility_images",
+                    foreignKey="facility_id",
+                    alias="images",
+                )
+            ],
+            databaseDdl=self.DDL,
+        )
+
+    def test_backend_generates_jwt_auth_not_mock(self) -> None:
+        contract = self._contract()
+        dba = generate_dba_bundle(contract)
+        db_code = dba.files["server/db.js"]
+        self.assertIn("const AUTH_ENABLED = true", db_code)
+        self.assertIn("AUTH_SCHEMA_SQL", db_code)
+        self.assertIn("findAuthUserByUsername", db_code)
+        self.assertIn('"password_hash"', db_code)
+
+        backend = generate_backend_bundle(
+            contract,
+            dba_schema=json.loads(dba.files["server/schema.core.json"]),
+        )
+        self.assertIn("server/auth.js", backend.files)
+        auth_code = backend.files["server/auth.js"]
+        self.assertIn("jsonwebtoken", auth_code)
+        self.assertIn("loginHandler", auth_code)
+        self.assertIn("requireRole", auth_code)
+        index_code = backend.files["server/index.js"]
+        self.assertIn("PUBLIC_AUTH_PATHS", index_code)
+        self.assertIn('app.post("/api/v1/users/login", loginHandler)', index_code)
+        self.assertIn(
+            'app.get("/api/v1/users/me", authenticate, meHandler)', index_code
+        )
+        self.assertNotIn("沙盒 Mock 响应", index_code)
+        package = json.loads(backend.files["server/package.json"])
+        self.assertIn("jsonwebtoken", package["dependencies"])
+
+    def test_frontend_wraps_app_with_auth_gate(self) -> None:
+        bundle = generate_frontend_bundle(
+            self._contract(),
+            existing_main=self.MAIN,
+            existing_vite=self.VITE,
+            existing_package=self.PACKAGE,
+            include_panel=False,
+        )
+        self.assertIn("src/auth.jsx", bundle.files)
+        main = bundle.files["src/main.jsx"]
+        self.assertIn("AuthGate", main)
+        self.assertIn("<AuthGate><App /></AuthGate>", main)
+        self.assertIn("installAuthFetch()", main)
+        auth_code = bundle.files["src/auth.jsx"]
+        self.assertIn("/api/v1/users/login", auth_code)
+        self.assertIn("localStorage", auth_code)
 
 
 class SchemaMcpTests(unittest.TestCase):
@@ -2079,8 +2479,7 @@ class GraphTests(unittest.TestCase):
         review = [
             item
             for item in a2a
-            if item["fromAgent"] == "BackendCoder"
-            and item["toAgent"] == "Architect"
+            if item["fromAgent"] == "BackendCoder" and item["toAgent"] == "Architect"
         ]
         self.assertTrue(review, a2a)
         self.assertEqual(review[-1]["requestedAction"], "REVIEW_CONTRACT")
@@ -3091,9 +3490,7 @@ CREATE TABLE job_descriptions (
                 ArchitectApiRoute(method="GET", path="/api/v1/users"),
                 ArchitectApiRoute(method="POST", path="/api/v1/users"),
                 ArchitectApiRoute(method="GET", path="/api/v1/users/:id"),
-                ArchitectApiRoute(
-                    method="GET", path="/api/v1/users/:id/applications"
-                ),
+                ArchitectApiRoute(method="GET", path="/api/v1/users/:id/applications"),
             ],
             databaseDdl=ddl,
         )
@@ -3109,10 +3506,7 @@ CREATE TABLE job_descriptions (
         self.assertFalse(audit.ok)
         self.assertEqual(audit.defect_kind, "CONTRACT_DEFECT")
         self.assertTrue(
-            any(
-                "applications" in problem.message
-                for problem in audit.problems
-            ),
+            any("applications" in problem.message for problem in audit.problems),
             audit.problems,
         )
 

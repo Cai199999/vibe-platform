@@ -121,17 +121,40 @@ def _timeout_seconds() -> float:
     return max(1.0, min(value, 120.0))
 
 
-def _import_allowed(source: str) -> bool:
-    if source in ALLOWED_IMPORTS:
+def _package_name(source: str) -> str:
+    parts = str(source or "").strip().split("/")
+    if not parts or not parts[0]:
+        return ""
+    if parts[0].startswith("@") and len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    return parts[0]
+
+
+def _import_allowed(source: str, allowed: Iterable[str] = ALLOWED_IMPORTS) -> bool:
+    normalized = str(source or "").strip()
+    if normalized in allowed:
         return True
-    return source.startswith("./") or source.startswith("../")
+    if normalized.startswith("./") or normalized.startswith("../"):
+        return True
+    # 允许技术栈配置声明的 npm 包及其子路径（例如
+    # some-package/dist/style.css -> some-package）。
+    return _package_name(normalized) in allowed
 
 
 def verify_visual_source(
     files: Mapping[str, str],
     expected_node_ids: Iterable[str],
+    *,
+    allowed_imports: Iterable[str] | None = None,
 ) -> VisualCodegenGateReport:
-    """执行一次完整 CodeGen AST 门禁。"""
+    """执行一次完整 CodeGen AST 门禁。
+
+    ``allowed_imports`` 由 contract.techStack 派生：平台核心只传包名，
+    不在门禁里硬编码任何行业库。
+    """
+    allowed = set(ALLOWED_IMPORTS)
+    if allowed_imports:
+        allowed.update(str(item) for item in allowed_imports if str(item).strip())
     expected = [str(item) for item in expected_node_ids]
     payload = {
         "files": {
@@ -145,6 +168,8 @@ def verify_visual_source(
             and path.endswith((".jsx", ".js"))
         },
         "expectedNodeIds": expected,
+        # 由 techStack 派生的 npm 包白名单；Node 门禁按包名放行子路径。
+        "allowedImports": sorted(allowed),
     }
     if not payload["files"]:
         return VisualCodegenGateReport(
@@ -215,7 +240,9 @@ def verify_visual_source(
         if isinstance(item, dict)
     ]
     imports = tuple(str(item) for item in result.get("imports") or [])
-    forbidden_imports = [item for item in imports if not _import_allowed(item)]
+    forbidden_imports = [
+        item for item in imports if not _import_allowed(item, allowed)
+    ]
     if forbidden_imports:
         errors.extend(f"import 不在白名单内: {item}" for item in forbidden_imports)
 

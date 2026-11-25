@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
 from dataclasses import replace
@@ -41,6 +42,15 @@ from ai_core.codegen.visual import (
     VisualCodegenError,
     compile_visual_document,
     generate_visual_fallback,
+)
+from ai_core.codegen.bindings import apply_contract_interactions
+from ai_core.codegen.stack_dependencies import (
+    contract_stack_text,
+    resolve_stack_dependencies,
+)
+from ai_core.codegen.visual_extensions import (
+    extension_dependencies,
+    load_visual_extensions,
 )
 from ai_core.codegen.visual_gate import VisualCodegenGateUnavailable
 from ai_core.config import get_settings
@@ -84,6 +94,32 @@ from ai_core.observability.fullstack_metrics import FULLSTACK_METRICS
 from ai_core.ports.sandbox import SandboxProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _merge_package_manifests(base: str, override: str) -> str:
+    """保留全栈基座的 scripts / 名称，同时合并 CodeGen 派生的依赖。
+
+    Visual CodeGen 的 package.json 已包含 techStack 解析出的依赖
+    （例如第三方 UI 库 / 图表库）；全栈模式的 base bundle 只负责 dev 脚本与
+    模板依赖。两者必须合并，不能由任意一方整体覆盖。
+    """
+    try:
+        base_obj = json.loads(base)
+        override_obj = json.loads(override)
+    except (TypeError, ValueError):
+        return base
+    if not isinstance(base_obj, dict) or not isinstance(override_obj, dict):
+        return base
+    merged = dict(base_obj)
+    for key in ("dependencies", "devDependencies"):
+        values = dict(base_obj.get(key) or {})
+        values.update(override_obj.get(key) or {})
+        merged[key] = values
+    scripts = dict(override_obj.get("scripts") or {})
+    scripts.update(base_obj.get("scripts") or {})
+    if scripts:
+        merged["scripts"] = scripts
+    return json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
 
 # 节点总数用于日志与 SSE 的 index/total；新增节点时只需改这一处。
 GRAPH_NODE_TOTAL = 7
@@ -960,8 +996,27 @@ class FullstackGraphRunner:
             if visual_document is not None:
                 # 离线优先链路：冻结虚拟树一次性确定性编译。
                 # 不调用 LLM、不猜测布局，基础节点全部走硬编码映射。
+                # 先把契约里的 componentInteractions 映射成节点绑定，
+                # CodeGen 才能生成真实的 API 调用（领域无关）。
+                visual_document = apply_contract_interactions(
+                    visual_document,
+                    contract.component_interactions,
+                )
+                extensions = load_visual_extensions()
+                stack = resolve_stack_dependencies(contract_stack_text(contract))
+                dependencies = {
+                    **stack.dependencies,
+                    **extension_dependencies(extensions),
+                }
                 try:
-                    compiled = compile_visual_document(visual_document)
+                    compiled = compile_visual_document(
+                        visual_document,
+                        include_interactions=True,
+                        extra_dependencies=dependencies,
+                        extra_dev_dependencies=stack.dev_dependencies,
+                        extra_imports=list(stack.imports),
+                        visual_extensions=extensions,
+                    )
                 except VisualCodegenGateUnavailable as exc:
                     raise FullstackGenerationError(
                         f"CodeGen AST 门禁不可用: {exc}", node="FrontendCoder"
@@ -1000,6 +1055,17 @@ class FullstackGraphRunner:
                     # visual.css 与 index.html。
                     merged_files = dict(compiled.files)
                     merged_files.update(base_bundle.files)
+                    # base bundle 提供 dev.mjs / 后端依赖；compiled 提供
+                    # techStack 派生依赖（第三方 UI 库、图表库等）。整体覆盖会
+                    # 丢掉其中一方，必须按 manifest 合并。
+                    if (
+                        "package.json" in compiled.files
+                        and "package.json" in base_bundle.files
+                    ):
+                        merged_files["package.json"] = _merge_package_manifests(
+                            base_bundle.files["package.json"],
+                            compiled.files["package.json"],
+                        )
                     bundle = GeneratedBundle(
                         files=merged_files,
                         summary=f"{base_bundle.summary}；{compiled.summary}",

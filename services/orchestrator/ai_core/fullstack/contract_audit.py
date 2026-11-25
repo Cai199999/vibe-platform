@@ -280,9 +280,7 @@ def _nested_resource_pairs(routes: Iterable[str]) -> list[tuple[str, str]]:
     return pairs
 
 
-_ALIAS_ISSUE = re.compile(
-    r"不存在的\s*JOIN\s*别名[：:]\s*([^\s（(]+)"
-)
+_ALIAS_ISSUE = re.compile(r"不存在的\s*JOIN\s*别名[：:]\s*([^\s（(]+)")
 
 
 def _alias_key(value: object) -> str:
@@ -308,11 +306,7 @@ def _nested_route_segments(routes: Iterable[str]) -> set[str]:
     """契约里所有 ``/:id/<segment>`` 的子段（归一化后）。"""
     segments: set[str] = set()
     for route in routes:
-        parts = [
-            segment
-            for segment in _normalize_path(route).split("/")
-            if segment
-        ]
+        parts = [segment for segment in _normalize_path(route).split("/") if segment]
         for index, part in enumerate(parts):
             if not part.startswith(":") or index + 1 >= len(parts):
                 continue
@@ -334,9 +328,7 @@ def _audit_alias_contract_gaps(
     aliases = _aliases_from_code_issues(code_issues)
     if not aliases:
         return []
-    declared = _nested_route_segments(
-        route.path for route in contract.api_routes or []
-    )
+    declared = _nested_route_segments(route.path for route in contract.api_routes or [])
     if not declared:
         return []
     tables = parse_ddl_table_columns(contract.database_ddl)
@@ -400,11 +392,24 @@ def _audit_nested_routes(
         contract.relations,
         derive_when_empty=True,
     )
+    # Sequelize include 别名是合法的嵌套资源名：例如 alias=images
+    # 指向 facility_images。审计必须先按契约 relations 解析别名，
+    # 否则会把合法的 /facilities/:id/images 误判为“DDL 缺表”。
+    alias_tables: dict[str, str] = {}
+    for relation in contract.relations or []:
+        alias = str(relation.alias or "").strip().lower()
+        if alias:
+            alias_tables[alias] = relation.child_table
+            alias_tables.setdefault(_singular(alias), relation.child_table)
     for parent_resource, child_resource in _nested_resource_pairs(
         route.path for route in contract.api_routes or []
     ):
-        parent = _table_for_resource(parent_resource, tables)
-        child = _table_for_resource(child_resource, tables)
+        parent = _table_for_resource(parent_resource, tables) or alias_tables.get(
+            parent_resource.lower(), ""
+        )
+        child = _table_for_resource(child_resource, tables) or alias_tables.get(
+            child_resource.lower(), ""
+        )
         if not child:
             problems.append(
                 ContractProblem(
@@ -606,9 +611,7 @@ def audit_contract(
     在归因为 ``CODE_DEFECT`` 时把证据一并回传，避免“契约没问题”变成
     无法解释的断言。
     """
-    issues = tuple(
-        str(item) for item in code_issues if str(item).strip()
-    )
+    issues = tuple(str(item) for item in code_issues if str(item).strip())
     problems = [
         *_audit_database(contract, mode),
         *_audit_routes(contract, mode),

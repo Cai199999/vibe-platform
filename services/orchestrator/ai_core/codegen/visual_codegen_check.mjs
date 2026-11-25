@@ -114,24 +114,32 @@ function walk(node, visitor) {
   }
 }
 
-function importAllowed(source) {
-  if (
-    [
-      'react',
-      'react-dom',
-      'react-dom/client',
-      'react/jsx-runtime',
-      'vite',
-      '@vitejs/plugin-react',
-    ].includes(source)
-  ) {
-    return true
+const DEFAULT_ALLOWED_IMPORTS = new Set([
+  'react',
+  'react-dom',
+  'react-dom/client',
+  'react/jsx-runtime',
+  'vite',
+  '@vitejs/plugin-react',
+])
+
+function packageName(source) {
+  const parts = String(source || '').split('/')
+  if (!parts[0]) return ''
+  if (parts[0].startsWith('@') && parts.length >= 2) {
+    return `${parts[0]}/${parts[1]}`
   }
-  // 只允许本地样式与本地模块；第三方包一律拒绝。
-  return source.startsWith('./') || source.startsWith('../')
+  return parts[0]
 }
 
-function checkFile(parser, file, source, expectedIds) {
+function importAllowed(source, allowedImports) {
+  if (DEFAULT_ALLOWED_IMPORTS.has(source)) return true
+  // 只允许本地样式与本地模块，以及 techStack 配置显式声明的 npm 包。
+  if (source.startsWith('./') || source.startsWith('../')) return true
+  return allowedImports.has(packageName(source))
+}
+
+function checkFile(parser, file, source, expectedIds, allowedImports) {
   const errors = []
   const nodeIds = []
   const imports = []
@@ -182,7 +190,7 @@ function checkFile(parser, file, source, expectedIds) {
     if (node.type === 'ImportDeclaration') {
       const sourceValue = String(node.source?.value || '')
       imports.push(sourceValue)
-      if (!importAllowed(sourceValue)) {
+      if (!importAllowed(sourceValue, allowedImports)) {
         fileErrors(`import 不在白名单内: ${sourceValue}`, node.loc)
       }
       return
@@ -258,13 +266,18 @@ async function main() {
   const expectedNodeIds = Array.isArray(payload?.expectedNodeIds)
     ? payload.expectedNodeIds.map(String)
     : []
+  const allowedImports = new Set(
+    Array.isArray(payload?.allowedImports)
+      ? payload.allowedImports.map(String)
+      : [],
+  )
 
   const errors = []
   const nodeIds = []
   const imports = []
   for (const [file, source] of Object.entries(files)) {
     if (typeof source !== 'string') continue
-    const result = checkFile(parser, file, source, expectedNodeIds)
+    const result = checkFile(parser, file, source, expectedNodeIds, allowedImports)
     errors.push(...result.errors)
     nodeIds.push(...result.nodeIds)
     imports.push(...result.imports)

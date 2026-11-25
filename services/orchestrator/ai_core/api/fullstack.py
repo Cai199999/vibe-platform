@@ -9,7 +9,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from ai_core.agent.events import RunEventBuffer, peer_event_buffer
+from ai_core.agent.events import (
+    RunEventBuffer,
+    get_persisted_event_buffer,
+    peer_event_buffer,
+)
 from ai_core.api.errors import sandbox_error_to_http
 from ai_core.domain.fullstack import FullstackRunRequest, FullstackRunSnapshot
 from ai_core.error_envelope import stream_event_frames
@@ -52,6 +56,8 @@ def stream_fullstack_events(
 ) -> StreamingResponse:
     """回放 ``seq > afterSeq`` 后继续订阅；终态事件后关闭连接。"""
     buffer = peer_event_buffer(run_id)
+    if buffer is None:
+        buffer = get_persisted_event_buffer(run_id, terminal_type="fullstack.failed")
     if buffer is None:
         raise HTTPException(
             status_code=404,

@@ -23,6 +23,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from ai_core.codegen.visual_extensions import (
+    VisualExtension,
+    extension_imports,
+    find_extension,
+)
 from ai_core.codegen.visual_gate import (
     VisualCodegenGateError,
     VisualCodegenGateUnavailable,
@@ -1117,7 +1122,37 @@ def _slug(value: str, fallback: str = "vibe-visual-app") -> str:
     return slug[:60] or fallback
 
 
-def _render_package_json(document: VisualDocument) -> str:
+def _render_package_json(
+    document: VisualDocument,
+    extra_dependencies: Mapping[str, str] | None = None,
+    extra_dev_dependencies: Mapping[str, str] | None = None,
+) -> str:
+    dependencies = {
+        "react": "18.3.1",
+        "react-dom": "18.3.1",
+    }
+    dependencies.update(
+        {
+            str(name): str(version)
+            for name, version in (extra_dependencies or {}).items()
+        }
+    )
+    dev_dependencies = {
+        # inspect_plugin.js：为生成后新增的组件文件继续注入
+        # data-oid / source map，保证画布可定位、可编辑。
+        "@babel/core": "7.26.0",
+        "@babel/types": "7.26.0",
+        "@vitejs/plugin-react": "4.3.4",
+        "@vue/compiler-dom": "3.5.13",
+        "@vue/compiler-sfc": "3.5.13",
+        "vite": "5.4.21",
+    }
+    dev_dependencies.update(
+        {
+            str(name): str(version)
+            for name, version in (extra_dev_dependencies or {}).items()
+        }
+    )
     package = {
         "name": _slug(document.doc_id or document.title),
         "private": True,
@@ -1128,20 +1163,8 @@ def _render_package_json(document: VisualDocument) -> str:
             "build": "vite build",
             "preview": "vite preview --host 0.0.0.0",
         },
-        "dependencies": {
-            "react": "18.3.1",
-            "react-dom": "18.3.1",
-        },
-        "devDependencies": {
-            # inspect_plugin.js：为生成后新增的组件文件继续注入
-            # data-oid / source map，保证画布可定位、可编辑。
-            "@babel/core": "7.26.0",
-            "@babel/types": "7.26.0",
-            "@vitejs/plugin-react": "4.3.4",
-            "@vue/compiler-dom": "3.5.13",
-            "@vue/compiler-sfc": "3.5.13",
-            "vite": "5.4.21",
-        },
+        "dependencies": dependencies,
+        "devDependencies": dev_dependencies,
     }
     return json.dumps(package, ensure_ascii=False, indent=2) + "\n"
 
@@ -1219,6 +1242,104 @@ def _render_main_jsx() -> str:
     )
 
 
+def _render_data_list_jsx() -> str:
+    """通用集合列表组件：从契约 interaction 的端点拉取并渲染表格。"""
+    return """import { useEffect, useState } from 'react'
+
+export default function DataList({ endpoint }) {
+  const [items, setItems] = useState([])
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(Boolean(endpoint))
+  const [retryToken, setRetryToken] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    let retryTimer = null
+    if (!endpoint) {
+      setLoading(false)
+      return () => { cancelled = true }
+    }
+    const load = async (attempt) => {
+      setLoading(true)
+      try {
+        const response = await fetch(endpoint)
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const data = await response.json()
+        if (cancelled) return
+        const rows = Array.isArray(data)
+          ? data
+          : data.items || data.data || data.records || data.results || []
+        setItems(Array.isArray(rows) ? rows : [])
+        setError('')
+        setLoading(false)
+      } catch (cause) {
+        if (cancelled) return
+        if (attempt < 2) {
+          // 后端瞬断 / HMR 重启：1s、2s 两次自动退避重试。
+          retryTimer = setTimeout(() => load(attempt + 1), 1000 * (attempt + 1))
+          return
+        }
+        setError(String(cause))
+        setLoading(false)
+      }
+    }
+    load(0)
+    return () => {
+      cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
+    }
+  }, [endpoint, retryToken])
+
+  const tableStyle = { width: '100%', borderCollapse: 'collapse', fontSize: 13 }
+  const cellStyle = { border: '1px solid #cbd5e1', padding: '6px 8px', textAlign: 'left' }
+  if (!endpoint) return <p style={{ color: '#64748b' }}>未配置数据端点</p>
+  if (loading) return <p style={{ color: '#64748b' }}>加载中…</p>
+  if (error) {
+    return (
+      <div style={{ display: 'grid', gap: 8 }}>
+        <p style={{ color: '#b91c1c' }}>加载失败：{error}</p>
+        <button
+          type="button"
+          onClick={() => {
+            setError('')
+            setRetryToken((value) => value + 1)
+          }}
+        >
+          重试
+        </button>
+      </div>
+    )
+  }
+  if (!items.length) return <p style={{ color: '#64748b' }}>暂无数据</p>
+  const columns = Object.keys(items[0]).slice(0, 8)
+  return (
+    <div data-testid="data-list" style={{ overflowX: 'auto' }}>
+      <table style={tableStyle}>
+        <thead>
+          <tr>
+            {columns.map((key) => (
+              <th key={key} style={cellStyle}>{key}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((row, index) => (
+            <tr key={row.id ?? index}>
+              {columns.map((key) => (
+                <td key={key} style={cellStyle}>
+                  {typeof row[key] === 'object' ? JSON.stringify(row[key]) : String(row[key] ?? '')}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+"""
+
+
 def _fill_source_lines(source: str) -> str:
     """把每个节点开标签里的占位符替换为它在 App.jsx 的真实行号。"""
     lines = source.split("\n")
@@ -1228,13 +1349,54 @@ def _fill_source_lines(source: str) -> str:
     return "\n".join(lines)
 
 
+def _is_collection_get(action: dict[str, Any] | None) -> bool:
+    """只把无占位符的 GET 集合端点当作列表数据源。"""
+    if not action:
+        return False
+    if str(action.get("method") or "").upper() != "GET":
+        return False
+    endpoint = str(action.get("endpoint") or "")
+    return (
+        endpoint.startswith("/api")
+        and "{" not in endpoint
+        and ":" not in endpoint
+    )
+
+
 class _ReactCompiler:
     def __init__(
-        self, document: VisualDocument, *, include_interactions: bool = False
+        self,
+        document: VisualDocument,
+        *,
+        include_interactions: bool = False,
+        visual_extensions: Iterable[VisualExtension] | None = None,
     ) -> None:
         self.document = document
         self.include_interactions = include_interactions
         self.actions = _interaction_index(document) if include_interactions else {}
+        self.visual_extensions = tuple(visual_extensions or ())
+        self.used_extensions = tuple(
+            extension
+            for extension in self.visual_extensions
+            if any(
+                extension.matches(node)
+                for _page_id, _path, _title, root in _document_pages(document)
+                for node in _iter_nodes(root)
+            )
+        )
+        # 页面级集合面板：任意页面只要存在“无占位符的 GET 集合端点”，
+        # 就在页面根之后追加通用 DataList。与节点命名无关。
+        self.page_collection_endpoints: dict[str, tuple[str, ...]] = {}
+        for page_id, _path, _title, root in _document_pages(document):
+            endpoints: list[str] = []
+            for node in _iter_nodes(root):
+                action = self.actions.get(node.id)
+                if _is_collection_get(action):
+                    endpoints.append(str(action.get("endpoint")))
+            self.page_collection_endpoints[page_id] = tuple(
+                dict.fromkeys(endpoints)
+            )
+        self.has_data_list = any(self.page_collection_endpoints.values())
         self.multi_page = len(document.pages) > 1
         self.warnings: list[str] = []
         self.custom_node_ids: list[str] = []
@@ -1368,7 +1530,34 @@ class _ReactCompiler:
         lines.append(f"{pad}</{tag}>")
         return lines
 
+    def _render_extension(
+        self,
+        node: VisualNode,
+        extension: VisualExtension,
+        indent: int,
+    ) -> list[str]:
+        """渲染配置层提供的领域组件模板，外层仍保留节点身份属性。"""
+        pad = " " * indent
+        attrs = self._attrs(node)
+        action = self.actions.get(node.id) or {}
+        endpoint = str(action.get("endpoint") or "").replace('"', "")
+        render = extension.render.replace("__ENDPOINT__", endpoint)
+        lines = [f"{pad}<div {attrs}>"]
+        for line in render.splitlines():
+            lines.append(f"{pad}  {line}" if line.strip() else "")
+        if node.children:
+            # 扩展组件替换视觉主体，但原 children 的 data-node-id 必须
+            # 保留在 AST 里（Direct Ops / 门禁依赖）。hidden 不影响展示。
+            lines.append(f"{pad}  <div hidden>")
+            lines.extend(self._render_children(node.children, indent + 2))
+            lines.append(f"{pad}  </div>")
+        lines.append(f"{pad}</div>")
+        return lines
+
     def _render_node(self, node: VisualNode, indent: int) -> list[str]:
+        extension = find_extension(self.used_extensions, node)
+        if extension is not None:
+            return self._render_extension(node, extension, indent)
         tag = TAG_MAP[node.type]
         pad = " " * indent
 
@@ -1455,6 +1644,10 @@ class _ReactCompiler:
         if self.multi_page:
             lines.append('import { useState } from "react"')
         lines.append('import "./visual.css"')
+        for line in extension_imports(self.used_extensions):
+            lines.append(line)
+        if self.has_data_list:
+            lines.append("import DataList from './DataList.jsx'")
         lines.append("")
         lines.extend(_render_action_runtime(list(self.actions.values())))
 
@@ -1473,7 +1666,17 @@ class _ReactCompiler:
                         "  return (",
                     ]
                 )
-                lines.extend(self._render_node(root, 4))
+                endpoints = self.page_collection_endpoints.get(_page_id, ())
+                if endpoints:
+                    lines.append("    <>")
+                    lines.extend(self._render_node(root, 6))
+                    for endpoint in endpoints[:2]:
+                        lines.append(
+                            f"      <DataList endpoint={_js_string(endpoint)} />"
+                        )
+                    lines.append("    </>")
+                else:
+                    lines.extend(self._render_node(root, 4))
                 lines.extend(["  )", "}", ""])
             lines.append("const VISUAL_PAGES = [")
             for index, (page_id, path, title, _root) in enumerate(pages):
@@ -1528,7 +1731,21 @@ class _ReactCompiler:
                 ]
             )
             root = pages[0][3] if pages else None
-            if root is not None:
+            endpoints = (
+                self.page_collection_endpoints.get(pages[0][0], ())
+                if pages
+                else ()
+            )
+            if endpoints:
+                lines.append("    <>")
+                if root is not None:
+                    lines.extend(self._render_node(root, 6))
+                for endpoint in endpoints[:2]:
+                    lines.append(
+                        f"      <DataList endpoint={_js_string(endpoint)} />"
+                    )
+                lines.append("    </>")
+            elif root is not None:
                 lines.extend(self._render_node(root, 4))
             else:
                 lines.append(
@@ -1559,6 +1776,8 @@ class _ReactCompiler:
                 ),
             }
         )
+        if self.has_data_list:
+            files["src/DataList.jsx"] = _render_data_list_jsx()
         return VisualCompileResult(
             files=files,
             node_ids=node_ids,
@@ -1712,13 +1931,62 @@ def _assert_frozen(document: VisualDocument) -> None:
         )
 
 
-def _gate_or_raise(result: VisualCompileResult) -> None:
-    report = verify_visual_source(result.files, result.node_ids)
+def _gate_or_raise(
+    result: VisualCompileResult,
+    *,
+    allowed_imports: Iterable[str] | None = None,
+) -> None:
+    report = verify_visual_source(
+        result.files,
+        result.node_ids,
+        allowed_imports=allowed_imports,
+    )
     if report.ok:
         return
     raise VisualCodegenGateError(
         f"CodeGen Babel AST 门禁未通过：{'；'.join(report.errors[:5])}",
         errors=report.errors,
+    )
+
+
+def _apply_stack_dependencies(
+    result: VisualCompileResult,
+    document: VisualDocument,
+    extra_dependencies: Mapping[str, str] | None,
+    extra_dev_dependencies: Mapping[str, str] | None,
+    extra_imports: list[str] | None,
+) -> VisualCompileResult:
+    """把 techStack 派生的依赖 / import 合并进编译产物。"""
+    if not (extra_dependencies or extra_dev_dependencies or extra_imports):
+        return result
+    files = dict(result.files)
+    if "package.json" in files:
+        files["package.json"] = _render_package_json(
+            document,
+            extra_dependencies,
+            extra_dev_dependencies,
+        )
+    header = "\n".join(
+        dict.fromkeys(
+            str(line).strip() for line in (extra_imports or []) if str(line).strip()
+        )
+    )
+    if header:
+        for file_name in ("src/App.jsx", "src/main.jsx"):
+            source = files.get(file_name)
+            if source and header not in source:
+                files[file_name] = header + "\n" + source
+    return VisualCompileResult(
+        files=files,
+        node_ids=result.node_ids,
+        summary=result.summary,
+        warnings=result.warnings,
+        metadata={
+            **result.metadata,
+            "stackDependencies": sorted((extra_dependencies or {}).keys()),
+            "stackImports": [line for line in header.splitlines() if line],
+        },
+        repaired=result.repaired,
     )
 
 
@@ -1728,6 +1996,10 @@ def compile_visual_document(
     require_frozen: bool = True,
     allow_fallback: bool = True,
     include_interactions: bool = False,
+    extra_dependencies: Mapping[str, str] | None = None,
+    extra_dev_dependencies: Mapping[str, str] | None = None,
+    extra_imports: list[str] | None = None,
+    visual_extensions: Iterable[VisualExtension] | None = None,
 ) -> VisualCompileResult:
     """确定性编译，并通过 Babel AST 门禁。
 
@@ -1744,11 +2016,24 @@ def compile_visual_document(
     if require_frozen:
         _assert_frozen(visual)
     repeat_warnings = _unbound_repeat_warnings(visual)
+    allowed_imports = {
+        *(extra_dependencies or {}).keys(),
+        *(extra_dev_dependencies or {}).keys(),
+    }
 
     try:
         primary = _ReactCompiler(
-            visual, include_interactions=include_interactions
+            visual,
+            include_interactions=include_interactions,
+            visual_extensions=visual_extensions,
         ).compile()
+        primary = _apply_stack_dependencies(
+            primary,
+            visual,
+            extra_dependencies,
+            extra_dev_dependencies,
+            extra_imports,
+        )
     except VisualCodegenError:
         raise
     except Exception as exc:  # noqa: BLE001 - 编译器缺陷不能泄漏堆栈
@@ -1758,7 +2043,14 @@ def compile_visual_document(
                 code="VISUAL_CODEGEN_COMPILER_ERROR",
             ) from exc
         fallback = _fallback_result(visual, reason=f"编译器异常 {type(exc).__name__}")
-        _gate_or_raise(fallback)
+        fallback = _apply_stack_dependencies(
+            fallback,
+            visual,
+            extra_dependencies,
+            extra_dev_dependencies,
+            extra_imports,
+        )
+        _gate_or_raise(fallback, allowed_imports=allowed_imports)
         return _with_extra_warnings(
             VisualCompileResult(
                 files=fallback.files,
@@ -1772,7 +2064,7 @@ def compile_visual_document(
         )
 
     try:
-        _gate_or_raise(primary)
+        _gate_or_raise(primary, allowed_imports=allowed_imports)
         return _with_extra_warnings(primary, repeat_warnings)
     except VisualCodegenGateUnavailable:
         raise
@@ -1780,7 +2072,14 @@ def compile_visual_document(
         if not allow_fallback:
             raise
         fallback = _fallback_result(visual, reason=str(exc))
-        _gate_or_raise(fallback)
+        fallback = _apply_stack_dependencies(
+            fallback,
+            visual,
+            extra_dependencies,
+            extra_dev_dependencies,
+            extra_imports,
+        )
+        _gate_or_raise(fallback, allowed_imports=allowed_imports)
         return _with_extra_warnings(
             VisualCompileResult(
                 files=fallback.files,

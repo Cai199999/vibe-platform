@@ -1,0 +1,57 @@
+# 技术栈 token -> 前端依赖 / 额外 import。
+#
+# 平台核心只做“扫描 contract.techStack 里的 token 并合并配置”，
+# 不知道任何行业。新增框架 / 地图库 / 图表库时只改本文件。
+
+tokens:
+  react:
+    dependencies:
+      react: "18.3.1"
+      react-dom: "18.3.1"
+  vite:
+    dev_dependencies:
+      vite: "5.4.21"
+  tailwind:
+    dev_dependencies:
+      tailwindcss: "^3.4.0"
+      postcss: "^8.4.0"
+      autoprefixer: "^10.4.0"
+  leaflet:
+    dependencies:
+      leaflet: "^1.9.4"
+    imports:
+      - "import 'leaflet/dist/leaflet.css'"
+  react-leaflet:
+    dependencies:
+      react-leaflet: "^4.2.1"
+  maplibre:
+    dependencies:
+      maplibre-gl: "^4.7.1"
+    imports:
+      - "import 'maplibre-gl/dist/maplibre-gl.css'"
+  openlayers:
+    dependencies:
+      ol: "^10.0.0"
+    imports:
+      - "import 'ol/ol.css'"
+  echarts:
+    dependencies:
+      echarts: "^5.5.1"
+  d3:
+    dependencies:
+      d3: "^7.9.0"
+  chartjs:
+    dependencies:
+      chart.js: "^4.4.0"
+      react-chartjs-2: "^5.2.0"
+  antd:
+    dependencies:
+      antd: "^5.20.0"
+  mui:
+    dependencies:
+      "@mui/material": "^5.16.0"
+      "@emotion/react": "^11.13.0"
+      "@emotion/styled": "^11.13.0"
+  three:
+    dependencies:
+      three: "^0.169.0"
