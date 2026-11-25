@@ -228,7 +228,10 @@ import json
 from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import TypedDict
 from urllib.parse import parse_qs, urlparse
+
+from langgraph.graph import END, START, StateGraph
 
 from observability.otel import setup_tracing
 
@@ -261,16 +264,54 @@ def classify(text: str) -> dict:
     }
 
 
+class AgentState(TypedDict, total=False):
+    text: str
+    category: str
+    confidence: float
+    suggestion: str
+
+
+def classify_node(state: AgentState) -> AgentState:
+    return classify(state.get("text", ""))
+
+
+def suggest_node(state: AgentState) -> AgentState:
+    suggestion = state.get("suggestion", "")
+    return {"suggestion": suggestion or "补充信息后由人工分派"}
+
+
+def build_graph():
+    builder = StateGraph(AgentState)
+    builder.add_node("classify", classify_node)
+    builder.add_node("suggest", suggest_node)
+    builder.add_edge(START, "classify")
+    builder.add_edge("classify", "suggest")
+    builder.add_edge("suggest", END)
+    return builder.compile()
+
+
+GRAPH = build_graph()
+
+
+def run_agent(text: str) -> dict:
+    with _span("agent_graph"):
+        result = GRAPH.invoke({"text": text})
+    return {
+        "category": result.get("category", "其他"),
+        "confidence": float(result.get("confidence") or 0),
+        "suggestion": result.get("suggestion", ""),
+    }
+
+
 def serve(port: int) -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             if parsed.path == "/health":
-                payload = {"status": "UP"}
+                payload = {"status": "UP", "engine": "langgraph"}
             else:
                 text = parse_qs(parsed.query).get("text", [""])[0]
-                with _span("classify"):
-                    payload = classify(text)
+                payload = run_agent(text)
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("content-type", "application/json")
@@ -299,8 +340,7 @@ def main() -> int:
         parser.error("单次模式需要 --event")
     event = json.loads(Path(args.event).read_text(encoding="utf-8"))
     text = f"{event.get('title', '')} {event.get('content', '')}"
-    with _span("classify"):
-        result = classify(text)
+    result = run_agent(text)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 
@@ -688,6 +728,7 @@ def _requirements_txt() -> str:
 opentelemetry-sdk==1.28.2
 opentelemetry-exporter-otlp==1.28.2
 kafka-python==2.2.15
+langgraph==0.2.62
 """
 
 

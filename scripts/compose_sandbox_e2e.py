@@ -172,7 +172,25 @@ def main() -> int:
         wait_http(f"{API}/health")
         wait_http(f"{WEB}/health")
         wait_http(f"{AGENT}/health")
-        report["stages"].append({"name": "health", "ok": True})
+        with urllib.request.urlopen(f"{AGENT}/health", timeout=5) as response:
+            agent_health = json.loads(response.read().decode("utf-8"))
+        if agent_health.get("engine") != "langgraph":
+            raise RuntimeError(f"Agent 未运行 LangGraph: {agent_health}")
+        with urllib.request.urlopen(
+            f"{AGENT}/classify?text=%E6%89%93%E5%8D%B0%E6%9C%BA%E6%97%A0%E6%B3%95%E8%BF%9E%E6%8E%A5",
+            timeout=10,
+        ) as response:
+            agent_result = json.loads(response.read().decode("utf-8"))
+        if agent_result.get("category") != "IT":
+            raise RuntimeError(f"LangGraph Agent 分类异常: {agent_result}")
+        report["stages"].append(
+            {
+                "name": "health",
+                "ok": True,
+                "agentEngine": "langgraph",
+                "agentResult": agent_result,
+            }
+        )
 
         tests = run(
             compose
@@ -234,6 +252,9 @@ def main() -> int:
         otel_logs = wait_log(compose, "otel", "ticket-consumer")
         if "consume_event" not in otel_logs:
             raise RuntimeError("Collector 未收到 consume_event span")
+        agent_logs = wait_log(compose, "otel", "ticket-agent")
+        if "agent_graph" not in agent_logs:
+            raise RuntimeError("Collector 未收到 agent_graph span")
         api_logs = wait_log(compose, "otel", "ticket-api")
         if "POST" not in api_logs and "/api/tickets" not in api_logs:
             raise RuntimeError("Collector 未收到 API 请求 span")
@@ -244,6 +265,8 @@ def main() -> int:
                 "needles": [
                     "ticket-consumer",
                     "consume_event",
+                    "ticket-agent",
+                    "agent_graph",
                     "ticket-api",
                 ],
             }
