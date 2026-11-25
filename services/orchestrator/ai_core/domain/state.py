@@ -270,6 +270,8 @@ class ArchitectState(TypedDict, total=False):
     history_summary: str
     history_tokens_before: int
     history_tokens_after: int
+    # 用户可选上传的参考文档（name/content）；只参与本次 Run 的 RAG。
+    knowledge_documents: list[dict[str, Any]]
     # 整次 Architect Run 的 Token 用量 / 费用；由节点增量累加。
     token_usage: Annotated[dict[str, Any], _merge_token_usage]
     threshold: float

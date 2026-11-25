@@ -1,0 +1,70 @@
+{
+  "name": "contract_defect_revision",
+  "runId": "fsk_demo_contract",
+  "contractId": "ctr_demo_contract",
+  "runTerminal": "SUCCEEDED",
+  "events": [
+    {
+      "type": "a2a.feedback",
+      "payload": {
+        "feedbackId": "a2a_contract_1",
+        "runId": "fsk_demo_contract",
+        "fromAgent": "BackendCoder",
+        "toAgent": "Architect",
+        "kind": "contract_revision",
+        "requestedAction": "REVISE_CONTRACT",
+        "summary": "契约缺少嵌套路由 / relations，代码侧无法继续修复",
+        "evidence": ["/api/v1/projects/:id/tasks 缺少 relation"],
+        "contractId": "ctr_demo_contract",
+        "payload": {
+          "attempt": 1,
+          "maxAttempts": 2
+        },
+        "createdAt": "2026-11-21T05:11:00Z"
+      }
+    },
+    {
+      "type": "a2a.feedback",
+      "payload": {
+        "feedbackId": "a2a_contract_2",
+        "runId": "fsk_demo_contract",
+        "fromAgent": "Architect",
+        "toAgent": "BackendCoder",
+        "kind": "contract_revision_started",
+        "requestedAction": "WAIT_FOR_CONTRACT",
+        "summary": "收到后端诊断，开始修订契约（revision 1）",
+        "evidence": ["/api/v1/projects/:id/tasks 缺少 relation"],
+        "contractId": "ctr_demo_contract",
+        "payload": {
+          "revision": 1
+        },
+        "createdAt": "2026-11-21T05:11:03Z"
+      }
+    },
+    {
+      "type": "a2a.feedback",
+      "payload": {
+        "feedbackId": "a2a_contract_3",
+        "runId": "fsk_demo_contract",
+        "fromAgent": "Architect",
+        "toAgent": "BackendCoder",
+        "kind": "contract_confirmed",
+        "requestedAction": "GENERATE_WITH_CONTRACT",
+        "summary": "契约已确认（revision 1），后端可据此生成/重生成",
+        "evidence": ["已补齐 tasks relation"],
+        "contractId": "ctr_demo_contract",
+        "payload": {
+          "status": "CONFIRMED",
+          "revision": 1
+        },
+        "createdAt": "2026-11-21T05:11:30Z"
+      }
+    }
+  ],
+  "expected": {
+    "stepCount": 3,
+    "loops": 1,
+    "terminalReason": "RESOLVED",
+    "errors": []
+  }
+}

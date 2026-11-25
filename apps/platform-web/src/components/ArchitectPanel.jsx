@@ -1,6 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import ProjectDocsDrawer from './ProjectDocsDrawer.jsx'
+import ProjectDocumentCenter from './ProjectDocumentCenter.jsx'
 import { buildProjectDocs } from '../workspace/projectDocs.js'
+import {
+  classifyArchitectDocument,
+  discoverArchitectSolutions,
+} from '../workspace/architectStream.js'
+import {
+  SOLUTION_KIND_LABELS,
+  buildSolutionChoice,
+  defaultSolutionChoice,
+  solutionMeta,
+  solutionSourceLabel,
+} from '../workspace/solutionDiscovery.js'
+import { useAuth } from '../auth/AuthContext.jsx'
+import {
+  activeKnowledgeDocuments,
+  addProjectDocument,
+  documentCount,
+  mergeKnowledgeDocuments,
+} from '../workspace/documentCenter.js'
 import ContractViewer from './ContractViewer.jsx'
 
 const SHAPE_LABELS = {
@@ -1045,14 +1064,125 @@ function VisualCodegen({ fullstack, onGenerate }) {
  * Context。提交后由后端直接进入 revise_contract（不会重新澄清、不会
  * 丢掉已经确认的技术栈与业务槽位），新契约回到待确认状态。
  */
-function ContractAppend({ contract, submitting, onDecide }) {
+function ContractAppend({
+  contract,
+  submitting,
+  onDecide,
+  projectId,
+  provider = 'auto',
+  onOpenDocumentCenter,
+  onDocumentsChanged,
+}) {
+  const { session } = useAuth()
   const [comment, setComment] = useState('')
+  const [runDocs, setRunDocs] = useState([])
+  const [docBusy, setDocBusy] = useState(false)
+  const [docError, setDocError] = useState('')
+  const [docNotice, setDocNotice] = useState('')
+  const [pendingDoc, setPendingDoc] = useState(null)
   const ready = comment.trim().length > 0
+  const centerCount = documentCount(projectId)
+
+  const addRunDoc = (doc) => {
+    setRunDocs((previous) => {
+      const key = `${doc.name}\u0000${doc.content}`
+      if (
+        previous.some(
+          (item) => `${item.name}\u0000${item.content}` === key,
+        )
+      ) {
+        return previous
+      }
+      return [...previous, doc]
+    })
+  }
+
+  const handleFiles = async (event) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file || docBusy) return
+    setDocError('')
+    setDocNotice('')
+    setPendingDoc(null)
+    if (!/\.(md|markdown|txt)$/i.test(file.name)) {
+      setDocError('仅支持 .md / .markdown / .txt')
+      return
+    }
+    if (file.size > 200 * 1024) {
+      setDocError('单份文档不能超过 200KB')
+      return
+    }
+    try {
+      const content = await file.text()
+      if (!content.trim()) {
+        setDocError('文档内容为空')
+        return
+      }
+      setDocBusy(true)
+      const analysis = await classifyArchitectDocument({
+        name: file.name,
+        content,
+        llmProvider: provider,
+        token: session?.token,
+      })
+      const doc = { name: file.name, content, size: file.size, analysis }
+      if (analysis.decision === 'STORE') {
+        const result = addProjectDocument(projectId, { ...doc, ...analysis })
+        if (!result.ok) setDocError(result.error)
+        else {
+          setDocNotice(`「${file.name}」已加入文档中心`)
+          onDocumentsChanged?.()
+        }
+        addRunDoc(doc)
+      } else if (analysis.decision === 'DISCARD') {
+        addRunDoc(doc)
+        setDocNotice(`「${file.name}」判定为一次性，本次使用、不保存`)
+      } else {
+        setPendingDoc(doc)
+        setDocNotice(
+          `未检测到明确的复用语义：${
+            analysis.reason || '请选择是否加入文档中心'
+          }`,
+        )
+      }
+    } catch (cause) {
+      setDocError(`读取文档失败：${cause?.message || cause}`)
+    } finally {
+      setDocBusy(false)
+    }
+  }
+
+  const resolvePending = (addToCenter) => {
+    if (!pendingDoc) return
+    if (addToCenter) {
+      const result = addProjectDocument(projectId, {
+        ...pendingDoc,
+        ...pendingDoc.analysis,
+        decision: 'STORE',
+      })
+      if (!result.ok) {
+        setDocError(result.error)
+        return
+      }
+      onDocumentsChanged?.()
+      setDocNotice(`「${pendingDoc.name}」已加入文档中心`)
+    } else {
+      setDocNotice(`「${pendingDoc.name}」仅本次使用，不保存`)
+    }
+    addRunDoc(pendingDoc)
+    setPendingDoc(null)
+  }
 
   const submit = () => {
-    if (!ready || submitting) return
-    onDecide('REVISE', comment.trim())
+    if (!ready || submitting || pendingDoc || docBusy) return
+    const docs = mergeKnowledgeDocuments(
+      runDocs,
+      activeKnowledgeDocuments(projectId),
+    )
+    onDecide('REVISE', comment.trim(), undefined, docs)
     setComment('')
+    setRunDocs([])
+    setDocNotice('')
   }
 
   return (
@@ -1072,6 +1202,81 @@ function ContractAppend({ contract, submitting, onDecide }) {
           }}
         />
       </label>
+      <div className="architect-doc-upload">
+        <div className="architect-doc-upload-head">
+          <strong>追加文档（可选）</strong>
+          <span>启用的文档会进入本次修订 RAG；一次性的只用于本次</span>
+        </div>
+        <div className="architect-doc-upload-row">
+          <label className="architect-doc-picker">
+            <input
+              type="file"
+              accept=".md,.markdown,.txt"
+              onChange={handleFiles}
+              disabled={docBusy}
+            />
+            {docBusy ? '正在判断文档用途…' : '选择文档'}
+          </label>
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={onOpenDocumentCenter}
+          >
+            文档中心 ({centerCount})
+          </button>
+        </div>
+        {runDocs.length > 0 && (
+          <div className="architect-doc-list">
+            {runDocs.map((doc, index) => (
+              <span
+                key={`${doc.name}-${index}`}
+                className="architect-doc-chip"
+              >
+                {doc.name}
+                <button
+                  type="button"
+                  aria-label={`移除 ${doc.name}`}
+                  onClick={() =>
+                    setRunDocs((previous) =>
+                      previous.filter((_, i) => i !== index),
+                    )
+                  }
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        {pendingDoc && (
+          <div className="project-doc-center-pending">
+            <div>
+              <strong>{pendingDoc.name}</strong>
+              <p>{pendingDoc.analysis?.reason || '未检测到明确语义'}</p>
+            </div>
+            <div className="project-doc-center-pending-actions">
+              <button
+                type="button"
+                className="architect-primary"
+                onClick={() => resolvePending(true)}
+              >
+                加入文档中心
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => resolvePending(false)}
+              >
+                仅本次使用
+              </button>
+            </div>
+          </div>
+        )}
+        {docError && <p className="architect-doc-error">{docError}</p>}
+        {docNotice && (
+          <p className="project-doc-center-notice">{docNotice}</p>
+        )}
+      </div>
       <div className="architect-decision-row">
         <span className="architect-append-hint">
           会直接在当前契约上修订，无需重新澄清
@@ -1079,7 +1284,7 @@ function ContractAppend({ contract, submitting, onDecide }) {
         <button
           type="button"
           className="architect-primary"
-          disabled={!ready || submitting}
+          disabled={!ready || submitting || Boolean(pendingDoc) || docBusy}
           title={ready ? '追加到当前 Context 并重新生成契约' : '请先写下新的需求'}
           onClick={submit}
         >
@@ -1473,6 +1678,212 @@ function ConflictDecisionDialog({ conflict, submitting, error, onDecide }) {
   )
 }
 
+/**
+ * 澄清前的方案选择卡片。
+ *
+ * 数据全部来自 `/architect/solutions/discover`；这里只负责展示与回传
+ * optionId。选择结果由父组件映射成 solutionChoice，随 start 一起提交。
+ */
+function SolutionDiscoveryPanel({
+  discovery,
+  selected,
+  onSelect,
+  onConfirm,
+  onSkip,
+  onRetry,
+  onBack,
+}) {
+  const data = discovery?.data
+  const options = data?.options ?? []
+  const loading = Boolean(discovery?.loading)
+  const error = discovery?.error
+  return (
+    <section
+      className="architect-solution-discovery"
+      data-architect-solution-discovery
+    >
+      <header className="architect-solution-header">
+        <div>
+          <h4>先确认方案，再进入架构澄清</h4>
+          <p>
+            平台先分析需求，检索可复用方案；你也可以跳过检索直接自研。
+          </p>
+        </div>
+        <button
+          type="button"
+          className="architect-solution-back"
+          onClick={onBack}
+          disabled={loading}
+        >
+          返回修改需求
+        </button>
+      </header>
+
+      {loading && (
+        <div
+          className="architect-solution-loading"
+          data-architect-solution-loading
+        >
+          <span className="architect-solution-spinner" aria-hidden="true" />
+          正在分析需求，并从 GitHub / 本地知识库检索可复用方案…
+        </div>
+      )}
+
+      {!loading && error && (
+        <div className="architect-solution-error" role="alert">
+          <strong>方案侦察未完成</strong>
+          <span>{error}</span>
+        </div>
+      )}
+
+      {!loading && data && (
+        <>
+          <div className="architect-solution-summary">
+            <p>{data.requirementSummary}</p>
+            <div className="architect-solution-tags">
+              {data.domain && <span>{data.domain}</span>}
+              {data.provider && <span>检索：{data.provider}</span>}
+              {data.degraded && (
+                <span className="is-warn">已降级为本地/自研</span>
+              )}
+            </div>
+            {(data.notes ?? []).length > 0 && (
+              <ul className="architect-solution-notes">
+                {data.notes.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="architect-solution-list" data-architect-solutions>
+            {options.map((option) => {
+              const active = option.optionId === selected?.optionId
+              const recommended =
+                option.optionId === data.recommendedOptionId
+              const cautions = [
+                ...(option.cons ?? []),
+                ...(option.risks ?? []),
+              ]
+              return (
+                <label
+                  key={option.optionId}
+                  className={`architect-solution-card${
+                    active ? ' is-selected' : ''
+                  }`}
+                  data-architect-solution-option={option.optionId}
+                >
+                  <input
+                    type="radio"
+                    name="architect-solution-choice"
+                    checked={active}
+                    onChange={() => onSelect?.(option.optionId)}
+                  />
+                  <div className="architect-solution-body">
+                    <div className="architect-solution-head">
+                      <strong>{option.title}</strong>
+                      <span
+                        className={`architect-solution-kind is-${String(
+                          option.kind,
+                        ).toLowerCase()}`}
+                      >
+                        {SOLUTION_KIND_LABELS[option.kind] ?? option.kind}
+                      </span>
+                      {recommended && (
+                        <span className="architect-solution-recommended">
+                          推荐
+                        </span>
+                      )}
+                      {option.source && (
+                        <span className="architect-solution-source">
+                          {solutionSourceLabel(option)}
+                        </span>
+                      )}
+                    </div>
+                    {option.summary && <p>{option.summary}</p>}
+                    {solutionMeta(option) && (
+                      <div className="architect-solution-meta">
+                        {solutionMeta(option)}
+                      </div>
+                    )}
+                    {option.sourceUrl && (
+                      <a
+                        className="architect-solution-link"
+                        href={option.sourceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        查看仓库 ↗
+                      </a>
+                    )}
+                    <div className="architect-solution-columns">
+                      <div>
+                        <b>优点</b>
+                        <ul>
+                          {(option.pros ?? []).map((item, index) => (
+                            <li key={`pro-${index}`}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div>
+                        <b>注意</b>
+                        <ul>
+                          {cautions.map((item, index) => (
+                            <li key={`con-${index}`}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                </label>
+              )
+            })}
+          </div>
+
+          <div className="architect-solution-actions">
+            <button
+              type="button"
+              className="architect-primary"
+              data-architect-solution-confirm
+              disabled={!selected}
+              onClick={onConfirm}
+            >
+              使用此方案并开始
+            </button>
+            <button
+              type="button"
+              data-architect-solution-skip
+              onClick={onSkip}
+            >
+              跳过，直接自研
+            </button>
+            <button type="button" onClick={onRetry}>
+              重新侦察
+            </button>
+          </div>
+        </>
+      )}
+
+      {!loading && !data && error && (
+        <div className="architect-solution-actions">
+          <button
+            type="button"
+            className="architect-primary"
+            data-architect-solution-skip
+            onClick={onSkip}
+          >
+            仍要自研并开始
+          </button>
+          <button type="button" onClick={onRetry}>
+            重试
+          </button>
+        </div>
+      )}
+    </section>
+  )
+}
+
 export default function ArchitectPanel({
   projectName,
   projectId = '',
@@ -1493,13 +1904,28 @@ export default function ArchitectPanel({
   gate,
   onReleaseGate,
   projectMode = 'NEW_PROJECT',
+  modelProvider = 'auto',
 }) {
   const scrollRef = useRef(null)
   const contractRef = useRef(null)
+  const { session } = useAuth()
   const [confirmCancel, setConfirmCancel] = useState(false)
   // 新建项目的第一条输入：纯自然语言目标，不再要求先做形态选择。
   const [goal, setGoal] = useState('')
+  // 项目规模 / 质量分级：在用户输入需求后、多轮对话开始前必须选择。
+  const [qualityTier, setQualityTier] = useState('')
+  // 方案侦察：分析需求 -> 检索可复用方案 -> 用户选择 -> 再正式 start。
+  const [solutionDiscovery, setSolutionDiscovery] = useState({
+    open: false,
+    loading: false,
+    error: '',
+    data: null,
+    selectedId: '',
+  })
   const [docsOpen, setDocsOpen] = useState(false)
+  // 文档中心：本地面板，上传在“追加修改需求”里；这里只负责打开 / 刷新。
+  const [docCenterOpen, setDocCenterOpen] = useState(false)
+  const [docCenterVersion, setDocCenterVersion] = useState(0)
   const existingSource = projectMode === 'EXISTING_SOURCE'
   const status = state?.status ?? 'IDLE'
   const statusTone = STATUS_TONES[status] ?? 'idle'
@@ -1519,6 +1945,10 @@ export default function ArchitectPanel({
     [contract, projectName],
   )
   const helper = state?.helper ?? { messages: [], pending: false, error: null }
+  const docCenterCount = useMemo(
+    () => documentCount(projectId),
+    [projectId, docCenterVersion],
+  )
 
   /**
    * 统一聊天流：主状态机消息与影子助手问答按时间合并。
@@ -1542,6 +1972,82 @@ export default function ArchitectPanel({
       return left.order - right.order
     })
   }, [messages, helper.messages])
+
+  const runSolutionDiscovery = async () => {
+    const text = goal.trim()
+    if (!text || !qualityTier || solutionDiscovery.loading) return
+    setSolutionDiscovery({
+      open: true,
+      loading: true,
+      error: '',
+      data: null,
+      selectedId: '',
+    })
+    try {
+      const data = await discoverArchitectSolutions({
+        message: text,
+        projectId,
+        projectName,
+        // 文档中心里启用的文档；与正式 start 保持同一份事实源。
+        knowledgeDocuments: mergeKnowledgeDocuments(
+          activeKnowledgeDocuments(projectId),
+        ),
+        provider: modelProvider,
+        token: session?.token,
+      })
+      setSolutionDiscovery({
+        open: true,
+        loading: false,
+        error: '',
+        data,
+        selectedId:
+          data?.recommendedOptionId ||
+          data?.options?.[0]?.optionId ||
+          'opt_build',
+      })
+    } catch (cause) {
+      setSolutionDiscovery({
+        open: true,
+        loading: false,
+        error: `方案侦察暂不可用：${cause?.message || cause}`,
+        data: null,
+        selectedId: 'opt_build',
+      })
+    }
+  }
+
+  const selectedSolution = useMemo(() => {
+    const options = solutionDiscovery.data?.options ?? []
+    return (
+      options.find(
+        (option) => option.optionId === solutionDiscovery.selectedId,
+      ) ?? null
+    )
+  }, [solutionDiscovery.data, solutionDiscovery.selectedId])
+
+  const startArchitectWithChoice = (choice) => {
+    onStart?.(goal.trim(), qualityTier, choice)
+  }
+
+  const confirmSolutionChoice = () => {
+    const choice =
+      buildSolutionChoice(selectedSolution) || defaultSolutionChoice()
+    startArchitectWithChoice(choice)
+  }
+
+  const skipSolutionDiscovery = () => {
+    startArchitectWithChoice(defaultSolutionChoice())
+  }
+
+  const closeSolutionDiscovery = () => {
+    setSolutionDiscovery({
+      open: false,
+      loading: false,
+      error: '',
+      data: null,
+      selectedId: '',
+    })
+  }
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -1615,6 +2121,15 @@ export default function ArchitectPanel({
             </div>
           </div>
           <div className="architect-header-right">
+            <button
+              type="button"
+              className="ghost-button"
+              data-project-doc-center-open
+              title="查看本地文档中心；只有启用的文档进入 Architect RAG"
+              onClick={() => setDocCenterOpen(true)}
+            >
+              📚 文档中心 ({docCenterCount})
+            </button>
             <button
               type="button"
               className="ghost-button"
@@ -1802,27 +2317,71 @@ export default function ArchitectPanel({
                       goal.trim()
                     ) {
                       event.preventDefault()
-                      onStart?.(goal.trim())
+                      if (qualityTier) void runSolutionDiscovery()
                     }
                   }}
                 />
               </label>
-              <div className="architect-goal-actions">
-                <button
-                  type="button"
-                  className="architect-primary"
-                  data-architect-start
-                  disabled={!goal.trim()}
-                  onClick={() => onStart?.(goal.trim())}
-                >
-                  {existingSource ? '开始后端增量审查' : '开始架构设计'}
-                </button>
-                <span className="architect-goal-hint">
-                  {existingSource
-                    ? '只确认接口 / 数据表增量，不生成前端代码'
-                    : '架构师会连续追问，直到契约置信度达到阈值'}
-                </span>
-              </div>
+              <fieldset
+                className="architect-goal-tier"
+                data-architect-quality-tier
+              >
+                <legend>项目规模 / 质量要求（不可跳过）</legend>
+                {QUALITY_TIER_OPTIONS.map((option) => (
+                  <label key={option.value}>
+                    <input
+                      type="radio"
+                      name="architect-quality-tier"
+                      value={option.value}
+                      checked={qualityTier === option.value}
+                      onChange={() => setQualityTier(option.value)}
+                    />
+                    <span>{option.label}</span>
+                  </label>
+                ))}
+              </fieldset>
+              {solutionDiscovery.open ? (
+                <SolutionDiscoveryPanel
+                  discovery={solutionDiscovery}
+                  selected={selectedSolution}
+                  onSelect={(optionId) =>
+                    setSolutionDiscovery((previous) => ({
+                      ...previous,
+                      selectedId: optionId,
+                    }))
+                  }
+                  onConfirm={confirmSolutionChoice}
+                  onSkip={skipSolutionDiscovery}
+                  onRetry={() => void runSolutionDiscovery()}
+                  onBack={closeSolutionDiscovery}
+                />
+              ) : (
+                <div className="architect-goal-actions">
+                  <button
+                    type="button"
+                    className="architect-primary"
+                    data-architect-start
+                    disabled={!goal.trim() || !qualityTier}
+                    title={
+                      !goal.trim()
+                        ? '请先写下需求'
+                        : !qualityTier
+                          ? '请先选择项目规模 / 质量要求'
+                          : '先侦察可复用方案，再进入架构澄清'
+                    }
+                    onClick={() => void runSolutionDiscovery()}
+                  >
+                    {existingSource ? '侦察复用方案' : '侦察复用方案并开始'}
+                  </button>
+                  <span className="architect-goal-hint">
+                    {existingSource
+                      ? '先看能否复用，再确认接口 / 数据表增量'
+                      : !qualityTier
+                        ? '先选择项目规模，再侦察方案'
+                        : '先确认复用 / 自研方案，再进入架构澄清'}
+                  </span>
+                </div>
+              )}
             </div>
           )}
 
@@ -2000,6 +2559,12 @@ export default function ArchitectPanel({
                 contract={contract}
                 submitting={Boolean(state.decisionSubmitting)}
                 onDecide={onDecide}
+                projectId={projectId}
+                provider={modelProvider}
+                onOpenDocumentCenter={() => setDocCenterOpen(true)}
+                onDocumentsChanged={() =>
+                  setDocCenterVersion((value) => value + 1)
+                }
               />
             </>
           )}
@@ -2093,6 +2658,13 @@ export default function ArchitectPanel({
         open={docsOpen}
         docs={projectDocs}
         onClose={() => setDocsOpen(false)}
+      />
+      <ProjectDocumentCenter
+        open={docCenterOpen}
+        projectId={projectId}
+        provider={modelProvider}
+        onClose={() => setDocCenterOpen(false)}
+        onChange={() => setDocCenterVersion((value) => value + 1)}
       />
     </div>
   )

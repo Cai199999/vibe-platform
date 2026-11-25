@@ -17,6 +17,8 @@ from typing import Any
 
 from ai_core.adapters.checkpoint import get_checkpointer_provider
 from ai_core.a2a import A2A_LOG, build_feedback
+from ai_core.run_guard import get_run_guard
+from ai_core.persistence.run_store import get_run_store
 from ai_core.ports.checkpoint import CheckpointerProvider
 from ai_core.agent.events import RunEventBuffer, get_event_buffer
 from ai_core.architect.graph import (
@@ -187,7 +189,14 @@ def find_architect_contract(contract_id: str) -> ArchitectContract | None:
             if contract.status != "CONFIRMED":
                 return None
             return contract.model_copy(deep=True)
-    return None
+    stored = get_run_store().load_contract(contract_id)
+    if stored is None:
+        return None
+    try:
+        contract = ArchitectContract.model_validate(stored)
+    except Exception:  # noqa: BLE001 - 持久化数据损坏按未找到处理
+        return None
+    return contract if contract.status == "CONFIRMED" else None
 
 
 def find_confirmed_contract_for_project(project_id: str) -> ArchitectContract | None:
@@ -274,6 +283,12 @@ class ArchitectService:
             )
             _ACTIVE_RUNS[run_id] = active
 
+        active.buffer.attach_snapshot(
+            "architect",
+            lambda a=active: self.snapshot(a.run_id).model_dump(
+                mode="json", by_alias=True
+            ),
+        )
         active.buffer.emit(
             "architect.started",
             {
@@ -285,11 +300,13 @@ class ArchitectService:
                 "llmProvider": request.options.llm_provider,
                 "projectMode": active.project_mode,
                 "outputPhase": active.output_phase,
+                "qualityTier": request.quality_tier or "",
+                "qualityTierRequired": not bool(request.quality_tier),
             },
             dedupe_key=f"architect.started:{run_id}",
         )
         threading.Thread(
-            target=self._run_worker,
+            target=get_run_guard().wrap(self._run_worker),
             args=(active,),
             name=f"architect-{run_id}",
             daemon=True,
@@ -505,7 +522,7 @@ class ArchitectService:
             ),
         )
         threading.Thread(
-            target=self._resume_worker,
+            target=get_run_guard().wrap(self._resume_worker),
             args=(
                 active,
                 {
@@ -663,6 +680,36 @@ class ArchitectService:
             # 追加需求时若重新选了质量分级，以最新选择为准；未传则沿用。
             if request.quality_tier:
                 revision_state["quality_tier"] = request.quality_tier
+            # 文档中心 / 本次上传文档随追加需求进入本次修订的 RAG：
+            # 用户文档替换旧的 user_document 片段，全局知识库片段保留。
+            if request.knowledge_documents:
+                from ai_core.architect.user_documents import (
+                    retrieve_user_document_chunks,
+                )
+
+                documents = [
+                    document.model_dump(mode="json", by_alias=True)
+                    for document in request.knowledge_documents
+                ]
+                query = (
+                    f"{request.comment.strip()} "
+                    f"{base_state.get('project_summary') or ''}"
+                )
+                user_chunks = retrieve_user_document_chunks(documents, query, top_k=3)
+                global_chunks = [
+                    chunk
+                    for chunk in (base_state.get("retrieved_chunks") or [])
+                    if (chunk.get("metadata") or {}).get("source") != "user_document"
+                ]
+                revision_state["knowledge_documents"] = documents
+                revision_state["retrieved_chunks"] = [
+                    {
+                        **chunk.to_citation(),
+                        "content": chunk.content,
+                        "metadata": chunk.metadata,
+                    }
+                    for chunk in user_chunks
+                ] + global_chunks[: max(0, 5 - len(user_chunks))]
             active.state = revision_state
             active.buffer.emit(
                 "architect.contract.revision_requested",
@@ -699,7 +746,7 @@ class ArchitectService:
                 dedupe_key=f"a2a:{ack.feedback_id}",
             )
             threading.Thread(
-                target=self._revision_worker,
+                target=get_run_guard().wrap(self._revision_worker),
                 args=(active, revision_state),
                 name=f"architect-revision-{run_id}",
                 daemon=True,
@@ -707,7 +754,7 @@ class ArchitectService:
             return _decision_response(active, contract, now)
 
         threading.Thread(
-            target=self._resume_worker,
+            target=get_run_guard().wrap(self._resume_worker),
             args=(
                 active,
                 {
@@ -775,7 +822,7 @@ class ArchitectService:
             dedupe_key=f"architect.contract.conflict.answered:{conflict.conflict_id}",
         )
         threading.Thread(
-            target=self._resume_worker,
+            target=get_run_guard().wrap(self._resume_worker),
             args=(
                 active,
                 {
@@ -918,7 +965,23 @@ class ArchitectService:
         return ArchitectCancelResponse(run_id=run_id, status="CANCELLING")
 
     def snapshot(self, run_id: str) -> ArchitectSnapshotResponse:
-        active = _require_run(run_id)
+        active = get_active_architect_run(run_id)
+        if active is None:
+            stored = get_run_store().load_snapshot("architect", run_id)
+            if stored is None:
+                raise ArchitectRunNotFoundError(
+                    f"Architect Run 不存在或已过期: {run_id}"
+                )
+            restored = ArchitectSnapshotResponse.model_validate(stored)
+            if restored.status not in {"CONFIRMED", "CANCELLED", "FAILED"}:
+                # 进程重启后不存在继续执行的线程；把“进行中”如实收敛为失败，
+                # 避免前端一直等待一个永远不会推进的任务。
+                restored.status = "FAILED"
+                restored.error = (
+                    restored.error or "服务重启，架构任务已中断，请重新发起。"
+                )
+                restored.error_code = "RUN_INTERRUPTED"
+            return restored
         with _ACTIVE_LOCK:
             return ArchitectSnapshotResponse(
                 run_id=active.run_id,
@@ -947,6 +1010,7 @@ class ArchitectService:
                 ),
                 messages=[dict(item) for item in active.messages],
                 direct_changelog=list(active.state.get("direct_changelog") or []),
+                token_usage=dict(active.state.get("token_usage") or {}),
                 error=active.error,
                 error_code=active.error_code,
             )
@@ -1188,6 +1252,10 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         ),
         "visual_delta": dict(request.visual_delta or {}),
         "ui_history": list(request.ui_history),
+        "knowledge_documents": [
+            document.model_dump(mode="json", by_alias=True)
+            for document in request.knowledge_documents
+        ],
         # 项目摘要 + 本次快照改动：Architect 分析 / 契约草稿必须复用其中
         # 已确认的技术选型，不再重复做选型问卷。
         "project_summary": request.project_summary,
@@ -1202,10 +1270,16 @@ def _initial_state(active: ActiveArchitectRun, bundle: Any) -> dict[str, Any]:
         "round": 0,
         "status": "INGESTING",
         "app_shape": "",
-        # 质量分级只在契约确认阶段由用户写入；初值留空，避免把默认值
-        # 误当成“用户已选择”。
-        "quality_tier": "",
-        "quality_tier_selected": False,
+        # 项目规模 / 质量分级在多轮对话一开始由用户选择；旧客户端未传时
+        # 仍回退到契约确认阶段。
+        "quality_tier": request.quality_tier or "",
+        "quality_tier_selected": bool(request.quality_tier),
+        # 方案侦察阶段用户选定的复用 / 改造 / 自研方案；空 = 未做侦察。
+        "solution_choice": (
+            request.solution_choice.model_dump(mode="json", by_alias=True)
+            if request.solution_choice is not None
+            else {}
+        ),
         "skeleton_mode": False,
         "slots": {},
         "confidence_score": 0.0,

@@ -187,6 +187,7 @@ export async function fetchArchitectDecision(
   decision,
   comment,
   qualityTier,
+  knowledgeDocuments,
   token,
 ) {
   const response = await fetch(
@@ -202,6 +203,10 @@ export async function fetchArchitectDecision(
         decision,
         comment: comment || undefined,
         qualityTier: qualityTier || undefined,
+        knowledgeDocuments:
+          Array.isArray(knowledgeDocuments) && knowledgeDocuments.length
+            ? knowledgeDocuments
+            : undefined,
       }),
     },
   )
@@ -209,6 +214,98 @@ export async function fetchArchitectDecision(
     throw new Error(await responseError(response))
   }
   return response.json()
+}
+
+/**
+ * 判断上传文档是长期复用还是一次性。
+ *
+ * 规则 + LLM 兜底由后端完成；前端最多等 15 秒，超时/失败都回退为
+ * ASK，让用户在文档中心里手动决定，不阻塞追加需求。
+ */
+export async function classifyArchitectDocument({
+  name,
+  content,
+  projectSummary = '',
+  llmProvider = 'auto',
+  token,
+} = {}) {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 15000)
+  try {
+    const response = await fetch('/api/v1/architect/documents/classify', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token ?? ''}`,
+      },
+      body: JSON.stringify({
+        name,
+        content,
+        projectSummary,
+        llmProvider,
+      }),
+      signal: controller.signal,
+    })
+    if (!response.ok) {
+      throw new Error(await responseError(response))
+    }
+    return await response.json()
+  } catch (cause) {
+    return {
+      decision: 'ASK',
+      reuse: 'UNCERTAIN',
+      reason: `语义判断暂不可用：${cause?.message || cause}`,
+      confidence: 0,
+      source: 'rules',
+      signals: [],
+    }
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+/**
+ * 澄清前的方案侦察：需求分析 + 联网/本地复用检索 + 自研方案。
+ *
+ * 只读接口，不创建 Run；用户在面板里选定方案后，再带着
+ * solutionChoice 调 architect.start。检索失败时服务端会降级为
+ * 自研方案，前端不应把该接口失败当成阻塞错误。
+ */
+export async function discoverArchitectSolutions({
+  message,
+  projectId = '',
+  projectName = '',
+  knowledgeDocuments = [],
+  provider = 'auto',
+  maxOptions = 3,
+  token,
+} = {}) {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 30000)
+  try {
+    const response = await fetch('/api/v1/architect/solutions/discover', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token ?? ''}`,
+      },
+      body: JSON.stringify({
+        message,
+        projectId,
+        projectName,
+        knowledgeDocuments,
+        provider,
+        maxOptions,
+      }),
+      signal: controller.signal,
+    })
+    if (!response.ok) {
+      throw new Error(await responseError(response))
+    }
+    return await response.json()
+  } finally {
+    window.clearTimeout(timer)
+  }
 }
 
 /**

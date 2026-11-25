@@ -1,0 +1,73 @@
+{
+  "name": "retry_exhausted_escalated",
+  "runId": "fsk_demo_escalate",
+  "contractId": "ctr_demo_escalate",
+  "runTerminal": "FAILED",
+  "events": [
+    {
+      "type": "a2a.feedback",
+      "payload": {
+        "feedbackId": "a2a_escalate_1",
+        "runId": "fsk_demo_escalate",
+        "fromAgent": "ConsistencyVerifier",
+        "toAgent": "BackendCoder",
+        "kind": "route_repair",
+        "requestedAction": "ADD_BACKEND_ROUTE",
+        "summary": "前端请求缺失 1 条后端路由，请补齐",
+        "evidence": ["POST /api/v1/deliverables/:id/qc"],
+        "contractId": "ctr_demo_escalate",
+        "payload": {
+          "attempt": 1,
+          "maxAttempts": 2,
+          "missingRoutes": ["POST /api/v1/deliverables/:id/qc"]
+        },
+        "createdAt": "2026-11-21T05:12:00Z"
+      }
+    },
+    {
+      "type": "a2a.feedback",
+      "payload": {
+        "feedbackId": "a2a_escalate_2",
+        "runId": "fsk_demo_escalate",
+        "fromAgent": "ConsistencyVerifier",
+        "toAgent": "BackendCoder",
+        "kind": "route_repair",
+        "requestedAction": "ADD_BACKEND_ROUTE",
+        "summary": "前端请求仍缺失 1 条后端路由，重试未收敛",
+        "evidence": ["POST /api/v1/deliverables/:id/qc"],
+        "contractId": "ctr_demo_escalate",
+        "payload": {
+          "attempt": 2,
+          "maxAttempts": 2,
+          "missingRoutes": ["POST /api/v1/deliverables/:id/qc"]
+        },
+        "createdAt": "2026-11-21T05:12:20Z"
+      }
+    },
+    {
+      "type": "a2a.feedback",
+      "payload": {
+        "feedbackId": "a2a_escalate_3",
+        "runId": "fsk_demo_escalate",
+        "fromAgent": "ConsistencyVerifier",
+        "toAgent": "Architect",
+        "kind": "contract_review",
+        "requestedAction": "REVIEW_CONTRACT",
+        "summary": "一致性问题自愈耗尽：请复核契约是否缺少成果质检路由",
+        "evidence": ["POST /api/v1/deliverables/:id/qc"],
+        "contractId": "ctr_demo_escalate",
+        "payload": {
+          "attempt": 2,
+          "maxAttempts": 2
+        },
+        "createdAt": "2026-11-21T05:12:40Z"
+      }
+    }
+  ],
+  "expected": {
+    "stepCount": 3,
+    "loops": 2,
+    "terminalReason": "ESCALATED",
+    "errors": []
+  }
+}

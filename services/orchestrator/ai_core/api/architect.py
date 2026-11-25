@@ -5,7 +5,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from ai_core.agent.events import RunEventBuffer
+from ai_core.agent.events import RunEventBuffer, get_persisted_event_buffer
+from ai_core.architect.document_classifier import classify_document_reuse
 from ai_core.architect.llm import ArchitectLLMConfigurationError
 from ai_core.error_envelope import stream_event_frames
 from ai_core.domain.architect import (
@@ -21,7 +22,12 @@ from ai_core.domain.architect import (
     ArchitectHelperResponse,
     ArchitectRunRequest,
     ArchitectSnapshotResponse,
+    DocumentClassifyRequest,
+    DocumentClassifyResponse,
+    SolutionDiscoveryRequest,
+    SolutionDiscoveryResponse,
 )
+from ai_core.architect.discovery import discover_solutions
 from ai_core.architect.service import (
     ArchitectService,
     ArchitectServiceError,
@@ -49,6 +55,43 @@ def start_architect_stream(request: ArchitectRunRequest) -> StreamingResponse:
     return _sse_response(active.buffer, after_seq=0)
 
 
+@router.post("/documents/classify", response_model=DocumentClassifyResponse)
+def classify_document(request: DocumentClassifyRequest) -> DocumentClassifyResponse:
+    """判断上传文档是长期复用还是一次性；不写入任何持久存储。"""
+    decision = classify_document_reuse(
+        request.name,
+        request.content,
+        project_summary=request.project_summary,
+        llm_provider=request.llm_provider,
+    )
+    return DocumentClassifyResponse(
+        decision=decision.decision,
+        reuse=decision.reuse,
+        reason=decision.reason,
+        confidence=decision.confidence,
+        source=decision.source,
+        signals=decision.signals,
+    )
+
+
+@router.post(
+    "/solutions/discover",
+    response_model=SolutionDiscoveryResponse,
+)
+def discover_solution_options(
+    request: SolutionDiscoveryRequest,
+) -> SolutionDiscoveryResponse:
+    """澄清前的方案侦察：需求分析 + 联网/本地复用检索 + 自研方案。
+
+    只读接口：不创建 Run、不写项目状态。检索失败会降级为自研方案，
+    由用户在 UI 中显式选择后再启动正式 Architect 流程。
+    """
+    try:
+        return discover_solutions(request)
+    except Exception as exc:  # noqa: BLE001 - 统一错误信封
+        _raise_http(exc)
+
+
 @router.get("/runs/{run_id}/events/stream")
 def stream_architect_events(
     run_id: str,
@@ -56,7 +99,14 @@ def stream_architect_events(
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ) -> StreamingResponse:
     active = get_active_architect_run(run_id)
-    if active is None:
+    if active is not None:
+        buffer = active.buffer
+    else:
+        buffer = get_persisted_event_buffer(
+            run_id,
+            terminal_type="architect.failed",
+        )
+    if buffer is None:
         raise HTTPException(
             status_code=404,
             detail={
@@ -70,7 +120,7 @@ def stream_architect_events(
             effective_after = max(0, int(last_event_id))
         except ValueError:
             effective_after = 0
-    return _sse_response(active.buffer, after_seq=effective_after)
+    return _sse_response(buffer, after_seq=effective_after)
 
 
 @router.post(

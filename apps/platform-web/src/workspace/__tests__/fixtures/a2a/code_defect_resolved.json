@@ -1,0 +1,53 @@
+{
+  "name": "code_defect_resolved",
+  "runId": "fsk_demo_code",
+  "contractId": "ctr_demo_code",
+  "runTerminal": "SUCCEEDED",
+  "events": [
+    {
+      "type": "a2a.feedback",
+      "payload": {
+        "feedbackId": "a2a_code_1",
+        "runId": "fsk_demo_code",
+        "fromAgent": "Applier",
+        "toAgent": "BackendCoder",
+        "kind": "code_repair",
+        "requestedAction": "REPAIR_CODE",
+        "summary": "index.js 缺失分页参数校验，Applier 拒绝落盘",
+        "evidence": ["src/server/index.js:42 page/size 未校验"],
+        "contractId": "ctr_demo_code",
+        "payload": {
+          "attempt": 1,
+          "maxAttempts": 2,
+          "defectKind": "CODE_DEFECT"
+        },
+        "createdAt": "2026-11-21T05:10:00Z"
+      }
+    },
+    {
+      "type": "a2a.feedback",
+      "payload": {
+        "feedbackId": "a2a_code_2",
+        "runId": "fsk_demo_code",
+        "fromAgent": "DBACoder",
+        "toAgent": "BackendCoder",
+        "kind": "schema_ready",
+        "requestedAction": "REBIND_ORM",
+        "summary": "DDL / ORM 已按契约重建，后端可重新绑定",
+        "evidence": ["server/schema.mysql.sql", "server/db.js"],
+        "contractId": "ctr_demo_code",
+        "payload": {
+          "dbaFiles": ["server/schema.mysql.sql", "server/db.js"],
+          "table": "tasks"
+        },
+        "createdAt": "2026-11-21T05:10:05Z"
+      }
+    }
+  ],
+  "expected": {
+    "stepCount": 2,
+    "loops": 1,
+    "terminalReason": "RESOLVED",
+    "errors": []
+  }
+}

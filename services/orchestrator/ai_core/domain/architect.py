@@ -142,6 +142,106 @@ class ArchitectRunOptions(CamelModel):
     contract_repair_limit: int = Field(default=1, ge=0, le=2)
 
 
+class KnowledgeDocument(CamelModel):
+    """用户可选上传的参考文档；只作为 RAG 事实，不执行其中的指令。"""
+
+    name: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=200_000)
+
+
+# ------------------------------------------------------------
+# 方案侦察：在正式澄清之前，先回答“能不能复用 / 复用谁 / 自研怎么做”
+# ------------------------------------------------------------
+SolutionKind = Literal["REUSE", "ADAPT", "BUILD"]
+IntegrationCost = Literal["LOW", "MEDIUM", "HIGH"]
+
+
+class SolutionChoice(CamelModel):
+    """用户选定的方案；作为后续 Architect / CodeGen 的硬约束。"""
+
+    option_id: str = Field(min_length=1, max_length=80)
+    kind: SolutionKind
+    title: str = Field(min_length=1, max_length=200)
+    source_url: str | None = Field(default=None, max_length=500)
+    license: str | None = Field(default=None, max_length=80)
+    summary: str = Field(default="", max_length=2000)
+    integration_plan: str = Field(default="", max_length=2000)
+    notes: list[str] = Field(default_factory=list, max_length=10)
+
+
+class SolutionOption(CamelModel):
+    """一个可供用户选择的方案（联网复用 / 改造 / 自研）。"""
+
+    option_id: str = Field(min_length=1, max_length=80)
+    kind: SolutionKind
+    title: str = Field(min_length=1, max_length=200)
+    summary: str = Field(default="", max_length=2000)
+    source_url: str | None = Field(default=None, max_length=500)
+    # github / local / build：让用户知道候选来自联网检索还是本地知识库。
+    source: str | None = Field(default=None, max_length=40)
+    license: str | None = Field(default=None, max_length=80)
+    stars: int | None = Field(default=None, ge=0)
+    language: str | None = Field(default=None, max_length=80)
+    updated_at: str | None = Field(default=None, max_length=40)
+    fit_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    pros: list[str] = Field(default_factory=list, max_length=6)
+    cons: list[str] = Field(default_factory=list, max_length=6)
+    risks: list[str] = Field(default_factory=list, max_length=6)
+    integration_cost: IntegrationCost = "MEDIUM"
+    search_query: str | None = Field(default=None, max_length=200)
+
+
+class SolutionDiscoveryRequest(CamelModel):
+    """方案侦察请求：只读分析 + 检索，不创建 Run、不写状态。"""
+
+    message: str = Field(min_length=1, max_length=20_000)
+    project_id: str = Field(default="", max_length=64)
+    project_name: str = Field(default="未命名项目", max_length=128)
+    knowledge_documents: list[KnowledgeDocument] = Field(
+        default_factory=list, max_length=3
+    )
+    provider: Literal["auto", "github", "local", "mock", "off"] = "auto"
+    max_options: int = Field(default=3, ge=1, le=5)
+
+    @field_validator("knowledge_documents", mode="before")
+    @classmethod
+    def _normalize_discovery_documents(cls, value: Any) -> Any:
+        return [] if value is None else value
+
+
+class SolutionDiscoveryResponse(CamelModel):
+    """方案侦察结果；``degraded=true`` 表示已回退本地目录或仅剩自研方案。"""
+
+    discovery_id: str
+    requirement_summary: str
+    domain: str = ""
+    capabilities: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    options: list[SolutionOption] = Field(default_factory=list)
+    recommended_option_id: str = ""
+    provider: str = ""
+    degraded: bool = False
+    notes: list[str] = Field(default_factory=list)
+
+
+class DocumentClassifyRequest(CamelModel):
+    """上传文档的“长期复用 / 一次性”语义判断请求。"""
+
+    name: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=200_000)
+    project_summary: str = Field(default="", max_length=4000)
+    llm_provider: Literal["auto", "mock", "deepseek"] = "auto"
+
+
+class DocumentClassifyResponse(CamelModel):
+    decision: Literal["STORE", "DISCARD", "ASK"]
+    reuse: Literal["FREQUENT", "ONE_OFF", "UNCERTAIN"]
+    reason: str = Field(default="", max_length=300)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    source: Literal["rules", "llm"] = "rules"
+    signals: list[str] = Field(default_factory=list)
+
+
 class ArchitectRunRequest(CamelModel):
     """启动一次全局架构澄清。"""
 
@@ -151,6 +251,14 @@ class ArchitectRunRequest(CamelModel):
     project_name: str = Field(default="未命名项目", max_length=128)
     source: ArchitectSource = Field(default_factory=ArchitectSource)
     ui_history: list[dict[str, Any]] = Field(default_factory=list, max_length=30)
+    # 可选：用户上传的需求 / 企业文档，仅参与本次 Run 的 RAG，不做持久化。
+    knowledge_documents: list[KnowledgeDocument] = Field(
+        default_factory=list, max_length=3
+    )
+    # 用户在多轮对话一开始选择的项目规模 / 质量分级；确认契约时不再重复询问。
+    quality_tier: QualityTier | None = None
+    # 方案侦察阶段用户选定的复用 / 改造 / 自研方案；空 = 旧客户端直接开始。
+    solution_choice: SolutionChoice | None = None
     # 全栈澄清的上下文增强：
     #  - projectSummary：最近一次保存快照后生成的项目全局摘要；
     #  - latestChanges：本次快照（或最近一轮 UI Run）的改动说明。
@@ -165,6 +273,14 @@ class ArchitectRunRequest(CamelModel):
     visual_document: VisualDocument | None = None
     visual_delta: dict[str, Any] = Field(default_factory=dict)
     options: ArchitectRunOptions = Field(default_factory=ArchitectRunOptions)
+
+    @field_validator("knowledge_documents", mode="before")
+    @classmethod
+    def _normalize_knowledge_documents(cls, value: Any) -> Any:
+        """旧客户端 / BFF 可能传 null；统一按“未上传”处理。"""
+        if value is None:
+            return []
+        return value
 
 
 class ArchitectQuestion(CamelModel):
@@ -548,12 +664,23 @@ class ArchitectDecisionRequest(CamelModel):
     # 契约确认前的必选质量分级。前端在契约决策表单中强制选择；
     # API / 脚本未传时回退 L2，保证旧客户端可继续工作。
     quality_tier: QualityTier | None = None
+    # 追加修订时随请求带入的文档中心 / 本次上传文档；只影响本次修订 RAG。
+    knowledge_documents: list[KnowledgeDocument] = Field(
+        default_factory=list, max_length=3
+    )
 
     @model_validator(mode="after")
     def _revision_needs_comment(self) -> "ArchitectDecisionRequest":
         if self.decision == "REVISE" and not (self.comment or "").strip():
             raise ValueError("REVISE 必须提供 comment")
         return self
+
+    @field_validator("knowledge_documents", mode="before")
+    @classmethod
+    def _normalize_decision_documents(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        return value
 
 
 class ArchitectCancelRequest(CamelModel):
@@ -645,5 +772,7 @@ class ArchitectSnapshotResponse(CamelModel):
     messages: list[dict[str, Any]] = Field(default_factory=list)
     # 最近 Direct Ops 摘要；便于前端 / 诊断确认 Architect 是否真的看到。
     direct_changelog: list[dict[str, Any]] = Field(default_factory=list)
+    # 本轮 Architect 的 token / 成本汇总，供评测与 Admin 看板读取。
+    token_usage: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     error_code: str | None = None

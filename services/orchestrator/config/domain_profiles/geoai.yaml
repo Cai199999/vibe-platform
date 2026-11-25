@@ -1,0 +1,145 @@
+# GIS / GeoAI 领域包。
+#
+# 这是“定制层”示例：所有 GIS 关键词、检索词、复用目录、推荐依赖与
+# 地图组件模板都放在这里；平台核心只按通用协议加载，不写 if gis。
+
+id: geoai
+label: GIS / 地理信息
+description: 地图、空间查询、遥感影像、要素编辑与巡检工单。
+
+detect:
+  terms:
+    - gis
+    - geoai
+    - geospatial
+    - 地理
+    - 地图
+    - 空间
+    - 遥感
+    - 测绘
+    - 影像
+    - 图层
+    - 地块
+    - 管网
+    - 坐标
+    - geojson
+    - postgis
+    - leaflet
+    - maplibre
+    - tile
+  min_hits: 1
+
+capabilities:
+  - label: 地图渲染与图层管理
+    terms: [地图, 图层, 瓦片, leaflet, maplibre, mapbox, openlayers, tile]
+    search_queries:
+      - open source web gis map react
+  - label: 空间查询与分析
+    terms: [空间查询, 缓冲区, 叠加分析, 相交, 距离, postgis, spatial, geoserver, st_, wkt, wkb]
+    search_queries:
+      - postgis spatial query api
+      - geoserver spatial analysis
+  - label: 地理数据导入导出
+    terms: [geojson, shapefile, shp, kml, gpx, 导入, 导出, gis数据]
+    search_queries:
+      - geojson shapefile import export javascript
+  - label: 要素绘制与编辑
+    terms: [标注, 绘制, 编辑要素, 要素编辑, feature, draw, edit]
+    search_queries:
+      - leaflet draw edit geojson
+  - label: 影像/栅格处理
+    terms: [影像, 遥感, 栅格, raster, 变化检测, 分割, segmentation]
+    search_queries:
+      - remote sensing web gis viewer
+  - label: 任务/工单流程
+    terms: [任务, 工单, 巡检, 流程, 审批, 派单]
+    search_queries:
+      - gis task management open source
+  - label: 统计报表
+    terms: [统计, 报表, 图表, 看板, dashboard, chart]
+    search_queries:
+      - gis dashboard open source
+  - label: 认证与权限
+    terms: [登录, 权限, 角色, 认证, jwt, rbac]
+    search_queries:
+      - gis platform auth rbac
+  - label: 部署与运维
+    terms: [部署, 上线, docker, 运维, 监控, 备份]
+    search_queries:
+      - gis docker deployment
+
+constraints:
+  - label: 需要可上线部署
+    terms: [上线, 生产, 部署, 交付]
+  - label: 使用真实数据
+    terms: [真实数据, 真实业务, 真实项目]
+  - label: 需要认证与权限
+    terms: [登录, 权限, 角色, 认证]
+  - label: 需要移动端适配
+    terms: [移动端, 手机, 移动]
+  - label: 需要性能与并发保障
+    terms: [性能, 并发, 高可用]
+  - label: 需要离线能力
+    terms: [离线, 内网, 私有化]
+  - label: 需要安全与合规
+    terms: [安全, 合规, 审计]
+
+search:
+  queries:
+    - geoai gis geospatial open source
+    - open source web gis platform
+  local_catalog: knowledge/geoai_reuse/repos.json
+  mock_candidates:
+    - full_name: opengeos/geoai
+      url: https://github.com/opengeos/geoai
+      description: Python library for geospatial AI workflows
+      stars: 3479
+      language: Python
+      license: MIT
+      pushed_at: "2026-11-21T05:33:07Z"
+      topics: [gis, geospatial, remote-sensing, library]
+      role: Python GeoAI 库
+      reuse: 后端地理处理、遥感推理
+    - full_name: decision-labs/geoai.js
+      url: https://github.com/decision-labs/geoai.js
+      description: Browser GeoAI library built on transformers.js
+      stars: 1800
+      language: TypeScript
+      license: MIT
+      pushed_at: "2026-10-01T00:00:00Z"
+      topics: [gis, geospatial, library, browser]
+      role: 浏览器端 GeoAI 库
+      reuse: 前端地图/影像推理
+
+ranking:
+  domain_terms: [gis, geospatial, geoai, map, 遥感]
+  preferred_languages: [TypeScript, JavaScript]
+  preferred_capabilities: [地图渲染与图层管理, 要素绘制与编辑]
+  domain_boost: 0.12
+  web_boost: 0.12
+  browser_boost: 0.03
+
+build_summary: >-
+  自研方案：React + MapLibre GL JS + Spring Boot/FastAPI + PostGIS，按契约实现
+  地图、空间查询与业务闭环；地图与空间能力复用成熟开源库，业务闭环与数据模型
+  自研，不复制现成 GIS 整站。
+
+codegen:
+  dependencies:
+    leaflet: "^1.9.4"
+    react-leaflet: "^4.2.1"
+  imports:
+    - "import 'leaflet/dist/leaflet.css'"
+  visual_extensions:
+    - id: leaflet_map
+      match:
+        types: [component]
+        names: [地图画布, 地图, map, Map]
+      dependencies:
+        react-leaflet: "^4.2.1"
+      imports:
+        - "import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet'"
+      render: |
+        <MapContainer center={[39.9042, 116.4074]} zoom={12} style={{ height: 360, width: '100%' }}>
+          <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+        </MapContainer>

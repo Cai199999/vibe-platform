@@ -148,6 +148,7 @@ export const EMPTY_ARCHITECT = {
   // VISUAL_V0 / BACKEND_BINDING / FULL。
   outputPhase: null,
   qualityTierRequired: true,
+  qualityTier: null,
   appShape: null,
   confidenceScore: 0,
   threshold: 0.85,
@@ -306,6 +307,9 @@ export function reduceArchitect(state, event) {
         status: 'RUNNING',
         projectMode: payload.projectMode ?? state.projectMode ?? null,
         outputPhase: payload.outputPhase ?? state.outputPhase ?? null,
+        qualityTier: payload.qualityTier || state.qualityTier || null,
+        qualityTierRequired:
+          payload.qualityTierRequired ?? state.qualityTierRequired,
         submitting: true,
         error: null,
       }
@@ -1235,7 +1239,13 @@ export function useArchitect({ token } = {}) {
   )
 
   const decide = useCallback(
-    async (projectId, decision, comment = '', qualityTier = '') => {
+    async (
+      projectId,
+      decision,
+      comment = '',
+      qualityTier = '',
+      knowledgeDocs = [],
+    ) => {
       const current = statesRef.current[projectId]
       const contract = current?.contract
       if (!current?.runId || !contract?.contractId) return
@@ -1247,6 +1257,7 @@ export function useArchitect({ token } = {}) {
           decision,
           comment,
           qualityTier || undefined,
+          knowledgeDocs,
           token,
         )
         await connect(projectId, {

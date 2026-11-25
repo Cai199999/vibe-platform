@@ -1,5 +1,6 @@
 package com.vibeplatform.bff.architect;
 
+import com.vibeplatform.bff.common.TraceContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vibeplatform.bff.admin.AdminMetricsService;
@@ -73,6 +74,12 @@ public class ArchitectStreamService {
                 .uri(STREAM_START_PATH)
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept(MediaType.TEXT_EVENT_STREAM)
+                .headers(headers -> {
+                    String traceId = TraceContext.current();
+                    if (traceId != null && !traceId.isBlank()) {
+                        headers.set(TraceContext.HEADER, traceId);
+                    }
+                })
                 .bodyValue(jsonBody)
                 .exchangeToFlux(response -> {
                     if (response.statusCode().isError()) {
@@ -147,6 +154,12 @@ public class ArchitectStreamService {
                         .queryParam("afterSeq", resumeFrom)
                         .build(runId))
                 .accept(MediaType.TEXT_EVENT_STREAM)
+                .headers(headers -> {
+                    String traceId = TraceContext.current();
+                    if (traceId != null && !traceId.isBlank()) {
+                        headers.set(TraceContext.HEADER, traceId);
+                    }
+                })
                 .exchangeToFlux(response -> {
                     if (response.statusCode().isError()) {
                         return response.bodyToMono(String.class)

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.vibeplatform.bff.resilience.AiCoreGuardException;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,14 +35,21 @@ public class ArchitectService {
             "/api/v1/internal/architect/runs/{runId}/cancel";
     private static final String HELPER_PATH =
             "/api/v1/internal/architect/runs/{runId}/helper";
+    private static final String CLASSIFY_DOCUMENT_PATH =
+            "/api/v1/internal/architect/documents/classify";
+    private static final String DISCOVER_SOLUTIONS_PATH =
+            "/api/v1/internal/architect/solutions/discover";
 
+    private final RestClient aiCoreInteractiveRestClient;
     private final RestClient aiCoreRunRestClient;
     private final ObjectMapper objectMapper;
 
     public ArchitectService(
+            @Qualifier("aiCoreInteractiveRestClient") RestClient aiCoreInteractiveRestClient,
             @Qualifier("aiCoreRunRestClient") RestClient aiCoreRunRestClient,
             ObjectMapper objectMapper
     ) {
+        this.aiCoreInteractiveRestClient = aiCoreInteractiveRestClient;
         this.aiCoreRunRestClient = aiCoreRunRestClient;
         this.objectMapper = objectMapper;
     }
@@ -52,6 +60,7 @@ public class ArchitectService {
             JsonNode body
     ) {
         return postJson(
+                aiCoreInteractiveRestClient,
                 CLARIFICATION_ANSWER_PATH,
                 body,
                 "architect clarification answer",
@@ -66,6 +75,7 @@ public class ArchitectService {
             JsonNode body
     ) {
         return postJson(
+                aiCoreInteractiveRestClient,
                 CONTRACT_DECISION_PATH,
                 body,
                 "architect contract decision",
@@ -81,6 +91,7 @@ public class ArchitectService {
             JsonNode body
     ) {
         return postJson(
+                aiCoreInteractiveRestClient,
                 CONTRACT_CONFLICT_DECISION_PATH,
                 body,
                 "architect contract conflict decision",
@@ -90,19 +101,37 @@ public class ArchitectService {
     }
 
     public ResponseEntity<JsonNode> cancel(String runId, JsonNode body) {
-        return postJson(CANCEL_PATH, body, "architect cancel", runId);
+        return postJson(aiCoreInteractiveRestClient, CANCEL_PATH, body, "architect cancel", runId);
     }
 
     /** 影子助手只读问答；不改变主架构状态。 */
     public ResponseEntity<JsonNode> askHelper(String runId, JsonNode body) {
-        return postJson(HELPER_PATH, body, "architect helper", runId);
+        return postJson(aiCoreRunRestClient, HELPER_PATH, body, "architect helper", runId);
+    }
+
+    /** 上传文档的长期复用 / 一次性语义判断；不写入任何持久存储。 */
+    public ResponseEntity<JsonNode> classifyDocument(JsonNode body) {
+        return postJson(aiCoreRunRestClient, CLASSIFY_DOCUMENT_PATH, body, "architect document classify");
+    }
+
+    /** 澄清前的方案侦察：只读检索，不创建 Run。 */
+    public ResponseEntity<JsonNode> discoverSolutions(JsonNode body) {
+        // 联网检索 + 模型分析可能超过短交互通道的 15s 预算；使用 Run
+        // 通道（300s）承载，但前端仍以 30s 中止，避免无限等待。
+        return postJson(
+                aiCoreRunRestClient,
+                DISCOVER_SOLUTIONS_PATH,
+                body,
+                "architect solution discovery"
+        );
     }
 
     public ResponseEntity<JsonNode> snapshot(String runId) {
-        return getJson(RUN_PATH, "architect snapshot", runId);
+        return getJson(aiCoreInteractiveRestClient, RUN_PATH, "architect snapshot", runId);
     }
 
     private ResponseEntity<JsonNode> postJson(
+            RestClient client,
             String path,
             JsonNode body,
             String operation,
@@ -120,7 +149,7 @@ public class ArchitectService {
                     ));
         }
         try {
-            ResponseEntity<JsonNode> response = aiCoreRunRestClient.post()
+            ResponseEntity<JsonNode> response = client.post()
                     .uri(path, uriVariables)
                     .contentType(MediaType.APPLICATION_JSON)
                     .accept(MediaType.APPLICATION_JSON)
@@ -144,26 +173,19 @@ public class ArchitectService {
             );
             return response;
         } catch (RestClientException ex) {
-            long elapsedMs = elapsedMillis(startedAt);
-            log.error("{} proxy failed elapsedMs={}: {}",
-                    operation, elapsedMs, ex.getMessage());
-            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                    .body(errorBody(
-                            "AI_CORE_UNAVAILABLE",
-                            "调用 AI Core 失败（" + elapsedMs + "ms）: "
-                                    + ex.getMessage()
-                    ));
+            return unavailable(operation, startedAt, ex);
         }
     }
 
     private ResponseEntity<JsonNode> getJson(
+            RestClient client,
             String path,
             String operation,
             Object... uriVariables
     ) {
         long startedAt = System.nanoTime();
         try {
-            ResponseEntity<JsonNode> response = aiCoreRunRestClient.get()
+            ResponseEntity<JsonNode> response = client.get()
                     .uri(path, uriVariables)
                     .accept(MediaType.APPLICATION_JSON)
                     .exchange((clientRequest, clientResponse) -> {
@@ -185,16 +207,37 @@ public class ArchitectService {
             );
             return response;
         } catch (RestClientException ex) {
-            long elapsedMs = elapsedMillis(startedAt);
-            log.error("{} proxy failed elapsedMs={}: {}",
-                    operation, elapsedMs, ex.getMessage());
-            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                    .body(errorBody(
-                            "AI_CORE_UNAVAILABLE",
-                            "调用 AI Core 失败（" + elapsedMs + "ms）: "
-                                    + ex.getMessage()
-                    ));
+            return unavailable(operation, startedAt, ex);
         }
+    }
+
+    private ResponseEntity<JsonNode> unavailable(
+            String operation,
+            long startedAt,
+            RestClientException ex
+    ) {
+        long elapsedMs = elapsedMillis(startedAt);
+        AiCoreGuardException guard = guardCause(ex);
+        String code = guard == null ? "AI_CORE_UNAVAILABLE" : guard.code();
+        log.error("{} proxy failed code={} elapsedMs={}: {}",
+                operation, code, elapsedMs, ex.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(errorBody(
+                        code,
+                        "调用 AI Core 失败（" + elapsedMs + "ms）: "
+                                + ex.getMessage()
+                ));
+    }
+
+    private static AiCoreGuardException guardCause(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof AiCoreGuardException guard) {
+                return guard;
+            }
+            current = current.getCause();
+        }
+        return null;
     }
 
     private JsonNode errorBody(String code, String message) {

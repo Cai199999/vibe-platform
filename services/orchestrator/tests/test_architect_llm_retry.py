@@ -69,6 +69,29 @@ class ArchitectLLMRetryTests(unittest.TestCase):
         # 每次重试前都要清空前端半截流式文本。
         self.assertEqual(reset.call_count, 2)
 
+    def test_bare_connection_error_is_treated_as_transient(self) -> None:
+        # LangChain/OpenAI SDK 在连接失败时常只给出 "Connection error."，
+        # 归类逻辑必须覆盖这种裸文案，否则一次网络抖动会打掉整次 Run。
+        client = _FlakyModelClient(
+            failures=1,
+            error="DeepSeek 调用失败: Connection error.",
+        )
+        llm = _llm(client)
+        with (
+            patch("ai_core.architect.llm.time.sleep"),
+            patch("ai_core.architect.llm.reset_token_stream"),
+        ):
+            result = llm._generate_with_repair(
+                task="architect_analyze",
+                system="system",
+                human="human",
+                json_schema=None,
+                parse=json.loads,
+                label="analyze",
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.calls, 2)
+
     def test_non_transient_error_is_not_retried(self) -> None:
         client = _FlakyModelClient(failures=5, error="401 unauthorized invalid api key")
         llm = _llm(client)

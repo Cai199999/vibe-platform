@@ -112,6 +112,27 @@ public class ArchitectController {
         return architectService.cancel(runId, body);
     }
 
+    /** 判断上传文档是长期复用还是一次性；不写入持久存储。 */
+    @PostMapping("/documents/classify")
+    public ResponseEntity<JsonNode> classifyDocument(
+            @RequestBody(required = false) JsonNode body
+    ) {
+        return architectService.classifyDocument(body);
+    }
+
+    /**
+     * 澄清前的方案侦察：需求分析 + 联网/本地复用检索 + 自研方案。
+     *
+     * <p>只读接口，不创建 Run；用户选定方案后再调用
+     * {@code /runs/stream}，并通过 {@code solutionChoice} 带入硬约束。</p>
+     */
+    @PostMapping("/solutions/discover")
+    public ResponseEntity<JsonNode> discoverSolutions(
+            @RequestBody(required = false) JsonNode body
+    ) {
+        return architectService.discoverSolutions(body);
+    }
+
     /** 刷新 / 重连后恢复快照。 */
     @GetMapping("/runs/{runId}")
     public ResponseEntity<JsonNode> snapshot(@PathVariable String runId) {

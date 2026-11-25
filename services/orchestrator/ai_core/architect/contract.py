@@ -412,6 +412,149 @@ def draft_from_dict(payload: dict) -> ContractDraft:
     )
 
 
+_VISUAL_COMPONENT_TYPES = {"form", "list", "component"}
+_GENERIC_VISUAL_NAMES = {
+    "提交",
+    "确定",
+    "取消",
+    "保存",
+    "按钮",
+    "输入项",
+    "表单标题",
+    "列表占位",
+    "组件标题",
+    "组件说明",
+    "页面标题",
+    "页面占位",
+    "导航标题",
+    "导航占位",
+    "品牌",
+    "页面说明",
+    "顶栏",
+    "主内容区",
+    "侧边栏",
+    "主体布局",
+}
+
+
+def _visual_pages(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    pages = [item for item in payload.get("pages") or [] if isinstance(item, dict)]
+    if pages:
+        return pages
+    root = payload.get("root")
+    if isinstance(root, dict):
+        return [
+            {
+                "pageId": root.get("id"),
+                "path": "/",
+                "title": root.get("name"),
+                "root": root,
+            }
+        ]
+    return []
+
+
+def _walk_visual(
+    node: dict[str, Any],
+    ancestors: tuple[dict[str, Any], ...] = (),
+) -> Any:
+    yield node, ancestors
+    for child in node.get("children") or []:
+        if isinstance(child, dict):
+            yield from _walk_visual(child, (*ancestors, node))
+
+
+def _normalize_route_path(path: str) -> str:
+    text = str(path or "/").strip()
+    return "/" if text in {"", "/"} else text.rstrip("/")
+
+
+def _is_business_component(node: dict[str, Any]) -> bool:
+    name = str(node.get("name") or "").strip()
+    if not name or name in _GENERIC_VISUAL_NAMES:
+        return False
+    node_type = str(node.get("type") or "")
+    if node_type in _VISUAL_COMPONENT_TYPES:
+        return True
+    if node_type == "button":
+        semantics = node.get("semantics") or {}
+        return str(semantics.get("importance") or "") == "core"
+    return False
+
+
+def _frontend_routes_from_visual(
+    payload: dict[str, Any],
+    draft_routes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """后端绑定阶段以冻结虚拟树为前端事实源，恢复被模型漏写的页面路由。"""
+    by_path = {
+        _normalize_route_path(str(item.get("path") or "/")): item
+        for item in draft_routes
+        if isinstance(item, dict)
+    }
+    routes: list[dict[str, Any]] = []
+    for page in _visual_pages(payload):
+        path = str(page.get("path") or "/")
+        existing = by_path.get(_normalize_route_path(path))
+        if existing is not None:
+            routes.append(existing)
+            continue
+        root = page.get("root") or {}
+        name = str(page.get("title") or root.get("name") or "未命名页面")
+        routes.append({"path": path, "name": name, "description": name})
+    return routes or list(draft_routes)
+
+
+def _components_from_visual(
+    payload: dict[str, Any],
+    draft_components: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """从冻结虚拟树恢复业务组件；模型新增但树中不存在的组件不再保留。"""
+    by_name = {
+        str(item.get("name") or "").strip(): item
+        for item in draft_components
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    }
+    components: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for page in _visual_pages(payload):
+        root = page.get("root") or {}
+        if not isinstance(root, dict):
+            continue
+        for node, ancestors in _walk_visual(root):
+            if not _is_business_component(node):
+                continue
+            name = str(node.get("name") or "").strip()
+            if name in seen:
+                continue
+            seen.add(name)
+            existing = by_name.get(name)
+            if existing is not None:
+                components.append(existing)
+                continue
+            semantics = node.get("semantics") or {}
+            section = next(
+                (
+                    str(item.get("name") or "")
+                    for item in reversed(ancestors)
+                    if str(item.get("type") or "") == "section"
+                ),
+                "",
+            )
+            components.append(
+                {
+                    "name": name,
+                    "role": str(
+                        semantics.get("role") or node.get("type") or "component"
+                    ),
+                    "section": section,
+                    "description": str(semantics.get("purpose") or ""),
+                    "isPlaceholder": False,
+                }
+            )
+    return components or list(draft_components)
+
+
 def assemble_contract(
     *,
     contract_id: str,
@@ -426,6 +569,7 @@ def assemble_contract(
     project_mode: str = "NEW_PROJECT",
     output_phase: str = "FULL",
     frozen_visual_document: dict[str, Any] | None = None,
+    solution_choice: dict[str, Any] | None = None,
 ) -> ArchitectContract:
     existing_source = project_mode == "EXISTING_SOURCE"
     visual_v0 = output_phase == "VISUAL_V0"
@@ -451,6 +595,23 @@ def assemble_contract(
             )
         markdown += "\n".join(lines)
 
+    choice = solution_choice or {}
+    choice_label = str(choice.get("title") or choice.get("optionId") or "").strip()
+    if choice_label and choice_label not in markdown:
+        # 方案选择是用户明确做出的决策，必须进入契约正文，才能从契约侧
+        # 审计“为什么采用这个复用方案”，而不是只留在运行元数据里。
+        choice_lines = ["", "", "## 方案选择", ""]
+        choice_lines.append(
+            f"- 选项：{choice_label}" f"（`{choice.get('optionId') or 'n/a'}`）"
+        )
+        if choice.get("kind"):
+            choice_lines.append(f"- 类型：{choice.get('kind')}")
+        if choice.get("sourceUrl"):
+            choice_lines.append(f"- 来源：{choice.get('sourceUrl')}")
+        if choice.get("integrationPlan"):
+            choice_lines.append(f"- 集成方案：{choice.get('integrationPlan')}")
+        markdown += "\n".join(choice_lines)
+
     tech_stack = dict(draft.tech_stack)
     # 全栈契约必须把数据库引擎提升为一级字段：Coder 与部署配置都依赖它。
     # sqlite 仅用于本地测试；生产选型为 mysql / postgresql。
@@ -473,9 +634,18 @@ def assemble_contract(
                 derive_when_empty=True,
             )
 
+    frontend_routes = list(draft.frontend_routes)
+    components = list(draft.components)
     if backend_binding:
         # 后端绑定阶段以用户冻结的虚拟树为准，绝不重新生成或覆盖。
+        # 模型重写契约时容易漏掉部分页面 / 组件（Iter6 曾从 4 路由掉到 1），
+        # 这里用冻结树确定性地补齐，避免结构化契约与画布事实分叉。
         visual_payload = dict(frozen_visual_document or {})
+        if visual_payload:
+            frontend_routes = _frontend_routes_from_visual(
+                visual_payload, frontend_routes
+            )
+            components = _components_from_visual(visual_payload, components)
     else:
         visual_payload = dict(draft.visual_document or {})
     if (
@@ -522,9 +692,9 @@ def assemble_contract(
         database_ddl=draft.database_ddl,
         relations=relations,
         component_interactions=draft.component_interactions,
-        frontend_routes=draft.frontend_routes,
+        frontend_routes=frontend_routes,
         page_layout=draft.page_layout,
-        components=draft.components,
+        components=components,
         visual_document=visual_document,
         ui_logic=draft.ui_logic,
         frontend_data_model=draft.frontend_data_model,

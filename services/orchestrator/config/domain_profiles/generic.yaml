@@ -1,0 +1,40 @@
+# 平台默认领域配置：不包含任何行业关键词。
+#
+# 核心代码只按同一套协议读取 domain profile；新增行业时复制本文件，
+# 在 detect / capabilities / search / ranking / codegen 中补充配置，
+# 不要把行业词写进 Python。
+
+id: generic
+label: 通用 Web 应用
+description: 平台默认配置；适用于没有专门领域包的通用需求。
+
+detect:
+  terms: []
+
+capabilities: []
+
+constraints: []
+
+search:
+  queries:
+    - open source web application framework
+    - react admin dashboard open source
+  # 本地复用目录；空表示只依赖联网检索。
+  local_catalog: ""
+
+ranking:
+  domain_terms: []
+  preferred_languages:
+    - TypeScript
+    - JavaScript
+  preferred_capabilities: []
+
+build_summary: >-
+  自研方案：按契约从零实现；复用成熟框架与基础库，不引入不可控的整站模板。
+
+codegen:
+  dependencies: {}
+  imports: []
+  # 页面级集合数据面板由编译器根据 contract interactions 自动生成，
+  # 不需要节点名匹配；这里只放领域专用组件扩展。
+  visual_extensions: []

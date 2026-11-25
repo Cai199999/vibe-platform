@@ -254,9 +254,7 @@ class ArchitectFlowTest(unittest.TestCase):
         self.assertIn("architect.contract.confirmed", event_types)
         # Architect → BackendCoder 的反向 A2A 回执必须随确认一起发出。
         a2a_events = [
-            event
-            for event in harness.buffer.snapshot()
-            if event.type == "a2a.feedback"
+            event for event in harness.buffer.snapshot() if event.type == "a2a.feedback"
         ]
         self.assertTrue(a2a_events)
         self.assertEqual(a2a_events[-1].payload["fromAgent"], "Architect")
@@ -1350,6 +1348,19 @@ class ArchitectHelperTest(unittest.TestCase):
         self.assertEqual(active.status, "AWAITING_CLARIFICATION")
         self.assertIs(active.clarification, before_clarification)
         self.assertIs(active.contract, before_contract)
+
+    def test_snapshot_exposes_token_usage(self) -> None:
+        """评测脚本从 snapshot 读取真实 token/cost，不允许只留在内部状态。"""
+        active = self._register_active_run()
+        active.state["token_usage"] = {
+            "totalTokens": 1234,
+            "cost": 0.0456,
+            "currency": "CNY",
+        }
+        service = ArchitectService(llm=MockArchitectLLM())
+        snapshot = service.snapshot(active.run_id)
+        self.assertEqual(snapshot.token_usage["totalTokens"], 1234)
+        self.assertEqual(snapshot.token_usage["cost"], 0.0456)
 
     def test_helper_requires_existing_run(self) -> None:
         service = ArchitectService(llm=MockArchitectLLM())

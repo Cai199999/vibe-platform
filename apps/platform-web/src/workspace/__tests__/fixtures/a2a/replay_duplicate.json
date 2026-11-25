@@ -1,0 +1,53 @@
+{
+  "name": "replay_duplicate",
+  "runId": "fsk_demo_replay",
+  "contractId": "ctr_demo_replay",
+  "runTerminal": "SUCCEEDED",
+  "events": [
+    {
+      "type": "a2a.feedback",
+      "payload": {
+        "feedbackId": "a2a_replay_1",
+        "runId": "fsk_demo_replay",
+        "fromAgent": "Applier",
+        "toAgent": "DBACoder",
+        "kind": "schema_repair",
+        "requestedAction": "REGENERATE_DB",
+        "summary": "db.js JOIN 别名与契约不一致，请重建数据库层",
+        "evidence": ["jobs.job_descriptions vs job_descriptions"],
+        "contractId": "ctr_demo_replay",
+        "payload": {
+          "attempt": 1,
+          "maxAttempts": 2
+        },
+        "createdAt": "2026-11-21T05:13:00Z"
+      }
+    },
+    {
+      "type": "a2a.feedback",
+      "payload": {
+        "feedbackId": "a2a_replay_1",
+        "runId": "fsk_demo_replay",
+        "fromAgent": "Applier",
+        "toAgent": "DBACoder",
+        "kind": "schema_repair",
+        "requestedAction": "REGENERATE_DB",
+        "summary": "db.js JOIN 别名与契约不一致，请重建数据库层",
+        "evidence": ["jobs.job_descriptions vs job_descriptions"],
+        "contractId": "ctr_demo_replay",
+        "payload": {
+          "attempt": 1,
+          "maxAttempts": 2
+        },
+        "createdAt": "2026-11-21T05:13:00Z"
+      }
+    }
+  ],
+  "expected": {
+    "stepCount": 1,
+    "loops": 1,
+    "terminalReason": "RESOLVED",
+    "errors": [],
+    "warnings": ["duplicate feedbackId a2a_replay_1"]
+  }
+}

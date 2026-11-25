@@ -92,6 +92,7 @@ from ai_core.observability.streaming import (
 )
 from ai_core.observability.token_usage import TokenUsage, UsageCollector, collect_usage
 from ai_core.adapters.rag import get_rag_provider
+from ai_core.architect.user_documents import retrieve_user_document_chunks
 from ai_core.ports.rag import RAGProvider, RAGProviderError
 
 logger = logging.getLogger(__name__)
@@ -464,11 +465,19 @@ class ArchitectGraphRunner:
     def _retrieve_knowledge(self, state: ArchitectState) -> dict[str, Any]:
         self._check_cancelled()
         query = _rag_query(state)
+        top_k = max(1, int(state.get("rag_top_k") or 5))
+        # 用户上传文档优先：它们是本次项目的直接事实，先于通用规范。
+        user_chunks = retrieve_user_document_chunks(
+            state.get("knowledge_documents") or [],
+            query,
+            top_k=min(3, top_k),
+        )
+        provider_name = "user_document" if user_chunks else "none"
         try:
             provider = self._rag_provider_factory(state.get("rag_provider") or None)
-            chunks = provider.retrieve(
-                query,
-                top_k=max(1, int(state.get("rag_top_k") or 5)),
+            global_chunks = provider.retrieve(query, top_k=top_k)
+            provider_name = (
+                f"{provider.name}+user_document" if user_chunks else provider.name
             )
         except RAGProviderError as exc:
             # RAG 是增强能力，不是主流程单点；失败时继续生成并显式记录。
@@ -478,6 +487,10 @@ class ArchitectGraphRunner:
                 {"message": str(exc)},
                 dedupe_key=f"architect.rag.failed:{state['run_id']}",
             )
+            global_chunks = []
+
+        chunks = [*user_chunks, *global_chunks]
+        if not chunks:
             return {"retrieved_chunks": []}
 
         payload = [
@@ -492,7 +505,7 @@ class ArchitectGraphRunner:
             "architect.rag.retrieved",
             {
                 "query": query[:500],
-                "provider": provider.name,
+                "provider": provider_name,
                 "citations": [chunk.to_citation() for chunk in chunks],
             },
             dedupe_key=f"architect.rag.retrieved:{state['run_id']}",
@@ -1224,6 +1237,7 @@ class ArchitectGraphRunner:
             project_mode=str(state.get("project_mode") or "NEW_PROJECT"),
             output_phase=str(state.get("output_phase") or "FULL"),
             frozen_visual_document=dict(state.get("visual_document") or {}),
+            solution_choice=dict(state.get("solution_choice") or {}),
         )
         contract_payload = contract.model_dump(mode="json", by_alias=True)
         self._emit(
@@ -1463,9 +1477,7 @@ class ArchitectGraphRunner:
             to_agent="BackendCoder",
             kind="contract_confirmed",
             requested_action="GENERATE_WITH_CONTRACT",
-            summary=(
-                f"契约已确认（revision {revision}），后端可据此生成/重生成"
-            ),
+            summary=(f"契约已确认（revision {revision}），后端可据此生成/重生成"),
             evidence=[comment] if comment else (),
             contract_id=str(state.get("contract_id") or ""),
             payload={
@@ -1651,6 +1663,8 @@ def _context_from_state(state: ArchitectState) -> ArchitectContext:
         latest_changes=str(state.get("latest_changes") or ""),
         project_mode=str(state.get("project_mode") or "NEW_PROJECT"),
         output_phase=str(state.get("output_phase") or "FULL"),
+        quality_tier=str(state.get("quality_tier") or ""),
+        solution_choice=dict(state.get("solution_choice") or {}),
         visual_document=dict(state.get("visual_document") or {}),
         visual_delta=dict(state.get("visual_delta") or {}),
         direct_changelog=list(state.get("direct_changelog") or []),
