@@ -17,6 +17,12 @@ services:
     build:
       context: ./services/orchestrator
       dockerfile: Dockerfile
+      args:
+        # 国内网络可用 PIP_INDEX_URL=... 覆盖，加速镜像构建。
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        # 默认跳过热身（S3 下载可能超时）；模型缓存由命名卷持久化，
+        # 网络可用时置 true 重新构建即可预热，或从旧容器灌入缓存。
+        CHROMA_WARMUP_ENABLED: ${CHROMA_WARMUP_ENABLED:-false}
     image: vibe-platform/python-ai:dev
     container_name: vibe-python-ai
     environment:
@@ -74,6 +80,15 @@ services:
       LLM_COST_CURRENCY: ${LLM_COST_CURRENCY:-CNY}
       REDIS_HOST: ${REDIS_HOST:-host.docker.internal}
       REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+      # Run 事件 / 快照 / 已确认契约持久化；Redis 不可用时自动回退内存。
+      RUN_STORE_BACKEND: ${RUN_STORE_BACKEND:-redis}
+      RUN_EVENT_TTL_SECONDS: ${RUN_EVENT_TTL_SECONDS:-86400}
+      RUN_SNAPSHOT_TTL_SECONDS: ${RUN_SNAPSHOT_TTL_SECONDS:-604800}
+      # 多副本项目写锁（默认开启；Redis 不可用时回退本地锁）。
+      DISTRIBUTED_LOCK_ENABLED: ${DISTRIBUTED_LOCK_ENABLED:-true}
+      DISTRIBUTED_LOCK_TTL_SECONDS: ${DISTRIBUTED_LOCK_TTL_SECONDS:-300}
       # L3 生产级门禁：复用宿主 MySQL 做临时库迁移验收。
       MYSQL_HOST: ${MYSQL_HOST:-host.docker.internal}
       MYSQL_PORT: ${MYSQL_PORT:-3306}
@@ -95,6 +110,12 @@ services:
       SANDBOX_DRAFT_ORPHAN_TTL_DAYS: ${SANDBOX_DRAFT_ORPHAN_TTL_DAYS:-7}
       SANDBOX_DRAFT_GC_ENABLED: ${SANDBOX_DRAFT_GC_ENABLED:-true}
       SANDBOX_DRAFT_GC_INTERVAL_SECONDS: ${SANDBOX_DRAFT_GC_INTERVAL_SECONDS:-21600}
+      # 已停止沙盒容器回收（只清理超 TTL 且未登记的 exited 容器）。
+      SANDBOX_CONTAINER_GC_ENABLED: ${SANDBOX_CONTAINER_GC_ENABLED:-true}
+      SANDBOX_CONTAINER_ORPHAN_TTL_DAYS: ${SANDBOX_CONTAINER_ORPHAN_TTL_DAYS:-7}
+      SANDBOX_CONTAINER_GC_INTERVAL_SECONDS: ${SANDBOX_CONTAINER_GC_INTERVAL_SECONDS:-21600}
+      # 全局 Run 并发舱壁：超出上限的后台 Run 在自己的线程中排队。
+      MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-8}
       SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-768}
       SANDBOX_CPU_LIMIT: ${SANDBOX_CPU_LIMIT:-1.0}
       # Direct Ops 与 AI Run 的项目级写锁。
@@ -149,9 +170,14 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # MCP Demo Server；只读挂载，容器内绝不修改仓库脚本。
       - ./scripts:/app/scripts:ro
+      # 知识库 / GeoAI 复用目录；只读挂载，更新目录后重启 python-ai 即可重新索引。
+      - ./services/orchestrator/knowledge:/app/knowledge:ro
       # 项目上下文记忆（local/global summary、用户画像、工具结果）。
       # 挂载到宿主持久化，容器重建后仍可注入 system prompt。
       - ./services/orchestrator/data:/app/data
+      # Chroma ONNX 模型缓存：重建容器不会重新下载 167MB 模型。
+      # 镜像构建时跳过热身（CHROMA_WARMUP_ENABLED=false）可从旧容器灌入一次。
+      - vibe-chroma-cache:/app/.cache/chroma
     group_add:
       # 宿主 docker 组 GID，Linux 上用 `stat -c '%g' /var/run/docker.sock` 获取。
       - "${DOCKER_GID:-115}"
@@ -202,6 +228,16 @@ services:
       AI_CORE_BASE_URL: http://python-ai:8100
       AI_CORE_CONNECT_TIMEOUT_MS: 2000
       AI_CORE_READ_TIMEOUT_MS: 3000
+      # 交互式代理（Supervisor / Architect 状态操作）独立预算。
+      AI_CORE_INTERACTIVE_CONNECT_TIMEOUT_MS: ${AI_CORE_INTERACTIVE_CONNECT_TIMEOUT_MS:-2000}
+      AI_CORE_INTERACTIVE_READ_TIMEOUT_MS: ${AI_CORE_INTERACTIVE_READ_TIMEOUT_MS:-15000}
+      # 舱壁 + 熔断：下游变慢时最多占用固定线程数。
+      AI_CORE_RESILIENCE_ENABLED: ${AI_CORE_RESILIENCE_ENABLED:-true}
+      AI_CORE_SHORT_MAX_CONCURRENT: ${AI_CORE_SHORT_MAX_CONCURRENT:-64}
+      AI_CORE_INTERACTIVE_MAX_CONCURRENT: ${AI_CORE_INTERACTIVE_MAX_CONCURRENT:-64}
+      AI_CORE_RUN_MAX_CONCURRENT: ${AI_CORE_RUN_MAX_CONCURRENT:-48}
+      AI_CORE_FAILURE_THRESHOLD: ${AI_CORE_FAILURE_THRESHOLD:-4}
+      AI_CORE_OPEN_DURATION_MS: ${AI_CORE_OPEN_DURATION_MS:-15000}
       # Run 是同步长请求：模型 + 沙盒构建 + 最多 3 次修复。
       AI_CORE_RUN_CONNECT_TIMEOUT_MS: 2000
       AI_CORE_RUN_READ_TIMEOUT_MS: ${AI_CORE_RUN_READ_TIMEOUT_MS:-300000}
@@ -253,6 +289,11 @@ services:
       timeout: 5s
       retries: 6
       start_period: 20s
+
+volumes:
+  # 本地模型缓存；不进入 Git，容器重建后仍保留。
+  vibe-chroma-cache:
+    name: vibe-platform-chroma-cache
 
 networks:
   vibe-platform-net:

@@ -226,6 +226,13 @@ _SPECS: dict[str, ErrorSpec] = {
         "V0 虚拟原型未通过结构校验，请补充页面需求后重新发起。",
         retryable=True,
     ),
+    # 模型上游不可用与“输出不合法”必须区分：前者可重试，后者需要改描述。
+    "VISUAL_LLM_UNAVAILABLE": ErrorSpec(
+        "MODEL",
+        "RECOVERABLE",
+        "模型服务暂时不可用，请稍后重试。",
+        retryable=True,
+    ),
     "ARCHITECT_INCOMPLETE_STATE": ErrorSpec(
         "ARCHITECT", "FATAL", "架构流程未到达可交付状态，请重新发起。"
     ),

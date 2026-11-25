@@ -6,7 +6,11 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from docker.errors import DockerException
 
-from ai_core.agent.events import RunEventBuffer, peer_event_buffer
+from ai_core.agent.events import (
+    RunEventBuffer,
+    get_persisted_event_buffer,
+    peer_event_buffer,
+)
 from ai_core.agent.llm import AgentLLMConfigurationError
 from ai_core.domain.agent import (
     ApprovalDecisionRequest,
@@ -85,6 +89,8 @@ def stream_run_events(
 ) -> StreamingResponse:
     """回放 ``seq > afterSeq`` 后继续订阅；终态事件到达后关闭连接。"""
     buffer = peer_event_buffer(run_id)
+    if buffer is None:
+        buffer = get_persisted_event_buffer(run_id, terminal_type="run.failed")
     if buffer is None:
         raise HTTPException(
             status_code=404,

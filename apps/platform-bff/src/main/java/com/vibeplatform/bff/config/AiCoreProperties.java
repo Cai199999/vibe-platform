@@ -16,6 +16,8 @@ public record AiCoreProperties(
         String baseUrl,
         int connectTimeoutMs,
         int readTimeoutMs,
+        int interactiveConnectTimeoutMs,
+        int interactiveReadTimeoutMs,
         int runConnectTimeoutMs,
         int runReadTimeoutMs
 ) {
@@ -31,6 +33,14 @@ public record AiCoreProperties(
         }
         if (readTimeoutMs <= 0) {
             readTimeoutMs = 3_000;
+        }
+        if (interactiveConnectTimeoutMs <= 0) {
+            interactiveConnectTimeoutMs = connectTimeoutMs;
+        }
+        if (interactiveReadTimeoutMs <= 0) {
+            // 交互式代理（Supervisor / Architect 状态操作）不是长任务，
+            // 但也不该像健康检查一样 3 秒就掐断；默认 15 秒。
+            interactiveReadTimeoutMs = 15_000;
         }
         if (runConnectTimeoutMs <= 0) {
             runConnectTimeoutMs = connectTimeoutMs;

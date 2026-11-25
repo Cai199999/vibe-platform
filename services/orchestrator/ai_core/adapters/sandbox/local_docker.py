@@ -1247,6 +1247,103 @@ class LocalDockerSandbox(SandboxProvider):
 
         return reclaimed
 
+    def reap_stopped_sandboxes(self, ttl_days: int | None = None) -> list[str]:
+        """回收超过 TTL 的已停止沙盒容器。
+
+        容器是“每项目一份”的，python-ai 重启后登记表为空，已经退出的
+        容器不会再被任何 Run 使用。这里只删除：
+          - ``vibe.managed=true``；
+          - 状态为 exited / created / dead；
+          - 不在当前进程 ``_sandboxes`` 登记表中；
+          - 最后结束时间早于 TTL。
+
+        运行中的预览绝不删除，避免影响用户正在操作的页面。
+        """
+        ttl = (
+            self.settings.sandbox_container_orphan_ttl_days
+            if ttl_days is None
+            else ttl_days
+        )
+        if ttl <= 0:
+            return []
+        cutoff = time.time() - ttl * 86400
+        try:
+            client = self._require_client()
+            containers = client.containers.list(
+                all=True,
+                filters={"label": f"{LABEL_MANAGED}=true"},
+            )
+        except (DockerException, SandboxError):
+            logger.warning(
+                "sandbox container gc skipped: docker unavailable", exc_info=True
+            )
+            return []
+
+        with self._lock:
+            active_ids = set(self._sandboxes.values())
+
+        reclaimed: list[str] = []
+        for container in containers:
+            state = (getattr(container, "attrs", None) or {}).get("State") or {}
+            status = str(state.get("Status") or getattr(container, "status", ""))
+            if status not in {"exited", "created", "dead"}:
+                continue
+            if getattr(container, "id", "") in active_ids:
+                continue
+            finished = self._container_finished_epoch(container, state)
+            if finished is None or finished > cutoff:
+                continue
+            labels = getattr(container, "labels", None) or {}
+            sandbox_id = str(labels.get(LABEL_SANDBOX_ID) or container.id)
+            try:
+                container.remove(force=True)
+            except DockerException:
+                logger.warning(
+                    "sandbox container gc failed sandbox=%s",
+                    sandbox_id,
+                    exc_info=True,
+                )
+                continue
+            reclaimed.append(sandbox_id)
+            logger.info(
+                "stopped sandbox reclaimed sandbox=%s age_days=%.1f",
+                sandbox_id,
+                (time.time() - finished) / 86400,
+            )
+        return reclaimed
+
+    @staticmethod
+    def _container_finished_epoch(
+        container: Any, state: dict[str, Any]
+    ) -> float | None:
+        """优先用容器结束时间；从未启动的容器回退到创建时间。"""
+        for raw in (
+            state.get("FinishedAt"),
+            (getattr(container, "attrs", None) or {}).get("Created"),
+        ):
+            epoch = LocalDockerSandbox._parse_docker_time(raw)
+            if epoch is not None:
+                return epoch
+        return None
+
+    @staticmethod
+    def _parse_docker_time(value: Any) -> float | None:
+        if not value or not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text or text.startswith("0001-01-01"):
+            return None
+        # Docker 返回纳秒精度，fromisoformat 只支持微秒；直接去掉小数部分。
+        text = re.sub(r"\.\d+", "", text)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        elif "+" not in text[10:] and "-" not in text[10:]:
+            text += "+00:00"
+        try:
+            return datetime.fromisoformat(text).timestamp()
+        except ValueError:
+            return None
+
     def _reclaim_drafts(
         self,
         container: Any,

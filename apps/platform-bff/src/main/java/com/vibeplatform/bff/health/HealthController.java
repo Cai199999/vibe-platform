@@ -1,6 +1,8 @@
 package com.vibeplatform.bff.health;
 
+import com.vibeplatform.bff.resilience.AiCoreResilienceRegistry;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,13 +39,16 @@ public class HealthController {
     private static final String PYTHON_PING_PATH = "/api/v1/internal/ping";
 
     private final RestClient aiCoreRestClient;
+    private final AiCoreResilienceRegistry resilienceRegistry;
     private final String applicationVersion;
 
     public HealthController(
             RestClient aiCoreRestClient,
+            AiCoreResilienceRegistry resilienceRegistry,
             @Value("${info.app.version:0.1.0}") String applicationVersion
     ) {
         this.aiCoreRestClient = aiCoreRestClient;
+        this.resilienceRegistry = resilienceRegistry;
         this.applicationVersion = applicationVersion;
     }
 
@@ -68,12 +73,16 @@ public class HealthController {
                     pythonUp ? null : "Python AI Core 返回了非 UP 状态"
             );
 
+            Map<String, HealthResponse.DependencyStatus> dependencies =
+                    new LinkedHashMap<>();
+            dependencies.put("pythonAi", pythonStatus);
+            dependencies.put("aiCoreResilience", resilienceStatus());
             HealthResponse response = new HealthResponse(
                     pythonUp ? "UP" : "DEGRADED",
                     SERVICE_NAME,
                     applicationVersion,
                     timestamp,
-                    Map.of("pythonAi", pythonStatus)
+                    dependencies
             );
 
             return pythonUp
@@ -81,19 +90,36 @@ public class HealthController {
                     : ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(response);
         } catch (RestClientException ex) {
             log.warn("Python AI Core ping failed: {}", ex.getMessage());
+            Map<String, HealthResponse.DependencyStatus> dependencies =
+                    new LinkedHashMap<>();
+            dependencies.put("pythonAi", new HealthResponse.DependencyStatus(
+                    "DOWN",
+                    "python-ai",
+                    null,
+                    ex.getMessage()
+            ));
+            dependencies.put("aiCoreResilience", resilienceStatus());
             HealthResponse response = new HealthResponse(
                     "DEGRADED",
                     SERVICE_NAME,
                     applicationVersion,
                     timestamp,
-                    Map.of("pythonAi", new HealthResponse.DependencyStatus(
-                            "DOWN",
-                            "python-ai",
-                            null,
-                            ex.getMessage()
-                    ))
+                    dependencies
             );
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(response);
         }
+    }
+
+    /**
+     * 舱壁/熔断状态只作为诊断信息，不把 BFF 自身判为 DOWN：下游熔断时
+     * 非 AI 接口（源码快照、健康检查）仍需保持可用。
+     */
+    private HealthResponse.DependencyStatus resilienceStatus() {
+        return new HealthResponse.DependencyStatus(
+                "UP",
+                "ai-core-resilience",
+                resilienceRegistry.snapshot(),
+                null
+        );
     }
 }

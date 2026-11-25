@@ -86,7 +86,14 @@ public class ProjectSourceService {
                 prefix,
                 updatedAt
         );
-        repository.save(record, fileRecords);
+        try {
+            repository.save(record, fileRecords);
+        } catch (RuntimeException ex) {
+            // MinIO 已写入、MySQL 失败的孤儿对象：尽力清理，避免长期堆积。
+            // 补偿失败不能覆盖原始异常，仓库层错误仍是唯一对外错误。
+            objectStore.deleteObjects(objectKeys.values());
+            throw ex;
+        }
         return new ProjectSourceResponse(
                 safeProjectId,
                 tenantId,

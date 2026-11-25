@@ -15,11 +15,14 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Protocol
+from typing import Any, AsyncIterator, Callable, Protocol
+
+from ai_core.persistence.run_store import get_run_store
 
 TERMINAL_EVENT_TYPES = {
     "run.succeeded",
@@ -44,6 +47,16 @@ TERMINAL_EVENT_TYPES = {
     # Phase 2 的 HITL 恢复。
     "direct.succeeded",
     "direct.failed",
+    "direct.decision.required",
+}
+# 这些事件会结束当前 SSE 连接，但只是“暂停”而不是终态：进程重启后
+# 不可能再恢复，回放时必须补一条 RUN_INTERRUPTED，避免前端继续等待。
+PAUSE_EVENT_TYPES = {
+    "clarification.required",
+    "approval.required",
+    "decision.required",
+    "architect.clarification.required",
+    "architect.contract.ready",
     "direct.decision.required",
 }
 SSE_EVENT_NAME = "run.event"
@@ -88,6 +101,22 @@ class RunEvent:
         if self.trace_id:
             data["traceId"] = self.trace_id
         return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RunEvent | None":
+        try:
+            return cls(
+                event_id=str(data["eventId"]),
+                run_id=str(data["runId"]),
+                seq=int(data["seq"]),
+                type=str(data["type"]),
+                version=int(data.get("version") or 1),
+                ts=str(data.get("ts") or ""),
+                payload=dict(data.get("payload") or {}),
+                trace_id=data.get("traceId"),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
 
     def to_sse(self) -> str:
         # data 必须是单行 JSON，避免不同客户端对多行 data 的拼接行为不一致。
@@ -152,6 +181,11 @@ class RunEventBuffer:
             int, tuple[asyncio.AbstractEventLoop, asyncio.Queue]
         ] = {}
         self._terminal_seq: int | None = None
+        self._store = get_run_store()
+        self._snapshot_kind: str | None = None
+        self._snapshot_provider: Callable[[], dict[str, Any]] | None = None
+        self._last_snapshot_at = 0.0
+        self._restored = False
 
     @property
     def last_seq(self) -> int:
@@ -192,6 +226,8 @@ class RunEventBuffer:
                 self._terminal_seq = None
             subscribers = list(self._subscribers.values())
 
+        self._persist_event(event)
+        self._maybe_persist_snapshot(event)
         for loop, queue in subscribers:
             try:
                 loop.call_soon_threadsafe(queue.put_nowait, event)
@@ -199,6 +235,76 @@ class RunEventBuffer:
                 # 订阅所在的事件循环已经关闭（浏览器断开），忽略即可。
                 continue
         return event
+
+    def attach_snapshot(
+        self,
+        kind: str,
+        provider: Callable[[], dict[str, Any]],
+    ) -> None:
+        """注册快照生成器；事件推进时按 1 秒节流写入持久化存储。"""
+        self._snapshot_kind = kind
+        self._snapshot_provider = provider
+
+    def hydrate_from_store(self) -> bool:
+        """从持久化存储恢复历史事件；返回是否恢复出任何事件。"""
+        try:
+            stored = self._store.list_events(self.run_id, limit=self._max_events)
+        except Exception:  # noqa: BLE001 - 恢复失败按无历史处理
+            return False
+        events: list[RunEvent] = []
+        for item in stored:
+            event = RunEvent.from_dict(item)
+            if event is not None:
+                events.append(event)
+        if not events:
+            return False
+        with self._lock:
+            self._events.clear()
+            self._events.extend(events)
+            self._seq = max(event.seq for event in events)
+            self._terminal_seq = None
+            for event in events:
+                if event.type in TERMINAL_EVENT_TYPES:
+                    self._terminal_seq = event.seq
+                else:
+                    self._terminal_seq = None
+            self._restored = True
+        return True
+
+    @property
+    def restored(self) -> bool:
+        return self._restored
+
+    def _persist_event(self, event: RunEvent) -> None:
+        try:
+            self._store.append_event(self.run_id, event.to_dict())
+        except Exception:  # noqa: BLE001 - 持久化不能阻断 Run
+            pass
+
+    def _maybe_persist_snapshot(self, event: RunEvent) -> None:
+        provider = self._snapshot_provider
+        kind = self._snapshot_kind
+        if provider is None or kind is None:
+            return
+        terminal = event.type in TERMINAL_EVENT_TYPES
+        now = time.monotonic()
+        if not terminal and now - self._last_snapshot_at < 1.0:
+            return
+        self._last_snapshot_at = now
+        try:
+            snapshot = provider()
+            if not isinstance(snapshot, dict):
+                return
+            self._store.save_snapshot(kind, self.run_id, snapshot)
+            contract = snapshot.get("contract")
+            if (
+                isinstance(contract, dict)
+                and contract.get("status") == "CONFIRMED"
+                and contract.get("contractId")
+            ):
+                self._store.save_contract(str(contract["contractId"]), contract)
+        except Exception:  # noqa: BLE001 - 快照失败不影响 Run
+            pass
 
     def snapshot(self, after_seq: int = 0) -> list[RunEvent]:
         with self._lock:
@@ -219,10 +325,15 @@ class RunEventBuffer:
 
         last_seq = after_seq
         try:
-            for event in self.snapshot(after_seq):
+            replayed = self.snapshot(after_seq)
+            # 历史里可能“先暂停、后恢复”：只有最后一个事件是终态时才
+            # 关闭连接，否则重连客户端会在旧的 clarification.required
+            # 处提前断开，看不到后续恢复/中断事件。
+            last_index = len(replayed) - 1
+            for index, event in enumerate(replayed):
                 last_seq = max(last_seq, event.seq)
                 yield event
-                if event.type in TERMINAL_EVENT_TYPES:
+                if event.type in TERMINAL_EVENT_TYPES and index == last_index:
                     return
 
             # 终态 / 暂停事件在订阅之前就已发生，且 afterSeq 已覆盖它：
@@ -259,7 +370,8 @@ def get_event_buffer(
     trace_id: str | None = None,
     max_events: int = 2000,
 ) -> RunEventBuffer:
-    """按 runId 复用事件缓冲；进程重启后丢失，M2.0 可接受。"""
+    """按 runId 复用事件缓冲；缺失时由持久化存储回放（见
+    ``get_persisted_event_buffer``）。"""
     with _default_lock:
         buffer = _default_buffers.get(run_id)
         if buffer is None:
@@ -272,6 +384,47 @@ def get_event_buffer(
         return buffer
 
 
+def reset_event_buffers_for_tests() -> None:
+    """测试辅助：清空进程内缓冲，模拟 Python 进程重启。"""
+    with _default_lock:
+        _default_buffers.clear()
+
+
 def peer_event_buffer(run_id: str) -> RunEventBuffer | None:
     with _default_lock:
         return _default_buffers.get(run_id)
+
+
+def get_persisted_event_buffer(
+    run_id: str,
+    *,
+    terminal_type: str,
+) -> RunEventBuffer | None:
+    """进程内没有缓冲时，从持久化存储恢复历史事件。
+
+    恢复出的 Run 不可能还在执行（执行线程随进程消失），因此如果历史里
+    没有终态事件，补发一条 ``RUN_INTERRUPTED`` 终态事件，避免 SSE 连接
+    永远等待心跳。
+    """
+    buffer = peer_event_buffer(run_id)
+    if buffer is not None:
+        return buffer
+    buffer = get_event_buffer(run_id)
+    if not buffer.hydrate_from_store():
+        return None
+    events = buffer.snapshot()
+    last_type = events[-1].type if events else ""
+    if buffer._terminal_seq is None or last_type in PAUSE_EVENT_TYPES:  # noqa: SLF001
+        buffer.emit(
+            terminal_type,
+            {
+                "code": "RUN_INTERRUPTED",
+                "errorCode": "RUN_INTERRUPTED",
+                "message": "服务重启，任务已中断，请重新发起。",
+                "userMessage": "服务重启，任务已中断，请重新发起。",
+                "retryable": True,
+                "degraded": True,
+            },
+            dedupe_key=f"run_interrupted:{run_id}",
+        )
+    return buffer

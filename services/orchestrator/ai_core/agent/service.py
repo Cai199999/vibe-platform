@@ -94,6 +94,8 @@ from ai_core.direct_ops.changelog import get_change_log_store
 from ai_core.domain.direct_ops import ChangeLogEntry
 from ai_core.config import Settings, get_settings
 from ai_core.project_lock import ProjectBusyError, project_write_lock
+from ai_core.run_guard import get_run_guard
+from ai_core.persistence.run_store import get_run_store
 from ai_core.adapters.sandbox import get_sandbox_provider
 from ai_core.ports.sandbox import (
     SandboxDraft,
@@ -387,9 +389,13 @@ class RunExecutionService:
         if not created:
             return active
 
+        active.buffer.attach_snapshot(
+            "ui",
+            lambda a=active: self._snapshot_dict(a),
+        )
         self._emit_run_started(active)
         thread = threading.Thread(
-            target=self._stream_worker,
+            target=get_run_guard().wrap(self._stream_worker),
             args=(active,),
             name=f"run-{run_id}",
             daemon=True,
@@ -472,7 +478,7 @@ class RunExecutionService:
         # 先把连接可订阅所需的非终态事件写入缓冲，再后台恢复；前端收到 202
         # 后用 afterSeq 订阅即可继续时间轴。
         thread = threading.Thread(
-            target=self._resume_worker,
+            target=get_run_guard().wrap(self._resume_worker),
             args=(active, answers),
             name=f"resume-{run_id}",
             daemon=True,
@@ -653,7 +659,7 @@ class RunExecutionService:
             raise RunCheckpointLostError("决策 checkpoint 已丢失")
 
         thread = threading.Thread(
-            target=self._decision_resume_worker,
+            target=get_run_guard().wrap(self._decision_resume_worker),
             args=(active, prepared, paused, option),
             name=f"decision-{run_id}",
             daemon=True,
@@ -823,7 +829,7 @@ class RunExecutionService:
 
         # 后台恢复，API 立即返回 202；前端用 lastSeq 重放事件流。
         thread = threading.Thread(
-            target=self._approval_resume_worker,
+            target=get_run_guard().wrap(self._approval_resume_worker),
             args=(
                 active,
                 prepared,
@@ -982,7 +988,14 @@ class RunExecutionService:
     def snapshot(self, run_id: str) -> RunSnapshotResponse:
         active = get_active_run(run_id)
         if active is None:
-            raise RunNotFoundError(f"Run 不存在或已过期: {run_id}")
+            stored = get_run_store().load_snapshot("ui", run_id)
+            if stored is None:
+                raise RunNotFoundError(f"Run 不存在或已过期: {run_id}")
+            restored = RunSnapshotResponse.model_validate(stored)
+            if restored.status not in TERMINAL_RUN_STATUSES:
+                restored.status = "FAILED"
+                restored.error = restored.error or "服务重启，任务已中断，请重新发起。"
+            return restored
         with _ACTIVE_LOCK:
             self._expire_if_needed(active)
         response = active.response
@@ -999,6 +1012,23 @@ class RunExecutionService:
             error=response.error if response else None,
             last_seq=active.buffer.last_seq,
         )
+
+    def _snapshot_dict(self, active: ActiveRun) -> dict[str, Any]:
+        """供事件持久化使用：只读构造快照，不触发 expiry 副作用。"""
+        response = active.response
+        return RunSnapshotResponse(
+            run_id=active.run_id,
+            status=active.status,
+            sandbox_id=response.sandbox_id if response else "",
+            preview_url=response.preview_url if response else "",
+            clarification=active.clarification,
+            approval=active.approval,
+            pending_decision=active.pending_decision,
+            cancel_requested=active.cancel_requested,
+            assistant_message=response.assistant_message if response else "",
+            error=response.error if response else None,
+            last_seq=active.buffer.last_seq,
+        ).model_dump(mode="json", by_alias=True)
 
     def list_clarifications(self, run_id: str) -> ClarificationListResponse:
         active = get_active_run(run_id)

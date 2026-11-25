@@ -6,9 +6,11 @@ import io.minio.GetObjectArgs;
 import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
+import io.minio.RemoveObjectArgs;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Collection;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -64,6 +66,28 @@ public class ProjectSourceObjectStore {
                     "写入源码对象存储失败，请稍后重试",
                     ex
             );
+        }
+    }
+
+    /**
+     * 尽力删除一批对象。用于 MySQL 元数据写入失败后的补偿：
+     * 删除失败只记录日志，不能覆盖原始异常。
+     */
+    public void deleteObjects(Collection<String> objectKeys) {
+        if (objectKeys == null || objectKeys.isEmpty()) {
+            return;
+        }
+        for (String objectKey : objectKeys) {
+            try {
+                client.removeObject(
+                        RemoveObjectArgs.builder()
+                                .bucket(bucket)
+                                .object(objectKey)
+                                .build()
+                );
+            } catch (Exception ex) {
+                log.warn("cleanup orphan source object failed key={}", objectKey, ex);
+            }
         }
     }
 

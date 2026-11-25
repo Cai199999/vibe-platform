@@ -69,3 +69,61 @@ def start_draft_gc(
         logger.info("orphan draft gc disabled by config")
         return None
     return DraftGarbageCollector(provider, settings).start()
+
+
+class SandboxContainerGarbageCollector:
+    """回收长时间停止的沙盒容器。
+
+    与草稿回收独立：只处理 ``vibe.managed=true`` 且已退出、超过 TTL、
+    不在当前进程登记表中的容器。运行中的预览永远不碰。
+    """
+
+    def __init__(self, provider: SandboxProvider, settings: Settings) -> None:
+        self._provider = provider
+        self._settings = settings
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="vibe-sandbox-container-gc",
+            daemon=True,
+        )
+
+    def start(self) -> "SandboxContainerGarbageCollector":
+        self._thread.start()
+        return self
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop_event.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        interval = max(
+            60,
+            int(
+                getattr(self._settings, "sandbox_container_gc_interval_seconds", 21_600)
+            ),
+        )
+        while not self._stop_event.is_set():
+            try:
+                reclaimed = self._provider.reap_stopped_sandboxes()
+                if reclaimed:
+                    logger.info(
+                        "stopped sandbox gc reclaimed %d container(s): %s",
+                        len(reclaimed),
+                        ", ".join(reclaimed),
+                    )
+            except Exception:  # pragma: no cover - 防御性兜底
+                logger.warning("stopped sandbox gc failed", exc_info=True)
+            self._stop_event.wait(interval)
+
+
+def start_container_gc(
+    provider: SandboxProvider,
+    settings: Settings,
+) -> SandboxContainerGarbageCollector | None:
+    """按配置启动停止容器回收器；关闭时返回 ``None``。"""
+    if not getattr(settings, "sandbox_container_gc_enabled", False):
+        logger.info("stopped sandbox gc disabled by config")
+        return None
+    return SandboxContainerGarbageCollector(provider, settings).start()

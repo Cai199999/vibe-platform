@@ -14,15 +14,31 @@ RUN apt-get update \
     && groupadd --system app \
     && useradd --system --gid app app
 
+# 允许构建时切换 PyPI 镜像（默认官方源）；本地/国内网络可通过
+# `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple docker compose build` 加速。
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
+# Run 事件 / 快照 / 契约持久化与多副本项目锁（RUN_STORE_BACKEND=redis）。
+# 单独成层：requirements.txt 变化时仍可复用上面的重型依赖缓存。
+RUN pip install --no-cache-dir redis==5.2.1
+
 # 混合 RAG：构建阶段预热本地 ONNX Embedding，运行期无需联网下载模型。
 # 模型体积约 80MB，缓存在 /app/.cache/chroma，运行时 app 用户可读。
+# 离线 / 镜像源不可达时可传 CHROMA_WARMUP_ENABLED=false：构建继续，
+# 运行期首次向量检索会尝试下载；Hybrid RAG 在向量路径失败时回退 BM25。
 ENV HOME=/app
+ARG CHROMA_WARMUP_ENABLED=true
 RUN mkdir -p /app/.cache/chroma \
-    && python -c "from chromadb.utils.embedding_functions import DefaultEmbeddingFunction; DefaultEmbeddingFunction()(['warmup'])" \
+    && if [ "$CHROMA_WARMUP_ENABLED" = "true" ]; then \
+         python -c "from chromadb.utils.embedding_functions import DefaultEmbeddingFunction; DefaultEmbeddingFunction()(['warmup'])" ; \
+       else \
+         echo "chroma warmup skipped (CHROMA_WARMUP_ENABLED=false)" ; \
+       fi \
     && chown -R app:app /app/.cache
 
 COPY main.py .

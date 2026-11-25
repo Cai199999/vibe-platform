@@ -66,13 +66,39 @@ class Settings(BaseSettings):
     model_architect_analyze_name: str = ""
     model_architect_contract_name: str = ""
     model_architect_helper_name: str = ""
+    # 澄清之前的“方案侦察”：只输出短 JSON（领域 / 能力 / 检索词）。
+    model_solution_discovery_name: str = ""
+    model_solution_discovery_temperature: float = 0.0
+
+    # ------------------------------------------------------------
+    # 方案侦察：在正式澄清前检索可复用方案（GitHub / 本地目录）
+    # ------------------------------------------------------------
+    # auto：优先 GitHub，失败回退本地；github：只联网；local：只本地；
+    # off：关闭检索，仅给出自研方案。测试用 mock 注入确定性候选。
+    github_token: str = ""
+    reuse_search_provider: str = "auto"
+    reuse_search_timeout_seconds: float = 6.0
+    reuse_search_cache_ttl_seconds: int = 86400
+    reuse_search_cache_dir: str = "data/reuse_search_cache"
+    reuse_search_max_queries: int = 3
     # 代码生成任务（Coder / BackendCoder 修复）输出完整文件，JSON 字符串化
     # 后很容易超过网关默认 4096；单独抬高上限。
     coder_max_output_tokens: int = 8192
 
-    # 复用宿主机 Docker Redis；当前骨架不主动连接。
+    # 复用宿主机 Docker Redis。RUN_STORE_BACKEND=redis 时用于 Run 事件 /
+    # 快照 / 已确认契约持久化；不可用时自动回退内存。
     redis_host: str = "127.0.0.1"
     redis_port: int = 6379
+    redis_password: str = ""
+    redis_db: int = 0
+    run_store_backend: str = "memory"  # memory | redis | auto
+    run_store_redis_prefix: str = "vibe:run-store"
+    run_event_ttl_seconds: int = 24 * 3600
+    run_snapshot_ttl_seconds: int = 7 * 24 * 3600
+    run_event_max: int = 2000
+    # 多副本项目写锁：默认关闭，单进程使用本地锁；开启后走 Redis SET NX。
+    distributed_lock_enabled: bool = False
+    distributed_lock_ttl_seconds: int = 300
 
     # ------------------------------------------------------------
     # Sandbox（LocalDockerSandbox）
@@ -101,6 +127,17 @@ class Settings(BaseSettings):
     sandbox_draft_gc_enabled: bool = True
     # 后台回收间隔；启动时会立即执行一次，便于重启后尽快收敛。
     sandbox_draft_gc_interval_seconds: int = 6 * 3600
+
+    # 停止状态沙盒容器回收：python-ai 重启或异常退出后，已 Exited 的
+    # 容器不会再被任何 Run 引用。只清理超过 TTL 且未在当前进程登记表
+    # 中的容器，运行中的沙盒永远不碰。
+    sandbox_container_gc_enabled: bool = True
+    sandbox_container_orphan_ttl_days: int = 7
+    sandbox_container_gc_interval_seconds: int = 6 * 3600
+
+    # 全局 Run 并发舱壁：同一进程最多同时执行 N 个 Graph。超出上限的
+    # Run 在各自后台线程排队，HTTP 仍立即返回 202，不改变交互语义。
+    max_concurrent_runs: int = 8
 
     # 浏览器访问预览端口时使用的主机名。M1 为单机开发，默认 127.0.0.1。
     sandbox_preview_host: str = "127.0.0.1"

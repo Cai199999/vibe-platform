@@ -68,6 +68,31 @@ class ProjectSourceServiceTest {
     }
 
     @Test
+    void metadataFailureDeletesOrphanObjects() {
+        StubRepository repository = new StubRepository();
+        repository.failure = new IllegalStateException("mysql down");
+        StubObjectStore store = new StubObjectStore();
+        ProjectSourceService service = new ProjectSourceService(repository, store);
+        Map<String, String> files = new LinkedHashMap<>();
+        files.put("src/App.jsx", "export default function App() {}");
+
+        assertThatThrownBy(() -> service.save(
+                "proj_1",
+                new SaveProjectSourceRequest(
+                        "tenant_local",
+                        "新项目",
+                        "src/App.jsx",
+                        "App.jsx",
+                        files
+                )
+        )).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("mysql down");
+
+        assertThat(store.deleted)
+                .containsExactly("project-sources/tenant_local/proj_1/r1/src/App.jsx");
+    }
+
+    @Test
     void getReadsEveryObjectBack() {
         StubRepository repository = new StubRepository();
         repository.existing = new ProjectSourceRecord(
@@ -125,6 +150,7 @@ class ProjectSourceServiceTest {
         ProjectSourceRecord saved;
         List<ProjectSourceFileRecord> savedFiles = new ArrayList<>();
         List<ProjectSourceFileRecord> files = List.of();
+        RuntimeException failure;
 
         StubRepository() {
             super(null);
@@ -145,6 +171,9 @@ class ProjectSourceServiceTest {
                 ProjectSourceRecord record,
                 List<ProjectSourceFileRecord> fileRecords
         ) {
+            if (failure != null) {
+                throw failure;
+            }
             saved = record;
             savedFiles = new ArrayList<>(fileRecords);
         }
@@ -155,6 +184,7 @@ class ProjectSourceServiceTest {
         String putPrefix;
         Map<String, String> putFiles = Map.of();
         final Map<String, String> objects = new LinkedHashMap<>();
+        final List<String> deleted = new ArrayList<>();
 
         StubObjectStore() {
             super(null, new MinioProperties(null, null, null, "vibe-platform", false));
@@ -175,6 +205,11 @@ class ProjectSourceServiceTest {
         @Override
         public String readText(String objectKey) {
             return objects.get(objectKey);
+        }
+
+        @Override
+        public void deleteObjects(java.util.Collection<String> objectKeys) {
+            deleted.addAll(objectKeys);
         }
     }
 }

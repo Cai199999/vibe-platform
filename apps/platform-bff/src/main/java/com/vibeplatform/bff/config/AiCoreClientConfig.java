@@ -1,5 +1,6 @@
 package com.vibeplatform.bff.config;
 
+import com.vibeplatform.bff.resilience.AiCoreResilienceRegistry;
 import io.netty.channel.ChannelOption;
 import java.net.http.HttpClient;
 import java.time.Duration;
@@ -17,32 +18,59 @@ import org.springframework.web.reactive.function.client.WebClient;
  * <p>使用 JDK HttpClient，显式设置连接/读取超时：</p>
  * <ul>
  *   <li>{@code aiCoreRestClient}：短超时，供健康检查使用，下游变慢时快速失败；</li>
+ *   <li>{@code aiCoreInteractiveRestClient}：15 秒，供 Supervisor /
+ *       Architect 状态操作等交互式代理使用；</li>
  *   <li>{@code aiCoreRunRestClient}：长超时，供 Run 执行代理使用，覆盖
  *       模型生成、沙盒构建与最多 3 次修复。</li>
  * </ul>
  *
- * <p>{@code aiCoreRestClient} 标记为 {@link Primary}，其他按类型注入的旧代码
- * 行为不变；Run 服务通过 {@code @Qualifier} 显式选择长超时客户端。</p>
+ * <p>三条通道各自挂载舱壁 + 熔断拦截器；{@code aiCoreRestClient} 标记为
+ * {@link Primary}，其他按类型注入的旧代码行为不变。</p>
  */
 @Configuration
 public class AiCoreClientConfig {
 
     @Bean
     @Primary
-    public RestClient aiCoreRestClient(AiCoreProperties properties) {
+    public RestClient aiCoreRestClient(
+            AiCoreProperties properties,
+            AiCoreResilienceRegistry resilience
+    ) {
         return buildRestClient(
                 properties.baseUrl(),
                 properties.connectTimeoutMs(),
-                properties.readTimeoutMs()
+                properties.readTimeoutMs(),
+                resilience.interceptor(AiCoreResilienceRegistry.SHORT)
+        );
+    }
+
+    /**
+     * 交互式代理：Supervisor 路由/派发/注册中心、Architect 澄清与决策。
+     * 独立 15 秒预算，避免下游卡死时占用 300 秒的长任务线程。
+     */
+    @Bean
+    public RestClient aiCoreInteractiveRestClient(
+            AiCoreProperties properties,
+            AiCoreResilienceRegistry resilience
+    ) {
+        return buildRestClient(
+                properties.baseUrl(),
+                properties.interactiveConnectTimeoutMs(),
+                properties.interactiveReadTimeoutMs(),
+                resilience.interceptor(AiCoreResilienceRegistry.INTERACTIVE)
         );
     }
 
     @Bean
-    public RestClient aiCoreRunRestClient(AiCoreProperties properties) {
+    public RestClient aiCoreRunRestClient(
+            AiCoreProperties properties,
+            AiCoreResilienceRegistry resilience
+    ) {
         return buildRestClient(
                 properties.baseUrl(),
                 properties.runConnectTimeoutMs(),
-                properties.runReadTimeoutMs()
+                properties.runReadTimeoutMs(),
+                resilience.interceptor(AiCoreResilienceRegistry.RUN)
         );
     }
 
@@ -71,7 +99,12 @@ public class AiCoreClientConfig {
                 .build();
     }
 
-    private RestClient buildRestClient(String baseUrl, int connectTimeoutMs, int readTimeoutMs) {
+    private RestClient buildRestClient(
+            String baseUrl,
+            int connectTimeoutMs,
+            int readTimeoutMs,
+            org.springframework.http.client.ClientHttpRequestInterceptor resilienceInterceptor
+    ) {
         // 强制 HTTP/1.1：JDK HttpClient 默认 HTTP/2，会向 Uvicorn 发送 h2c
         // Upgrade 请求。Uvicorn(h11) 不支持升级，日志报 "Unsupported upgrade
         // request"，POST 请求体还会丢失（表现为 FastAPI 422 missing body）。
@@ -87,6 +120,7 @@ public class AiCoreClientConfig {
         return RestClient.builder()
                 .baseUrl(baseUrl)
                 .requestFactory(requestFactory)
+                .requestInterceptor(resilienceInterceptor)
                 .defaultHeader("Accept", "application/json")
                 .build();
     }

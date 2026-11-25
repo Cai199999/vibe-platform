@@ -1,6 +1,14 @@
 server:
   port: ${SERVER_PORT:8080}
   shutdown: graceful
+  # 显式声明容量：默认 200 线程 + 100 排队。真正的保护在
+  # ai-core.resilience（舱壁/熔断），这里只是避免隐式默认值漂移。
+  tomcat:
+    threads:
+      max: ${SERVER_TOMCAT_MAX_THREADS:200}
+      min-spare: ${SERVER_TOMCAT_MIN_SPARE:20}
+    accept-count: ${SERVER_TOMCAT_ACCEPT_COUNT:200}
+    max-connections: ${SERVER_TOMCAT_MAX_CONNECTIONS:8192}
 
 spring:
   application:
@@ -50,9 +58,24 @@ ai-core:
   base-url: ${AI_CORE_BASE_URL:http://localhost:8100}
   connect-timeout-ms: ${AI_CORE_CONNECT_TIMEOUT_MS:2000}
   read-timeout-ms: ${AI_CORE_READ_TIMEOUT_MS:3000}
+  # 交互式代理：Supervisor / Architect 状态操作，不承载分钟级生成。
+  interactive-connect-timeout-ms: ${AI_CORE_INTERACTIVE_CONNECT_TIMEOUT_MS:2000}
+  interactive-read-timeout-ms: ${AI_CORE_INTERACTIVE_READ_TIMEOUT_MS:15000}
   # Run 执行是同步长请求：模型调用 + 沙盒构建 + 最多 3 次修复。
   run-connect-timeout-ms: ${AI_CORE_RUN_CONNECT_TIMEOUT_MS:2000}
   run-read-timeout-ms: ${AI_CORE_RUN_READ_TIMEOUT_MS:300000}
+  # 舱壁 + 熔断：下游变慢时最多占满 N 个线程，其余接口保持可用。
+  resilience:
+    enabled: ${AI_CORE_RESILIENCE_ENABLED:true}
+    short-max-concurrent: ${AI_CORE_SHORT_MAX_CONCURRENT:64}
+    short-acquire-timeout-ms: ${AI_CORE_SHORT_ACQUIRE_TIMEOUT_MS:0}
+    interactive-max-concurrent: ${AI_CORE_INTERACTIVE_MAX_CONCURRENT:64}
+    interactive-acquire-timeout-ms: ${AI_CORE_INTERACTIVE_ACQUIRE_TIMEOUT_MS:0}
+    run-max-concurrent: ${AI_CORE_RUN_MAX_CONCURRENT:48}
+    run-acquire-timeout-ms: ${AI_CORE_RUN_ACQUIRE_TIMEOUT_MS:0}
+    failure-threshold: ${AI_CORE_FAILURE_THRESHOLD:4}
+    open-duration-ms: ${AI_CORE_OPEN_DURATION_MS:15000}
+    half-open-max-calls: ${AI_CORE_HALF_OPEN_MAX_CALLS:2}
 
 # MinIO 仅做客户端配置，M1 启动时懒连接。
 minio:

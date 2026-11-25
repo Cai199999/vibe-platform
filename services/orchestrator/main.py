@@ -26,9 +26,11 @@ from ai_core.api.source_analysis import router as source_analysis_router
 from ai_core.api.supervisor import router as supervisor_router
 from ai_core.api.visual_agent import router as visual_agent_router
 from ai_core.config import get_settings
+from ai_core.persistence.run_store import get_run_store
+from ai_core.run_guard import get_run_guard
 from ai_core.error_envelope import install_error_handlers
 from ai_core.sandbox import get_sandbox_provider
-from ai_core.sandbox_gc import start_draft_gc
+from ai_core.sandbox_gc import start_container_gc, start_draft_gc
 from ai_core.schemas import HealthResponse, PingResponse
 
 settings = get_settings()
@@ -53,12 +55,18 @@ def _package_version(package_name: str) -> str | None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """服务生命周期：启动孤儿草稿回收，退出时停止后台线程。"""
-    collector = start_draft_gc(get_sandbox_provider(), settings)
+    provider = get_sandbox_provider()
+    collector = start_draft_gc(provider, settings)
+    container_collector = start_container_gc(provider, settings)
     try:
         yield
     finally:
         if collector is not None:
             collector.stop()
+        if container_collector is not None:
+            container_collector.stop()
+        # 刷出异步事件写队列；Redis 不可用时是 no-op。
+        get_run_store().close()
 
 
 app = FastAPI(
@@ -92,6 +100,7 @@ def health() -> HealthResponse:
     Docker 暂不可用不应阻断 Java BFF 等非沙盒功能。
     """
     provider = get_sandbox_provider()
+    capacity = get_run_guard().snapshot()
     return HealthResponse(
         status="UP",
         service=settings.service_name,
@@ -103,6 +112,8 @@ def health() -> HealthResponse:
             "sandbox_image": provider.image_state(),
             # 只暴露“是否已配置”和实际生效的 provider，绝不返回密钥内容。
             "llm": "deepseek" if settings.deepseek_api_key else "mock",
+            "run_capacity": f"{capacity['inFlight']}/{capacity['limit']}",
+            "run_store": get_run_store().backend,
         },
     )
 

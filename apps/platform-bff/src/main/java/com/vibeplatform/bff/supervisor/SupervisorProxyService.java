@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.vibeplatform.bff.admin.AdminMetricsService;
+import com.vibeplatform.bff.resilience.AiCoreGuardException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
@@ -40,16 +41,16 @@ public class SupervisorProxyService {
     private static final String RELOAD_PATH =
             "/api/v1/internal/supervisor/agents/reload";
 
-    private final RestClient aiCoreRunRestClient;
+    private final RestClient aiCoreInteractiveRestClient;
     private final ObjectMapper objectMapper;
     private final AdminMetricsService adminMetricsService;
 
     public SupervisorProxyService(
-            @Qualifier("aiCoreRunRestClient") RestClient aiCoreRunRestClient,
+            @Qualifier("aiCoreInteractiveRestClient") RestClient aiCoreInteractiveRestClient,
             ObjectMapper objectMapper,
             AdminMetricsService adminMetricsService
     ) {
-        this.aiCoreRunRestClient = aiCoreRunRestClient;
+        this.aiCoreInteractiveRestClient = aiCoreInteractiveRestClient;
         this.objectMapper = objectMapper;
         this.adminMetricsService = adminMetricsService;
     }
@@ -158,7 +159,7 @@ public class SupervisorProxyService {
                     ));
         }
         try {
-            ResponseEntity<JsonNode> response = aiCoreRunRestClient.post()
+            ResponseEntity<JsonNode> response = aiCoreInteractiveRestClient.post()
                     .uri(path)
                     .contentType(MediaType.APPLICATION_JSON)
                     .accept(MediaType.APPLICATION_JSON)
@@ -182,26 +183,14 @@ public class SupervisorProxyService {
             );
             return response;
         } catch (RestClientException ex) {
-            long elapsedMs = elapsedMillis(startedAt);
-            log.error(
-                    "{} proxy failed elapsedMs={}: {}",
-                    operation,
-                    elapsedMs,
-                    ex.getMessage()
-            );
-            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                    .body(errorBody(
-                            "AI_CORE_UNAVAILABLE",
-                            "调用 AI Core 失败（" + elapsedMs + "ms）: "
-                                    + ex.getMessage()
-                    ));
+            return unavailable(operation, startedAt, ex);
         }
     }
 
     private ResponseEntity<JsonNode> deleteJson(String path, String operation) {
         long startedAt = System.nanoTime();
         try {
-            ResponseEntity<JsonNode> response = aiCoreRunRestClient.delete()
+            ResponseEntity<JsonNode> response = aiCoreInteractiveRestClient.delete()
                     .uri(path)
                     .accept(MediaType.APPLICATION_JSON)
                     .exchange((clientRequest, clientResponse) -> {
@@ -222,26 +211,14 @@ public class SupervisorProxyService {
             );
             return response;
         } catch (RestClientException ex) {
-            long elapsedMs = elapsedMillis(startedAt);
-            log.error(
-                    "{} proxy failed elapsedMs={}: {}",
-                    operation,
-                    elapsedMs,
-                    ex.getMessage()
-            );
-            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                    .body(errorBody(
-                            "AI_CORE_UNAVAILABLE",
-                            "调用 AI Core 失败（" + elapsedMs + "ms）: "
-                                    + ex.getMessage()
-                    ));
+            return unavailable(operation, startedAt, ex);
         }
     }
 
     private ResponseEntity<JsonNode> getJson(String path, String operation) {
         long startedAt = System.nanoTime();
         try {
-            ResponseEntity<JsonNode> response = aiCoreRunRestClient.get()
+            ResponseEntity<JsonNode> response = aiCoreInteractiveRestClient.get()
                     .uri(path)
                     .accept(MediaType.APPLICATION_JSON)
                     .exchange((clientRequest, clientResponse) -> {
@@ -263,20 +240,42 @@ public class SupervisorProxyService {
             );
             return response;
         } catch (RestClientException ex) {
-            long elapsedMs = elapsedMillis(startedAt);
-            log.error(
-                    "{} proxy failed elapsedMs={}: {}",
-                    operation,
-                    elapsedMs,
-                    ex.getMessage()
-            );
-            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                    .body(errorBody(
-                            "AI_CORE_UNAVAILABLE",
-                            "调用 AI Core 失败（" + elapsedMs + "ms）: "
-                                    + ex.getMessage()
-                    ));
+            return unavailable(operation, startedAt, ex);
         }
+    }
+
+    private ResponseEntity<JsonNode> unavailable(
+            String operation,
+            long startedAt,
+            RestClientException ex
+    ) {
+        long elapsedMs = elapsedMillis(startedAt);
+        AiCoreGuardException guard = guardCause(ex);
+        String code = guard == null ? "AI_CORE_UNAVAILABLE" : guard.code();
+        log.error(
+                "{} proxy failed code={} elapsedMs={}: {}",
+                operation,
+                code,
+                elapsedMs,
+                ex.getMessage()
+        );
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(errorBody(
+                        code,
+                        "调用 AI Core 失败（" + elapsedMs + "ms）: "
+                                + ex.getMessage()
+                ));
+    }
+
+    private static AiCoreGuardException guardCause(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof AiCoreGuardException guard) {
+                return guard;
+            }
+            current = current.getCause();
+        }
+        return null;
     }
 
     private JsonNode errorBody(String code, String message) {

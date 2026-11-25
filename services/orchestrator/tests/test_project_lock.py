@@ -72,5 +72,49 @@ class ProjectWriteLockTest(unittest.TestCase):
             lock.release(lease_b)
 
 
+class _FakeRedis:
+    def __init__(self, acquire: bool = True) -> None:
+        self.acquire = acquire
+        self.values: dict[str, str] = {}
+        self.releases = 0
+
+    def set(self, key: str, token: str, nx: bool = True, px: int | None = None) -> bool:
+        if not self.acquire:
+            return False
+        self.values[key] = token
+        return True
+
+    def eval(self, script: str, numkeys: int, key: str, *args: object) -> int:
+        if "del" in script:
+            self.releases += 1
+            self.values.pop(key, None)
+            return 1
+        return 1 if key in self.values else 0
+
+
+class RedisProjectLockTest(unittest.TestCase):
+    def test_redis_lease_acquires_and_releases_with_token(self) -> None:
+        lock = ProjectWriteLock()
+        client = _FakeRedis()
+
+        lease = lock._acquire_redis(client, "proj_redis", "ai-run", timeout=0.1)
+
+        self.assertIsNotNone(lease)
+        assert lease is not None
+        self.assertEqual(lease.backend, "redis")
+        self.assertIn("vibe:lock:project:proj_redis", client.values)
+        lock.release(lease)
+        self.assertEqual(client.releases, 1)
+        self.assertEqual(client.values, {})
+
+    def test_redis_contention_times_out_as_project_busy(self) -> None:
+        lock = ProjectWriteLock()
+        client = _FakeRedis(acquire=False)
+
+        with self.assertRaises(ProjectBusyError):
+            lock._acquire_redis(client, "proj_redis", "ai-run", timeout=0.05)
+        self.assertGreaterEqual(lock.snapshot()["timeouts"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -222,6 +222,15 @@ class SandboxProvider(ABC):
         """
         return []
 
+    def reap_stopped_sandboxes(self, ttl_days: int | None = None) -> list[str]:
+        """回收超过 TTL 且已停止的沙盒容器，返回被回收的 sandbox_id 列表。
+
+        只处理 ``vibe.managed=true`` 且状态为 exited / created / dead 的
+        容器；运行中的沙盒、当前进程登记表中的容器永远不碰。默认实现
+        不做任何事；LocalDockerSandbox 覆盖为真实清理。
+        """
+        return []
+
     @abstractmethod
     def apply_patch(
         self,
