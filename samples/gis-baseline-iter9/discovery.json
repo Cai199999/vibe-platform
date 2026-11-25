@@ -1,0 +1,111 @@
+{
+  "discoveryId": "sd_d96ea06247a84a14",
+  "requirementSummary": "项目「GIS 任务管理平台」；领域：GIS / 地理信息；核心能力：地图渲染与图层管理、空间查询与分析、影像/栅格处理、任务/工单流程、认证与权限；约束：需要可上线部署、使用真实数据、需要认证与权限、production-ready web application；建议方案：Build a Docker-deployable web GIS platform for urban facility inspection teams, combining an interactive map with layer toggles, facility point CRUD and filtering, spatial queries by location or bounding box, inspection work orders with assignment and status workflow plus overdue flags, image uploads tied to facilities, and role-based login for admins and inspectors, backed by a real spatial database and real map tiles.",
+  "domain": "GIS / 地理信息",
+  "capabilities": [
+    "地图渲染与图层管理",
+    "空间查询与分析",
+    "影像/栅格处理",
+    "任务/工单流程",
+    "认证与权限",
+    "部署与运维",
+    "map overview with base map, facility point and inspection route layer toggling",
+    "facility point CRUD with type and status filtering",
+    "spatial query by current location or bounding box selection",
+    "inspection work order creation, assignment, status transitions and overdue marking"
+  ],
+  "constraints": [
+    "需要可上线部署",
+    "使用真实数据",
+    "需要认证与权限",
+    "production-ready web application",
+    "Docker deployable",
+    "real database persistence",
+    "real map data",
+    "role-based permissions"
+  ],
+  "options": [
+    {
+      "optionId": "opt_reuse_opengeos_geoai",
+      "kind": "REUSE",
+      "title": "opengeos/geoai",
+      "summary": "GeoAI: Artificial Intelligence for Geospatial Data",
+      "sourceUrl": "https://github.com/opengeos/geoai",
+      "source": "local",
+      "license": "MIT",
+      "stars": 3479,
+      "language": "Python",
+      "updatedAt": "2026-11-21T05:33:07Z",
+      "fitScore": 0.96,
+      "pros": [
+        "可直接作为依赖，集成面小",
+        "成熟度参考：3479 stars",
+        "许可证：MIT"
+      ],
+      "cons": [
+        "需要适配现有技术栈",
+        "领域能力可能不完整，仍需业务层自研"
+      ],
+      "risks": [],
+      "integrationCost": "LOW",
+      "searchQuery": "geoai gis geospatial open source"
+    },
+    {
+      "optionId": "opt_adapt_matheusconstantino_poc_geoserver_sqlserv",
+      "kind": "ADAPT",
+      "title": "MatheusConstantino/poc-geoserver-sqlserver",
+      "summary": "Portfolio POC: GeoServer + SQL Server 2022 + PostGIS spatial engineering, AI-powered analysis (Claude API), multi-agent Claude Code workflow, spec-driven development",
+      "sourceUrl": "https://github.com/MatheusConstantino/poc-geoserver-sqlserver",
+      "source": "github",
+      "license": "MIT",
+      "stars": null,
+      "language": "TypeScript",
+      "updatedAt": "2026-06-10T15:33:13Z",
+      "fitScore": 0.834,
+      "pros": [
+        "有完整业务闭环可借鉴",
+        "缩短从 0 到 1 的时间",
+        "可按需裁剪"
+      ],
+      "cons": [
+        "需要剥离原业务与部署假设",
+        "代码体量与维护成本较高"
+      ],
+      "risks": [],
+      "integrationCost": "HIGH",
+      "searchQuery": "geoserver spatial analysis"
+    },
+    {
+      "optionId": "opt_build",
+      "kind": "BUILD",
+      "title": "自研方案",
+      "summary": "Build a Docker-deployable web GIS platform for urban facility inspection teams, combining an interactive map with layer toggles, facility point CRUD and filtering, spatial queries by location or bounding box, inspection work orders with assignment and status workflow plus overdue flags, image uploads tied to facilities, and role-based login for admins and inspectors, backed by a real spatial database and real map tiles.",
+      "sourceUrl": null,
+      "source": "build",
+      "license": null,
+      "stars": null,
+      "language": null,
+      "updatedAt": null,
+      "fitScore": 0.6,
+      "pros": [
+        "完全贴合需求",
+        "无外部许可证风险",
+        "可完全控制架构与交付节奏"
+      ],
+      "cons": [
+        "从零实现，周期最长",
+        "需要自行补齐领域能力"
+      ],
+      "risks": [
+        "需求理解偏差",
+        "工期与范围容易失控"
+      ],
+      "integrationCost": "MEDIUM",
+      "searchQuery": null
+    }
+  ],
+  "recommendedOptionId": "opt_reuse_opengeos_geoai",
+  "provider": "github+local+llm",
+  "degraded": false,
+  "notes": []
+}

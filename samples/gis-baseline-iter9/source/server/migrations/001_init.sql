@@ -1,0 +1,57 @@
+-- 001_init.sql · 由 DBACoder 根据《全栈实施契约》生成
+-- contract: ctr_83e7700b9b5344f5a175
+-- table: facilities
+-- engine: mysql
+-- 执行：node server/migrate.mjs（生产发布前必须执行）
+-- 说明：迁移执行器会记录文件名与 checksum；禁止修改已发布的历史文件，
+--       新增结构变更请创建 002_xxx.sql。
+
+CREATE TABLE IF NOT EXISTS users (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(64) NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  role ENUM('admin','operator','viewer') NOT NULL DEFAULT 'viewer',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_users_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS facilities (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(128) NOT NULL,
+  type VARCHAR(64) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  lng DECIMAL(10,7) NOT NULL,
+  lat DECIMAL(10,7) NOT NULL,
+  location POINT SRID 4326 NOT NULL,
+  created_by BIGINT UNSIGNED NULL,
+  updated_by BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_facilities_name (name),
+  KEY idx_facilities_type_status (type, status),
+  SPATIAL KEY sp_facilities_location (location)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS patrol_routes (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(128) NOT NULL,
+  path_geojson JSON NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  created_by BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_patrol_routes_name (name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS facility_images (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  facility_id BIGINT UNSIGNED NOT NULL,
+  url VARCHAR(512) NOT NULL,
+  filename VARCHAR(255) NOT NULL,
+  mime_type VARCHAR(64) NOT NULL,
+  size_bytes INT UNSIGNED NOT NULL,
+  created_by BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_facility_images_facility_id (facility_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

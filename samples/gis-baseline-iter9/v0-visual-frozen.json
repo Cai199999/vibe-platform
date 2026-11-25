@@ -1,0 +1,5710 @@
+{
+  "schemaVersion": "1.0",
+  "docId": "vdoc_aabde269be907c764907",
+  "projectId": "prj_gis_3712e74eb8",
+  "revision": 1,
+  "status": "FROZEN",
+  "title": "GIS 任务管理平台",
+  "designTokens": {
+    "colors": {
+      "primary": "#2563eb",
+      "surface": "#ffffff",
+      "text": "#0f172a",
+      "muted": "#64748b",
+      "border": "#cbd5e1"
+    },
+    "spacing": {
+      "sm": "8px",
+      "md": "16px",
+      "lg": "24px"
+    },
+    "radius": {
+      "card": "12px"
+    },
+    "typography": {
+      "body": "14px",
+      "title": "22px"
+    }
+  },
+  "pages": [
+    {
+      "pageId": "pg_881b4bacef1b4f286c85",
+      "path": "/",
+      "title": "GIS 任务管理平台",
+      "root": {
+        "id": "nd_b307f616a3f8882291cb",
+        "type": "page",
+        "name": "GIS 任务管理平台",
+        "componentRef": "",
+        "props": {
+          "title": "GIS 任务管理平台"
+        },
+        "layout": {
+          "display": "block",
+          "direction": "column",
+          "gap": "",
+          "padding": "32px",
+          "align": "stretch",
+          "justify": "start",
+          "wrap": false,
+          "columns": 1,
+          "minWidth": "",
+          "maxWidth": "1180px"
+        },
+        "style": {
+          "tokenRefs": [],
+          "className": "",
+          "tailwind": [
+            "bg-white",
+            "min-h-screen"
+          ]
+        },
+        "children": [
+          {
+            "id": "nd_064159f8de75a306074b",
+            "type": "section",
+            "name": "顶栏",
+            "componentRef": "",
+            "props": {},
+            "layout": {
+              "display": "flex",
+              "direction": "row",
+              "gap": "16px",
+              "padding": "20px",
+              "align": "stretch",
+              "justify": "start",
+              "wrap": false,
+              "columns": 1,
+              "minWidth": "",
+              "maxWidth": ""
+            },
+            "style": {
+              "tokenRefs": [],
+              "className": "",
+              "tailwind": [
+                "rounded-xl",
+                "border",
+                "bg-white"
+              ]
+            },
+            "children": [
+              {
+                "id": "nd_1fd2c06605266a829ab8",
+                "type": "text",
+                "name": "品牌",
+                "componentRef": "",
+                "props": {
+                  "text": "GIS 任务管理平台"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "GIS 任务管理平台",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_a42f6d81e8e5e818e94f",
+                "type": "text",
+                "name": "页面说明",
+                "componentRef": "",
+                "props": {
+                  "text": "由 Architect 生成的虚拟骨架"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "由 Architect 生成的虚拟骨架",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              }
+            ],
+            "repeat": null,
+            "semantics": {
+              "role": "header",
+              "purpose": "品牌与页面标题",
+              "importance": "normal",
+              "businessEntity": ""
+            },
+            "a11y": {
+              "label": "",
+              "description": ""
+            },
+            "state": {
+              "defaultVisible": true,
+              "disabled": false
+            },
+            "codegen": {
+              "mode": "primitive",
+              "componentName": "",
+              "extractComponent": false,
+              "imports": []
+            },
+            "provenance": {
+              "createdBy": "architect",
+              "revision": 1,
+              "changeId": ""
+            },
+            "locked": false
+          },
+          {
+            "id": "nd_5ba9b1499d3abcefb7ba",
+            "type": "grid",
+            "name": "主体布局",
+            "componentRef": "",
+            "props": {},
+            "layout": {
+              "display": "grid",
+              "direction": "column",
+              "gap": "24px",
+              "padding": "24px 0px",
+              "align": "stretch",
+              "justify": "start",
+              "wrap": false,
+              "columns": 2,
+              "minWidth": "",
+              "maxWidth": ""
+            },
+            "style": {
+              "tokenRefs": [],
+              "className": "",
+              "tailwind": []
+            },
+            "children": [
+              {
+                "id": "nd_6b16a7c37fde9ec4c192",
+                "type": "section",
+                "name": "侧边栏",
+                "componentRef": "",
+                "props": {},
+                "layout": {
+                  "display": "flex",
+                  "direction": "column",
+                  "gap": "12px",
+                  "padding": "20px",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "rounded-xl",
+                    "border",
+                    "bg-slate-50"
+                  ]
+                },
+                "children": [
+                  {
+                    "id": "nd_40df2cd65158e29e7cd0",
+                    "type": "text",
+                    "name": "导航标题",
+                    "componentRef": "",
+                    "props": {
+                      "text": "导航"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "导航",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_66e619fec35ad9ca3d25",
+                    "type": "text",
+                    "name": "导航占位",
+                    "componentRef": "",
+                    "props": {
+                      "text": "模块入口待补充"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "模块入口待补充",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  }
+                ],
+                "repeat": null,
+                "semantics": {
+                  "role": "navigation",
+                  "purpose": "业务模块导航",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_72f1aa5ab41940bff27f",
+                "type": "section",
+                "name": "主内容区",
+                "componentRef": "",
+                "props": {},
+                "layout": {
+                  "display": "flex",
+                  "direction": "column",
+                  "gap": "12px",
+                  "padding": "20px",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": []
+                },
+                "children": [
+                  {
+                    "id": "nd_7c4a74529603e28ade70",
+                    "type": "form",
+                    "name": "登录表单",
+                    "componentRef": "",
+                    "props": {},
+                    "layout": {
+                      "display": "flex",
+                      "direction": "column",
+                      "gap": "12px",
+                      "padding": "20px",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-xl",
+                        "border",
+                        "bg-white"
+                      ]
+                    },
+                    "children": [
+                      {
+                        "id": "nd_5c1e9cf5d01e4f89e778",
+                        "type": "text",
+                        "name": "表单标题",
+                        "componentRef": "",
+                        "props": {
+                          "text": "登录表单"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "登录表单",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      },
+                      {
+                        "id": "nd_82b7f5001a220d9608cb",
+                        "type": "input",
+                        "name": "输入项",
+                        "componentRef": "Input",
+                        "props": {
+                          "placeholder": "请输入登录表单"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "rounded-lg",
+                            "border",
+                            "border-slate-300"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "",
+                          "purpose": "",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "请输入登录表单",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "输入项",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      },
+                      {
+                        "id": "nd_798c10e881c408ba24d8",
+                        "type": "button",
+                        "name": "提交",
+                        "componentRef": "Button",
+                        "props": {
+                          "text": "提交",
+                          "variant": "primary"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "rounded-lg",
+                            "bg-blue-600",
+                            "text-white"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "action",
+                          "purpose": "提交",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "提交",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      }
+                    ],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "form",
+                      "purpose": "用户名、口令、登录按钮",
+                      "importance": "core",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_cdd8e73b377027fe80cf",
+                    "type": "component",
+                    "name": "地图画布",
+                    "componentRef": "",
+                    "props": {},
+                    "layout": {
+                      "display": "flex",
+                      "direction": "column",
+                      "gap": "8px",
+                      "padding": "16px",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-xl",
+                        "border",
+                        "bg-white"
+                      ]
+                    },
+                    "children": [
+                      {
+                        "id": "nd_7cd6dca6228544d24e4e",
+                        "type": "text",
+                        "name": "组件标题",
+                        "componentRef": "",
+                        "props": {
+                          "text": "地图画布"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "地图画布",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      },
+                      {
+                        "id": "nd_9e369e6a9d042d455d52",
+                        "type": "text",
+                        "name": "组件说明",
+                        "componentRef": "",
+                        "props": {
+                          "text": "Leaflet + OSM 底图，渲染设施点与巡检路线"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "Leaflet + OSM 底图，渲染设施点与巡检路线",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      }
+                    ],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "map",
+                      "purpose": "Leaflet + OSM 底图，渲染设施点与巡检路线",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_143f3561c6bea3d97446",
+                    "type": "component",
+                    "name": "图层切换器",
+                    "componentRef": "",
+                    "props": {},
+                    "layout": {
+                      "display": "flex",
+                      "direction": "column",
+                      "gap": "8px",
+                      "padding": "16px",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-xl",
+                        "border",
+                        "bg-white"
+                      ]
+                    },
+                    "children": [
+                      {
+                        "id": "nd_09abbc15a484e56ae95b",
+                        "type": "text",
+                        "name": "组件标题",
+                        "componentRef": "",
+                        "props": {
+                          "text": "图层切换器"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "图层切换器",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      },
+                      {
+                        "id": "nd_967880df3dd1db4304bc",
+                        "type": "text",
+                        "name": "组件说明",
+                        "componentRef": "",
+                        "props": {
+                          "text": "底图/设施点/巡检路线开关"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "底图/设施点/巡检路线开关",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      }
+                    ],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "control",
+                      "purpose": "底图/设施点/巡检路线开关",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_531062ef8369f8d7ab9f",
+                    "type": "component",
+                    "name": "设施筛选面板",
+                    "componentRef": "",
+                    "props": {},
+                    "layout": {
+                      "display": "flex",
+                      "direction": "column",
+                      "gap": "8px",
+                      "padding": "16px",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-xl",
+                        "border",
+                        "bg-white"
+                      ]
+                    },
+                    "children": [
+                      {
+                        "id": "nd_1f984c650a0308902267",
+                        "type": "text",
+                        "name": "组件标题",
+                        "componentRef": "",
+                        "props": {
+                          "text": "设施筛选面板"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "设施筛选面板",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      },
+                      {
+                        "id": "nd_597adf8cea4ce92ef250",
+                        "type": "text",
+                        "name": "组件说明",
+                        "componentRef": "",
+                        "props": {
+                          "text": "类型、状态、框选/当前位置查询"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "类型、状态、框选/当前位置查询",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      }
+                    ],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "filter",
+                      "purpose": "类型、状态、框选/当前位置查询",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_7fca7f284681ddaa0f0f",
+                    "type": "form",
+                    "name": "设施表单",
+                    "componentRef": "",
+                    "props": {},
+                    "layout": {
+                      "display": "flex",
+                      "direction": "column",
+                      "gap": "12px",
+                      "padding": "20px",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-xl",
+                        "border",
+                        "bg-white"
+                      ]
+                    },
+                    "children": [
+                      {
+                        "id": "nd_001984a7173e76e3a3d7",
+                        "type": "text",
+                        "name": "表单标题",
+                        "componentRef": "",
+                        "props": {
+                          "text": "设施表单"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "设施表单",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      },
+                      {
+                        "id": "nd_8214d1cacd8681dfe3c7",
+                        "type": "input",
+                        "name": "输入项",
+                        "componentRef": "Input",
+                        "props": {
+                          "placeholder": "请输入设施表单"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "rounded-lg",
+                            "border",
+                            "border-slate-300"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "",
+                          "purpose": "",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "请输入设施表单",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "输入项",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      },
+                      {
+                        "id": "nd_db063590ac68813e1101",
+                        "type": "button",
+                        "name": "提交",
+                        "componentRef": "Button",
+                        "props": {
+                          "text": "提交",
+                          "variant": "primary"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "rounded-lg",
+                            "bg-blue-600",
+                            "text-white"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "action",
+                          "purpose": "提交",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "提交",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      }
+                    ],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "form",
+                      "purpose": "名称、类型、状态、经纬度",
+                      "importance": "core",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_faa7566c51b7e5fed256",
+                    "type": "list",
+                    "name": "设施列表",
+                    "componentRef": "",
+                    "props": {},
+                    "layout": {
+                      "display": "flex",
+                      "direction": "column",
+                      "gap": "8px",
+                      "padding": "16px",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-xl",
+                        "border",
+                        "bg-white"
+                      ]
+                    },
+                    "children": [
+                      {
+                        "id": "nd_26e1574ebb9f99689908",
+                        "type": "text",
+                        "name": "列表占位",
+                        "componentRef": "",
+                        "props": {
+                          "text": "列表内容"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "列表内容",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      }
+                    ],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "list",
+                      "purpose": "响应式多列卡片，含距离与状态",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_d76781d30015230f34a5",
+                    "type": "component",
+                    "name": "影像上传",
+                    "componentRef": "",
+                    "props": {},
+                    "layout": {
+                      "display": "flex",
+                      "direction": "column",
+                      "gap": "8px",
+                      "padding": "16px",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-xl",
+                        "border",
+                        "bg-white"
+                      ]
+                    },
+                    "children": [
+                      {
+                        "id": "nd_0b8a2cac497801646562",
+                        "type": "text",
+                        "name": "组件标题",
+                        "componentRef": "",
+                        "props": {
+                          "text": "影像上传"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "影像上传",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      },
+                      {
+                        "id": "nd_ba767a973dad9c7de7d9",
+                        "type": "text",
+                        "name": "组件说明",
+                        "componentRef": "",
+                        "props": {
+                          "text": "上传并展示设施关联影像"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "上传并展示设施关联影像",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      }
+                    ],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "upload",
+                      "purpose": "上传并展示设施关联影像",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_27e75bb78c3305463c15",
+                    "type": "component",
+                    "name": "工单列表",
+                    "componentRef": "",
+                    "props": {},
+                    "layout": {
+                      "display": "flex",
+                      "direction": "column",
+                      "gap": "8px",
+                      "padding": "16px",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-xl",
+                        "border",
+                        "bg-white"
+                      ]
+                    },
+                    "children": [
+                      {
+                        "id": "nd_f694e67ab93aaa4a2e54",
+                        "type": "text",
+                        "name": "组件标题",
+                        "componentRef": "",
+                        "props": {
+                          "text": "工单列表"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "工单列表",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      },
+                      {
+                        "id": "nd_8548b3e4ecd5445d4658",
+                        "type": "text",
+                        "name": "组件说明",
+                        "componentRef": "",
+                        "props": {
+                          "text": "状态、指派人、截止时间、逾期标记"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "状态、指派人、截止时间、逾期标记",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      }
+                    ],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "table",
+                      "purpose": "状态、指派人、截止时间、逾期标记",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_0cbafe8d769e8e19896f",
+                    "type": "form",
+                    "name": "工单创建表单",
+                    "componentRef": "",
+                    "props": {},
+                    "layout": {
+                      "display": "flex",
+                      "direction": "column",
+                      "gap": "12px",
+                      "padding": "20px",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-xl",
+                        "border",
+                        "bg-white"
+                      ]
+                    },
+                    "children": [
+                      {
+                        "id": "nd_4ba17f4840b92ae92a52",
+                        "type": "text",
+                        "name": "表单标题",
+                        "componentRef": "",
+                        "props": {
+                          "text": "工单创建表单"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "text-sm",
+                            "text-slate-700"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "content",
+                          "purpose": "工单创建表单",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      },
+                      {
+                        "id": "nd_c5550854a22d273b22c7",
+                        "type": "input",
+                        "name": "输入项",
+                        "componentRef": "Input",
+                        "props": {
+                          "placeholder": "请输入工单创建表单"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "rounded-lg",
+                            "border",
+                            "border-slate-300"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "",
+                          "purpose": "",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "请输入工单创建表单",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "输入项",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      },
+                      {
+                        "id": "nd_272a582f0e33b77ecc37",
+                        "type": "button",
+                        "name": "提交",
+                        "componentRef": "Button",
+                        "props": {
+                          "text": "提交",
+                          "variant": "primary"
+                        },
+                        "layout": {
+                          "display": "block",
+                          "direction": "column",
+                          "gap": "",
+                          "padding": "",
+                          "align": "stretch",
+                          "justify": "start",
+                          "wrap": false,
+                          "columns": 1,
+                          "minWidth": "",
+                          "maxWidth": ""
+                        },
+                        "style": {
+                          "tokenRefs": [],
+                          "className": "",
+                          "tailwind": [
+                            "rounded-lg",
+                            "bg-blue-600",
+                            "text-white"
+                          ]
+                        },
+                        "children": [],
+                        "repeat": null,
+                        "semantics": {
+                          "role": "action",
+                          "purpose": "提交",
+                          "importance": "normal",
+                          "businessEntity": ""
+                        },
+                        "a11y": {
+                          "label": "",
+                          "description": ""
+                        },
+                        "state": {
+                          "defaultVisible": true,
+                          "disabled": false
+                        },
+                        "codegen": {
+                          "mode": "primitive",
+                          "componentName": "提交",
+                          "extractComponent": false,
+                          "imports": []
+                        },
+                        "provenance": {
+                          "createdBy": "architect",
+                          "revision": 1,
+                          "changeId": ""
+                        },
+                        "locked": false
+                      }
+                    ],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "form",
+                      "purpose": "关联设施、标题、指派人、截止时间",
+                      "importance": "core",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_1479d20134f647a1504b",
+                    "type": "button",
+                    "name": "工单状态按钮",
+                    "componentRef": "Button",
+                    "props": {
+                      "text": "工单状态按钮",
+                      "variant": "primary"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-lg",
+                        "bg-blue-600",
+                        "text-white"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "action",
+                      "purpose": "推进到进行中/已完成",
+                      "importance": "core",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "工单状态按钮",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  }
+                ],
+                "repeat": null,
+                "semantics": {
+                  "role": "main",
+                  "purpose": "核心业务区域",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              }
+            ],
+            "repeat": null,
+            "semantics": {
+              "role": "layout",
+              "purpose": "侧栏 + 主内容",
+              "importance": "normal",
+              "businessEntity": ""
+            },
+            "a11y": {
+              "label": "",
+              "description": ""
+            },
+            "state": {
+              "defaultVisible": true,
+              "disabled": false
+            },
+            "codegen": {
+              "mode": "primitive",
+              "componentName": "",
+              "extractComponent": false,
+              "imports": []
+            },
+            "provenance": {
+              "createdBy": "architect",
+              "revision": 1,
+              "changeId": ""
+            },
+            "locked": false
+          }
+        ],
+        "repeat": null,
+        "semantics": {
+          "role": "page",
+          "purpose": "GIS 任务管理平台",
+          "importance": "normal",
+          "businessEntity": ""
+        },
+        "a11y": {
+          "label": "",
+          "description": ""
+        },
+        "state": {
+          "defaultVisible": true,
+          "disabled": false
+        },
+        "codegen": {
+          "mode": "primitive",
+          "componentName": "",
+          "extractComponent": false,
+          "imports": []
+        },
+        "provenance": {
+          "createdBy": "architect",
+          "revision": 1,
+          "changeId": ""
+        },
+        "locked": false
+      }
+    },
+    {
+      "pageId": "pg_cc8ab431d7132ee2bae6",
+      "path": "/login",
+      "title": "登录页",
+      "root": {
+        "id": "nd_d0d6020b7a6d7217e498",
+        "type": "page",
+        "name": "登录页",
+        "componentRef": "",
+        "props": {
+          "title": "登录页",
+          "path": "/login"
+        },
+        "layout": {
+          "display": "block",
+          "direction": "column",
+          "gap": "",
+          "padding": "32px",
+          "align": "stretch",
+          "justify": "start",
+          "wrap": false,
+          "columns": 1,
+          "minWidth": "",
+          "maxWidth": "1180px"
+        },
+        "style": {
+          "tokenRefs": [],
+          "className": "",
+          "tailwind": [
+            "bg-white",
+            "min-h-screen"
+          ]
+        },
+        "children": [
+          {
+            "id": "nd_749bcca3c6be1cb20b89",
+            "type": "section",
+            "name": "顶部导航",
+            "componentRef": "",
+            "props": {},
+            "layout": {
+              "display": "flex",
+              "direction": "row",
+              "gap": "16px",
+              "padding": "20px",
+              "align": "stretch",
+              "justify": "start",
+              "wrap": false,
+              "columns": 1,
+              "minWidth": "",
+              "maxWidth": ""
+            },
+            "style": {
+              "tokenRefs": [],
+              "className": "",
+              "tailwind": [
+                "rounded-xl",
+                "border",
+                "bg-white"
+              ]
+            },
+            "children": [
+              {
+                "id": "nd_a8352415831f8322a52d",
+                "type": "text",
+                "name": "品牌",
+                "componentRef": "",
+                "props": {
+                  "text": "GIS 任务管理平台"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "GIS 任务管理平台",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_c56c09b63e7e27d3de38",
+                "type": "text",
+                "name": "页面说明",
+                "componentRef": "",
+                "props": {
+                  "text": "用户名口令登录，按角色跳转"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "用户名口令登录，按角色跳转",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              }
+            ],
+            "repeat": null,
+            "semantics": {
+              "role": "header",
+              "purpose": "品牌与页面标题",
+              "importance": "normal",
+              "businessEntity": ""
+            },
+            "a11y": {
+              "label": "",
+              "description": ""
+            },
+            "state": {
+              "defaultVisible": true,
+              "disabled": false
+            },
+            "codegen": {
+              "mode": "primitive",
+              "componentName": "",
+              "extractComponent": false,
+              "imports": []
+            },
+            "provenance": {
+              "createdBy": "architect",
+              "revision": 1,
+              "changeId": ""
+            },
+            "locked": false
+          },
+          {
+            "id": "nd_950134ede14a0c351f72",
+            "type": "section",
+            "name": "主内容区",
+            "componentRef": "",
+            "props": {},
+            "layout": {
+              "display": "flex",
+              "direction": "column",
+              "gap": "12px",
+              "padding": "20px",
+              "align": "stretch",
+              "justify": "start",
+              "wrap": false,
+              "columns": 1,
+              "minWidth": "",
+              "maxWidth": ""
+            },
+            "style": {
+              "tokenRefs": [],
+              "className": "",
+              "tailwind": []
+            },
+            "children": [
+              {
+                "id": "nd_c444d1db70f387542a05",
+                "type": "text",
+                "name": "页面标题",
+                "componentRef": "",
+                "props": {
+                  "text": "登录页"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "登录页",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_e66837c5fbbd7d24fd48",
+                "type": "text",
+                "name": "页面占位",
+                "componentRef": "",
+                "props": {
+                  "text": "该路由已创建，业务内容等待增量审查补充"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "该路由已创建，业务内容等待增量审查补充",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              }
+            ],
+            "repeat": null,
+            "semantics": {
+              "role": "main",
+              "purpose": "用户名口令登录，按角色跳转",
+              "importance": "normal",
+              "businessEntity": ""
+            },
+            "a11y": {
+              "label": "",
+              "description": ""
+            },
+            "state": {
+              "defaultVisible": true,
+              "disabled": false
+            },
+            "codegen": {
+              "mode": "primitive",
+              "componentName": "",
+              "extractComponent": false,
+              "imports": []
+            },
+            "provenance": {
+              "createdBy": "architect",
+              "revision": 1,
+              "changeId": ""
+            },
+            "locked": false
+          }
+        ],
+        "repeat": null,
+        "semantics": {
+          "role": "page",
+          "purpose": "登录页",
+          "importance": "normal",
+          "businessEntity": ""
+        },
+        "a11y": {
+          "label": "",
+          "description": ""
+        },
+        "state": {
+          "defaultVisible": true,
+          "disabled": false
+        },
+        "codegen": {
+          "mode": "primitive",
+          "componentName": "",
+          "extractComponent": false,
+          "imports": []
+        },
+        "provenance": {
+          "createdBy": "architect",
+          "revision": 1,
+          "changeId": ""
+        },
+        "locked": false
+      }
+    },
+    {
+      "pageId": "pg_42dbf160213620dedbce",
+      "path": "/facilities",
+      "title": "设施管理",
+      "root": {
+        "id": "nd_785d396005e2de2ddfc9",
+        "type": "page",
+        "name": "设施管理",
+        "componentRef": "",
+        "props": {
+          "title": "设施管理",
+          "path": "/facilities"
+        },
+        "layout": {
+          "display": "block",
+          "direction": "column",
+          "gap": "",
+          "padding": "32px",
+          "align": "stretch",
+          "justify": "start",
+          "wrap": false,
+          "columns": 1,
+          "minWidth": "",
+          "maxWidth": "1180px"
+        },
+        "style": {
+          "tokenRefs": [],
+          "className": "",
+          "tailwind": [
+            "bg-white",
+            "min-h-screen"
+          ]
+        },
+        "children": [
+          {
+            "id": "nd_cb32c80a48fdab049565",
+            "type": "section",
+            "name": "顶部导航",
+            "componentRef": "",
+            "props": {},
+            "layout": {
+              "display": "flex",
+              "direction": "row",
+              "gap": "16px",
+              "padding": "20px",
+              "align": "stretch",
+              "justify": "start",
+              "wrap": false,
+              "columns": 1,
+              "minWidth": "",
+              "maxWidth": ""
+            },
+            "style": {
+              "tokenRefs": [],
+              "className": "",
+              "tailwind": [
+                "rounded-xl",
+                "border",
+                "bg-white"
+              ]
+            },
+            "children": [
+              {
+                "id": "nd_ce27876bb370191af964",
+                "type": "text",
+                "name": "品牌",
+                "componentRef": "",
+                "props": {
+                  "text": "GIS 任务管理平台"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "GIS 任务管理平台",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_784c86b97334ce076cd4",
+                "type": "text",
+                "name": "页面说明",
+                "componentRef": "",
+                "props": {
+                  "text": "设施列表、筛选、CRUD 与影像"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "设施列表、筛选、CRUD 与影像",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              }
+            ],
+            "repeat": null,
+            "semantics": {
+              "role": "header",
+              "purpose": "品牌与页面标题",
+              "importance": "normal",
+              "businessEntity": ""
+            },
+            "a11y": {
+              "label": "",
+              "description": ""
+            },
+            "state": {
+              "defaultVisible": true,
+              "disabled": false
+            },
+            "codegen": {
+              "mode": "primitive",
+              "componentName": "",
+              "extractComponent": false,
+              "imports": []
+            },
+            "provenance": {
+              "createdBy": "architect",
+              "revision": 1,
+              "changeId": ""
+            },
+            "locked": false
+          },
+          {
+            "id": "nd_b489b6e8ad5d3e77e280",
+            "type": "section",
+            "name": "主内容区",
+            "componentRef": "",
+            "props": {},
+            "layout": {
+              "display": "flex",
+              "direction": "column",
+              "gap": "12px",
+              "padding": "20px",
+              "align": "stretch",
+              "justify": "start",
+              "wrap": false,
+              "columns": 1,
+              "minWidth": "",
+              "maxWidth": ""
+            },
+            "style": {
+              "tokenRefs": [],
+              "className": "",
+              "tailwind": []
+            },
+            "children": [
+              {
+                "id": "nd_72e2a4a9cb6bf20b4437",
+                "type": "text",
+                "name": "页面标题",
+                "componentRef": "",
+                "props": {
+                  "text": "设施管理"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "设施管理",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_2d865a5287fec6fd1b23",
+                "type": "text",
+                "name": "页面占位",
+                "componentRef": "",
+                "props": {
+                  "text": "该路由已创建，业务内容等待增量审查补充"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "该路由已创建，业务内容等待增量审查补充",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              }
+            ],
+            "repeat": null,
+            "semantics": {
+              "role": "main",
+              "purpose": "设施列表、筛选、CRUD 与影像",
+              "importance": "normal",
+              "businessEntity": ""
+            },
+            "a11y": {
+              "label": "",
+              "description": ""
+            },
+            "state": {
+              "defaultVisible": true,
+              "disabled": false
+            },
+            "codegen": {
+              "mode": "primitive",
+              "componentName": "",
+              "extractComponent": false,
+              "imports": []
+            },
+            "provenance": {
+              "createdBy": "architect",
+              "revision": 1,
+              "changeId": ""
+            },
+            "locked": false
+          }
+        ],
+        "repeat": null,
+        "semantics": {
+          "role": "page",
+          "purpose": "设施管理",
+          "importance": "normal",
+          "businessEntity": ""
+        },
+        "a11y": {
+          "label": "",
+          "description": ""
+        },
+        "state": {
+          "defaultVisible": true,
+          "disabled": false
+        },
+        "codegen": {
+          "mode": "primitive",
+          "componentName": "",
+          "extractComponent": false,
+          "imports": []
+        },
+        "provenance": {
+          "createdBy": "architect",
+          "revision": 1,
+          "changeId": ""
+        },
+        "locked": false
+      }
+    },
+    {
+      "pageId": "pg_11983be87be5bc6dd482",
+      "path": "/tasks",
+      "title": "巡检工单",
+      "root": {
+        "id": "nd_0a521a2538ac3a0b9e6e",
+        "type": "page",
+        "name": "巡检工单",
+        "componentRef": "",
+        "props": {
+          "title": "巡检工单",
+          "path": "/tasks"
+        },
+        "layout": {
+          "display": "block",
+          "direction": "column",
+          "gap": "",
+          "padding": "32px",
+          "align": "stretch",
+          "justify": "start",
+          "wrap": false,
+          "columns": 1,
+          "minWidth": "",
+          "maxWidth": "1180px"
+        },
+        "style": {
+          "tokenRefs": [],
+          "className": "",
+          "tailwind": [
+            "bg-white",
+            "min-h-screen"
+          ]
+        },
+        "children": [
+          {
+            "id": "nd_d339e58bad3a1fde42a1",
+            "type": "section",
+            "name": "顶部导航",
+            "componentRef": "",
+            "props": {},
+            "layout": {
+              "display": "flex",
+              "direction": "row",
+              "gap": "16px",
+              "padding": "20px",
+              "align": "stretch",
+              "justify": "start",
+              "wrap": false,
+              "columns": 1,
+              "minWidth": "",
+              "maxWidth": ""
+            },
+            "style": {
+              "tokenRefs": [],
+              "className": "",
+              "tailwind": [
+                "rounded-xl",
+                "border",
+                "bg-white"
+              ]
+            },
+            "children": [
+              {
+                "id": "nd_3499506bb9273fcad55d",
+                "type": "text",
+                "name": "品牌",
+                "componentRef": "",
+                "props": {
+                  "text": "GIS 任务管理平台"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "GIS 任务管理平台",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_3af6bada430a1fccf9ef",
+                "type": "text",
+                "name": "页面说明",
+                "componentRef": "",
+                "props": {
+                  "text": "工单列表、创建指派与状态流转"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "工单列表、创建指派与状态流转",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              }
+            ],
+            "repeat": null,
+            "semantics": {
+              "role": "header",
+              "purpose": "品牌与页面标题",
+              "importance": "normal",
+              "businessEntity": ""
+            },
+            "a11y": {
+              "label": "",
+              "description": ""
+            },
+            "state": {
+              "defaultVisible": true,
+              "disabled": false
+            },
+            "codegen": {
+              "mode": "primitive",
+              "componentName": "",
+              "extractComponent": false,
+              "imports": []
+            },
+            "provenance": {
+              "createdBy": "architect",
+              "revision": 1,
+              "changeId": ""
+            },
+            "locked": false
+          },
+          {
+            "id": "nd_88ffab4eef4c0f9d16b8",
+            "type": "section",
+            "name": "主内容区",
+            "componentRef": "",
+            "props": {},
+            "layout": {
+              "display": "flex",
+              "direction": "column",
+              "gap": "12px",
+              "padding": "20px",
+              "align": "stretch",
+              "justify": "start",
+              "wrap": false,
+              "columns": 1,
+              "minWidth": "",
+              "maxWidth": ""
+            },
+            "style": {
+              "tokenRefs": [],
+              "className": "",
+              "tailwind": []
+            },
+            "children": [
+              {
+                "id": "nd_a554e53babeb4787b71d",
+                "type": "text",
+                "name": "页面标题",
+                "componentRef": "",
+                "props": {
+                  "text": "巡检工单"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "巡检工单",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_54fa6e2938e3154bc3d8",
+                "type": "text",
+                "name": "页面占位",
+                "componentRef": "",
+                "props": {
+                  "text": "该路由已创建，业务内容等待增量审查补充"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "该路由已创建，业务内容等待增量审查补充",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              }
+            ],
+            "repeat": null,
+            "semantics": {
+              "role": "main",
+              "purpose": "工单列表、创建指派与状态流转",
+              "importance": "normal",
+              "businessEntity": ""
+            },
+            "a11y": {
+              "label": "",
+              "description": ""
+            },
+            "state": {
+              "defaultVisible": true,
+              "disabled": false
+            },
+            "codegen": {
+              "mode": "primitive",
+              "componentName": "",
+              "extractComponent": false,
+              "imports": []
+            },
+            "provenance": {
+              "createdBy": "architect",
+              "revision": 1,
+              "changeId": ""
+            },
+            "locked": false
+          }
+        ],
+        "repeat": null,
+        "semantics": {
+          "role": "page",
+          "purpose": "巡检工单",
+          "importance": "normal",
+          "businessEntity": ""
+        },
+        "a11y": {
+          "label": "",
+          "description": ""
+        },
+        "state": {
+          "defaultVisible": true,
+          "disabled": false
+        },
+        "codegen": {
+          "mode": "primitive",
+          "componentName": "",
+          "extractComponent": false,
+          "imports": []
+        },
+        "provenance": {
+          "createdBy": "architect",
+          "revision": 1,
+          "changeId": ""
+        },
+        "locked": false
+      }
+    }
+  ],
+  "activePageId": "pg_881b4bacef1b4f286c85",
+  "root": {
+    "id": "nd_b307f616a3f8882291cb",
+    "type": "page",
+    "name": "GIS 任务管理平台",
+    "componentRef": "",
+    "props": {
+      "title": "GIS 任务管理平台"
+    },
+    "layout": {
+      "display": "block",
+      "direction": "column",
+      "gap": "",
+      "padding": "32px",
+      "align": "stretch",
+      "justify": "start",
+      "wrap": false,
+      "columns": 1,
+      "minWidth": "",
+      "maxWidth": "1180px"
+    },
+    "style": {
+      "tokenRefs": [],
+      "className": "",
+      "tailwind": [
+        "bg-white",
+        "min-h-screen"
+      ]
+    },
+    "children": [
+      {
+        "id": "nd_064159f8de75a306074b",
+        "type": "section",
+        "name": "顶栏",
+        "componentRef": "",
+        "props": {},
+        "layout": {
+          "display": "flex",
+          "direction": "row",
+          "gap": "16px",
+          "padding": "20px",
+          "align": "stretch",
+          "justify": "start",
+          "wrap": false,
+          "columns": 1,
+          "minWidth": "",
+          "maxWidth": ""
+        },
+        "style": {
+          "tokenRefs": [],
+          "className": "",
+          "tailwind": [
+            "rounded-xl",
+            "border",
+            "bg-white"
+          ]
+        },
+        "children": [
+          {
+            "id": "nd_1fd2c06605266a829ab8",
+            "type": "text",
+            "name": "品牌",
+            "componentRef": "",
+            "props": {
+              "text": "GIS 任务管理平台"
+            },
+            "layout": {
+              "display": "block",
+              "direction": "column",
+              "gap": "",
+              "padding": "",
+              "align": "stretch",
+              "justify": "start",
+              "wrap": false,
+              "columns": 1,
+              "minWidth": "",
+              "maxWidth": ""
+            },
+            "style": {
+              "tokenRefs": [],
+              "className": "",
+              "tailwind": [
+                "text-sm",
+                "text-slate-700"
+              ]
+            },
+            "children": [],
+            "repeat": null,
+            "semantics": {
+              "role": "content",
+              "purpose": "GIS 任务管理平台",
+              "importance": "normal",
+              "businessEntity": ""
+            },
+            "a11y": {
+              "label": "",
+              "description": ""
+            },
+            "state": {
+              "defaultVisible": true,
+              "disabled": false
+            },
+            "codegen": {
+              "mode": "primitive",
+              "componentName": "",
+              "extractComponent": false,
+              "imports": []
+            },
+            "provenance": {
+              "createdBy": "architect",
+              "revision": 1,
+              "changeId": ""
+            },
+            "locked": false
+          },
+          {
+            "id": "nd_a42f6d81e8e5e818e94f",
+            "type": "text",
+            "name": "页面说明",
+            "componentRef": "",
+            "props": {
+              "text": "由 Architect 生成的虚拟骨架"
+            },
+            "layout": {
+              "display": "block",
+              "direction": "column",
+              "gap": "",
+              "padding": "",
+              "align": "stretch",
+              "justify": "start",
+              "wrap": false,
+              "columns": 1,
+              "minWidth": "",
+              "maxWidth": ""
+            },
+            "style": {
+              "tokenRefs": [],
+              "className": "",
+              "tailwind": [
+                "text-sm",
+                "text-slate-700"
+              ]
+            },
+            "children": [],
+            "repeat": null,
+            "semantics": {
+              "role": "content",
+              "purpose": "由 Architect 生成的虚拟骨架",
+              "importance": "normal",
+              "businessEntity": ""
+            },
+            "a11y": {
+              "label": "",
+              "description": ""
+            },
+            "state": {
+              "defaultVisible": true,
+              "disabled": false
+            },
+            "codegen": {
+              "mode": "primitive",
+              "componentName": "",
+              "extractComponent": false,
+              "imports": []
+            },
+            "provenance": {
+              "createdBy": "architect",
+              "revision": 1,
+              "changeId": ""
+            },
+            "locked": false
+          }
+        ],
+        "repeat": null,
+        "semantics": {
+          "role": "header",
+          "purpose": "品牌与页面标题",
+          "importance": "normal",
+          "businessEntity": ""
+        },
+        "a11y": {
+          "label": "",
+          "description": ""
+        },
+        "state": {
+          "defaultVisible": true,
+          "disabled": false
+        },
+        "codegen": {
+          "mode": "primitive",
+          "componentName": "",
+          "extractComponent": false,
+          "imports": []
+        },
+        "provenance": {
+          "createdBy": "architect",
+          "revision": 1,
+          "changeId": ""
+        },
+        "locked": false
+      },
+      {
+        "id": "nd_5ba9b1499d3abcefb7ba",
+        "type": "grid",
+        "name": "主体布局",
+        "componentRef": "",
+        "props": {},
+        "layout": {
+          "display": "grid",
+          "direction": "column",
+          "gap": "24px",
+          "padding": "24px 0px",
+          "align": "stretch",
+          "justify": "start",
+          "wrap": false,
+          "columns": 2,
+          "minWidth": "",
+          "maxWidth": ""
+        },
+        "style": {
+          "tokenRefs": [],
+          "className": "",
+          "tailwind": []
+        },
+        "children": [
+          {
+            "id": "nd_6b16a7c37fde9ec4c192",
+            "type": "section",
+            "name": "侧边栏",
+            "componentRef": "",
+            "props": {},
+            "layout": {
+              "display": "flex",
+              "direction": "column",
+              "gap": "12px",
+              "padding": "20px",
+              "align": "stretch",
+              "justify": "start",
+              "wrap": false,
+              "columns": 1,
+              "minWidth": "",
+              "maxWidth": ""
+            },
+            "style": {
+              "tokenRefs": [],
+              "className": "",
+              "tailwind": [
+                "rounded-xl",
+                "border",
+                "bg-slate-50"
+              ]
+            },
+            "children": [
+              {
+                "id": "nd_40df2cd65158e29e7cd0",
+                "type": "text",
+                "name": "导航标题",
+                "componentRef": "",
+                "props": {
+                  "text": "导航"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "导航",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_66e619fec35ad9ca3d25",
+                "type": "text",
+                "name": "导航占位",
+                "componentRef": "",
+                "props": {
+                  "text": "模块入口待补充"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "text-sm",
+                    "text-slate-700"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "content",
+                  "purpose": "模块入口待补充",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              }
+            ],
+            "repeat": null,
+            "semantics": {
+              "role": "navigation",
+              "purpose": "业务模块导航",
+              "importance": "normal",
+              "businessEntity": ""
+            },
+            "a11y": {
+              "label": "",
+              "description": ""
+            },
+            "state": {
+              "defaultVisible": true,
+              "disabled": false
+            },
+            "codegen": {
+              "mode": "primitive",
+              "componentName": "",
+              "extractComponent": false,
+              "imports": []
+            },
+            "provenance": {
+              "createdBy": "architect",
+              "revision": 1,
+              "changeId": ""
+            },
+            "locked": false
+          },
+          {
+            "id": "nd_72f1aa5ab41940bff27f",
+            "type": "section",
+            "name": "主内容区",
+            "componentRef": "",
+            "props": {},
+            "layout": {
+              "display": "flex",
+              "direction": "column",
+              "gap": "12px",
+              "padding": "20px",
+              "align": "stretch",
+              "justify": "start",
+              "wrap": false,
+              "columns": 1,
+              "minWidth": "",
+              "maxWidth": ""
+            },
+            "style": {
+              "tokenRefs": [],
+              "className": "",
+              "tailwind": []
+            },
+            "children": [
+              {
+                "id": "nd_7c4a74529603e28ade70",
+                "type": "form",
+                "name": "登录表单",
+                "componentRef": "",
+                "props": {},
+                "layout": {
+                  "display": "flex",
+                  "direction": "column",
+                  "gap": "12px",
+                  "padding": "20px",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "rounded-xl",
+                    "border",
+                    "bg-white"
+                  ]
+                },
+                "children": [
+                  {
+                    "id": "nd_5c1e9cf5d01e4f89e778",
+                    "type": "text",
+                    "name": "表单标题",
+                    "componentRef": "",
+                    "props": {
+                      "text": "登录表单"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "登录表单",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_82b7f5001a220d9608cb",
+                    "type": "input",
+                    "name": "输入项",
+                    "componentRef": "Input",
+                    "props": {
+                      "placeholder": "请输入登录表单"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-lg",
+                        "border",
+                        "border-slate-300"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "",
+                      "purpose": "",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "请输入登录表单",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "输入项",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_798c10e881c408ba24d8",
+                    "type": "button",
+                    "name": "提交",
+                    "componentRef": "Button",
+                    "props": {
+                      "text": "提交",
+                      "variant": "primary"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-lg",
+                        "bg-blue-600",
+                        "text-white"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "action",
+                      "purpose": "提交",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "提交",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  }
+                ],
+                "repeat": null,
+                "semantics": {
+                  "role": "form",
+                  "purpose": "用户名、口令、登录按钮",
+                  "importance": "core",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_cdd8e73b377027fe80cf",
+                "type": "component",
+                "name": "地图画布",
+                "componentRef": "",
+                "props": {},
+                "layout": {
+                  "display": "flex",
+                  "direction": "column",
+                  "gap": "8px",
+                  "padding": "16px",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "rounded-xl",
+                    "border",
+                    "bg-white"
+                  ]
+                },
+                "children": [
+                  {
+                    "id": "nd_7cd6dca6228544d24e4e",
+                    "type": "text",
+                    "name": "组件标题",
+                    "componentRef": "",
+                    "props": {
+                      "text": "地图画布"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "地图画布",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_9e369e6a9d042d455d52",
+                    "type": "text",
+                    "name": "组件说明",
+                    "componentRef": "",
+                    "props": {
+                      "text": "Leaflet + OSM 底图，渲染设施点与巡检路线"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "Leaflet + OSM 底图，渲染设施点与巡检路线",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  }
+                ],
+                "repeat": null,
+                "semantics": {
+                  "role": "map",
+                  "purpose": "Leaflet + OSM 底图，渲染设施点与巡检路线",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_143f3561c6bea3d97446",
+                "type": "component",
+                "name": "图层切换器",
+                "componentRef": "",
+                "props": {},
+                "layout": {
+                  "display": "flex",
+                  "direction": "column",
+                  "gap": "8px",
+                  "padding": "16px",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "rounded-xl",
+                    "border",
+                    "bg-white"
+                  ]
+                },
+                "children": [
+                  {
+                    "id": "nd_09abbc15a484e56ae95b",
+                    "type": "text",
+                    "name": "组件标题",
+                    "componentRef": "",
+                    "props": {
+                      "text": "图层切换器"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "图层切换器",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_967880df3dd1db4304bc",
+                    "type": "text",
+                    "name": "组件说明",
+                    "componentRef": "",
+                    "props": {
+                      "text": "底图/设施点/巡检路线开关"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "底图/设施点/巡检路线开关",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  }
+                ],
+                "repeat": null,
+                "semantics": {
+                  "role": "control",
+                  "purpose": "底图/设施点/巡检路线开关",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_531062ef8369f8d7ab9f",
+                "type": "component",
+                "name": "设施筛选面板",
+                "componentRef": "",
+                "props": {},
+                "layout": {
+                  "display": "flex",
+                  "direction": "column",
+                  "gap": "8px",
+                  "padding": "16px",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "rounded-xl",
+                    "border",
+                    "bg-white"
+                  ]
+                },
+                "children": [
+                  {
+                    "id": "nd_1f984c650a0308902267",
+                    "type": "text",
+                    "name": "组件标题",
+                    "componentRef": "",
+                    "props": {
+                      "text": "设施筛选面板"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "设施筛选面板",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_597adf8cea4ce92ef250",
+                    "type": "text",
+                    "name": "组件说明",
+                    "componentRef": "",
+                    "props": {
+                      "text": "类型、状态、框选/当前位置查询"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "类型、状态、框选/当前位置查询",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  }
+                ],
+                "repeat": null,
+                "semantics": {
+                  "role": "filter",
+                  "purpose": "类型、状态、框选/当前位置查询",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_7fca7f284681ddaa0f0f",
+                "type": "form",
+                "name": "设施表单",
+                "componentRef": "",
+                "props": {},
+                "layout": {
+                  "display": "flex",
+                  "direction": "column",
+                  "gap": "12px",
+                  "padding": "20px",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "rounded-xl",
+                    "border",
+                    "bg-white"
+                  ]
+                },
+                "children": [
+                  {
+                    "id": "nd_001984a7173e76e3a3d7",
+                    "type": "text",
+                    "name": "表单标题",
+                    "componentRef": "",
+                    "props": {
+                      "text": "设施表单"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "设施表单",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_8214d1cacd8681dfe3c7",
+                    "type": "input",
+                    "name": "输入项",
+                    "componentRef": "Input",
+                    "props": {
+                      "placeholder": "请输入设施表单"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-lg",
+                        "border",
+                        "border-slate-300"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "",
+                      "purpose": "",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "请输入设施表单",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "输入项",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_db063590ac68813e1101",
+                    "type": "button",
+                    "name": "提交",
+                    "componentRef": "Button",
+                    "props": {
+                      "text": "提交",
+                      "variant": "primary"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-lg",
+                        "bg-blue-600",
+                        "text-white"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "action",
+                      "purpose": "提交",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "提交",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  }
+                ],
+                "repeat": null,
+                "semantics": {
+                  "role": "form",
+                  "purpose": "名称、类型、状态、经纬度",
+                  "importance": "core",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_faa7566c51b7e5fed256",
+                "type": "list",
+                "name": "设施列表",
+                "componentRef": "",
+                "props": {},
+                "layout": {
+                  "display": "flex",
+                  "direction": "column",
+                  "gap": "8px",
+                  "padding": "16px",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "rounded-xl",
+                    "border",
+                    "bg-white"
+                  ]
+                },
+                "children": [
+                  {
+                    "id": "nd_26e1574ebb9f99689908",
+                    "type": "text",
+                    "name": "列表占位",
+                    "componentRef": "",
+                    "props": {
+                      "text": "列表内容"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "列表内容",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  }
+                ],
+                "repeat": null,
+                "semantics": {
+                  "role": "list",
+                  "purpose": "响应式多列卡片，含距离与状态",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_d76781d30015230f34a5",
+                "type": "component",
+                "name": "影像上传",
+                "componentRef": "",
+                "props": {},
+                "layout": {
+                  "display": "flex",
+                  "direction": "column",
+                  "gap": "8px",
+                  "padding": "16px",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "rounded-xl",
+                    "border",
+                    "bg-white"
+                  ]
+                },
+                "children": [
+                  {
+                    "id": "nd_0b8a2cac497801646562",
+                    "type": "text",
+                    "name": "组件标题",
+                    "componentRef": "",
+                    "props": {
+                      "text": "影像上传"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "影像上传",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_ba767a973dad9c7de7d9",
+                    "type": "text",
+                    "name": "组件说明",
+                    "componentRef": "",
+                    "props": {
+                      "text": "上传并展示设施关联影像"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "上传并展示设施关联影像",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  }
+                ],
+                "repeat": null,
+                "semantics": {
+                  "role": "upload",
+                  "purpose": "上传并展示设施关联影像",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_27e75bb78c3305463c15",
+                "type": "component",
+                "name": "工单列表",
+                "componentRef": "",
+                "props": {},
+                "layout": {
+                  "display": "flex",
+                  "direction": "column",
+                  "gap": "8px",
+                  "padding": "16px",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "rounded-xl",
+                    "border",
+                    "bg-white"
+                  ]
+                },
+                "children": [
+                  {
+                    "id": "nd_f694e67ab93aaa4a2e54",
+                    "type": "text",
+                    "name": "组件标题",
+                    "componentRef": "",
+                    "props": {
+                      "text": "工单列表"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "工单列表",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_8548b3e4ecd5445d4658",
+                    "type": "text",
+                    "name": "组件说明",
+                    "componentRef": "",
+                    "props": {
+                      "text": "状态、指派人、截止时间、逾期标记"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "状态、指派人、截止时间、逾期标记",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  }
+                ],
+                "repeat": null,
+                "semantics": {
+                  "role": "table",
+                  "purpose": "状态、指派人、截止时间、逾期标记",
+                  "importance": "normal",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_0cbafe8d769e8e19896f",
+                "type": "form",
+                "name": "工单创建表单",
+                "componentRef": "",
+                "props": {},
+                "layout": {
+                  "display": "flex",
+                  "direction": "column",
+                  "gap": "12px",
+                  "padding": "20px",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "rounded-xl",
+                    "border",
+                    "bg-white"
+                  ]
+                },
+                "children": [
+                  {
+                    "id": "nd_4ba17f4840b92ae92a52",
+                    "type": "text",
+                    "name": "表单标题",
+                    "componentRef": "",
+                    "props": {
+                      "text": "工单创建表单"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "text-sm",
+                        "text-slate-700"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "content",
+                      "purpose": "工单创建表单",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_c5550854a22d273b22c7",
+                    "type": "input",
+                    "name": "输入项",
+                    "componentRef": "Input",
+                    "props": {
+                      "placeholder": "请输入工单创建表单"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-lg",
+                        "border",
+                        "border-slate-300"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "",
+                      "purpose": "",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "请输入工单创建表单",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "输入项",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  },
+                  {
+                    "id": "nd_272a582f0e33b77ecc37",
+                    "type": "button",
+                    "name": "提交",
+                    "componentRef": "Button",
+                    "props": {
+                      "text": "提交",
+                      "variant": "primary"
+                    },
+                    "layout": {
+                      "display": "block",
+                      "direction": "column",
+                      "gap": "",
+                      "padding": "",
+                      "align": "stretch",
+                      "justify": "start",
+                      "wrap": false,
+                      "columns": 1,
+                      "minWidth": "",
+                      "maxWidth": ""
+                    },
+                    "style": {
+                      "tokenRefs": [],
+                      "className": "",
+                      "tailwind": [
+                        "rounded-lg",
+                        "bg-blue-600",
+                        "text-white"
+                      ]
+                    },
+                    "children": [],
+                    "repeat": null,
+                    "semantics": {
+                      "role": "action",
+                      "purpose": "提交",
+                      "importance": "normal",
+                      "businessEntity": ""
+                    },
+                    "a11y": {
+                      "label": "",
+                      "description": ""
+                    },
+                    "state": {
+                      "defaultVisible": true,
+                      "disabled": false
+                    },
+                    "codegen": {
+                      "mode": "primitive",
+                      "componentName": "提交",
+                      "extractComponent": false,
+                      "imports": []
+                    },
+                    "provenance": {
+                      "createdBy": "architect",
+                      "revision": 1,
+                      "changeId": ""
+                    },
+                    "locked": false
+                  }
+                ],
+                "repeat": null,
+                "semantics": {
+                  "role": "form",
+                  "purpose": "关联设施、标题、指派人、截止时间",
+                  "importance": "core",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              },
+              {
+                "id": "nd_1479d20134f647a1504b",
+                "type": "button",
+                "name": "工单状态按钮",
+                "componentRef": "Button",
+                "props": {
+                  "text": "工单状态按钮",
+                  "variant": "primary"
+                },
+                "layout": {
+                  "display": "block",
+                  "direction": "column",
+                  "gap": "",
+                  "padding": "",
+                  "align": "stretch",
+                  "justify": "start",
+                  "wrap": false,
+                  "columns": 1,
+                  "minWidth": "",
+                  "maxWidth": ""
+                },
+                "style": {
+                  "tokenRefs": [],
+                  "className": "",
+                  "tailwind": [
+                    "rounded-lg",
+                    "bg-blue-600",
+                    "text-white"
+                  ]
+                },
+                "children": [],
+                "repeat": null,
+                "semantics": {
+                  "role": "action",
+                  "purpose": "推进到进行中/已完成",
+                  "importance": "core",
+                  "businessEntity": ""
+                },
+                "a11y": {
+                  "label": "",
+                  "description": ""
+                },
+                "state": {
+                  "defaultVisible": true,
+                  "disabled": false
+                },
+                "codegen": {
+                  "mode": "primitive",
+                  "componentName": "工单状态按钮",
+                  "extractComponent": false,
+                  "imports": []
+                },
+                "provenance": {
+                  "createdBy": "architect",
+                  "revision": 1,
+                  "changeId": ""
+                },
+                "locked": false
+              }
+            ],
+            "repeat": null,
+            "semantics": {
+              "role": "main",
+              "purpose": "核心业务区域",
+              "importance": "normal",
+              "businessEntity": ""
+            },
+            "a11y": {
+              "label": "",
+              "description": ""
+            },
+            "state": {
+              "defaultVisible": true,
+              "disabled": false
+            },
+            "codegen": {
+              "mode": "primitive",
+              "componentName": "",
+              "extractComponent": false,
+              "imports": []
+            },
+            "provenance": {
+              "createdBy": "architect",
+              "revision": 1,
+              "changeId": ""
+            },
+            "locked": false
+          }
+        ],
+        "repeat": null,
+        "semantics": {
+          "role": "layout",
+          "purpose": "侧栏 + 主内容",
+          "importance": "normal",
+          "businessEntity": ""
+        },
+        "a11y": {
+          "label": "",
+          "description": ""
+        },
+        "state": {
+          "defaultVisible": true,
+          "disabled": false
+        },
+        "codegen": {
+          "mode": "primitive",
+          "componentName": "",
+          "extractComponent": false,
+          "imports": []
+        },
+        "provenance": {
+          "createdBy": "architect",
+          "revision": 1,
+          "changeId": ""
+        },
+        "locked": false
+      }
+    ],
+    "repeat": null,
+    "semantics": {
+      "role": "page",
+      "purpose": "GIS 任务管理平台",
+      "importance": "normal",
+      "businessEntity": ""
+    },
+    "a11y": {
+      "label": "",
+      "description": ""
+    },
+    "state": {
+      "defaultVisible": true,
+      "disabled": false
+    },
+    "codegen": {
+      "mode": "primitive",
+      "componentName": "",
+      "extractComponent": false,
+      "imports": []
+    },
+    "provenance": {
+      "createdBy": "architect",
+      "revision": 1,
+      "changeId": ""
+    },
+    "locked": false
+  },
+  "interactions": [],
+  "bindings": [],
+  "review": {
+    "frozenAt": "2026-11-24T04:22:37.572533Z",
+    "questionRounds": 0,
+    "answers": []
+  },
+  "metadata": {
+    "createdBy": "architect",
+    "createdAt": "2026-11-24T04:22:37.150858Z",
+    "lastModifiedBy": "architect",
+    "contentHash": "sha256:09f806c2a4458616fbdca205681e9492b8eb2176d39f7164d84869513fa1fcdd"
+  }
+}

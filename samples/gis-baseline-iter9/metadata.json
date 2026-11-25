@@ -1,0 +1,101 @@
+{
+  "generatedAt": "2026-11-24T04:58:01+0000",
+  "baseUrl": "http://java-bff:8080",
+  "goal": "做一个可上线的 GIS 任务管理平台，面向城市设施巡检团队。核心功能：1) 地图总览，支持底图 / 设施点 / 巡检路线图层切换；2) 设施点位管理，支持增删改查、按类型与状态筛选；3) 空间查询，支持按当前位置或框选范围查询附近设施；4) 巡检任务工单，支持创建、指派、状态流转（待处理 / 进行中 / 已完成）和逾期标记；5) 影像上传与记录关联到设施；6) 登录与角色权限（管理员 / 巡检员）。要求使用真实数据库持久化、真实地图数据，交付可 Docker 部署的 Web 应用。",
+  "projectId": "prj_gis_resume_4421da680e",
+  "projectName": "GIS 任务管理平台",
+  "qualityTier": "L3_PRODUCTION",
+  "llmProvider": "deepseek",
+  "solutionChoice": {
+    "optionId": "opt_reuse_opengeos_geoai",
+    "kind": "REUSE",
+    "title": "opengeos/geoai",
+    "sourceUrl": "https://github.com/opengeos/geoai",
+    "license": "MIT",
+    "summary": "GeoAI: Artificial Intelligence for Geospatial Data",
+    "integrationPlan": "以 opengeos/geoai 为依赖；业务模型、页面与权限按契约自研，不复制整站业务代码。",
+    "notes": [
+      "来源：local",
+      "集成成本：LOW"
+    ]
+  },
+  "discovery": {
+    "provider": "github+local+llm",
+    "degraded": false,
+    "recommendedOptionId": "opt_reuse_opengeos_geoai",
+    "options": [
+      {
+        "optionId": "opt_reuse_opengeos_geoai",
+        "kind": "REUSE",
+        "title": "opengeos/geoai",
+        "source": "local",
+        "fitScore": 0.96
+      },
+      {
+        "optionId": "opt_adapt_matheusconstantino_poc_geoserver_sqlserv",
+        "kind": "ADAPT",
+        "title": "MatheusConstantino/poc-geoserver-sqlserver",
+        "source": "github",
+        "fitScore": 0.834
+      },
+      {
+        "optionId": "opt_build",
+        "kind": "BUILD",
+        "title": "自研方案",
+        "source": "build",
+        "fitScore": 0.6
+      }
+    ]
+  },
+  "v0RunId": "arc_gis_v0_d5d4d3a5d5",
+  "backendRunId": "arc_gis_be_e7ecfe7b87",
+  "fullstackRunId": "fsk_gis_679e921b8e",
+  "contractId": "ctr_83e7700b9b5344f5a175",
+  "visualContentHash": "sha256:09f806c2a4458616fbdca205681e9492b8eb2176d39f7164d84869513fa1fcdd",
+  "sandboxId": "sbx_79e8d55c82ca4f66bfdf",
+  "previewUrl": "http://127.0.0.1:54973",
+  "collectionPath": "/api/v1/facilities",
+  "databaseEngine": "mysql",
+  "orm": "sequelize",
+  "infraFiles": [
+    ".dockerignore",
+    ".env.example",
+    "DEPLOY.md",
+    "Dockerfile",
+    "README.md",
+    "docker-compose.yml",
+    "render.yaml"
+  ],
+  "fullstackStatus": "SUCCEEDED",
+  "fullstackSteps": [],
+  "contractSummary": {
+    "appShape": "full_stack_system",
+    "apiRoutes": 13,
+    "tables": 4,
+    "frontendRoutes": 1,
+    "components": 7,
+    "visualNodes": 60
+  },
+  "sourceDir": "/repo/samples/gis-baseline-iter6/source",
+  "elapsedSeconds": 55.6,
+  "events": {
+    "counts": {
+      "fullstack.started": 1,
+      "fullstack.node.started": 7,
+      "fullstack.node.output": 30,
+      "fullstack.node.completed": 7,
+      "fullstack.visual.codegen": 1,
+      "fullstack.consistency.report": 1,
+      "fullstack.sandbox.restarting": 1,
+      "fullstack.sandbox.ready": 1,
+      "fullstack.completed": 2
+    },
+    "total": 51
+  },
+  "resumedFrom": "/repo/samples/gis-baseline-iter6",
+  "codegenReplay": {
+    "from": "samples/gis-baseline-iter6",
+    "note": "契约漂移修复 + 多实体 CRUD + JWT/RBAC 的代码生成重放；非完整沙盒 E2E",
+    "generatedAt": "2026-11-24T08:30:38+0000"
+  }
+}

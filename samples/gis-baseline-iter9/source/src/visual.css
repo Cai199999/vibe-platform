@@ -1,0 +1,124 @@
+:root {
+  --color-primary: #2563eb;
+  --color-primary-soft: #dbeafe;
+  --color-surface: #ffffff;
+  --color-canvas: #f1f5f9;
+  --color-text: #0f172a;
+  --color-muted: #64748b;
+  --color-border: #cbd5e1;
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+  --radius-sm: 8px;
+  --radius-card: 12px;
+  --radius-pill: 999px;
+  --typography-body: 14px;
+  --typography-title: 22px;
+  --typography-caption: 12px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  background: var(--color-canvas);
+  color: var(--color-text);
+}
+
+.visual-node {
+  box-sizing: border-box;
+}
+
+.visual-button {
+  font: inherit;
+}
+
+.visual-input {
+  max-width: 100%;
+}
+
+.visual-repeat-item {
+  list-style: none;
+}
+
+/* Direct Ops 新增组件：没有显式尺寸时也要有可感知的盒子，
+   避免空 div 高度塌陷成一条细线。 */
+.vibe-direct-button {
+  min-height: 30px;
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+}
+
+.vibe-direct-input {
+  min-height: 30px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+}
+
+.vibe-direct-text {
+  margin: 0;
+}
+
+.vibe-direct-container {
+  min-height: 120px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+}
+
+.vibe-direct-card {
+  min-height: 96px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+}
+
+.visual-table th,
+.visual-table td {
+  border: 1px solid var(--color-border);
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.visual-page-nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.visual-page-nav button {
+  padding: 6px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--color-muted);
+  cursor: pointer;
+}
+
+.visual-page-nav button.is-active {
+  border-color: var(--color-primary);
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+}
+
+.visual-custom-placeholder {
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-card);
+  padding: 12px;
+  color: var(--color-muted);
+  background: var(--color-canvas);
+}

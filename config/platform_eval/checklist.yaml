@@ -1,0 +1,43 @@
+# vibe-platform 自身评测清单
+#
+# 与 gis_eval 的区别：
+#   - gis_eval 评“平台生成的 GIS 项目”；
+#   - platform_eval 评“平台本身”的契约闭环、溯源、门禁、确定性、
+#     交付、安全与可观测能力。
+#
+# 评测对象是仓库代码 + 最新一次生成产物（默认 Iter6），不依赖行业方向。
+
+version: 1
+name: vibe-platform-self-eval
+
+weights:
+  architecture: 15
+  contract_loop: 15
+  traceability: 10
+  gates_repair: 15
+  determinism_reliability: 15
+  delivery: 10
+  # 生产就绪度：多实体 CRUD、鉴权、地图数据打点、云端部署。
+  # 这一项故意独立，避免“工程能力强”被误读成“生成物可直接上线”。
+  production_readiness: 10
+  security: 5
+  observability: 5
+
+artifact:
+  baseline_dir: samples/gis-baseline-iter6
+  contract: contract.json
+  metadata: metadata.json
+  visual: v0-visual-frozen.json
+  source: source
+  gis_report: reports/gis/baseline.json
+  smoke_glob: reports/gis/smoke-*.json
+  g1_glob: reports/g1/g1_*.json
+
+thresholds:
+  gis_eval_min_score: 90
+  gis_contract_min_score: 90
+  max_fullstack_seconds: 300
+  min_oid_nodes: 50
+  min_source_map_entries: 1
+
+core_dir: services/orchestrator/ai_core

@@ -1,0 +1,30 @@
+# 由 InfraCoder 生成：Render Blueprint（后端 Docker + 前端静态站）。
+# 使用方法：把项目推到 Git 仓库，在 Render 选择 New > Blueprint，
+# 指向本文件；随后填写 DATABASE_URL、CORS_ORIGIN 与 VITE_API_BASE_URL。
+services:
+  - type: web
+    name: vibe-facilities-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    # 发布前显式执行 SQL 迁移；迁移失败会阻断本次部署。
+    preDeployCommand: node server/migrate.mjs
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: DB_ENGINE
+        value: mysql
+      - key: DB_SSL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+  - type: web
+    name: vibe-facilities-web
+    runtime: static
+    buildCommand: npm install --no-audit --no-fund && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        sync: false

@@ -1,0 +1,36 @@
+{
+  "name": "vibe-sandbox-app",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run --passWithNoTests",
+    "dev:vite": "vite"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "express": "4.21.2",
+    "lucide-react": "^0.460.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "vue": "3.5.13",
+    "leaflet": "^1.9.4",
+    "react-leaflet": "^4.2.1"
+  },
+  "devDependencies": {
+    "@babel/core": "7.26.0",
+    "@babel/types": "7.26.0",
+    "@vitejs/plugin-react": "4.3.4",
+    "@vitejs/plugin-vue": "5.2.1",
+    "@vue/compiler-dom": "3.5.13",
+    "@vue/compiler-sfc": "3.5.13",
+    "vite": "5.4.21",
+    "vitest": "2.1.9",
+    "tailwindcss": "^3.4.0",
+    "postcss": "^8.4.0",
+    "autoprefixer": "^10.4.0"
+  }
+}

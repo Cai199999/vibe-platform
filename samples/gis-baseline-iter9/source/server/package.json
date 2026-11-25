@@ -1,0 +1,19 @@
+{
+  "name": "vibe-fullstack-server",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "express": "4.21.2",
+    "sequelize": "6.37.5",
+    "mysql2": "3.11.5",
+    "pg": "8.13.1",
+    "pg-hstore": "2.3.4",
+    "multer": "2.5.0",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "db:migrate": "node migrate.mjs"
+  }
+}

@@ -1,0 +1,11 @@
+node_modules
+dist/
+.vite/
+*.log
+vite.config.*.timestamp-*
+*.timestamp-*.mjs
+data/
+*.sqlite
+*.sqlite3
+*.db
+vibe-source-map.json

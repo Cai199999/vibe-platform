@@ -1,0 +1,162 @@
+# GIS 可上线项目评测清单（故事基线）
+#
+# 设计原则：
+#   1. 只检查“可验证的事实”，不做主观打分；
+#   2. 每个类别都能追溯到具体文件 / 命令 / 元数据；
+#   3. 构建与预览由平台 E2E 产出证据，评测脚本负责复核静态事实；
+#   4. 同一份清单既可用于基线，也可用于后续迭代的前后对比。
+
+version: 1
+name: gis-launch-checklist
+
+weights:
+  structure: 10
+  build: 20
+  api_consistency: 15
+  contract_fidelity: 10
+  traceability: 10
+  security: 10
+  gis_domain: 15
+  deployability: 10
+
+structure:
+  required_files:
+    - package.json
+    - Dockerfile
+    - .env.example
+  required_dirs:
+    - src
+    - server
+  optional_files:
+    - README.md
+    - DEPLOY.md
+    - render.yaml
+    - docker-compose.yml
+
+build:
+  package_script: build
+  metadata_status_key: fullstackStatus
+  dist_candidates:
+    - dist
+    - build
+    - client/dist
+  # 默认不联网安装依赖；--run-build 时才执行 npm run build。
+  timeout_seconds: 240
+
+api_consistency:
+  frontend_globs:
+    - "src/**/*.js"
+    - "src/**/*.jsx"
+    - "src/**/*.ts"
+    - "src/**/*.tsx"
+  backend_globs:
+    - "server/**/*.js"
+    - "server/**/*.ts"
+  ignore_paths:
+    - /api/health
+    - /health
+    - /api/v1/health
+  min_match_ratio: 0.8
+
+contract_fidelity:
+  contract_candidates:
+    - ../contract.json
+    - contract.json
+  # 契约 techStack 与产物依赖 / 后端语言的最低一致性要求。
+  frontend_tokens:
+    - react
+    - leaflet
+  backend_tokens:
+    - spring
+    - express
+    - node
+  database_tokens:
+    - mysql
+    - postgresql
+    - sqlite
+  orm_tokens:
+    - jpa
+    - hibernate
+    - sequelize
+  min_route_ratio: 0.8
+
+traceability:
+  source_map_candidates:
+    - vibe-source-map.json
+    - public/vibe-source-map.json
+    - src/vibe-source-map.json
+  oid_attributes:
+    - data-oid
+    - data-node-id
+  contract_candidates:
+    - contract.json
+    - ../contract.json
+  min_oid_nodes: 1
+
+security:
+  forbidden_patterns:
+    - "Access-Control-Allow-Origin: *"
+    - "Access-Control-Allow-Origin', '*'"
+    - "Access-Control-Allow-Origin\", \"*\""
+  secret_patterns:
+    - "(?i)(password|passwd|secret|api[_-]?key|token)\\s*[:=]\\s*['\"][^'\"]{6,}['\"]"
+  allow_secret_files:
+    - .env.example
+  auth_keywords:
+    - bcrypt
+    - jsonwebtoken
+    - jwt
+    - /auth/login
+    - Authorization
+  require_auth: true
+
+gis_domain:
+  frontend_dependencies:
+    - leaflet
+    - react-leaflet
+    - maplibre-gl
+    - openlayers
+    - ol
+    - mapbox-gl
+    - deck.gl
+  source_keywords:
+    - map
+    - lng
+    - lat
+    - longitude
+    - latitude
+    - geojson
+    - geometry
+    - tile
+  backend_keywords:
+    - "ST_"
+    - postgis
+    - geography
+    - geometry
+    - geojson
+    - lng
+    - lat
+  # 真实地图渲染：只装依赖但渲染成文本不算 GIS 能力。
+  render_keywords:
+    - MapContainer
+    - TileLayer
+    - maplibre
+    - "ol/Map"
+  min_keyword_hits: 2
+
+deployability:
+  required_files:
+    - Dockerfile
+    - .env.example
+  recommended_files:
+    - DEPLOY.md
+    - render.yaml
+    - docker-compose.yml
+  health_paths:
+    - /api/health
+    - /health
+    - /api/v1/health
+  dockerfile_checks:
+    - "FROM"
+    - "EXPOSE"
+  prefer_non_root: true

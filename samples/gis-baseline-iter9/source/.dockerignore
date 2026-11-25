@@ -1,0 +1,14 @@
+# 构建镜像时排除本地依赖、运行期数据与敏感配置。
+node_modules
+dist
+data
+.git
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.db
+*.log
+docs
+reports

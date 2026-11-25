@@ -1,0 +1,170 @@
+{
+  "prefix": "/api",
+  "table": "facilities",
+  "coreSchema": "server/schema.core.json",
+  "collection": "/api/v1/facilities",
+  "item": "/api/v1/facilities/:facility_id",
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/health",
+      "source": "express.template"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/facilities",
+      "source": "express.collection"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/facilities",
+      "source": "express.collection"
+    },
+    {
+      "method": "GET",
+      "path": "/api/data",
+      "source": "express.template"
+    },
+    {
+      "method": "POST",
+      "path": "/api/data",
+      "source": "express.template"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/facilities/:facility_id",
+      "source": "express.item"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/facilities/:facility_id",
+      "source": "express.item"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/facilities/:facility_id",
+      "source": "express.item"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/facilities/:facility_id",
+      "source": "express.item"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/users/login",
+      "source": "express.auth"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/users/register",
+      "source": "express.auth"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/users/me",
+      "source": "express.auth"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/facilities/:facility_id/facility-images",
+      "source": "express.multi_entity"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/facilities/:facility_id/facility-images",
+      "source": "express.multi_entity"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/patrol-routes",
+      "source": "express.multi_entity"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/patrol-routes",
+      "source": "express.multi_entity"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/health",
+      "source": "express.multi_entity"
+    }
+  ],
+  "contractRoutes": [
+    {
+      "method": "POST",
+      "path": "/api/v1/users/register"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/users/login"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/users/me"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/facilities"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/facilities"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/facilities/{facility_id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/facilities/{facility_id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/facilities/{facility_id}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/facilities/{facility_id}/facility-images"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/facilities/{facility_id}/facility-images"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/patrol-routes"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/patrol-routes"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/health"
+    }
+  ],
+  "relations": [
+    {
+      "type": "one_to_many",
+      "parentTable": "users",
+      "childTable": "facilities",
+      "foreignKey": "created_by",
+      "parentKey": "id",
+      "onDelete": "CASCADE",
+      "childAlias": "facilities",
+      "parentAlias": "facilities"
+    },
+    {
+      "type": "one_to_many",
+      "parentTable": "facilities",
+      "childTable": "facility_images",
+      "foreignKey": "facility_id",
+      "parentKey": "id",
+      "onDelete": "CASCADE",
+      "childAlias": "images",
+      "parentAlias": "facility"
+    }
+  ]
+}

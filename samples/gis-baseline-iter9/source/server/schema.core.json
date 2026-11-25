@@ -1,0 +1,681 @@
+{
+  "table": "facilities",
+  "entity": "登录表单",
+  "engine": "mysql",
+  "columns": [
+    "id",
+    "name",
+    "type",
+    "status",
+    "lng",
+    "lat",
+    "location",
+    "created_by",
+    "updated_by",
+    "created_at",
+    "updated_at"
+  ],
+  "columnDefs": [
+    [
+      "id",
+      "INTEGER"
+    ],
+    [
+      "name",
+      "TEXT"
+    ],
+    [
+      "type",
+      "TEXT"
+    ],
+    [
+      "status",
+      "TEXT"
+    ],
+    [
+      "lng",
+      "REAL"
+    ],
+    [
+      "lat",
+      "REAL"
+    ],
+    [
+      "location",
+      "TEXT"
+    ],
+    [
+      "created_by",
+      "INTEGER"
+    ],
+    [
+      "updated_by",
+      "INTEGER"
+    ],
+    [
+      "created_at",
+      "TEXT"
+    ],
+    [
+      "updated_at",
+      "TEXT"
+    ]
+  ],
+  "columnMeta": {
+    "id": {
+      "type": "BIGINT",
+      "sqliteType": "INTEGER",
+      "nullable": false,
+      "hasDefault": false,
+      "primary": true,
+      "unique": false,
+      "autoIncrement": true
+    },
+    "name": {
+      "type": "VARCHAR",
+      "sqliteType": "TEXT",
+      "nullable": false,
+      "hasDefault": false,
+      "primary": false,
+      "unique": false,
+      "autoIncrement": false
+    },
+    "type": {
+      "type": "VARCHAR",
+      "sqliteType": "TEXT",
+      "nullable": false,
+      "hasDefault": false,
+      "primary": false,
+      "unique": false,
+      "autoIncrement": false
+    },
+    "status": {
+      "type": "VARCHAR",
+      "sqliteType": "TEXT",
+      "nullable": false,
+      "hasDefault": true,
+      "primary": false,
+      "unique": false,
+      "autoIncrement": false
+    },
+    "lng": {
+      "type": "DECIMAL",
+      "sqliteType": "REAL",
+      "nullable": false,
+      "hasDefault": false,
+      "primary": false,
+      "unique": false,
+      "autoIncrement": false
+    },
+    "lat": {
+      "type": "DECIMAL",
+      "sqliteType": "REAL",
+      "nullable": false,
+      "hasDefault": false,
+      "primary": false,
+      "unique": false,
+      "autoIncrement": false
+    },
+    "location": {
+      "type": "POINT",
+      "sqliteType": "TEXT",
+      "nullable": false,
+      "hasDefault": false,
+      "primary": false,
+      "unique": false,
+      "autoIncrement": false
+    },
+    "created_by": {
+      "type": "BIGINT",
+      "sqliteType": "INTEGER",
+      "nullable": true,
+      "hasDefault": false,
+      "primary": false,
+      "unique": false,
+      "autoIncrement": false
+    },
+    "updated_by": {
+      "type": "BIGINT",
+      "sqliteType": "INTEGER",
+      "nullable": true,
+      "hasDefault": false,
+      "primary": false,
+      "unique": false,
+      "autoIncrement": false
+    },
+    "created_at": {
+      "type": "DATETIME",
+      "sqliteType": "TEXT",
+      "nullable": false,
+      "hasDefault": true,
+      "primary": false,
+      "unique": false,
+      "autoIncrement": false
+    },
+    "updated_at": {
+      "type": "DATETIME",
+      "sqliteType": "TEXT",
+      "nullable": false,
+      "hasDefault": true,
+      "primary": false,
+      "unique": false,
+      "autoIncrement": false
+    }
+  },
+  "displayKey": "name",
+  "payloadKey": "name",
+  "tables": [
+    {
+      "table": "facilities",
+      "entity": "登录表单",
+      "isCore": true,
+      "columns": [
+        "id",
+        "name",
+        "type",
+        "status",
+        "lng",
+        "lat",
+        "location",
+        "created_by",
+        "updated_by",
+        "created_at",
+        "updated_at"
+      ],
+      "columnDefs": [
+        [
+          "id",
+          "INTEGER"
+        ],
+        [
+          "name",
+          "TEXT"
+        ],
+        [
+          "type",
+          "TEXT"
+        ],
+        [
+          "status",
+          "TEXT"
+        ],
+        [
+          "lng",
+          "REAL"
+        ],
+        [
+          "lat",
+          "REAL"
+        ],
+        [
+          "location",
+          "TEXT"
+        ],
+        [
+          "created_by",
+          "INTEGER"
+        ],
+        [
+          "updated_by",
+          "INTEGER"
+        ],
+        [
+          "created_at",
+          "TEXT"
+        ],
+        [
+          "updated_at",
+          "TEXT"
+        ]
+      ],
+      "columnMeta": {
+        "id": {
+          "type": "BIGINT",
+          "sqliteType": "INTEGER",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": true,
+          "unique": false,
+          "autoIncrement": true
+        },
+        "name": {
+          "type": "VARCHAR",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "type": {
+          "type": "VARCHAR",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "status": {
+          "type": "VARCHAR",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": true,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "lng": {
+          "type": "DECIMAL",
+          "sqliteType": "REAL",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "lat": {
+          "type": "DECIMAL",
+          "sqliteType": "REAL",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "location": {
+          "type": "POINT",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "created_by": {
+          "type": "BIGINT",
+          "sqliteType": "INTEGER",
+          "nullable": true,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "updated_by": {
+          "type": "BIGINT",
+          "sqliteType": "INTEGER",
+          "nullable": true,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "created_at": {
+          "type": "DATETIME",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": true,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "updated_at": {
+          "type": "DATETIME",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": true,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        }
+      },
+      "displayKey": "name",
+      "payloadKey": "name"
+    },
+    {
+      "table": "users",
+      "entity": "登录表单",
+      "isCore": false,
+      "columns": [
+        "id",
+        "username",
+        "role",
+        "created_at",
+        "updated_at"
+      ],
+      "columnDefs": [
+        [
+          "id",
+          "INTEGER"
+        ],
+        [
+          "username",
+          "TEXT"
+        ],
+        [
+          "role",
+          "TEXT"
+        ],
+        [
+          "created_at",
+          "TEXT"
+        ],
+        [
+          "updated_at",
+          "TEXT"
+        ]
+      ],
+      "columnMeta": {
+        "id": {
+          "type": "BIGINT",
+          "sqliteType": "INTEGER",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": true,
+          "unique": false,
+          "autoIncrement": true
+        },
+        "username": {
+          "type": "VARCHAR",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "role": {
+          "type": "ENUM",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": true,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "created_at": {
+          "type": "DATETIME",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": true,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "updated_at": {
+          "type": "DATETIME",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": true,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        }
+      },
+      "displayKey": "username",
+      "payloadKey": "username"
+    },
+    {
+      "table": "facility_images",
+      "entity": "登录表单",
+      "isCore": false,
+      "columns": [
+        "id",
+        "facility_id",
+        "url",
+        "filename",
+        "mime_type",
+        "size_bytes",
+        "created_by",
+        "created_at"
+      ],
+      "columnDefs": [
+        [
+          "id",
+          "INTEGER"
+        ],
+        [
+          "facility_id",
+          "INTEGER"
+        ],
+        [
+          "url",
+          "TEXT"
+        ],
+        [
+          "filename",
+          "TEXT"
+        ],
+        [
+          "mime_type",
+          "TEXT"
+        ],
+        [
+          "size_bytes",
+          "INTEGER"
+        ],
+        [
+          "created_by",
+          "INTEGER"
+        ],
+        [
+          "created_at",
+          "TEXT"
+        ]
+      ],
+      "columnMeta": {
+        "id": {
+          "type": "BIGINT",
+          "sqliteType": "INTEGER",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": true,
+          "unique": false,
+          "autoIncrement": true
+        },
+        "facility_id": {
+          "type": "BIGINT",
+          "sqliteType": "INTEGER",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "url": {
+          "type": "VARCHAR",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "filename": {
+          "type": "VARCHAR",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "mime_type": {
+          "type": "VARCHAR",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "size_bytes": {
+          "type": "INT",
+          "sqliteType": "INTEGER",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "created_by": {
+          "type": "BIGINT",
+          "sqliteType": "INTEGER",
+          "nullable": true,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "created_at": {
+          "type": "DATETIME",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": true,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        }
+      },
+      "displayKey": "facility_id",
+      "payloadKey": "facility_id"
+    }
+  ],
+  "relations": [
+    {
+      "type": "one_to_many",
+      "parentTable": "users",
+      "childTable": "facilities",
+      "foreignKey": "created_by",
+      "parentKey": "id",
+      "onDelete": "CASCADE",
+      "childAlias": "facilities",
+      "parentAlias": "createdFacilities"
+    },
+    {
+      "type": "one_to_many",
+      "parentTable": "facilities",
+      "childTable": "facility_images",
+      "foreignKey": "facility_id",
+      "parentKey": "id",
+      "onDelete": "CASCADE",
+      "childAlias": "images",
+      "parentAlias": "facility"
+    }
+  ],
+  "extraTables": [
+    {
+      "table": "patrol_routes",
+      "entity": "登录表单",
+      "isCore": false,
+      "columns": [
+        "id",
+        "name",
+        "path_geojson",
+        "status",
+        "created_by",
+        "created_at",
+        "updated_at"
+      ],
+      "columnDefs": [
+        [
+          "id",
+          "INTEGER"
+        ],
+        [
+          "name",
+          "TEXT"
+        ],
+        [
+          "path_geojson",
+          "TEXT"
+        ],
+        [
+          "status",
+          "TEXT"
+        ],
+        [
+          "created_by",
+          "INTEGER"
+        ],
+        [
+          "created_at",
+          "TEXT"
+        ],
+        [
+          "updated_at",
+          "TEXT"
+        ]
+      ],
+      "columnMeta": {
+        "id": {
+          "type": "BIGINT",
+          "sqliteType": "INTEGER",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": true,
+          "unique": false,
+          "autoIncrement": true
+        },
+        "name": {
+          "type": "VARCHAR",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "path_geojson": {
+          "type": "JSON",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "status": {
+          "type": "VARCHAR",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": true,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "created_by": {
+          "type": "BIGINT",
+          "sqliteType": "INTEGER",
+          "nullable": true,
+          "hasDefault": false,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "created_at": {
+          "type": "DATETIME",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": true,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        },
+        "updated_at": {
+          "type": "DATETIME",
+          "sqliteType": "TEXT",
+          "nullable": false,
+          "hasDefault": true,
+          "primary": false,
+          "unique": false,
+          "autoIncrement": false
+        }
+      },
+      "displayKey": "name",
+      "payloadKey": "name"
+    }
+  ],
+  "source": "databaseDdl",
+  "contractId": "ctr_83e7700b9b5344f5a175"
+}
