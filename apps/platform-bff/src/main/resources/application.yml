@@ -10,6 +10,13 @@ server:
     accept-count: ${SERVER_TOMCAT_ACCEPT_COUNT:200}
     max-connections: ${SERVER_TOMCAT_MAX_CONNECTIONS:8192}
 
+vibe:
+  oidc:
+    # 默认关闭：沿用 Mock 鉴权；生产启用后要求 Bearer JWT。
+    enabled: ${VIBE_OIDC_ENABLED:false}
+    issuer-uri: ${VIBE_OIDC_ISSUER_URI:}
+    jwk-set-uri: ${VIBE_OIDC_JWK_SET_URI:}
+
 spring:
   application:
     name: java-bff
