@@ -14,6 +14,7 @@ from ai_core.collaboration.a2a_bridge import CollaborationBridge
 from ai_core.collaboration.clarification import ClarificationBridge
 from ai_core.collaboration.risk import RiskGate
 from ai_core.prototype.delivery import package_delivery
+from ai_core.prototype.flywheel import run_flywheel_evaluation
 from ai_core.prototype.generator import generate_workspace
 from ai_core.prototype.planner import plan_topology
 from ai_core.prototype.runtime import (
@@ -294,17 +295,13 @@ def run_full_flow(
     step("delivery", delivery=delivery)
 
     # 8. 应用层飞轮：只调提示词，不训练
-    baseline = 0.72
-    candidate = 0.81
-    threshold = 0.75
-    decision = "canary" if candidate >= threshold > baseline else "reject"
+    evaluation = run_flywheel_evaluation(threshold=0.85)
+    if evaluation["decision"] != "canary":
+        raise RuntimeError(f"飞轮候选未通过评测闸门: {evaluation}")
     flywheel = {
         "ticketId": "t_001",
         "humanDecision": "accepted",
-        "candidate": {"promptVersion": "B", "changes": ["补充财务关键词"]},
-        "eval": {"baseline": baseline, "candidate": candidate, "threshold": threshold},
-        "decision": decision,
-        "training": "not-performed",
+        **evaluation,
     }
     flywheel_dir = workspace / "flywheel"
     flywheel_dir.mkdir(parents=True, exist_ok=True)
@@ -312,7 +309,7 @@ def run_full_flow(
         json.dumps(flywheel, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    step("flywheel", decision=decision)
+    step("flywheel", decision=evaluation["decision"])
 
     # 9. 证据清单
     evidence = {
