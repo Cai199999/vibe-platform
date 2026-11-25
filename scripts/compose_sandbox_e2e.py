@@ -174,6 +174,28 @@ def main() -> int:
         wait_http(f"{AGENT}/health")
         report["stages"].append({"name": "health", "ok": True})
 
+        tests = run(
+            compose
+            + [
+                "run",
+                "--rm",
+                "--no-deps",
+                "consumer",
+                "python",
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests",
+                "-v",
+            ],
+            check=False,
+        )
+        test_output = tests.stdout + tests.stderr
+        if tests.returncode != 0 or "OK" not in test_output:
+            raise RuntimeError(f"生成测试失败:\n{test_output[-1500:]}")
+        report["stages"].append({"name": "generated_tests", "ok": True})
+
         created = post_ticket()
         event_id = created["event"]["eventId"]
         state = wait_row(compose)

@@ -45,6 +45,7 @@ def generate_workspace(
         f"helm/{spec.name}/templates/otel-collector.yaml": _otel_k8s_yaml(spec),
         "observability/otel-collector.yaml": _otel_yaml(),
         "tests/smoke_test.py": _smoke_test(),
+        "tests/test_app.py": _app_test(),
         "contract/topology.json": json.dumps(
             topology.to_dict(), ensure_ascii=False, indent=2
         )
@@ -733,6 +734,7 @@ COPY services ./services
 COPY db ./db
 COPY events ./events
 COPY observability ./observability
+COPY tests ./tests
 CMD ["python", "services/consumer/consumer.py", "--watch"]
 """
 
@@ -1018,6 +1020,100 @@ service:
       receivers: [otlp]
       exporters: [debug]
 """
+
+
+def _app_test() -> str:
+    return '''#!/usr/bin/env python3
+"""生成的契约测试：分类、写回与幂等。"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class TicketAppTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="ticket-test-")
+        self.db = Path(self.temp.name) / "app.db"
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "db/migrate.py"),
+                "--db",
+                str(self.db),
+                "--migrations",
+                str(ROOT / "db/migrations"),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.event = Path(self.temp.name) / "event.json"
+        self.event.write_text(
+            json.dumps(
+                {
+                    "eventId": "evt_test",
+                    "ticketId": "t_test",
+                    "title": "打印机无法连接",
+                    "content": "办公室打印机无法连接网络",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def consume(self) -> dict:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "services/consumer/consumer.py"),
+                "--db",
+                str(self.db),
+                "--event",
+                str(self.event),
+                "--agent",
+                str(ROOT / "services/agent/agent.py"),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return json.loads(result.stdout)
+
+    def test_classification_and_idempotency(self) -> None:
+        first = self.consume()
+        second = self.consume()
+        self.assertFalse(first["duplicate"])
+        self.assertTrue(second["duplicate"])
+
+        conn = sqlite3.connect(self.db)
+        try:
+            row = conn.execute(
+                "SELECT ai_category FROM tickets WHERE id = 't_test'"
+            ).fetchone()
+            processed = conn.execute(
+                "SELECT COUNT(*) FROM processed_events"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(row[0], "IT")
+        self.assertEqual(processed, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+'''
 
 
 def _smoke_test() -> str:
