@@ -12,6 +12,7 @@ from ai_core.domain.visual_agent import (
     VisualNodeGenerationRequest,
 )
 from ai_core.domain.visual_document import VisualDocument, VisualNode
+from ai_core.ports.model import ModelClientError
 from ai_core.visual_agent.service import VisualNodeGenerator
 
 
@@ -128,6 +129,25 @@ class VisualNodeAgentTest(unittest.TestCase):
 
         self.assertEqual(ctx.exception.code, "VISUAL_NODE_INVALID")
         self.assertEqual(len(model.calls), 2)
+
+    def test_upstream_model_outage_is_retryable_503(self) -> None:
+        class _DownModel:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def generate(self, task: str, system: str, human: str) -> str:
+                self.calls += 1
+                raise ModelClientError("DeepSeek 调用失败: Connection error.")
+
+        model = _DownModel()
+        service = VisualNodeGenerator(client=model, settings=_Settings())  # type: ignore[arg-type]
+
+        with self.assertRaises(VisualNodeGenerationError) as ctx:
+            service.generate(_request())
+
+        self.assertEqual(ctx.exception.code, "VISUAL_LLM_UNAVAILABLE")
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(model.calls, 2)
 
     def test_page_root_and_absolute_coordinates_are_rejected(self) -> None:
         for payload in (

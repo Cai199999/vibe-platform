@@ -270,6 +270,7 @@ class VisualNodeGenerator:
         )
         attempt = 0
         last_error = ""
+        last_error_is_model = False
         while attempt < 2:
             attempt += 1
             try:
@@ -317,15 +318,20 @@ class VisualNodeGenerator:
                 )
             except (ValueError, ModelClientError) as exc:
                 last_error = str(exc)
+                last_error_is_model = isinstance(exc, ModelClientError)
                 logger.warning(
-                    "visual node generation attempt=%s failed: %s",
+                    "visual node generation attempt=%s failed model=%s: %s",
                     attempt,
+                    last_error_is_model,
                     last_error,
                 )
-                human += (
-                    "\n\n上一次输出不合法，请修正后只输出 JSON 数组。"
-                    f"\n错误：{last_error[:1200]}"
-                )
+                # 模型连接失败不是“输出格式不合法”，继续追加 schema 纠正
+                # 提示只会浪费一次请求；直接进入下一次（有界）尝试。
+                if not last_error_is_model:
+                    human += (
+                        "\n\n上一次输出不合法，请修正后只输出 JSON 数组。"
+                        f"\n错误：{last_error[:1200]}"
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("visual node generation crashed")
                 raise VisualNodeGenerationError(
@@ -335,6 +341,13 @@ class VisualNodeGenerator:
                     diagnostic={"error": str(exc)[:500]},
                 ) from exc
 
+        if last_error_is_model:
+            raise VisualNodeGenerationError(
+                "VISUAL_LLM_UNAVAILABLE",
+                "模型服务暂时不可用，请稍后重试",
+                status_code=503,
+                diagnostic={"error": last_error[:1000]},
+            )
         raise VisualNodeGenerationError(
             "VISUAL_NODE_INVALID",
             "局部生成未通过 VisualDocument Schema 校验，请换一种描述重试",

@@ -545,6 +545,8 @@ export function deleteVisualNodeFromDocument(
 ) {
   const found = findVisualNode(document.root, nodeId)
   if (!found) return document
+  // 页面根是隐式容器：不可删除；否则用户会把整页从 VisualDocument 中删掉。
+  if (found.parent === null || found.node.type === 'page') return document
   if (found.node.locked) return document
   const { root, removed } = removeVisualNode(document.root, nodeId)
   if (!removed) return document

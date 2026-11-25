@@ -225,6 +225,78 @@ class VisualV0Tests(unittest.TestCase):
         self.assertIsNotNone(contract.visual_document)
         self.assertEqual(contract.visual_document.doc_id, "vdoc_v0")
 
+    def test_backend_binding_restores_routes_and_components_from_visual(
+        self,
+    ) -> None:
+        """Iter6 回归：模型重写契约时丢掉的路由 / 组件，必须由冻结树补齐。"""
+        visual = build_visual_document_from_contract(
+            title="巡检平台",
+            page_layout=[{"region": "main", "title": "主内容区"}],
+            components=[
+                {"name": "设施表单", "role": "form", "description": "新增设施"},
+                {"name": "工单列表", "role": "list", "description": "工单列表"},
+                {"name": "工单状态按钮", "role": "action", "description": "推进状态"},
+            ],
+            frontend_routes=[
+                {"path": "/", "name": "总览", "description": "首页"},
+                {"path": "/tasks", "name": "工单", "description": "工单页"},
+            ],
+        )
+        draft = replace(
+            _existing_draft(),
+            visual_document={},
+            frontend_routes=[{"path": "/", "name": "总览", "description": "首页"}],
+            components=[
+                {"name": "设施表单", "role": "form", "description": "新增设施"}
+            ],
+        )
+        contract = assemble_contract(
+            contract_id="contract_bind_merge",
+            run_id="arc_bind_merge",
+            shape="full_stack_system",
+            confidence_score=0.9,
+            threshold=0.85,
+            source_hash="sha256:bind_merge",
+            draft=draft,
+            citations=[],
+            output_phase="BACKEND_BINDING",
+            frozen_visual_document=visual,
+        )
+        self.assertEqual(
+            [item["path"] for item in contract.frontend_routes],
+            ["/", "/tasks"],
+        )
+        names = [item["name"] for item in contract.components]
+        self.assertEqual(
+            names,
+            ["设施表单", "工单列表", "工单状态按钮"],
+        )
+
+    def test_solution_choice_is_written_into_contract_markdown(self) -> None:
+        """用户选中的复用方案必须进入契约正文，供契约侧审计。"""
+        contract = assemble_contract(
+            contract_id="contract_choice",
+            run_id="arc_choice",
+            shape="full_stack_system",
+            confidence_score=0.9,
+            threshold=0.85,
+            source_hash="sha256:choice",
+            draft=_existing_draft(),
+            citations=[],
+            solution_choice={
+                "optionId": "opt_reuse_geoai",
+                "kind": "REUSE",
+                "title": "opengeos/geoai",
+                "sourceUrl": "https://github.com/opengeos/geoai",
+                "integrationPlan": "作为依赖引入，业务模型自研。",
+            },
+        )
+        markdown = contract.contract_markdown
+        self.assertIn("## 方案选择", markdown)
+        self.assertIn("opengeos/geoai", markdown)
+        self.assertIn("opt_reuse_geoai", markdown)
+        self.assertIn("作为依赖引入", markdown)
+
 
 class ExistingSourceSlotTests(unittest.TestCase):
     def test_ui_layout_is_not_required_for_existing_source(self) -> None:

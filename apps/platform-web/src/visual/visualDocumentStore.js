@@ -70,11 +70,16 @@ function selectedStillExists(document, selectedId) {
   return Boolean(selectedId && findVisualNode(document.root, selectedId))
 }
 
+/** 页面根不是可编辑节点；默认选中它的第一个子节点。 */
+function firstSelectableChild(root) {
+  return root?.children?.[0]?.id ?? null
+}
+
 function initialState() {
   const document = readStoredDocument()
   return {
     doc: withActivePageRoot(document, document.root),
-    selectedId: document.root?.id ?? null,
+    selectedId: firstSelectableChild(document.root),
     activePageId: activePageIdOf(document),
     history: [],
     future: [],
@@ -96,9 +101,11 @@ export const useVisualDocumentStore = create((set, get) => {
     set((state) => ({
       doc: synced,
       selectedId:
-        selectedId && findVisualNode(synced.root, selectedId)
+        selectedId &&
+        selectedId !== synced.root?.id &&
+        findVisualNode(synced.root, selectedId)
           ? selectedId
-          : synced.root?.id ?? null,
+          : firstSelectableChild(synced.root),
       activePageId: activePageIdOf(synced),
       history: [...state.history, previous].slice(-HISTORY_LIMIT),
       future: [],
@@ -112,6 +119,11 @@ export const useVisualDocumentStore = create((set, get) => {
     ...initialState(),
 
     selectNode: (nodeId) => {
+      const state = get()
+      if (nodeId && nodeId === state.doc.root?.id) {
+        set({ selectedId: firstSelectableChild(state.doc.root) })
+        return
+      }
       set({ selectedId: nodeId || null })
     },
 
@@ -122,7 +134,7 @@ export const useVisualDocumentStore = create((set, get) => {
       set({
         doc: next,
         activePageId: pageId,
-        selectedId: next.root?.id ?? null,
+        selectedId: firstSelectableChild(next.root),
         history: [],
         future: [],
         lastError: '',
@@ -135,7 +147,7 @@ export const useVisualDocumentStore = create((set, get) => {
       if (!editable()) return false
       const state = get()
       const result = addVisualPage(state.doc, { title, path })
-      return commit(result.document, result.page.root.id)
+      return commit(result.document, firstSelectableChild(result.page.root))
     },
 
     addNode: (type, parentId = null, index = -1) => {
@@ -155,7 +167,7 @@ export const useVisualDocumentStore = create((set, get) => {
           node,
         })
         const selectedId =
-          type === 'page' ? next.root?.id ?? null : node.id
+          type === 'page' ? firstSelectableChild(next.root) : node.id
         return commit(next, selectedId)
       } catch (cause) {
         set({ lastError: String(cause?.message || cause) })
@@ -168,6 +180,7 @@ export const useVisualDocumentStore = create((set, get) => {
       const state = get()
       const found = findVisualNode(state.doc.root, nodeId)
       if (!found) return false
+      if (found.parent === null || found.node.type === 'page') return false
       const next = duplicateVisualNodeInDocument(state.doc, nodeId)
       const copy = findVisualNode(next.root, found.parent?.id)
       return commit(next, copy?.node?.children?.[found.index + 1]?.id ?? nodeId)

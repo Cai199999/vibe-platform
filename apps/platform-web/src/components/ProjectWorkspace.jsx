@@ -1250,6 +1250,7 @@ function ProjectWorkspaceInner({
           gate={supervisorGate}
           onReleaseGate={onReleaseGate}
           projectMode={projectMode}
+          modelProvider={modelProvider}
         />
       )}
     </section>

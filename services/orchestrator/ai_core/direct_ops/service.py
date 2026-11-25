@@ -121,7 +121,7 @@ def _oid_from_selector(selector: str) -> str:
 
     SDK 的 source.selector 对 OID 节点就是 data-oid 选择器，但 data-oid
     只存在于构建期 Source Map，并不写进源码。父容器解析必须拿到 oid
-    才能走地图定位，否则命中不到任何 JSX 节点。
+    才能走源码映射定位，否则命中不到任何 JSX 节点。
     """
     match = re.search(r'\[data-oid\s*=\s*"([^"]+)"\]', str(selector or ""))
     return match.group(1) if match else ""
@@ -1168,7 +1168,7 @@ class DirectOperationService:
         request = {
             "anchorId": parent_anchor_id,
             "annotationId": f"{payload.direct_action_id}_parent",
-            # Source map 节点在源码里没有 data-oid 属性，只有构建期地图。
+            # Source map 节点在源码里没有 data-oid 属性，只有构建期映射。
             # 因此 [data-oid="..."] 选择器必须同时带 oid，否则父容器永远
             # 解析不到，表现为“移动成功但组件没动 / 找不到落点”。
             "oid": placement.get("parentOid") or _oid_from_selector(parent_selector),

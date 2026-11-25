@@ -119,21 +119,22 @@ function VisualNodeView({
   }
 
   if (node.type === 'page') {
+    // 页面根是隐式容器：保留 data-visual-drop-id 作为落点，但不再渲染
+    // 可选中的节点外壳 / 删除按钮，避免用户把整页根节点删掉。
     return (
       <div
-        {...common}
+        className={`vc-node vc-page vc-page-root ${node.style?.className || ''}`}
+        style={layoutStyle(node)}
         data-visual-drop-id={node.locked ? undefined : node.id}
-        className={`${common.className} vc-page`}
+        data-visual-page-root={node.id}
+        data-visual-depth={depth}
+        onClick={(event) => {
+          // 点页面空白处只取消选中；页面根不作为可编辑节点，
+          // 但下一次“添加组件”会回退到页面根作为父容器。
+          event.stopPropagation()
+          onSelect(null)
+        }}
       >
-        <NodeChrome
-          node={node}
-          selected={selected}
-          onStartDrag={handlePointerDown}
-          onDelete={onDelete}
-          onDuplicate={onDuplicate}
-          onMagic={magic}
-          frozen={frozen}
-        />
         <div className="vc-page-body" data-visual-children>
           {node.children.length === 0 ? (
             <div className="vc-empty-page">

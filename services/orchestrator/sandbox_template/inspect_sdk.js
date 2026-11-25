@@ -3576,9 +3576,22 @@
   var directDeleteNeedsAnalysis = false
   var directDeleteAnalysisRequested = false
   var directDeletePreviousDisplay = ''
+  // 分析请求发出后用户可能又点了别的组件；响应回来时必须按发起时的
+  // 目标收尾，否则会把 B 的锚点当成 A 的删除结果入队。
+  var directDeletePendingSource = null
+  var directDeletePendingNode = null
+  var directDeletePendingDisplay = ''
   // 离线缓冲：已乐观隐藏、等待父页面【提交修改】的删除项。
   // 每项记录节点、源码锚点与原始 display，撤销缓冲时逐个恢复。
   var directPendingDeletes = []
+
+  function resetDirectDeleteAnalysis() {
+    directDeleteNeedsAnalysis = false
+    directDeleteAnalysisRequested = false
+    directDeletePendingSource = null
+    directDeletePendingNode = null
+    directDeletePendingDisplay = ''
+  }
 
   function rememberPendingDelete(node, source, previousDisplay) {
     if (!node || !source) return
@@ -3590,7 +3603,20 @@
   }
 
   function pendingDeleteKey(source) {
-    return String((source && source.selector) || '')
+    if (!source) return ''
+    // selector 会把同 class 的兄弟节点混成一条记录：提交第一个删除时
+    // 会把第二个的记录一起清掉，后续失败就无法恢复。优先用 oid；
+    // 循环项共享 oid，再用运行时 instance 序号区分具体实例。
+    var oid = String(source.oid || source.anchorId || '')
+    if (oid) {
+      var instance = source.instance
+      var instanceKey =
+        instance && typeof instance === 'object'
+          ? JSON.stringify(instance)
+          : String(instance === undefined || instance === null ? '' : instance)
+      return 'oid:' + oid + ':' + instanceKey
+    }
+    return 'selector:' + String(source.selector || '')
   }
 
   function restorePendingDeletes(source) {
@@ -4591,9 +4617,12 @@
     directMenu.style.display = directMenu.style.display === 'block' ? 'none' : 'block'
   }
 
-  function restoreDirectDeleteNode() {
-    if (directDeleteNode && directDeleteNode.isConnected) {
-      directDeleteNode.style.display = directDeletePreviousDisplay || ''
+  function restoreDirectDeleteNode(node, previousDisplay) {
+    var target = node || directDeleteNode
+    var display =
+      previousDisplay !== undefined ? previousDisplay : directDeletePreviousDisplay
+    if (target && target.isConnected) {
+      target.style.display = display || ''
     }
     directDeletePreviousDisplay = ''
   }
@@ -4617,6 +4646,9 @@
     }
     if (directDeleteNeedsAnalysis && !directDeleteAnalysisRequested) {
       directDeleteAnalysisRequested = true
+      directDeletePendingSource = directDeleteSource
+      directDeletePendingNode = directDeleteNode
+      directDeletePendingDisplay = directDeletePreviousDisplay
       post('direct-delete-request', {
         projectId: directProjectId,
         source: directDeleteSource,
@@ -4867,6 +4899,9 @@
       directDeletePending = false
       directDeleteNeedsAnalysis = false
       directDeleteAnalysisRequested = false
+      directDeletePendingSource = null
+      directDeletePendingNode = null
+      directDeletePendingDisplay = ''
       restorePendingDeletes(null)
       showDirectToast('已撤销待提交的删除')
       return
@@ -4874,69 +4909,59 @@
     if (data.type === 'direct-delete-result') {
       directDeletePending = false
       var result = data.payload || {}
-      var resultSource = result.source || directDeleteSource
+      var wasAnalysis = directDeleteAnalysisRequested
+      // 分析是异步的：响应回来时用户可能已经点了别的组件。始终按
+      // 发起分析时的目标收尾，避免把 B 的锚点当成 A 的删除结果。
+      var resultSource = result.source || directDeletePendingSource || directDeleteSource
+      var resultNode = directDeletePendingNode || directDeleteNode
+      var resultDisplay = wasAnalysis
+        ? directDeletePendingDisplay
+        : directDeletePreviousDisplay
       if (result.pending) {
-        directDeleteNeedsAnalysis = false
-        directDeleteAnalysisRequested = false
+        resetDirectDeleteAnalysis()
         showDirectToast('已加入待提交，点【提交修改】生效')
         return
       }
       if (result.ok || result.status === 'SUCCEEDED') {
         // 快路径成功：节点已被乐观隐藏，等待 HMR 移除；左下角可撤回。
-        directDeleteNeedsAnalysis = false
-        directDeleteAnalysisRequested = false
+        resetDirectDeleteAnalysis()
         commitPendingDeletes(resultSource)
         showDirectToast('已删除，可点左下角“撤回”')
         return
       }
       if (result.handled || result.status === 'HITL_REQUIRED') {
         // 父页面已弹出 HITL 决策面板，恢复节点显示。
-        directDeleteNeedsAnalysis = false
-        directDeleteAnalysisRequested = false
+        resetDirectDeleteAnalysis()
         restorePendingDeletes(resultSource)
-        restoreDirectDeleteNode()
+        restoreDirectDeleteNode(resultNode, resultDisplay)
         return
       }
-      if (result.safe === false) {
-        directDeleteNeedsAnalysis = false
-        directDeleteAnalysisRequested = false
-        restorePendingDeletes(resultSource)
-        restoreDirectDeleteNode()
-      }
-      if (result.safe && directDeleteAnalysisRequested) {
+      if (result.safe && wasAnalysis) {
         // 分析确认可安全删除：用户点“确认删除”时已完成确认，直接执行。
-        directDeleteAnalysisRequested = false
-        directDeleteNeedsAnalysis = false
-        rememberPendingDelete(
-          directDeleteNode,
-          directDeleteSource,
-          directDeletePreviousDisplay,
-        )
+        resetDirectDeleteAnalysis()
+        rememberPendingDelete(resultNode, resultSource, resultDisplay)
         post('direct-delete-confirmed', {
           projectId: directProjectId,
-          source: directDeleteSource,
+          source: resultSource,
         })
         return
       }
       if (result.safe && directDeleteAutoConfirm) {
         directDeleteAutoConfirm = false
-        rememberPendingDelete(
-          directDeleteNode,
-          directDeleteSource,
-          directDeletePreviousDisplay,
-        )
+        resetDirectDeleteAnalysis()
+        rememberPendingDelete(resultNode, resultSource, resultDisplay)
         post('direct-delete-confirmed', {
           projectId: directProjectId,
-          source: directDeleteSource,
+          source: resultSource,
         })
         return
       }
       if (result.safe) {
         var panel = ensureDirectConfirm()
         var node =
-          directDeleteNode && directDeleteNode.isConnected
-            ? directDeleteNode
-            : resolveSourceInstance(directDeleteSource)
+          resultNode && resultNode.isConnected
+            ? resultNode
+            : resolveSourceInstance(resultSource)
         if (node) {
           var rect = node.getBoundingClientRect()
           panel.style.left = Math.max(2, rect.right - 190) + 'px'
@@ -4947,8 +4972,13 @@
         }
         panel.style.display = 'block'
       } else {
+        resetDirectDeleteAnalysis()
+        // 待提交删除会先记入 directPendingDeletes；按 source 精确恢复即可。
+        // 只有分析阶段（尚未入 buffer）才需要直接还原隐藏的 DOM 节点。
         restorePendingDeletes(resultSource)
-        restoreDirectDeleteNode()
+        if (wasAnalysis) {
+          restoreDirectDeleteNode(resultNode, resultDisplay)
+        }
         showDirectToast(
           '已拦截：' + ((result.reasons || []).join('；') || '该组件不可直接删除'),
         )

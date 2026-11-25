@@ -1,0 +1,46 @@
+# 画布地基评测集
+#
+# 评的不是“能生成”，而是“画布操作 → 源码 → 构建 → 预览”是否一致：
+#   - 选中 / 删除 / 撤销 / 提交 / 拖拽 / 身份稳定；
+#   - 每次操作是否有可回滚的缓冲；
+#   - 操作完成后源码锚点、预览 DOM、构建结果是否一致；
+#   - 延迟、重复 oid、页面错误。
+#
+# 评测对象：一次新生成的 GIS 项目（live 画布，不导出代码包）。
+
+version: 1
+name: canvas-foundation-eval
+
+goal: >-
+  做一个 GIS 地图平台：地图总览、设施列表、登录；
+  要求 React + Vite + Node.js/Express + MySQL，可 Docker 部署。
+
+# UI 只暴露 auto（DeepSeek V3）与 mock；auto 在配置了
+# DEEPSEEK_API_KEY 时走真实模型。
+provider: auto
+quality_tier: L2_STANDARD
+
+cases:
+  - id: identity-baseline
+    name: 操作前 oid / node-id 唯一且稳定
+  - id: select
+    name: 选中节点并出现 Direct Ops 浮层
+  - id: delete-undo
+    name: 删除入缓冲 → 撤销恢复（源码未变）
+  - id: delete-commit
+    name: 再次删除 → 提交修改 → 源码/预览一致
+  - id: move-commit
+    name: 同父拖拽 → 提交修改 → 顺序与源码一致
+  - id: identity-after
+    name: 操作后无新 node-id（VisualDocument 身份漂移）
+  - id: call-site
+    name: 跨文件调用点 Props 更新（call_site_props_e2e.mjs）
+  - id: repeat-reorder
+    name: 循环项 / 网格拖拽、尺寸与 Alt 自由定位（direct_move_e2e.mjs）
+  - id: add-component
+    name: 圈选新增组件并写回源码（add_component_e2e_test.py，可选）
+
+thresholds:
+  max_case_latency_ms: 30000
+  min_oid_nodes: 20
+  max_page_errors: 0

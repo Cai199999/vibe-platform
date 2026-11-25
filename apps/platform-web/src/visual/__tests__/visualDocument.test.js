@@ -37,7 +37,7 @@ describe('VisualDocument 纯函数', () => {
     expect(validateVisualDocument(next).ok).toBe(true)
   })
 
-  it('支持增删改与任意根节点删除', () => {
+  it('根节点不可删除，子节点可删除', () => {
     let doc = emptyDoc()
     const section = createVisualNode('section')
     doc = insertVisualNodeIntoDocument(doc, {
@@ -56,8 +56,14 @@ describe('VisualDocument 纯函数', () => {
     })
     expect(findVisualNode(doc.root, text.id).node.props.text).toBe('新标题')
 
+    const beforeRootDelete = doc
     doc = deleteVisualNodeFromDocument(doc, doc.root.id)
-    expect(doc.root).toBeNull()
+    expect(doc).toBe(beforeRootDelete)
+    expect(findVisualNode(doc.root, section.id)).toBeTruthy()
+    expect(validateVisualDocument(doc).ok).toBe(true)
+
+    doc = deleteVisualNodeFromDocument(doc, text.id)
+    expect(findVisualNode(doc.root, text.id)).toBeNull()
     expect(validateVisualDocument(doc).ok).toBe(true)
   })
 

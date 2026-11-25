@@ -82,6 +82,10 @@ import {
   storeImportedSource,
 } from '../workspace/projectMode.js'
 import {
+  activeKnowledgeDocuments,
+  mergeKnowledgeDocuments,
+} from '../workspace/documentCenter.js'
+import {
   buildVisualDelta,
   loadVisualV0Baseline,
   storeVisualV0Baseline,
@@ -1373,6 +1377,9 @@ export default function WorkspacePage() {
   // M2.5 全局架构澄清：与画布 Run 完全独立的 SSE / 状态存储。
   const architect = useArchitect({ token: session?.token })
   const architectStates = architect.states
+  // 冻结回调是延迟 effect：用 ref 读取最新状态，避免闭包拿到旧的 qualityTier。
+  const architectStatesRef = useRef(architectStates)
+  architectStatesRef.current = architectStates
 
   // 导入源码的服务端回灌：localStorage 只是缓存，BFF 持久化快照才是
   // 跨刷新 / 跨浏览器的事实源。每个项目每次页面加载最多请求一次。
@@ -1732,6 +1739,22 @@ export default function WorkspacePage() {
           remaining = remaining.slice(1)
           directOpsQueueRef.current.set(projectId, remaining)
           publishDirectOps(projectId)
+          if (item.kind === 'delete') {
+            // 决策面板可能被取消：先恢复 iframe 里乐观隐藏的节点，
+            // 避免用户取消后组件仍处于隐藏状态。
+            item.reply?.postMessage?.(
+              {
+                channel: 'vibe-inspect',
+                type: 'direct-delete-result',
+                payload: {
+                  safe: false,
+                  reasons: ['需要先选择删除范围'],
+                  source: item.target,
+                },
+              },
+              '*',
+            )
+          }
           continue
         }
         if (item.kind === 'move') {
@@ -1747,7 +1770,14 @@ export default function WorkspacePage() {
             {
               channel: 'vibe-inspect',
               type: 'direct-delete-result',
-              payload: { ok: true, status: 'SUCCEEDED', committed: true },
+              payload: {
+                ok: true,
+                status: 'SUCCEEDED',
+                committed: true,
+                // 连续删除多个组件时必须回传本条目标：iframe 侧按 source
+                // 清理待提交记录，缺失会误清其它同 selector 的节点。
+                source: item.target,
+              },
             },
             '*',
           )
@@ -4050,8 +4080,25 @@ export default function WorkspacePage() {
    * 工具栏主 CTA：已有 Run 时恢复同一面板；否则也走 Supervisor，
    * 由后端决定是纯 Architect 还是 UI + Architect 的 both。
    */
-  const handleStartArchitect = async (projectId, goal = '') => {
+  const handleStartArchitect = async (
+    projectId,
+    goal = '',
+    qualityTier = '',
+    solutionChoice = null,
+  ) => {
     const project = projects.find((item) => item.id === projectId)
+    // 项目规模 / 质量分级在对话一开始选择；冻结后的 BACKEND_BINDING
+    // 是另一次 Architect Run，用 sessionStorage 按项目兜底传递。
+    if (qualityTier) {
+      window.sessionStorage.setItem(
+        `vibe.architect.qualityTier.${projectId}`,
+        qualityTier,
+      )
+    }
+    // 文档中心里启用的文档；最多 3 份，空数组不改变旧行为。
+    const knowledgeDocuments = mergeKnowledgeDocuments(
+      activeKnowledgeDocuments(projectId),
+    )
     const run = runStates[projectId] ?? EMPTY_RUN
     const projectMode = resolveProjectMode(project, {
       sandboxId: run.result?.sandboxId,
@@ -4092,6 +4139,9 @@ export default function WorkspacePage() {
           : { files: sourceFiles },
         projectSummary: run.projectSummary || '',
         latestChanges: run.latestChanges || '',
+        knowledgeDocuments,
+        qualityTier: qualityTier || undefined,
+        solutionChoice: solutionChoice || undefined,
         uiHistory: [
           {
             role: 'system',
@@ -4181,6 +4231,9 @@ export default function WorkspacePage() {
           : { files: {} },
         projectSummary: run.projectSummary || '',
         latestChanges: run.latestChanges || '',
+        knowledgeDocuments,
+        qualityTier: qualityTier || undefined,
+        solutionChoice: solutionChoice || undefined,
         uiHistory: [
           ...history,
           ...pendingContext,
@@ -4825,6 +4878,12 @@ export default function WorkspacePage() {
         latestChanges: packet.summary,
         projectMode: PROJECT_MODE.NEW_PROJECT,
         outputPhase: 'BACKEND_BINDING',
+        qualityTier:
+          architectStatesRef.current[activeTabId]?.qualityTier ||
+          window.sessionStorage.getItem(
+            `vibe.architect.qualityTier.${activeTabId}`,
+          ) ||
+          undefined,
         visualDocument: frozenDocument,
         visualDelta: packet.visualDelta || undefined,
         uiHistory: [
@@ -7201,14 +7260,16 @@ export default function WorkspacePage() {
     const hydration = draftHydrationRef.current.get(key)
     if (hydration) {
       // 草稿尚未从 IndexedDB 读完：先等恢复完成，再判断是否需要守卫。
-      void hydration.then(
-        () => {
-          draftHydrationRef.current.delete(key)
-          draftHydratingRef.current.delete(key)
-          handleCloseTab(projectId)
-        },
-        () => handleCloseTab(projectId),
-      )
+      // 加 1.5s 兜底，避免 IndexedDB 卡住导致“点关闭没反应”。
+      showToast('info', '正在检查未保存草稿…')
+      void Promise.race([
+        hydration,
+        new Promise((resolve) => window.setTimeout(resolve, 1500)),
+      ]).then(() => {
+        draftHydrationRef.current.delete(key)
+        draftHydratingRef.current.delete(key)
+        handleCloseTab(projectId)
+      })
       return
     }
     const hasDraft = useDraftStore
@@ -7396,7 +7457,8 @@ export default function WorkspacePage() {
         onSaveSnapshot: () => call('openSnapshotSave'),
         onRefreshAgents: () => workspaceActionsRef.current?.loadAgentCatalog(),
         onArchitectOpen: () => call('handleOpenArchitect'),
-        onArchitectStart: (goal) => call('handleStartArchitect', goal),
+        onArchitectStart: (goal, qualityTier, solutionChoice) =>
+          call('handleStartArchitect', goal, qualityTier, solutionChoice),
         onArchitectRestart: () => call('handleRestartArchitect'),
         onStartCreate: () => call('handleOpenArchitect'),
         onFrontendBootstrap: () =>
@@ -7410,12 +7472,18 @@ export default function WorkspacePage() {
             comment,
             options,
           ),
-        onArchitectDecide: (decision, comment, qualityTier) =>
+        onArchitectDecide: (
+          decision,
+          comment,
+          qualityTier,
+          knowledgeDocs,
+        ) =>
           workspaceActionsRef.current?.architectDecide(
             projectId,
             decision,
             comment,
             qualityTier,
+            knowledgeDocs,
           ),
         onArchitectDecideConflict: (optionId, comment) =>
           workspaceActionsRef.current?.architectDecideConflict(

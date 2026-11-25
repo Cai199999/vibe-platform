@@ -25,7 +25,7 @@ describe('OfflineVisualCanvas', () => {
     const doc = createEmptyVisualDocument({ projectId: 'proj_ui' })
     useVisualDocumentStore.setState({
       doc,
-      selectedId: doc.root.id,
+      selectedId: doc.root.children?.[0]?.id ?? null,
       history: [],
       future: [],
       lastError: '',
@@ -55,16 +55,14 @@ describe('OfflineVisualCanvas', () => {
     expect(container.textContent).toContain('在这里输入文本')
   })
 
-  it('删除选中节点后可从空画布恢复根页面', () => {
+  it('根节点不可删除，页面内容保持', () => {
     clickByText(container, '.vc-palette-item', '区块')
     const canvasStore = useVisualDocumentStore.getState()
     const rootId = canvasStore.doc.root.id
     act(() => {
       canvasStore.deleteNode(rootId)
     })
-    expect(container.querySelector('.vc-empty-canvas')).toBeTruthy()
-
-    clickByText(container, '.primary-button', '添加区块')
+    expect(useVisualDocumentStore.getState().doc.root.id).toBe(rootId)
     expect(container.querySelector('.vc-node-section')).toBeTruthy()
   })
 })

@@ -1269,6 +1269,9 @@ async function main() {
     const panel = page.locator('.architect-panel')
     await panel.waitFor({ state: 'visible', timeout: 30000 })
     await panel.locator('[data-architect-goal]').fill(GOAL)
+    await panel
+      .locator('[data-architect-quality-tier] input[value="L2_STANDARD"]')
+      .check({ force: true })
     await panel.locator('[data-architect-start]').click()
 
     log('drive V0 clarifications')

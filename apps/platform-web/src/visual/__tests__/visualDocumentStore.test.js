@@ -71,14 +71,13 @@ describe('VisualDocument Zustand store', () => {
     expect(moved.doc.root.children[0].children[0].id).toBe(textId)
   })
 
-  it('删除根节点后是合法空白画布，撤销可恢复', () => {
+  it('删除根节点被拒绝，页面根保持不变', () => {
     const store = useVisualDocumentStore.getState()
     const rootId = store.doc.root.id
     store.addNode('section', rootId)
-    useVisualDocumentStore.getState().deleteNode(rootId)
-    expect(useVisualDocumentStore.getState().doc.root).toBeNull()
-    expect(useVisualDocumentStore.getState().undo()).toBe(true)
-    expect(useVisualDocumentStore.getState().doc.root).not.toBeNull()
+    expect(useVisualDocumentStore.getState().deleteNode(rootId)).toBe(false)
+    expect(useVisualDocumentStore.getState().doc.root.id).toBe(rootId)
+    expect(useVisualDocumentStore.getState().doc.root.children).toHaveLength(1)
   })
 })
 
