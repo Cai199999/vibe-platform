@@ -1,0 +1,362 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Vibe Platform · 系统架构",
+    "subtitle": "React 画布 → Java BFF → Python AI Core → Docker 沙盒；源码快照持久化到 MySQL / MinIO",
+    "locale": "zh-CN",
+    "output": "docs/demo/vibe-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [1180, 900],
+    "repository": {
+      "url": "https://github.com/Cai199999/vibe-platform",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "33f03ce0a894e2c6404dbb96065d17b599e2a2c3"
+    }
+  },
+  "components": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "用户 / 浏览器",
+      "sublabel": "圈选 · 自然语言",
+      "pos": [30, 360],
+      "size": [130, 64]
+    },
+    {
+      "id": "web",
+      "type": "frontend",
+      "label": "React + Vite 画布",
+      "sublabel": "WorkspacePage / CanvasStage",
+      "pos": [210, 340],
+      "size": [170, 100],
+      "sources": [
+        { "path": "apps/platform-web/src/pages/WorkspacePage.jsx", "label": "工作台状态机" },
+        { "path": "apps/platform-web/src/components/CanvasStage.jsx", "label": "画布与 live 预览" }
+      ]
+    },
+    {
+      "id": "bff",
+      "type": "backend",
+      "label": "Java BFF",
+      "sublabel": "Spring Boot 3.3 · :8080",
+      "pos": [440, 350],
+      "size": [150, 80],
+      "sources": [
+        { "path": "apps/platform-bff/src/main/java/com/vibeplatform/bff/VibePlatformBffApplication.java" },
+        { "path": "apps/platform-bff/src/main/java/com/vibeplatform/bff/architect/ArchitectController.java", "label": "SSE 代理" }
+      ]
+    },
+    {
+      "id": "supervisor",
+      "type": "backend",
+      "label": "Supervisor",
+      "sublabel": "只路由，不写代码",
+      "pos": [680, 130],
+      "size": [170, 60],
+      "sources": [
+        { "path": "services/orchestrator/ai_core/supervisor/graph.py" },
+        { "path": "services/orchestrator/ai_core/supervisor/manifest.json", "label": "声明式能力" }
+      ]
+    },
+    {
+      "id": "architect",
+      "type": "backend",
+      "label": "Architect Graph",
+      "sublabel": "澄清 → 契约 → 冻结",
+      "pos": [680, 220],
+      "size": [170, 60],
+      "sources": [
+        { "path": "services/orchestrator/ai_core/architect/graph.py" },
+        { "path": "services/orchestrator/ai_core/architect/llm.py", "label": "DeepSeek / Mock" }
+      ]
+    },
+    {
+      "id": "ui",
+      "type": "backend",
+      "label": "UI Graph",
+      "sublabel": "规划 → 补丁 → 验证",
+      "pos": [680, 310],
+      "size": [170, 60],
+      "sources": [
+        { "path": "services/orchestrator/ai_core/agent/service.py" }
+      ]
+    },
+    {
+      "id": "direct",
+      "type": "backend",
+      "label": "Direct Ops",
+      "sublabel": "AST 写回 · 回滚",
+      "pos": [680, 400],
+      "size": [170, 60],
+      "sources": [
+        { "path": "services/orchestrator/ai_core/direct_ops/service.py" },
+        { "path": "services/orchestrator/ai_core/direct_ops/source_sync_queue.py", "label": "快照异步同步" }
+      ]
+    },
+    {
+      "id": "visual",
+      "type": "backend",
+      "label": "Visual CodeGen",
+      "sublabel": "Tailwind JSX + source map",
+      "pos": [680, 490],
+      "size": [170, 60],
+      "sources": [
+        { "path": "services/orchestrator/ai_core/codegen/visual.py" },
+        { "path": "services/orchestrator/ai_core/codegen/visual_gate.py", "label": "Babel 编译门禁" }
+      ]
+    },
+    {
+      "id": "llm",
+      "type": "external",
+      "label": "DeepSeek",
+      "sublabel": "真实 LLM 调用",
+      "pos": [960, 130],
+      "size": [170, 60],
+      "sources": [
+        { "path": "services/orchestrator/ai_core/architect/llm.py", "label": "模型分级与重试" }
+      ]
+    },
+    {
+      "id": "sandbox",
+      "type": "cloud",
+      "label": "Docker 沙盒",
+      "sublabel": "Vite 预览 · :5173",
+      "pos": [960, 300],
+      "size": [180, 90],
+      "sources": [
+        { "path": "services/orchestrator/ai_core/adapters/sandbox/local_docker.py" }
+      ]
+    },
+    {
+      "id": "git",
+      "type": "cloud",
+      "label": "Git Checkpoint",
+      "sublabel": "沙盒内原子回滚",
+      "pos": [960, 430],
+      "size": [180, 60],
+      "sources": [
+        { "path": "services/orchestrator/ai_core/direct_ops/service.py", "label": "commit / rollback" }
+      ]
+    },
+    {
+      "id": "mysql",
+      "type": "database",
+      "label": "MySQL",
+      "sublabel": "项目元数据 / 文件树",
+      "pos": [340, 630],
+      "size": [160, 60],
+      "sources": [
+        { "path": "apps/platform-bff/src/main/java/com/vibeplatform/bff/projectsource/ProjectSourceService.java" }
+      ]
+    },
+    {
+      "id": "minio",
+      "type": "database",
+      "label": "MinIO",
+      "sublabel": "源码正文快照",
+      "pos": [530, 630],
+      "size": [160, 60],
+      "sources": [
+        { "path": "apps/platform-bff/src/main/java/com/vibeplatform/bff/projectsource/ProjectSourceObjectStore.java" }
+      ]
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis",
+      "sublabel": "缓存 / 幂等 / 队列",
+      "pos": [720, 630],
+      "size": [160, 60]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Python AI Core · FastAPI + LangGraph",
+      "wraps": ["supervisor", "architect", "ui", "direct", "visual"],
+      "pad": 22
+    },
+    {
+      "kind": "security-group",
+      "label": "隔离执行边界",
+      "wraps": ["sandbox", "git"],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "持久化（复用 ~/Workspace/infra）",
+      "wraps": ["mysql", "minio", "redis"],
+      "pad": 18
+    }
+  ],
+  "connections": [
+    {
+      "id": "user-intent",
+      "from": "user",
+      "to": "web",
+      "label": "圈选 / 意图",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "web-api",
+      "from": "web",
+      "to": "bff",
+      "label": "/api · SSE",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "bff-orchestrate",
+      "from": "bff",
+      "to": "supervisor",
+      "label": "编排",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [[620, 390], [620, 160]]
+    },
+    {
+      "id": "sup-architect",
+      "from": "supervisor",
+      "to": "architect",
+      "label": "handoff_architect",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "sup-ui",
+      "from": "supervisor",
+      "to": "ui",
+      "fromSide": "left",
+      "toSide": "left",
+      "via": [[646, 160], [646, 340]]
+    },
+    {
+      "id": "sup-direct",
+      "from": "supervisor",
+      "to": "direct",
+      "fromSide": "left",
+      "toSide": "left",
+      "via": [[646, 160], [646, 430]]
+    },
+    {
+      "id": "sup-visual",
+      "from": "supervisor",
+      "to": "visual",
+      "fromSide": "left",
+      "toSide": "left",
+      "via": [[646, 160], [646, 520]]
+    },
+    {
+      "id": "architect-llm",
+      "from": "architect",
+      "to": "llm",
+      "label": "澄清 / 契约",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [[905, 250], [905, 160]]
+    },
+    {
+      "id": "ui-sandbox",
+      "from": "ui",
+      "to": "sandbox",
+      "label": "生成任务",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "direct-sandbox",
+      "from": "direct",
+      "to": "sandbox",
+      "label": "AST 写回",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [[905, 430], [905, 345]]
+    },
+    {
+      "id": "visual-sandbox",
+      "from": "visual",
+      "to": "sandbox",
+      "label": "Vite 工程",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "via": [[925, 520], [925, 410], [1050, 410]]
+    },
+    {
+      "id": "sandbox-git",
+      "from": "sandbox",
+      "to": "git",
+      "label": "commit",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "bff-mysql",
+      "from": "bff",
+      "to": "mysql",
+      "label": "元数据",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [[515, 580], [420, 580]]
+    },
+    {
+      "id": "bff-minio",
+      "from": "bff",
+      "to": "minio",
+      "label": "源码",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [[515, 580], [610, 580]]
+    },
+    {
+      "id": "bff-redis",
+      "from": "bff",
+      "to": "redis",
+      "label": "幂等 / 队列",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [[515, 580], [800, 580]]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "前端与入口",
+      "items": [
+        "圈选元素 + 自然语言，浮层不打断心流",
+        "多页面 Tab、高保真预览、版本历史与回滚",
+        "Direct Ops 离线缓冲：提交前不重建 iframe"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Agent 编排",
+      "items": [
+        "Supervisor 只路由，不写代码、不改子图状态",
+        "Architect 两阶段：V0 虚拟树 → 冻结 → 后端绑定",
+        "UI / Direct / Visual CodeGen 各自负责一种动作"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "执行与持久化",
+      "items": [
+        "所有生成代码只在 Docker 沙盒执行",
+        "Git checkpoint 支持原子回滚",
+        "MySQL 存元数据，MinIO 存源码正文"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "真假边界（面试版）",
+      "items": [
+        "DeepSeek 真实调用；鉴权仍是 Mock",
+        "无 gVisor；未上云；Run/指标无持久化",
+        "地图 SDK 尚未进入 CodeGen 白名单"
+      ]
+    }
+  ]
+}

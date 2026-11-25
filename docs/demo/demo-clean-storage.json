@@ -1,0 +1,14 @@
+{
+  "cookies": [],
+  "origins": [
+    {
+      "origin": "http://127.0.0.1:5173",
+      "localStorage": [
+        {
+          "name": "vibe.auth.session",
+          "value": "{\"token\":\"vibe_mock_21313675d5b0448a80589e5e5dfe4cfc\",\"user\":{\"id\":\"usr_demo\",\"name\":\"Vibe 体验官\",\"email\":\"demo@vibe.local\",\"tenantId\":\"tenant_local\",\"role\":\"member\"},\"issuedAt\":\"2026-11-21T02:09:19.624Z\",\"mode\":\"mock\"}"
+        }
+      ]
+    }
+  ]
+}

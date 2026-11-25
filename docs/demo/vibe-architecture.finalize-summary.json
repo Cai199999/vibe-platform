@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-architecture.candidate.json",
+    "sha256": "6d39750c652b2374e918a98566b0b6997edef643bc7d2cec537d7a8a22e86f7e",
+    "bytes": 9719
+  },
+  "artifact": {
+    "path": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-architecture.html",
+    "sha256": "4b64d6208c9445fb1ff13ef3ffc1cd86af4ef3d92f8f608799d829fc66d8b911",
+    "bytes": 858493
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-architecture.finalize.json",
+    "summaryReceipt": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-architecture.finalize-summary.json",
+    "browserCheckReceipt": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-architecture.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-11-21T01:50:04.739Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 6192,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  },
+  "visualReviewRecommendation": {
+    "action": "inspect-route-readability",
+    "signals": {
+      "routesOverSuggestedBends": 3,
+      "routesOverSuggestedStretch": 2
+    },
+    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
+    "affectedRoutes": {
+      "crossings": [],
+      "detours": [
+        {
+          "relationship": {
+            "id": "user-intent",
+            "from": "user",
+            "to": "web",
+            "label": "圈选 / 意图",
+            "collectionIndex": 0,
+            "artifactIndex": 1
+          },
+          "bends": 4,
+          "stretch": 1.615
+        },
+        {
+          "relationship": {
+            "id": "sup-ui",
+            "from": "supervisor",
+            "to": "ui",
+            "label": "",
+            "collectionIndex": 4,
+            "artifactIndex": 5
+          },
+          "bends": 2,
+          "stretch": 1.378,
+          "directCorridorBlockers": [
+            {
+              "id": "architect",
+              "label": "Architect Graph",
+              "box": [
+                680,
+                220,
+                170,
+                60
+              ]
+            }
+          ]
+        },
+        {
+          "relationship": {
+            "id": "ui-sandbox",
+            "from": "ui",
+            "to": "sandbox",
+            "label": "生成任务",
+            "collectionIndex": 8,
+            "artifactIndex": 9
+          },
+          "bends": 4,
+          "stretch": 1.278
+        },
+        {
+          "relationship": {
+            "id": "visual-sandbox",
+            "from": "visual",
+            "to": "sandbox",
+            "label": "Vite 工程",
+            "collectionIndex": 10,
+            "artifactIndex": 11
+          },
+          "bends": 3,
+          "stretch": 1
+        }
+      ],
+      "truncated": false
+    },
+    "hints": [
+      "user → web needs 4 bends: move node user or web so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "ui → sandbox needs 4 bends: move node ui or sandbox so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "visual → sandbox needs 3 bends: move node visual or sandbox so they share a row or column with matching centers, or sit diagonally with a clear corner."
+    ],
+    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
+  }
+}

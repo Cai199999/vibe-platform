@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "a096a8d8-b42e-409c-81b2-f5466f4ef924",
+  "status": "current",
+  "command": "deliver",
+  "type": "sequence",
+  "input": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-request-flow.candidate.json",
+  "output": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-request-flow.html",
+  "specification": {
+    "sha256": "0c6bfa85b760eeefda7623f53ff33cdecf4a25116fcd65c16b0d232f28f22541",
+    "bytes": 5379
+  },
+  "artifact": {
+    "sha256": "a3e961a13f69697d0e75856049eadf052903e8fe89fee34111f84b3969540e58",
+    "bytes": 849238
+  }
+}

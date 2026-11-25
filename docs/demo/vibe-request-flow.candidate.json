@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Vibe Platform · 一次 GIS 应用的生成与回写",
+    "subtitle": "圈选 / 意图 → Supervisor 路由 → Architect 契约 → Visual CodeGen → Docker 沙盒 → live 画布 → Direct Ops 回写",
+    "locale": "zh-CN",
+    "output": "docs/demo/vibe-request-flow.html",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "animation": "trace"
+  },
+  "participants": [
+    { "id": "user", "type": "external", "label": "用户", "sublabel": "圈选 / 意图" },
+    { "id": "web", "type": "frontend", "label": "React 画布", "sublabel": "Vite + Zustand" },
+    { "id": "bff", "type": "backend", "label": "Java BFF", "sublabel": "鉴权 / SSE 代理" },
+    { "id": "supervisor", "type": "backend", "label": "Supervisor", "sublabel": "只路由" },
+    { "id": "architect", "type": "backend", "label": "Architect", "sublabel": "澄清 → 契约" },
+    { "id": "llm", "type": "external", "label": "DeepSeek", "sublabel": "真实模型" },
+    { "id": "codegen", "type": "backend", "label": "Visual CodeGen", "sublabel": "Tailwind JSX" },
+    { "id": "sandbox", "type": "cloud", "label": "Docker 沙盒", "sublabel": "Vite :5173" }
+  ],
+  "segments": [
+    { "from": 150, "to": 355, "label": "澄清与契约" },
+    { "from": 365, "to": 625, "label": "生成与验证" },
+    { "from": 635, "to": 760, "label": "预览与回写" }
+  ],
+  "messages": [
+    { "id": "select", "from": "user", "to": "web", "y": 160, "label": "圈选组件 + 输入意图", "variant": "default" },
+    { "id": "start-run", "from": "web", "to": "bff", "y": 190, "label": "POST /runs · SSE", "variant": "emphasis" },
+    { "id": "route", "from": "bff", "to": "supervisor", "y": 220, "label": "route(intent)", "variant": "default" },
+    { "id": "handoff", "from": "supervisor", "to": "architect", "y": 250, "label": "handoff_architect", "variant": "emphasis" },
+    { "id": "clarify", "from": "architect", "to": "llm", "y": 280, "label": "澄清问题 / 契约草稿", "variant": "default" },
+    { "id": "json", "from": "llm", "to": "architect", "y": 310, "label": "结构化 JSON", "variant": "return" },
+    { "id": "v0", "from": "architect", "to": "bff", "y": 340, "label": "V0 虚拟树", "variant": "return" },
+    { "id": "render-v0", "from": "bff", "to": "web", "y": 370, "label": "渲染 V0 画布", "variant": "return" },
+    { "id": "edit-canvas", "from": "user", "to": "web", "y": 400, "label": "画布直接修改", "variant": "default" },
+    { "id": "freeze", "from": "web", "to": "bff", "y": 430, "label": "冻结视觉 + 确认契约", "variant": "emphasis" },
+    { "id": "release", "from": "bff", "to": "supervisor", "y": 460, "label": "release gate", "variant": "default" },
+    { "id": "codegen", "from": "supervisor", "to": "codegen", "y": 490, "label": "确认契约，进入生成", "variant": "emphasis" },
+    { "id": "write", "from": "codegen", "to": "sandbox", "y": 520, "label": "写入 Vite 工程 + npm install", "variant": "default" },
+    { "id": "verify", "from": "sandbox", "to": "codegen", "y": 550, "label": "构建 / 门禁校验结果", "variant": "return" },
+    { "id": "heal", "from": "codegen", "to": "sandbox", "y": 580, "label": "失败自愈后重试", "variant": "dashed" },
+    { "id": "preview", "from": "sandbox", "to": "bff", "y": 610, "label": "previewUrl + commitHash", "variant": "return" },
+    { "id": "live", "from": "bff", "to": "web", "y": 640, "label": "live iframe 预览", "variant": "return" },
+    { "id": "select-again", "from": "user", "to": "web", "y": 670, "label": "继续圈选 + 修改意图", "variant": "default" },
+    { "id": "direct", "from": "web", "to": "bff", "y": 700, "label": "Direct Ops 提交", "variant": "emphasis" },
+    { "id": "ast", "from": "bff", "to": "sandbox", "y": 730, "label": "AST 写回 + git commit", "variant": "default" }
+  ],
+  "activations": [
+    { "participant": "web", "from": 175, "to": 745, "type": "frontend" },
+    { "participant": "bff", "from": 185, "to": 735, "type": "backend" },
+    { "participant": "supervisor", "from": 200, "to": 475, "type": "backend" },
+    { "participant": "architect", "from": 230, "to": 350, "type": "backend" },
+    { "participant": "llm", "from": 255, "to": 320, "type": "external" },
+    { "participant": "codegen", "from": 460, "to": 595, "type": "backend" },
+    { "participant": "sandbox", "from": 490, "to": 740, "type": "cloud" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "为什么不是黑盒",
+      "items": [
+        "每个阶段都有 SSE 事件与时间轴，失败可定位",
+        "契约未确认时 release 返回 409，不偷偷启动 UI Run",
+        "构建失败进入有界自愈循环，耗尽后回传 Architect"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "真假边界",
+      "items": [
+        "V0 / 契约 / CodeGen / Direct Ops 都是真实执行",
+        "演示可切本地 Mock，只替换代码生成模板",
+        "沙盒无 gVisor；当前未上云"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "GIS 场景说明",
+      "items": [
+        "地图区域用内联 SVG 示意底图，不依赖外部地图 SDK",
+        "真实项目把底图替换为 Cesium / OpenLayers 组件",
+        "平台负责业务外壳、后台 CRUD 与交付闭环"
+      ]
+    }
+  ]
+}

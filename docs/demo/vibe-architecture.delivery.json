@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "f7be3434-f282-4060-8e41-c18306c96727",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-architecture.candidate.json",
+  "output": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-architecture.html",
+  "specification": {
+    "sha256": "6d39750c652b2374e918a98566b0b6997edef643bc7d2cec537d7a8a22e86f7e",
+    "bytes": 9719
+  },
+  "artifact": {
+    "sha256": "4b64d6208c9445fb1ff13ef3ffc1cd86af4ef3d92f8f608799d829fc66d8b911",
+    "bytes": 858493
+  }
+}

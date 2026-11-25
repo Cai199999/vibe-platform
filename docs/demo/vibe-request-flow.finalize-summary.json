@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "sequence",
+  "quality": "showcase",
+  "specification": {
+    "path": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-request-flow.candidate.json",
+    "sha256": "0c6bfa85b760eeefda7623f53ff33cdecf4a25116fcd65c16b0d232f28f22541",
+    "bytes": 5379
+  },
+  "artifact": {
+    "path": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-request-flow.html",
+    "sha256": "a3e961a13f69697d0e75856049eadf052903e8fe89fee34111f84b3969540e58",
+    "bytes": 849238
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-request-flow.finalize.json",
+    "summaryReceipt": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-request-flow.finalize-summary.json",
+    "browserCheckReceipt": "/home/admin1/Workspace/vibe-platform/docs/demo/vibe-request-flow.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-11-21T01:50:04.739Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 5928,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  }
+}

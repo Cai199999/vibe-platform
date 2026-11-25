@@ -47,3 +47,14 @@ coverage/
 
 # 评测报告（本地 / CI 生成）
 reports/
+
+# GIS 历史迭代样本：只保留最新有效基线入仓（samples/gis-baseline-iter9）。
+samples/gis-baseline/
+samples/gis-baseline-iter1/
+samples/gis-baseline-iter2/
+samples/gis-baseline-iter3/
+samples/gis-baseline-iter4/
+samples/gis-baseline-iter5/
+samples/gis-baseline-iter6/
+samples/gis-baseline-iter7/
+samples/gis-baseline-iter8/
