@@ -18,6 +18,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 
 from ai_core.api.architect import router as architect_router
+from ai_core.api.collaboration import router as collaboration_router
 from ai_core.api.direct_ops import router as direct_ops_router
 from ai_core.api.fullstack import router as fullstack_router
 from ai_core.api.runs import router as runs_router
@@ -86,6 +87,7 @@ app.include_router(sandbox_router)
 app.include_router(runs_router)
 app.include_router(direct_ops_router)
 app.include_router(architect_router)
+app.include_router(collaboration_router)
 app.include_router(fullstack_router)
 app.include_router(supervisor_router)
 app.include_router(visual_agent_router)

@@ -240,6 +240,30 @@ def infer_interaction_method(
     return methods[0]
 
 
+def _agent_policy_item(contract: dict[str, Any]) -> dict[str, Any]:
+    """契约是否冻结了 Agent 协作策略。"""
+    policy = contract.get("agentPolicy") or {}
+    edges = policy.get("fastPathEdges") or []
+    if not edges:
+        return _item(
+            "policy",
+            "Agent 协作策略",
+            "weak",
+            "契约未冻结快速通道白名单，生成阶段将使用能力包默认",
+        )
+    sample = "；".join(
+        f"{edge[0]}→{edge[1]}({edge[2]})"
+        for edge in edges[:3]
+        if isinstance(edge, (list, tuple)) and len(edge) == 4
+    )
+    return _item(
+        "policy",
+        "Agent 协作策略",
+        "ok",
+        f"已冻结 {len(edges)} 条快速通道白名单" + (f"；{sample}" if sample else ""),
+    )
+
+
 def _decision_item(
     metadata: dict[str, Any],
     discovery: dict[str, Any],
@@ -528,6 +552,7 @@ def analyse_baseline(baseline_dir: Path) -> dict[str, Any]:
         items.append(_item("interaction", f"{label} → {api_path}", status, evidence))
 
     items.append(_decision_item(metadata, discovery, contract))
+    items.append(_agent_policy_item(contract))
 
     # 汇总
     def count(kind: str) -> dict[str, int]:

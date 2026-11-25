@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from ai_core.evidence_chain import (
+    _agent_policy_item,
     analyse_baseline,
     infer_interaction_method,
     render_markdown,
@@ -188,6 +189,26 @@ class EvidenceChainTests(unittest.TestCase):
         self.assertIn("/login", markdown)
         self.assertIn("Mock", markdown)
         self.assertIn("方案决策", markdown)
+
+
+class AgentPolicyEvidenceTest(unittest.TestCase):
+    def test_frozen_policy_is_ok(self) -> None:
+        item = _agent_policy_item(
+            {
+                "agentPolicy": {
+                    "fastPathEdges": [
+                        ["DBACoder", "BackendCoder", "schema_ready", "REBIND_ORM"]
+                    ]
+                }
+            }
+        )
+        self.assertEqual(item["status"], "ok")
+        self.assertIn("1 条", item["evidence"])
+
+    def test_missing_policy_is_weak(self) -> None:
+        item = _agent_policy_item({})
+        self.assertEqual(item["status"], "weak")
+        self.assertIn("未冻结", item["evidence"])
 
 
 if __name__ == "__main__":

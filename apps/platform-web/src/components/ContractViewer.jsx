@@ -147,6 +147,43 @@ function KeyValueGrid({ data }) {
   )
 }
 
+function AgentPolicy({ policy }) {
+  if (!policy || typeof policy !== 'object') return null
+  const edges = Array.isArray(policy.fastPathEdges) ? policy.fastPathEdges : []
+  const clarification = policy.clarification === 'optional' ? '可选' : '必须'
+  const risk = policy.riskTolerance === 'normal' ? '常规' : '严格'
+  const language = policy.userLanguage === 'technical' ? '技术语言' : '业务语言'
+  return (
+    <>
+      <h4>Agent 协作策略</h4>
+      <div className="contract-agent-policy" data-agent-policy>
+        <div className="contract-agent-policy-meta">
+          <span>澄清：{clarification}</span>
+          <span>风险：{risk}</span>
+          <span>用户文案：{language}</span>
+        </div>
+        <div className="contract-agent-policy-title">快速通道白名单</div>
+        {edges.length > 0 ? (
+          <ul className="contract-agent-edges">
+            {edges.map((edge, index) => (
+              <li key={`${edge?.[0]}-${edge?.[1]}-${index}`}>
+                <code>{edge?.[0]}</code>
+                {' → '}
+                <code>{edge?.[1]}</code>
+                {' · '}
+                {edge?.[2]}
+                {edge?.[3] ? ` / ${edge[3]}` : ''}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <EmptyState>未冻结快速通道白名单，生成阶段将使用能力包默认。</EmptyState>
+        )}
+      </div>
+    </>
+  )
+}
+
 export default function ContractViewer({ contract, citations = [] }) {
   const [tab, setTab] = useState('overview')
   if (!contract) return null
@@ -233,6 +270,8 @@ export default function ContractViewer({ contract, citations = [] }) {
             ) : (
               <EmptyState>当前方案没有额外假设。</EmptyState>
             )}
+
+            <AgentPolicy policy={contract.agentPolicy} />
 
             <h4>知识库依据</h4>
             {contractCitations.length > 0 ? (

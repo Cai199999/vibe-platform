@@ -562,6 +562,30 @@ class ArchitectCitation(CamelModel):
     score: float = 0.0
 
 
+class ArchitectAgentPolicy(CamelModel):
+    """契约冻结的 Agent 协作策略。
+
+    快速通道白名单随契约版本冻结，避免生成阶段被运行选项悄悄放大。
+    """
+
+    fast_path_edges: list[list[str]] = Field(default_factory=list, max_length=32)
+    clarification: Literal["required", "optional"] = "required"
+    risk_tolerance: Literal["strict", "normal"] = "strict"
+    user_language: Literal["business", "technical"] = "business"
+
+    @field_validator("fast_path_edges")
+    @classmethod
+    def _normalize_edges(cls, value: Any) -> list[list[str]]:
+        edges: list[list[str]] = []
+        for item in value or []:
+            if not isinstance(item, (list, tuple)) or len(item) != 4:
+                continue
+            edge = [str(part).strip() for part in item]
+            if all(edge):
+                edges.append(edge)
+        return edges
+
+
 class ArchitectContract(CamelModel):
     """全栈 / 轻量 / 脚本三级实施契约。"""
 
@@ -572,6 +596,8 @@ class ArchitectContract(CamelModel):
     # L1 跳过严格校验，L2 走 AST + SQLite 基础验收，L3 额外执行真实
     # MySQL 迁移验收。该字段会原样传给 FullstackGraph 与前端结果面板。
     quality_tier: QualityTier = "L2_STANDARD"
+    # Agent 协作策略：快速通道白名单、澄清要求、风险容忍度、用户语言。
+    agent_policy: ArchitectAgentPolicy = Field(default_factory=ArchitectAgentPolicy)
     status: Literal[
         "AWAITING_CONFIRMATION",
         "CONFIRMED",
@@ -668,6 +694,8 @@ class ArchitectDecisionRequest(CamelModel):
     knowledge_documents: list[KnowledgeDocument] = Field(
         default_factory=list, max_length=3
     )
+    # 确认时由用户调整的 Agent 策略；不传则沿用契约冻结版本。
+    agent_policy: ArchitectAgentPolicy | None = None
 
     @model_validator(mode="after")
     def _revision_needs_comment(self) -> "ArchitectDecisionRequest":

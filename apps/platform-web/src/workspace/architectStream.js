@@ -189,6 +189,7 @@ export async function fetchArchitectDecision(
   qualityTier,
   knowledgeDocuments,
   token,
+  agentPolicy,
 ) {
   const response = await fetch(
     `/api/v1/architect/runs/${encodeURIComponent(runId)}/contracts/${encodeURIComponent(contractId)}/decision`,
@@ -207,6 +208,7 @@ export async function fetchArchitectDecision(
           Array.isArray(knowledgeDocuments) && knowledgeDocuments.length
             ? knowledgeDocuments
             : undefined,
+        agentPolicy: agentPolicy || undefined,
       }),
     },
   )

@@ -32,7 +32,7 @@ import json
 import logging
 import time
 from dataclasses import replace
-from typing import Any, TypedDict
+from typing import Any, Mapping, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
@@ -121,6 +121,7 @@ def _merge_package_manifests(base: str, override: str) -> str:
         merged["scripts"] = scripts
     return json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
 
+
 # 节点总数用于日志与 SSE 的 index/total；新增节点时只需改这一处。
 GRAPH_NODE_TOTAL = 7
 # 一致性检查失败后，最多把缺失路由回传 BackendCoder 自愈 2 次。
@@ -163,6 +164,8 @@ def _candidate_fingerprint(files: Any) -> str:
         if isinstance(content, str)
     )
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
 # Supervisor 激活的专属专家子图：只跑与目标 Agent 相关的节点。
 BACKEND_NODE_ORDER = ["DBACoder", "BackendCoder", "BuildVerifier", "SandboxRestart"]
 DBA_NODE_ORDER = ["DBACoder", "SandboxRestart"]
@@ -334,22 +337,97 @@ class FullstackGraphRunner:
     def run(self, initial_state: FullstackState) -> FullstackState:
         options = initial_state.get("options") or FullstackRunOptions()
         mode = options.mode if options.mode in MODE_NODE_ORDERS else "fullstack"
+        state = dict(initial_state)
+        grant_id = self._issue_fast_path(state, options)
+        if grant_id:
+            state["fast_path_grant_id"] = grant_id
         logger.info(
-            "FullstackGraph 启动 mode=%s run_id=%s project_id=%s sandbox_id=%s",
+            "FullstackGraph 启动 mode=%s run_id=%s project_id=%s sandbox_id=%s fast_path=%s",
             mode,
-            initial_state.get("run_id"),
-            initial_state.get("project_id"),
-            initial_state.get("sandbox_id"),
+            state.get("run_id"),
+            state.get("project_id"),
+            state.get("sandbox_id"),
+            bool(grant_id),
         )
-        result = self._graphs[mode].invoke(dict(initial_state))
+        try:
+            result = self._graphs[mode].invoke(state)
+        finally:
+            self._revoke_fast_path(grant_id)
         logger.info(
             "FullstackGraph 结束 run_id=%s changed_files=%d table=%s preview=%s",
-            initial_state.get("run_id"),
+            state.get("run_id"),
             len(result.get("files") or []),
             result.get("table"),
             result.get("preview_url"),
         )
         return dict(result)  # type: ignore[return-value]
+
+    def _issue_fast_path(
+        self,
+        state: FullstackState,
+        options: FullstackRunOptions,
+    ) -> str:
+        """Architect 在 Run 启动时预授权标准链路直连。"""
+        settings = get_settings()
+        if not settings.collaboration_fastpath_enabled or not options.fast_path:
+            return ""
+        run_id = str(state.get("run_id") or "")
+        if not run_id:
+            return ""
+        contract = state.get("contract")
+        task_id = str(
+            getattr(contract, "contract_id", "")
+            or getattr(contract, "id", "")
+            or run_id
+        )
+        edges = (
+            self._contract_fast_path_edges(contract) or options.fast_path_edges or None
+        )
+        try:
+            from ai_core.collaboration.hub import ARCHITECT_HUB
+
+            grant = ARCHITECT_HUB.issue_fast_path(
+                run_id=run_id,
+                task_id=task_id,
+                edges=edges,
+                ttl_seconds=settings.collaboration_fastpath_ttl_seconds,
+                max_steps=settings.collaboration_fastpath_max_steps,
+                sink=self._event_sink,
+            )
+            return grant.grant_id
+        except Exception:  # pragma: no cover - 不阻断生成
+            logger.exception("快速通道授权失败 run=%s", run_id)
+            return ""
+
+    @staticmethod
+    def _contract_fast_path_edges(contract: Any) -> list[list[str]]:
+        """读取契约冻结的白名单；兼容 dict / pydantic 两种快照。"""
+        policy = getattr(contract, "agent_policy", None)
+        if policy is None and isinstance(contract, Mapping):
+            policy = contract.get("agentPolicy") or contract.get("agent_policy")
+        if isinstance(policy, Mapping):
+            edges = policy.get("fastPathEdges") or policy.get("fast_path_edges")
+        else:
+            edges = getattr(policy, "fast_path_edges", None) if policy else None
+        return [
+            [str(part) for part in edge]
+            for edge in (edges or [])
+            if isinstance(edge, (list, tuple)) and len(edge) == 4
+        ]
+
+    def _revoke_fast_path(self, grant_id: str) -> None:
+        if not grant_id:
+            return
+        try:
+            from ai_core.collaboration.hub import ARCHITECT_HUB
+
+            ARCHITECT_HUB.revoke_fast_path(
+                grant_id,
+                "Run 结束，收回快速通道",
+                sink=self._event_sink,
+            )
+        except Exception:  # pragma: no cover
+            logger.exception("快速通道收回失败 grant=%s", grant_id)
 
     def _warn(self, state: FullstackState, message: str) -> list[str]:
         """记录 L1 非阻塞告警，并推送独立事件供前端即时展示。"""
@@ -595,9 +673,7 @@ class FullstackGraphRunner:
             try:
                 files = self._write_bundle(state, bundle)
             except ApplierSafetyBlock as exc:
-                blocked = self._handle_applier_block(
-                    state, exc, started, bundle.files
-                )
+                blocked = self._handle_applier_block(state, exc, started, bundle.files)
                 # 只有回 BackendCoder 重写时才保留本次候选，作为下一轮
                 # LLM 修复的基线；DBACoder 重建会重新生成持久化层。
                 if blocked.get("needs_backend_retry"):
@@ -862,9 +938,7 @@ class FullstackGraphRunner:
         fingerprint = _diagnostic_fingerprint(report.messages())
         candidate_fingerprint = _candidate_fingerprint(candidate_files)
         previous_fingerprint = str(state.get("applier_fingerprint") or "")
-        previous_candidate = str(
-            state.get("applier_candidate_fingerprint") or ""
-        )
+        previous_candidate = str(state.get("applier_candidate_fingerprint") or "")
         if (
             retry_count > 0
             and previous_fingerprint == fingerprint
@@ -1196,9 +1270,7 @@ class FullstackGraphRunner:
                     kind="contract_revision",
                     requested_action="REVISE_CONTRACT",
                     summary=contract_audit.summary(),
-                    evidence=[
-                        problem.message for problem in contract_audit.problems
-                    ],
+                    evidence=[problem.message for problem in contract_audit.problems],
                     contract_id=contract.contract_id,
                     payload=contract_audit.payload(),
                 )
@@ -1360,9 +1432,7 @@ class FullstackGraphRunner:
                 to_agent="DBACoder",
                 kind="schema_repair",
                 requested_action="REGENERATE_ORM",
-                summary=(
-                    "ORM 模型与迁移 DDL 字段错位，请按 DDL 重写持久化层"
-                ),
+                summary=("ORM 模型与迁移 DDL 字段错位，请按 DDL 重写持久化层"),
                 evidence=[
                     issue.message
                     for issue in report.issues
@@ -1873,11 +1943,58 @@ class FullstackGraphRunner:
             bundle.files,
             mode=options.mode,
         )
+        self._record_applier_actions(state, changed, bundle.files)
         merged = set(state.get("files") or [])
         merged.update(changed)
         files = sorted(merged)
         state["files"] = files
         return files
+
+    def _record_applier_actions(
+        self,
+        state: FullstackState,
+        changed: list[str],
+        files: Mapping[str, str],
+    ) -> None:
+        """把 Applier 的写操作写入 Architect 共享动作台账。"""
+        if not changed:
+            return
+        try:
+            from ai_core.collaboration.hub import ARCHITECT_HUB
+
+            run_id = str(state.get("run_id") or "")
+            contract = state.get("contract")
+            task_id = str(
+                getattr(contract, "contract_id", "")
+                or getattr(contract, "id", "")
+                or run_id
+            )
+            for path in changed:
+                content = files.get(path)
+                after_hash = (
+                    hashlib.sha256(content.encode("utf-8")).hexdigest()
+                    if isinstance(content, str)
+                    else ""
+                )
+                ARCHITECT_HUB.record_action(
+                    run_id=run_id,
+                    task_id=task_id,
+                    actor="Applier",
+                    tool="apply_patch",
+                    target=str(path),
+                    after_hash=after_hash,
+                    risk="normal",
+                    sink=self._event_sink,
+                )
+        except Exception as exc:  # pragma: no cover - 防御性兜底
+            logger.exception("动作台账写入失败 run=%s", state.get("run_id"))
+            self._emit(
+                "agent.action.failed",
+                {
+                    "runId": str(state.get("run_id") or ""),
+                    "error": str(exc)[:400],
+                },
+            )
 
     def _read_optional(self, sandbox_id: str, path: str) -> str | None:
         try:
@@ -2023,6 +2140,38 @@ class FullstackGraphRunner:
         )
         item = A2A_LOG.publish(feedback)
         self._emit("a2a.feedback", item)
+        # Architect 中心制：所有子 Agent 反馈同步进入共享收件箱；
+        # 报告失败不能阻断生成，但必须留下可观测事件。
+        try:
+            from ai_core.collaboration.hub import ARCHITECT_HUB
+
+            retries = int(state.get("llm_repair_count") or 0) + int(
+                state.get("build_retry_count") or 0
+            )
+            ARCHITECT_HUB.ingest_feedback(
+                feedback,
+                task_id=str(
+                    (payload or {}).get("taskId")
+                    or contract_id
+                    or state.get("run_id")
+                    or ""
+                ),
+                grant_id=str(state.get("fast_path_grant_id") or ""),
+                step_state={"retries": retries},
+                sink=self._event_sink,
+            )
+        except Exception as exc:  # pragma: no cover - 防御性兜底
+            logger.exception("Architect 收件箱写入失败 run=%s", state.get("run_id"))
+            self._emit(
+                "agent.report.failed",
+                {
+                    "runId": str(state.get("run_id") or ""),
+                    "fromAgent": from_agent,
+                    "error": str(exc)[:400],
+                },
+            )
+            if get_settings().collaboration_fail_closed:
+                raise
         return item
 
 

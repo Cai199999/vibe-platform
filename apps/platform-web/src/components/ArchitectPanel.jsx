@@ -21,6 +21,11 @@ import {
   mergeKnowledgeDocuments,
 } from '../workspace/documentCenter.js'
 import ContractViewer from './ContractViewer.jsx'
+import { fetchCollaborationRecord } from '../workspace/collaborationClient.js'
+import {
+  collaborationFromSnapshot,
+  mergeCollaboration,
+} from '../workspace/collaborationTimeline.js'
 
 const SHAPE_LABELS = {
   lightweight_web: '轻量网页工具',
@@ -342,6 +347,47 @@ function FullstackGeneration({
     [revisionRequest?.summary, ...(revisionRequest?.evidence || [])]
       .filter(Boolean)
       .join('\n')
+  const collaboration = Array.isArray(state.collaboration)
+    ? state.collaboration
+    : []
+  const [serverCollaboration, setServerCollaboration] = useState([])
+  const [collaborationLoad, setCollaborationLoad] = useState({
+    loading: false,
+    error: '',
+  })
+  const visibleCollaboration = mergeCollaboration(
+    collaboration,
+    serverCollaboration,
+  ).slice(-8)
+  const [collaborationFilter, setCollaborationFilter] = useState('all')
+  const loadedRunRef = useRef('')
+  const filteredCollaboration = visibleCollaboration.filter(
+    (item) => collaborationFilter === 'all' || item.kind === collaborationFilter,
+  )
+
+  const loadCollaboration = async () => {
+    if (!state.runId || collaborationLoad.loading) return
+    setCollaborationLoad({ loading: true, error: '' })
+    try {
+      const record = await fetchCollaborationRecord(state.runId)
+      setServerCollaboration(collaborationFromSnapshot(record))
+      setCollaborationLoad({ loading: false, error: '' })
+    } catch (error) {
+      setCollaborationLoad({
+        loading: false,
+        error: error?.message || '协作记录加载失败',
+      })
+    }
+  }
+
+  // 刷新 / 切换 Run 后自动拉取一次服务端记录，后续仍可手动刷新。
+  useEffect(() => {
+    if (!state.runId || loadedRunRef.current === state.runId) return
+    loadedRunRef.current = state.runId
+    loadCollaboration()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.runId])
+
   const [clarifyOpen, setClarifyOpen] = useState(false)
 
   useEffect(() => {
@@ -569,6 +615,87 @@ function FullstackGeneration({
             >
               让架构工程师修订契约
             </button>
+          )}
+        </div>
+      )}
+
+      {(visibleCollaboration.length > 0 || state.runId) && (
+        <div className="architect-collab" data-agent-collaboration>
+          <span className="architect-collab-title">协作时间线</span>
+          <div className="architect-collab-filters">
+            {[
+              ['all', '全部'],
+              ['report', '汇报'],
+              ['action', '操作'],
+              ['fastpath', '快速通道'],
+            ].map(([value, label]) => (
+              <button
+                type="button"
+                key={value}
+                className={
+                  collaborationFilter === value
+                    ? 'architect-collab-filter is-active'
+                    : 'architect-collab-filter'
+                }
+                data-collab-filter={value}
+                onClick={() => setCollaborationFilter(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {filteredCollaboration.map((item) => (
+            <span
+              className={`architect-collab-item is-${item.kind}`}
+              key={item.id}
+            >
+              {item.kind === 'report' && (
+                <>
+                  <strong>{item.agent}</strong>
+                  {' · '}
+                  {item.deliveryMode === 'fast_path' ? '直连' : '经架构师'}
+                  {item.summary ? ` · ${item.summary}` : ''}
+                </>
+              )}
+              {item.kind === 'action' && (
+                <>
+                  <strong>{item.actor}</strong>
+                  {' · '}
+                  {item.tool}
+                  {item.target ? ` · ${item.target}` : ''}
+                </>
+              )}
+              {item.kind === 'fastpath' && (
+                <>
+                  <strong>快速通道</strong>
+                  {' · '}
+                  {item.action === 'granted'
+                    ? '已授权'
+                    : `已收回：${item.reason || '出现异常'}`}
+                </>
+              )}
+            </span>
+          ))}
+          {filteredCollaboration.length === 0 && (
+            <span className="architect-collab-empty">当前筛选没有记录</span>
+          )}
+          {state.runId && (
+            <button
+              type="button"
+              className="architect-ghost"
+              data-load-collaboration
+              onClick={loadCollaboration}
+              disabled={collaborationLoad.loading}
+            >
+              {collaborationLoad.loading
+                ? '正在加载协作记录…'
+                : '从服务端加载完整记录'}
+            </button>
+          )}
+          {collaborationLoad.error && (
+            <span className="architect-collab-error" role="alert">
+              {collaborationLoad.error}
+            </span>
           )}
         </div>
       )}
@@ -1333,11 +1460,43 @@ function ContractActions({
   const [qualityTier, setQualityTier] = useState(
     qualityTierRequired ? '' : contract?.qualityTier || 'L2_STANDARD',
   )
+  const policyEdges = Array.isArray(contract?.agentPolicy?.fastPathEdges)
+    ? contract.agentPolicy.fastPathEdges
+    : []
+  const [selectedEdges, setSelectedEdges] = useState(() =>
+    policyEdges.map((_, index) => index),
+  )
+  useEffect(() => {
+    setSelectedEdges(
+      (Array.isArray(contract?.agentPolicy?.fastPathEdges)
+        ? contract.agentPolicy.fastPathEdges
+        : []
+      ).map((_, index) => index),
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contract?.contractId])
+  const togglePolicyEdge = (index) => {
+    setSelectedEdges((current) =>
+      current.includes(index)
+        ? current.filter((item) => item !== index)
+        : [...current, index],
+    )
+  }
+  const policyReady = policyEdges.length === 0 || selectedEdges.length > 0
   const revisionReady = comment.trim().length > 0
-  const confirmReady = qualityTierRequired
-    ? Boolean(qualityTier)
-    : Boolean(contract?.qualityTier || 'L2_STANDARD')
-  const effectiveTier = qualityTier || contract?.qualityTier || 'L2_STANDARD' 
+  const confirmReady =
+    (qualityTierRequired
+      ? Boolean(qualityTier)
+      : Boolean(contract?.qualityTier || 'L2_STANDARD')) && policyReady
+  const effectiveTier = qualityTier || contract?.qualityTier || 'L2_STANDARD'
+  const effectiveAgentPolicy = contract?.agentPolicy
+    ? {
+        ...contract.agentPolicy,
+        fastPathEdges: policyEdges.filter((_, index) =>
+          selectedEdges.includes(index),
+        ),
+      }
+    : undefined
 
   return (
     <div className="architect-contract-actions">
@@ -1367,6 +1526,39 @@ function ContractActions({
         <p className="architect-quality-hint" data-quality-tier-locked>
           质量分级已固定为 {contract?.qualityTier || 'L2_STANDARD'}，后续修订沿用该选择。
         </p>
+      )}
+      {policyEdges.length > 0 && (
+        <fieldset className="architect-agent-policy" data-agent-policy-editor>
+          <legend>快速通道白名单</legend>
+          <p className="architect-quality-hint">
+            勾选允许子 Agent 直连的标准链路；未勾选的边会回到 Architect 中转。
+          </p>
+          {policyEdges.map((edge, index) => (
+            <label
+              key={`${edge?.[0]}-${edge?.[1]}-${index}`}
+              className="architect-policy-option"
+            >
+              <input
+                type="checkbox"
+                checked={selectedEdges.includes(index)}
+                disabled={submitting}
+                onChange={() => togglePolicyEdge(index)}
+              />
+              <span>
+                <code>{edge?.[0]}</code>
+                {' → '}
+                <code>{edge?.[1]}</code>
+                {' · '}
+                {edge?.[2]}
+              </span>
+            </label>
+          ))}
+          {!policyReady && (
+            <p className="architect-quality-hint" data-agent-policy-required>
+              至少保留一条白名单，或取消确认后重新修订契约。
+            </p>
+          )}
+        </fieldset>
       )}
       <label className="architect-revision">
         <span>修订意见</span>
@@ -1416,7 +1608,15 @@ function ContractActions({
               ? '确认契约并进入代码生成'
               : '请先选择本次生成的质量要求'
           }
-          onClick={() => onDecide('CONFIRM', comment.trim(), effectiveTier)}
+          onClick={() =>
+            onDecide(
+              'CONFIRM',
+              comment.trim(),
+              effectiveTier,
+              undefined,
+              effectiveAgentPolicy,
+            )
+          }
         >
           {submitting ? (
             <>

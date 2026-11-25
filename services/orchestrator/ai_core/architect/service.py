@@ -594,6 +594,9 @@ class ArchitectService:
                 raise ArchitectContractNotFoundError("当前没有待确认的实施契约")
             if contract.contract_id != expected_id:
                 raise ArchitectContractNotFoundError(f"实施契约不存在: {expected_id}")
+            if decision == "CONFIRM" and request.agent_policy is not None:
+                # 用户确认前调整白名单：只影响本次确认后的契约版本。
+                contract.agent_policy = request.agent_policy
 
             # 已确认契约仍保持“持续在线”：用户追加新需求时允许再次
             # REVISE。此时不是恢复旧 interrupt，而是从当前 checkpoint
@@ -653,6 +656,11 @@ class ArchitectService:
                 "decision": decision,
                 "comment": request.comment,
                 "qualityTier": request.quality_tier,
+                "agentPolicy": (
+                    contract.agent_policy.model_dump(mode="json", by_alias=True)
+                    if contract.agent_policy
+                    else None
+                ),
             },
             dedupe_key=(
                 f"architect.contract.decision:"

@@ -22,6 +22,8 @@ public class ArchitectService {
 
     private static final Logger log = LoggerFactory.getLogger(ArchitectService.class);
     private static final String RUN_PATH = "/api/v1/internal/architect/runs/{runId}";
+    private static final String COLLABORATION_PATH =
+            "/api/v1/internal/collaboration/runs/{runId}";
     private static final String CLARIFICATION_ANSWER_PATH =
             "/api/v1/internal/architect/runs/{runId}/clarifications/"
                     + "{clarificationId}/answers";
@@ -128,6 +130,16 @@ public class ArchitectService {
 
     public ResponseEntity<JsonNode> snapshot(String runId) {
         return getJson(aiCoreInteractiveRestClient, RUN_PATH, "architect snapshot", runId);
+    }
+
+    /** Architect 协作状态：收件箱、动作台账与快速通道授权。 */
+    public ResponseEntity<JsonNode> collaboration(String runId) {
+        return getJson(
+                aiCoreInteractiveRestClient,
+                COLLABORATION_PATH,
+                "architect collaboration snapshot",
+                runId
+        );
     }
 
     private ResponseEntity<JsonNode> postJson(

@@ -8,6 +8,7 @@ import {
   streamArchitect,
 } from './architectStream.js'
 import { streamFullstack } from './fullstackStream.js'
+import { appendCollaborationEvent } from './collaborationTimeline.js'
 
 const STORAGE_KEY = 'vibe.architect.v1'
 // Architect / Fullstack 事件合并写盘间隔：SSE 期间不再逐事件同步序列化。
@@ -57,6 +58,8 @@ export const EMPTY_FULLSTACK = {
   // A2A 反馈：Applier / ConsistencyVerifier → Coder / Architect，
   // 以及 Architect 的契约确认回执。完整列表由事件与失败快照合并去重。
   a2a: [],
+  // Architect 协作时间线：子 Agent 汇报 / 写操作 / 快速通道授权。
+  collaboration: [],
   // 风险自适应门禁：L1 黄色告警 / L3 绿色通过徽标。
   qualityTier: null,
   qualityLabel: null,
@@ -637,6 +640,14 @@ function reduceFullstack(state, event) {
         ...base,
         a2a: mergeA2A(current.a2a, payload),
       }
+    case 'agent.report':
+    case 'agent.action':
+    case 'agent.fastpath.granted':
+    case 'agent.fastpath.revoked':
+      return {
+        ...base,
+        collaboration: appendCollaborationEvent(current.collaboration, event),
+      }
     case 'fullstack.started':
       return {
         ...base,
@@ -646,6 +657,7 @@ function reduceFullstack(state, event) {
         starting: false,
         // 新一轮生成从空的 A2A 列表开始，避免上一轮的契约请求残留。
         a2a: [],
+        collaboration: [],
         sandboxId: payload.sandboxId ?? current.sandboxId,
         previewUrl: payload.previewUrl ?? current.previewUrl,
         qualityTier: payload.qualityTier ?? current.qualityTier ?? null,
@@ -1245,6 +1257,7 @@ export function useArchitect({ token } = {}) {
       comment = '',
       qualityTier = '',
       knowledgeDocs = [],
+      agentPolicy = null,
     ) => {
       const current = statesRef.current[projectId]
       const contract = current?.contract
@@ -1259,6 +1272,7 @@ export function useArchitect({ token } = {}) {
           qualityTier || undefined,
           knowledgeDocs,
           token,
+          agentPolicy,
         )
         await connect(projectId, {
           runId: current.runId,

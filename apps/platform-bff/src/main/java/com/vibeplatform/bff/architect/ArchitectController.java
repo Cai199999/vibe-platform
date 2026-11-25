@@ -138,4 +138,10 @@ public class ArchitectController {
     public ResponseEntity<JsonNode> snapshot(@PathVariable String runId) {
         return architectService.snapshot(runId);
     }
+
+    /** Architect 视角的协作状态：子 Agent 汇报、动作台账、快速通道授权。 */
+    @GetMapping("/collaboration/runs/{runId}")
+    public ResponseEntity<JsonNode> collaboration(@PathVariable String runId) {
+        return architectService.collaboration(runId);
+    }
 }

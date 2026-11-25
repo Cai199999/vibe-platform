@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     service_name: str = "python-ai"
     service_version: str = "0.1.0"
 
+    # Architect 中心制协作：报告失败是否阻断主流程（默认观察 + 告警）。
+    collaboration_fail_closed: bool = False
+    # 快速通道：Architect 在 Run 启动时预授权标准链路直连。
+    collaboration_fastpath_enabled: bool = True
+    collaboration_fastpath_ttl_seconds: float = 3600.0
+    collaboration_fastpath_max_steps: int = 100
+    collaboration_fastpath_edges_path: str = "config/collaboration/fastpath_edges.yaml"
+
     # Direct Ops 提交后把最新源码同步到 BFF 持久化快照。
     bff_base_url: str = "http://java-bff:8080"
     source_snapshot_sync_enabled: bool = True

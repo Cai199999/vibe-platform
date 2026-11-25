@@ -1,0 +1,28 @@
+# 快速通道白名单：只有标准链路 + 零异常时才允许子 Agent 直连。
+# 每一项都必须同时匹配 from / to / kind / requestedAction。
+version: 1
+edges:
+  - from: DBACoder
+    to: BackendCoder
+    kind: schema_ready
+    requestedAction: REBIND_ORM
+  - from: BackendCoder
+    to: FrontendCoder
+    kind: api_ready
+    requestedAction: BIND_API
+  - from: BackendCoder
+    to: BuildVerifier
+    kind: backend_ready
+    requestedAction: VERIFY_BUILD
+  - from: FrontendCoder
+    to: BuildVerifier
+    kind: code_ready
+    requestedAction: VERIFY_BUILD
+  - from: Consumer
+    to: Agent
+    kind: task_ready
+    requestedAction: RUN_AGENT
+  - from: Agent
+    to: Consumer
+    kind: result_ready
+    requestedAction: WRITE_BACK

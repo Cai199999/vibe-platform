@@ -7741,6 +7741,37 @@ body.is-viewport-panning * {
   accent-color: #f59e0b;
 }
 
+.architect-agent-policy {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 4px 0;
+  padding: 8px 10px;
+  border: 1px dashed rgba(52, 211, 153, 0.3);
+  border-radius: 8px;
+}
+
+.architect-agent-policy legend {
+  padding: 0 4px;
+  color: #a7f3d0;
+  font-size: 10.5px;
+}
+
+.architect-policy-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: #cbd5e1;
+  font-size: 10px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.architect-policy-option input {
+  margin-top: 2px;
+  accent-color: #34d399;
+}
+
 .architect-quality-hint {
   margin: 2px 0 0;
   color: #fbbf24;
@@ -8008,6 +8039,61 @@ body.is-viewport-panning * {
 .architect-a2a .architect-ghost {
   align-self: flex-start;
   margin-top: 2px;
+}
+
+.architect-collab {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 9px;
+  border: 1px dashed rgba(52, 211, 153, 0.35);
+  border-radius: 8px;
+  background: rgba(52, 211, 153, 0.06);
+  color: #cbd5e1;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.architect-collab-title {
+  color: #a7f3d0;
+  font-weight: 600;
+}
+
+.architect-collab-item strong {
+  color: #e2e8f0;
+}
+
+.architect-collab-item.is-fastpath {
+  color: #fcd34d;
+}
+
+.architect-collab-error {
+  color: #fca5a5;
+}
+
+.architect-collab-filters {
+  display: flex;
+  gap: 4px;
+  margin: 2px 0;
+}
+
+.architect-collab-filter {
+  padding: 1px 6px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 999px;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.architect-collab-filter.is-active {
+  border-color: rgba(52, 211, 153, 0.6);
+  color: #a7f3d0;
+}
+
+.architect-collab-empty {
+  color: #94a3b8;
 }
 
 .architect-fullstack-error .architect-ghost {
@@ -8422,6 +8508,40 @@ body.is-viewport-panning * {
   color: #cbd5e1;
   font-size: 10.5px;
   line-height: 1.6;
+}
+
+.contract-agent-policy {
+  padding: 8px 10px;
+  border: 1px dashed rgba(52, 211, 153, 0.3);
+  border-radius: 8px;
+  background: rgba(52, 211, 153, 0.05);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.contract-agent-policy-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: #94a3b8;
+}
+
+.contract-agent-policy-title {
+  margin-top: 6px;
+  color: #a7f3d0;
+  font-weight: 600;
+}
+
+.contract-agent-edges {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding-left: 16px;
+  color: #cbd5e1;
+}
+
+.contract-agent-edges code {
+  color: #e2e8f0;
 }
 
 .contract-citations {

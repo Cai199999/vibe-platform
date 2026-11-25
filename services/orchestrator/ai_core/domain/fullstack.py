@@ -59,6 +59,10 @@ class FullstackRunOptions(CamelModel):
     project_mode: ProjectMode | None = None
     verify_build: bool = True
     restart_sandbox: bool = True
+    # Architect 预授权标准链路直连；出现异常自动收回。
+    fast_path: bool = True
+    # 可选：能力包 / 契约给出的白名单子集（[from, to, kind, requestedAction]）。
+    fast_path_edges: list[list[str]] = Field(default_factory=list, max_length=32)
     max_output_chars: int = Field(default=4000, ge=500, le=20_000)
 
 

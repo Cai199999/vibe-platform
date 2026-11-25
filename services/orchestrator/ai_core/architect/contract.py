@@ -19,6 +19,7 @@ from typing import Any
 from ai_core.architect.llm import ContractDraft
 from ai_core.architect.visual import build_visual_document_from_contract
 from ai_core.domain.architect import (
+    ArchitectAgentPolicy,
     ArchitectApiRoute,
     ArchitectCitation,
     ArchitectComponentInteraction,
@@ -555,6 +556,26 @@ def _components_from_visual(
     return components or list(draft_components)
 
 
+def _default_agent_policy() -> ArchitectAgentPolicy:
+    """把当前能力包的快速通道白名单冻结进契约。"""
+    try:
+        from ai_core.collaboration.fastpath import (
+            DEFAULT_FAST_EDGES,
+            load_fast_edges,
+        )
+        from ai_core.config import get_settings
+
+        edges = (
+            load_fast_edges(get_settings().collaboration_fastpath_edges_path)
+            or DEFAULT_FAST_EDGES
+        )
+    except Exception:  # pragma: no cover - 配置不可用时用空策略
+        edges = ()
+    return ArchitectAgentPolicy(
+        fast_path_edges=[list(edge) for edge in sorted(edges)],
+    )
+
+
 def assemble_contract(
     *,
     contract_id: str,
@@ -681,6 +702,7 @@ def assemble_contract(
         project_mode=project_mode,  # type: ignore[arg-type]
         output_phase=output_phase,  # type: ignore[arg-type]
         quality_tier=quality_tier,  # type: ignore[arg-type]
+        agent_policy=_default_agent_policy(),
         status="AWAITING_CONFIRMATION",
         confidence_score=confidence_score,
         threshold=threshold,
