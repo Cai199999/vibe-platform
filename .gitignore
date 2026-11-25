@@ -58,3 +58,6 @@ samples/gis-baseline-iter5/
 samples/gis-baseline-iter6/
 samples/gis-baseline-iter7/
 samples/gis-baseline-iter8/
+
+# 本地可视化产物（Archify 生成）
+.archify/
