@@ -20,6 +20,8 @@ import json
 import logging
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -159,6 +161,10 @@ class ActiveFullstackRun:
     quality_tier: str = "L2_STANDARD"
     warnings: list[str] = field(default_factory=list)
     mysql_check: dict[str, Any] = field(default_factory=dict)
+    # LLM 修复调用的 token / 成本累计；随完成事件与快照返回。
+    token_usage: dict[str, Any] = field(default_factory=dict)
+    # TestAgent 的可选验收报告；默认关闭时为空。
+    test_report: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -382,9 +388,12 @@ class FullstackService:
                 ):
                     active.warnings.append(L1_WARNING_TEXT)
                 active.mysql_check = dict(outcome.get("mysql_check") or {})
+                active.token_usage = dict(outcome.get("token_usage") or {})
                 active.status = "SUCCEEDED"
                 active.touch()
             self._record_visual_codegen_changelog(active)
+            self._sync_generated_source(active)
+            self._run_optional_test_agent(active)
             active.buffer.emit(
                 "fullstack.completed",
                 {
@@ -405,6 +414,10 @@ class FullstackService:
                     # L1/L2 不执行真实迁移验收，空字典必须回传 null，
                     # 否则前端会误以为“验收失败”。
                     "mysqlCheck": dict(active.mysql_check) or None,
+                    # 本次 LLM 修复调用累计的 token / 成本；模板路径为 0。
+                    "tokenUsage": dict(active.token_usage),
+                    # 可选 TestAgent 验收报告；未启用时为 null。
+                    "testReport": dict(active.test_report) or None,
                     "databaseEngine": contract_database_engine(active.contract),
                     "orm": "sequelize",
                     "dbaFiles": list(outcome.get("dba_files") or []),
@@ -449,6 +462,197 @@ class FullstackService:
                 active,
                 f"全栈生成异常: {exc}",
                 "FULLSTACK_INTERNAL_ERROR",
+            )
+
+    def _sync_generated_source(self, active: ActiveFullstackRun) -> None:
+        """把生成后的完整源码同步到 BFF/MinIO，支持跨设备恢复。
+
+        只同步文本产物，跳过依赖与构建目录；总大小限制 3MB。失败只告警，
+        不影响已完成的生成结果。
+        """
+        if not self._settings.source_snapshot_sync_enabled:
+            return
+        # 测试与内部调用可能没有 tenantId；不向 BFF 发起无租户写入。
+        if not active.request.tenant_id:
+            return
+        allowed_suffixes = (
+            ".js",
+            ".jsx",
+            ".ts",
+            ".tsx",
+            ".mjs",
+            ".cjs",
+            ".json",
+            ".css",
+            ".html",
+            ".sql",
+            ".md",
+            ".yml",
+            ".yaml",
+            ".env",
+        )
+        # 生成结果可能只记录入口文件；再探测一组标准产物路径，确保
+        # DataList / auth / server / 配置等完整源码也进入 MinIO。
+        candidate_paths = list(active.files)
+        for path in (
+            "src/App.jsx",
+            "src/DataList.jsx",
+            "src/main.jsx",
+            "src/visual.css",
+            "src/auth.jsx",
+            "src/api.js",
+            "server/index.js",
+            "server/db.js",
+            "server/auth.js",
+            "server/security.js",
+            "server/migrate.mjs",
+            "server/api-routes.json",
+            "server/schema.core.json",
+            "server/migrations/001_init.sql",
+            "package.json",
+            "vite.config.js",
+            "Dockerfile",
+            "docker-compose.yml",
+            "README.md",
+            ".env.example",
+        ):
+            if path not in candidate_paths:
+                candidate_paths.append(path)
+        files: dict[str, str] = {}
+        total = 0
+        for path in candidate_paths[:220]:
+            lowered = path.lower()
+            if not lowered.endswith(allowed_suffixes):
+                continue
+            if "node_modules/" in lowered or "package-lock" in lowered:
+                continue
+            try:
+                content = self._sandbox.read_file(active.sandbox_id, path)
+            except Exception:  # noqa: BLE001 - 单文件失败不阻断其余文件
+                continue
+            if not isinstance(content, str):
+                continue
+            size = len(content.encode("utf-8"))
+            if size > 512_000 or total + size > 3_000_000:
+                continue
+            files[path] = content
+            total += size
+        if not files:
+            return
+        entry = "src/App.jsx" if "src/App.jsx" in files else next(iter(files))
+        tenant = active.request.tenant_id or "tenant_local"
+        payload = json.dumps(
+            {
+                "tenantId": tenant,
+                "projectName": active.request.project_id,
+                "entryFile": entry,
+                "sourceName": entry,
+                "files": files,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        url = (
+            f"{self._settings.bff_base_url.rstrip('/')}/api/v1/project-sources/"
+            f"{active.request.project_id}"
+        )
+        request = urllib.request.Request(
+            url,
+            data=payload,
+            method="PUT",
+            headers={
+                "Content-Type": "application/json",
+                "X-Tenant-Id": tenant,
+            },
+        )
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=self._settings.source_snapshot_sync_timeout_seconds,
+            ) as response:
+                logger.info(
+                    "生成源码已同步 BFF project=%s files=%d bytes=%d status=%s",
+                    active.request.project_id,
+                    len(files),
+                    total,
+                    response.status,
+                )
+        except Exception as exc:  # noqa: BLE001 - 源码同步失败不回滚生成
+            logger.warning(
+                "生成源码同步失败 project=%s error=%s",
+                active.request.project_id,
+                exc,
+            )
+
+    def _run_optional_test_agent(self, active: ActiveFullstackRun) -> None:
+        """生成成功后可选执行 TestAgent。
+
+        默认关闭；失败只追加 warning，不把已成功的生成物改判为失败。
+        L1/L2/L3 与“仅供参考”语义由 TestAgent 报告自身携带。
+        """
+        if not self._settings.fullstack_test_agent_enabled:
+            return
+        tier = str(self._settings.fullstack_test_agent_tier or "L1").upper()
+        if tier not in {"L1", "L2", "L3"}:
+            tier = "L1"
+        active.buffer.emit(
+            "fullstack.test.started",
+            {
+                "runId": active.run_id,
+                "tier": tier,
+                "previewUrl": active.preview_url,
+            },
+            dedupe_key=f"fullstack.test.started:{active.run_id}",
+        )
+        try:
+            from ai_core.testing.agent import TEST_AGENT
+            from ai_core.testing.models import TestRequest
+
+            request = TestRequest(
+                source_run_id=active.run_id,
+                project_id=active.request.project_id,
+                contract_id=active.contract.contract_id,
+                tier=tier,  # type: ignore[arg-type]
+                preview_url=active.preview_url,
+                api_base_url=active.preview_url,
+                contract=active.contract.model_dump(mode="json", by_alias=True),
+                timeout_seconds=self._settings.fullstack_test_agent_timeout_seconds,
+            )
+            report = TEST_AGENT.execute(request)
+            active.test_report = report.model_dump(mode="json", by_alias=True)
+            if report.failed:
+                failed_checks = [
+                    item.message
+                    for item in report.checks
+                    if item.status in {"FAILED", "ERROR"}
+                ]
+                active.warnings.append(
+                    f"自动验收未通过（{tier}）："
+                    + "；".join(failed_checks[:3])
+                    + "；生成物仍可继续人工验收。"
+                )
+            active.buffer.emit(
+                "fullstack.test.completed",
+                {
+                    "runId": active.run_id,
+                    "tier": tier,
+                    "status": report.status,
+                    "summary": dict(report.summary),
+                    "advisory": report.advisory,
+                    "report": active.test_report,
+                },
+                dedupe_key=f"fullstack.test.completed:{active.run_id}",
+            )
+        except Exception as exc:  # noqa: BLE001 - 验收失败不能污染生成结果
+            logger.exception("TestAgent 验收异常 run_id=%s", active.run_id)
+            active.warnings.append(f"自动验收执行失败：{exc}")
+            active.buffer.emit(
+                "fullstack.test.failed",
+                {
+                    "runId": active.run_id,
+                    "tier": tier,
+                    "error": str(exc)[:400],
+                },
+                dedupe_key=f"fullstack.test.failed:{active.run_id}",
             )
 
     def _record_visual_codegen_changelog(self, active: ActiveFullstackRun) -> None:
@@ -506,6 +710,19 @@ class FullstackService:
             run_id=active.run_id,
             stage=f"fullstack.{node or 'unknown'}",
         )
+        # 终态失败同样进入门禁错误账本，保证每条报错都有结构化日志与统计。
+        try:
+            from ai_core.collaboration.error_router import GATE_ERRORS
+
+            GATE_ERRORS.record_final_failure(
+                run_id=active.run_id,
+                code=code,
+                message=error,
+                stage=f"fullstack.{node or 'unknown'}",
+                source=node or "FullstackGraph",
+            )
+        except Exception:  # pragma: no cover - 日志失败不能阻断终态事件
+            logger.exception("门禁错误终态入账失败 run=%s", active.run_id)
         # 先发终态事件，再改快照状态：测试 / 前端一旦观察到 FAILED，
         # 就能确定对应的 fullstack.failed 已经在缓冲区内，避免竞态。
         active.buffer.emit(
@@ -730,6 +947,10 @@ class FullstackService:
                 last_seq=active.buffer.last_seq,
                 created_at=active.created_at,
                 updated_at=active.updated_at,
+                payload={
+                    "tokenUsage": dict(active.token_usage),
+                    "testReport": dict(active.test_report) or None,
+                },
             )
 
     def summary_for_request(self, contract: ArchitectContract) -> dict[str, Any]:

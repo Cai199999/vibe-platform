@@ -10,10 +10,28 @@
 - ``a2a_bridge``：把现有 A2A 反馈改道到 Architect。
 """
 
+from ai_core.collaboration.error_router import (
+    GATE_ERRORS,
+    MAX_FIX_ATTEMPTS,
+    GateAssignment,
+    GateError,
+    GateErrorLedger,
+    GateErrorRouter,
+)
 from ai_core.collaboration.protocol import (
     ARCHITECT,
     AgentReport,
     route_a2a_to_architect,
 )
 
-__all__ = ["ARCHITECT", "AgentReport", "route_a2a_to_architect"]
+__all__ = [
+    "ARCHITECT",
+    "AgentReport",
+    "GATE_ERRORS",
+    "GateAssignment",
+    "GateError",
+    "GateErrorLedger",
+    "GateErrorRouter",
+    "MAX_FIX_ATTEMPTS",
+    "route_a2a_to_architect",
+]

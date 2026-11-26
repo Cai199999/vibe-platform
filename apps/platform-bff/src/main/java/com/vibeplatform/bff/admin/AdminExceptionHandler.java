@@ -68,6 +68,38 @@ public class AdminExceptionHandler {
         return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(body);
     }
 
+    @ExceptionHandler(GateErrorStatsUnavailableException.class)
+    public ResponseEntity<ObjectNode> handleGateErrorStatsUnavailable(
+            GateErrorStatsUnavailableException ex,
+            HttpServletRequest request
+    ) {
+        String requestId = resolveRequestId(request);
+        log.warn("admin gate error stats unavailable path={} requestId={}: {}",
+                request.getRequestURI(), requestId, ex.getMessage());
+
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("code", "AI_CORE_GATE_ERROR_STATS_UNAVAILABLE");
+        body.put("message", "AI Core 门禁错误统计暂不可用，请稍后重试");
+        body.put("requestId", requestId);
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(body);
+    }
+
+    @ExceptionHandler(TestingMetricsUnavailableException.class)
+    public ResponseEntity<ObjectNode> handleTestingUnavailable(
+            TestingMetricsUnavailableException ex,
+            HttpServletRequest request
+    ) {
+        String requestId = resolveRequestId(request);
+        log.warn("admin testing metrics unavailable path={} requestId={}: {}",
+                request.getRequestURI(), requestId, ex.getMessage());
+
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("code", "AI_CORE_TESTING_UNAVAILABLE");
+        body.put("message", "AI Core 测试指标暂不可用，请稍后重试");
+        body.put("requestId", requestId);
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(body);
+    }
+
     private String resolveRequestId(HttpServletRequest request) {
         String header = request.getHeader("X-Request-Id");
         return header == null || header.isBlank()

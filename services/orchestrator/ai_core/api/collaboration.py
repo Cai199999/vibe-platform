@@ -6,9 +6,34 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
+from ai_core.collaboration.error_router import GATE_ERRORS
 from ai_core.collaboration.hub import ARCHITECT_HUB
 
 router = APIRouter(prefix="/api/v1/internal/collaboration", tags=["collaboration"])
+
+
+@router.get("/errors/catalog")
+def get_error_catalog() -> dict[str, Any]:
+    """平台全部确定性错误码与负责 Agent，Architect 与运维共用。"""
+    return GATE_ERRORS.catalog()
+
+
+@router.get("/errors/stats")
+def get_error_stats(
+    top: int = Query(default=10, ge=1, le=50),
+) -> dict[str, Any]:
+    """高频门禁错误统计：按错误码、指纹、负责 Agent 聚合。"""
+    return GATE_ERRORS.stats(top)
+
+
+@router.get("/runs/{run_id}/errors")
+def get_run_errors(
+    run_id: str,
+    limit: int = Query(default=100, ge=1, le=200),
+) -> dict[str, Any]:
+    """某个 Run 的门禁错误时间线（含尝试次数与分派结果）。"""
+    items = GATE_ERRORS.ledger.for_run(run_id, limit)
+    return {"runId": run_id, "count": len(items), "errors": items}
 
 
 @router.get("/runs/{run_id}")
@@ -26,15 +51,18 @@ def get_run_collaboration(
     inbox = snapshot["inbox"]
     actions = snapshot["actions"]
     grants = snapshot["grants"]
+    gate_errors = GATE_ERRORS.ledger.for_run(run_id, limit)
     return {
         "runId": run_id,
         "inbox": inbox[-limit:],
         "actions": actions[-limit:],
         "fastPathGrants": grants,
+        "gateErrors": gate_errors,
         "counts": {
             "inbox": len(inbox),
             "actions": len(actions),
             "fastPathGrants": len(grants),
+            "gateErrors": len(gate_errors),
         },
     }
 

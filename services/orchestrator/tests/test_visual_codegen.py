@@ -590,7 +590,13 @@ class _MemorySandbox(SandboxProvider):
     def read_file(self, sandbox_id: str, path: str) -> str:
         return self.files[path]
 
-    def restart(self, sandbox_id: str, ready_path: str = "/") -> None:
+    def restart(
+        self,
+        sandbox_id: str,
+        ready_path: str = "/",
+        *,
+        require_root: bool = False,
+    ) -> None:
         self.restarts.append((sandbox_id, ready_path))
 
     def export_archive(self, sandbox_id: str) -> bytes:

@@ -85,6 +85,9 @@ class LLMBackendCoderTest(unittest.TestCase):
         self.assertIn("server/index.js", human)
         self.assertIsNotNone(schema_payload)
         self.assertEqual(repaired.metadata["llmRepair"]["files"], ["server/index.js"])
+        # 修复调用的 token / 成本随 metadata 回传，供事件与 Admin 看板消费。
+        self.assertIn("usage", repaired.metadata)
+        self.assertIn("inputTokens", repaired.metadata["usage"])
         self.assertEqual(
             repaired.files["server/index.js"], bundle.files["server/index.js"]
         )

@@ -29,6 +29,7 @@ from ai_core.fullstack.coders import (
     collection_path,
     core_table_for_contract,
 )
+from ai_core.observability.token_usage import UsageCollector, collect_usage
 from ai_core.ports.model import ModelClient, ModelClientError
 
 logger = logging.getLogger(__name__)
@@ -138,13 +139,15 @@ class LLMBackendCoder:
             authoritative_files=authoritative_files,
             previous_attempt=bool(bundle.metadata.get("applierPreviousAttempt")),
         )
+        collector = UsageCollector()
         try:
-            raw = self._ensure_client().generate_json(
-                "coder",
-                system,
-                human,
-                json_schema=_REPAIR_JSON_SCHEMA,
-            )
+            with collect_usage(collector):
+                raw = self._ensure_client().generate_json(
+                    "coder",
+                    system,
+                    human,
+                    json_schema=_REPAIR_JSON_SCHEMA,
+                )
         except ModelClientError as exc:
             raise LLMBackendRepairError(f"LLM BackendCoder 调用失败: {exc}") from exc
 
@@ -159,6 +162,8 @@ class LLMBackendCoder:
             "files": sorted(files),
             "diagnostics": [str(item) for item in diagnostics if str(item).strip()],
         }
+        # Run 级 token / 成本：后续 fullstack.applier.llm_repair 事件携带。
+        metadata["usage"] = collector.snapshot().as_dict()
         logger.info(
             "LLM BackendCoder 修复完成 attempt=%d/%d files=%s",
             attempt,

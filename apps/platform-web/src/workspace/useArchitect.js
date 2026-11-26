@@ -947,6 +947,23 @@ export function useArchitect({ token } = {}) {
         })
       } catch (cause) {
         if (cause?.name === 'AbortError') return
+        // Run 已不存在（服务重启 / 超出保留期）：清掉失效的 Run 身份，
+        // 但保留契约、澄清与画布等已产出内容，并给出可操作的提示。
+        if (cause?.runExpired) {
+          patch(projectId, (previous) => ({
+            ...previous,
+            runId: null,
+            streamPath: null,
+            lastSeq: 0,
+            status: 'FAILED',
+            submitting: false,
+            answerSubmitting: false,
+            decisionSubmitting: false,
+            error: cause.message,
+            errorCode: cause.code || 'ARCHITECT_RUN_NOT_FOUND',
+          }))
+          return
+        }
         patch(projectId, (previous) => ({
           ...previous,
           submitting: false,
@@ -1001,6 +1018,26 @@ export function useArchitect({ token } = {}) {
           // 终态已到达时，连接关闭属于正常收尾，不改写结果。
           if (fullstack.status === 'SUCCEEDED' || fullstack.status === 'FAILED') {
             return previous
+          }
+          // Run 已不存在：清掉旧 runId / 进度，重试时会生成新的 Run；
+          // 不清 sandboxId / previewUrl，已有沙盒预览仍可继续使用。
+          if (cause?.runExpired) {
+            return {
+              ...previous,
+              fullstack: {
+                ...fullstack,
+                runId: null,
+                lastSeq: 0,
+                status: 'FAILED',
+                starting: false,
+                activeNode: null,
+                steps: [],
+                outputs: [],
+                result: null,
+                error: cause.message,
+                errorCode: 'RUN_EXPIRED',
+              },
+            }
           }
           return {
             ...previous,

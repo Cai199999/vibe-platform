@@ -263,6 +263,46 @@ def _js_string(value: Any) -> str:
     return raw.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
 
 
+# 通用表单字段中文名 → 英文请求体字段。只覆盖 CRUD 常见字段，
+# 不包含任何行业专有名词；领域字段应优先由契约显式给出 name。
+_LABEL_FIELDS = (
+    ("名称", "name"),
+    ("标题", "title"),
+    ("状态", "status"),
+    ("优先级", "priority"),
+    ("备注", "note"),
+    ("描述", "description"),
+    ("内容", "content"),
+    ("截止", "due_date"),
+    ("日期", "date"),
+    ("金额", "amount"),
+    ("数量", "quantity"),
+    ("库存", "stock"),
+    ("类型", "type"),
+    ("标签", "tags"),
+    ("邮箱", "email"),
+    ("负责人", "owner"),
+    ("申请人", "applicant"),
+    ("客户", "customer"),
+)
+
+
+def _input_field_name(node: VisualNode) -> str:
+    """为表单输入推导 name，供 FormData 生成真实请求体。"""
+    explicit = str(node.props.get("name") or "").strip()
+    if explicit:
+        return explicit
+    text = f"{node.name or ''} {node.props.get('placeholder') or ''}"
+    for label, field in _LABEL_FIELDS:
+        if label in text:
+            return field
+    match = re.search(r"[A-Za-z_][A-Za-z0-9_]*", text)
+    if match:
+        return match.group(0).lower()
+    compact = re.sub(r"[^A-Za-z0-9_]", "", str(node.name or ""))
+    return compact.lower()
+
+
 def _js_object(style: Mapping[str, Any]) -> str:
     parts: list[str] = []
     for key, value in style.items():
@@ -1089,7 +1129,19 @@ def _render_action_runtime(actions: list[dict[str, Any]]) -> list[str]:
     return [
         f"const VISUAL_ACTIONS = {json.dumps(actions, ensure_ascii=False)};",
         "",
-        "async function runVisualAction(actionId) {",
+        "function showVisualToast(message) {",
+        "  let toast = document.getElementById('vibe-action-toast');",
+        "  if (!toast) {",
+        "    toast = document.createElement('div');",
+        "    toast.id = 'vibe-action-toast';",
+        "    toast.setAttribute('role', 'status');",
+        "    document.body.appendChild(toast);",
+        "  }",
+        "  toast.textContent = message;",
+        "  toast.dataset.vibeActionStatus = 'success';",
+        "}",
+        "",
+        "async function runVisualAction(actionId, payload) {",
         "  const action = VISUAL_ACTIONS.find((item) => item.id === actionId);",
         "  if (!action) return;",
         "  if (action.action === 'navigate' && action.endpoint) {",
@@ -1101,10 +1153,17 @@ def _render_action_runtime(actions: list[dict[str, Any]]) -> list[str]:
         "      const response = await fetch(action.endpoint, {",
         "        method: action.method || 'POST',",
         "        headers: { 'Content-Type': 'application/json' },",
-        "        body: action.method === 'GET' ? undefined : JSON.stringify({}),",
+        "        body: action.method === 'GET' ? undefined : JSON.stringify(payload || {}),",
         "      });",
         "      if (!response.ok) {",
         "        console.error('[visual-action] failed', action.id, response.status);",
+        "        return;",
+        "      }",
+        "      if (action.method === 'POST') {",
+        "        showVisualToast('提交成功');",
+        "        window.dispatchEvent(new CustomEvent('vibe-action-success', {",
+        "          detail: { actionId: action.id, endpoint: action.endpoint },",
+        "        }));",
         "      }",
         "    } catch (error) {",
         "      console.error('[visual-action] request failed', action.id, error);",
@@ -1112,6 +1171,15 @@ def _render_action_runtime(actions: list[dict[str, Any]]) -> list[str]:
         "    return;",
         "  }",
         "  console.info('[visual-action]', action.id, action.action);",
+        "}",
+        "",
+        "function submitVisualForm(event, actionId) {",
+        "  event.preventDefault();",
+        "  const payload = {};",
+        "  new FormData(event.currentTarget).forEach((value, key) => {",
+        "    if (typeof value === 'string' && value) payload[key] = value;",
+        "  });",
+        "  return runVisualAction(actionId, payload);",
         "}",
         "",
     ]
@@ -1242,6 +1310,123 @@ def _render_main_jsx() -> str:
     )
 
 
+def _render_quick_create_jsx() -> str:
+    """通用“+ 新增”弹窗：POST 到同一集合根，成功后通知列表 refetch。"""
+    return """import { useState } from 'react'
+
+const overlayStyle = {
+  position: 'fixed',
+  inset: 0,
+  background: 'rgba(15, 23, 42, 0.55)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  zIndex: 60,
+}
+const panelStyle = {
+  width: 'min(480px, 92vw)',
+  maxHeight: '86vh',
+  overflow: 'auto',
+  background: '#fff',
+  borderRadius: 14,
+  padding: 20,
+  boxShadow: '0 24px 60px rgba(15, 23, 42, 0.28)',
+}
+const inputStyle = {
+  width: '100%',
+  padding: '8px 10px',
+  border: '1px solid #cbd5e1',
+  borderRadius: 8,
+}
+
+export default function QuickCreate({ endpoint, fields = [] }) {
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  if (!endpoint) return null
+
+  const submit = async (event) => {
+    event.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setError('')
+    const form = event.currentTarget
+    const payload = {}
+    new FormData(form).forEach((value, key) => {
+      if (typeof value === 'string' && value) payload[key] = value
+    })
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      window.dispatchEvent(
+        new CustomEvent('vibe-action-success', { detail: { endpoint } }),
+      )
+      form.reset()
+      setOpen(false)
+    } catch (cause) {
+      setError(String(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div data-quick-create data-endpoint={endpoint} style={{ margin: '12px 0' }}>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        style={{
+          padding: '8px 14px',
+          border: '1px solid #2563eb',
+          borderRadius: 8,
+          background: '#2563eb',
+          color: '#fff',
+          fontWeight: 600,
+          cursor: 'pointer',
+        }}
+      >
+        ＋ 新增
+      </button>
+      {open && (
+        <div style={overlayStyle} role="presentation" onClick={() => setOpen(false)}>
+          <div
+            style={panelStyle}
+            role="dialog"
+            aria-modal="true"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 style={{ marginTop: 0 }}>新增记录</h3>
+            <form onSubmit={submit} style={{ display: 'grid', gap: 10 }}>
+              {fields.map((field) => (
+                <label key={field} style={{ display: 'grid', gap: 4 }}>
+                  <span style={{ fontSize: 12, color: '#475569' }}>{field}</span>
+                  <input name={field} placeholder={`请输入${field}`} style={inputStyle} />
+                </label>
+              ))}
+              {error && <p style={{ color: '#b91c1c', margin: 0 }}>{error}</p>}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                <button type="button" onClick={() => setOpen(false)} disabled={busy}>
+                  取消
+                </button>
+                <button type="submit" disabled={busy}>
+                  {busy ? '提交中…' : '提交'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+"""
+
+
 def _render_data_list_jsx() -> str:
     """通用集合列表组件：从契约 interaction 的端点拉取并渲染表格。"""
     return """import { useEffect, useState } from 'react'
@@ -1289,6 +1474,13 @@ export default function DataList({ endpoint }) {
       if (retryTimer) clearTimeout(retryTimer)
     }
   }, [endpoint, retryToken])
+
+  // 表单提交成功后自动 refetch，保证新数据立刻出现在列表里。
+  useEffect(() => {
+    const refresh = () => setRetryToken((value) => value + 1)
+    window.addEventListener('vibe-action-success', refresh)
+    return () => window.removeEventListener('vibe-action-success', refresh)
+  }, [])
 
   const tableStyle = { width: '100%', borderCollapse: 'collapse', fontSize: 13 }
   const cellStyle = { border: '1px solid #cbd5e1', padding: '6px 8px', textAlign: 'left' }
@@ -1356,11 +1548,7 @@ def _is_collection_get(action: dict[str, Any] | None) -> bool:
     if str(action.get("method") or "").upper() != "GET":
         return False
     endpoint = str(action.get("endpoint") or "")
-    return (
-        endpoint.startswith("/api")
-        and "{" not in endpoint
-        and ":" not in endpoint
-    )
+    return endpoint.startswith("/api") and "{" not in endpoint and ":" not in endpoint
 
 
 class _ReactCompiler:
@@ -1370,9 +1558,22 @@ class _ReactCompiler:
         *,
         include_interactions: bool = False,
         visual_extensions: Iterable[VisualExtension] | None = None,
+        collection_endpoints: Iterable[str] | None = None,
+        collection_fields: Mapping[str, Iterable[str]] | None = None,
     ) -> None:
         self.document = document
         self.include_interactions = include_interactions
+        self.collection_fields = {
+            str(key): [str(item) for item in values]
+            for key, values in (collection_fields or {}).items()
+        }
+        self.fallback_endpoints = tuple(
+            str(endpoint).strip()
+            for endpoint in (collection_endpoints or ())
+            if str(endpoint).strip().startswith("/api")
+            and "{" not in str(endpoint)
+            and ":" not in str(endpoint)
+        )
         self.actions = _interaction_index(document) if include_interactions else {}
         self.visual_extensions = tuple(visual_extensions or ())
         self.used_extensions = tuple(
@@ -1393,10 +1594,24 @@ class _ReactCompiler:
                 action = self.actions.get(node.id)
                 if _is_collection_get(action):
                     endpoints.append(str(action.get("endpoint")))
-            self.page_collection_endpoints[page_id] = tuple(
-                dict.fromkeys(endpoints)
-            )
+            self.page_collection_endpoints[page_id] = tuple(dict.fromkeys(endpoints))
+        if self.fallback_endpoints:
+            pages = list(_document_pages(document))
+            if pages:
+                first_page_id = pages[0][0]
+                self.page_collection_endpoints[first_page_id] = tuple(
+                    dict.fromkeys(
+                        self.page_collection_endpoints.get(first_page_id, ())
+                        + self.fallback_endpoints
+                    )
+                )
         self.has_data_list = any(self.page_collection_endpoints.values())
+        self.quick_create_endpoints = {
+            endpoint
+            for endpoints in self.page_collection_endpoints.values()
+            for endpoint in endpoints
+        }
+        self.has_quick_create = bool(self.quick_create_endpoints)
         self.multi_page = len(document.pages) > 1
         self.warnings: list[str] = []
         self.custom_node_ids: list[str] = []
@@ -1437,7 +1652,7 @@ class _ReactCompiler:
             attrs.append("disabled={true}")
         if node.a11y.label and node.type in {"button", "input", "image", "modal"}:
             attrs.append(f"aria-label={{{_js_string(node.a11y.label)}}}")
-        if self.include_interactions:
+        if self.include_interactions and node.type != "form":
             action = self.actions.get(node.id)
             if action:
                 if (
@@ -1586,8 +1801,9 @@ class _ReactCompiler:
             ]
             if value not in (None, ""):
                 extra.append(f"defaultValue={{{_js_string(value)}}}")
-            if node.props.get("name"):
-                extra.append(f"name={{{_js_string(node.props.get('name'))}}}")
+            field_name = _input_field_name(node)
+            if field_name:
+                extra.append(f"name={{{_js_string(field_name)}}}")
             return [f"{pad}<input {self._attrs(node, extra=extra)} />"]
 
         if node.type == "image":
@@ -1603,7 +1819,19 @@ class _ReactCompiler:
         attrs = self._attrs(node)
 
         if node.type == "form":
-            attrs += " onSubmit={(event) => event.preventDefault()}"
+            action = self.actions.get(node.id)
+            if (
+                action
+                and action.get("endpoint")
+                and str(action.get("action") or "") in {"submit", "call_api"}
+            ):
+                attrs += (
+                    " onSubmit={(event) => submitVisualForm(event, "
+                    + _js_string(action["id"])
+                    + ")}"
+                )
+            else:
+                attrs += " onSubmit={(event) => event.preventDefault()}"
         if node.type == "modal":
             attrs += ' role="dialog" aria-modal="true"'
 
@@ -1648,6 +1876,8 @@ class _ReactCompiler:
             lines.append(line)
         if self.has_data_list:
             lines.append("import DataList from './DataList.jsx'")
+        if self.has_quick_create:
+            lines.append("import QuickCreate from './QuickCreate.jsx'")
         lines.append("")
         lines.extend(_render_action_runtime(list(self.actions.values())))
 
@@ -1673,6 +1903,16 @@ class _ReactCompiler:
                     for endpoint in endpoints[:2]:
                         lines.append(
                             f"      <DataList endpoint={_js_string(endpoint)} />"
+                        )
+                        fields = self.collection_fields.get(
+                            endpoint, ["name", "description"]
+                        )[:6]
+                        lines.append(
+                            "      <QuickCreate endpoint="
+                            + _js_string(endpoint)
+                            + " fields={"
+                            + json.dumps(fields, ensure_ascii=False)
+                            + "} />"
                         )
                     lines.append("    </>")
                 else:
@@ -1732,17 +1972,23 @@ class _ReactCompiler:
             )
             root = pages[0][3] if pages else None
             endpoints = (
-                self.page_collection_endpoints.get(pages[0][0], ())
-                if pages
-                else ()
+                self.page_collection_endpoints.get(pages[0][0], ()) if pages else ()
             )
             if endpoints:
                 lines.append("    <>")
                 if root is not None:
                     lines.extend(self._render_node(root, 6))
                 for endpoint in endpoints[:2]:
+                    lines.append(f"      <DataList endpoint={_js_string(endpoint)} />")
+                    fields = self.collection_fields.get(
+                        endpoint, ["name", "description"]
+                    )[:6]
                     lines.append(
-                        f"      <DataList endpoint={_js_string(endpoint)} />"
+                        "      <QuickCreate endpoint="
+                        + _js_string(endpoint)
+                        + " fields={"
+                        + json.dumps(fields, ensure_ascii=False)
+                        + "} />"
                     )
                 lines.append("    </>")
             elif root is not None:
@@ -1778,6 +2024,8 @@ class _ReactCompiler:
         )
         if self.has_data_list:
             files["src/DataList.jsx"] = _render_data_list_jsx()
+        if self.has_quick_create:
+            files["src/QuickCreate.jsx"] = _render_quick_create_jsx()
         return VisualCompileResult(
             files=files,
             node_ids=node_ids,
@@ -2000,6 +2248,8 @@ def compile_visual_document(
     extra_dev_dependencies: Mapping[str, str] | None = None,
     extra_imports: list[str] | None = None,
     visual_extensions: Iterable[VisualExtension] | None = None,
+    collection_endpoints: Iterable[str] | None = None,
+    collection_fields: Mapping[str, Iterable[str]] | None = None,
 ) -> VisualCompileResult:
     """确定性编译，并通过 Babel AST 门禁。
 
@@ -2026,6 +2276,8 @@ def compile_visual_document(
             visual,
             include_interactions=include_interactions,
             visual_extensions=visual_extensions,
+            collection_endpoints=collection_endpoints,
+            collection_fields=collection_fields,
         ).compile()
         primary = _apply_stack_dependencies(
             primary,

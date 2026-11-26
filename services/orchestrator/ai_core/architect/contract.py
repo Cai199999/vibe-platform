@@ -70,6 +70,16 @@ def _normalize_component(raw: dict, index: int) -> dict:
     return item
 
 
+def _component_page_path(item: dict) -> str:
+    """组件归属页面路径；未声明视为首页。"""
+    raw = str(
+        item.get("page") or item.get("pagePath") or item.get("route") or ""
+    ).strip()
+    if not raw:
+        return "/"
+    return raw if raw.startswith("/") else "/" + raw
+
+
 def _visual_title(draft: ContractDraft) -> str:
     """为兜底 VisualDocument 推导页面标题。"""
     title = str(draft.tech_stack.get("frontendTitle") or "").strip()
@@ -126,6 +136,55 @@ def validate_draft(
                 preview = "；".join(report.errors[:5])
                 issues.append(
                     "visual_document 不符合 VisualDocument Schema：" + preview
+                )
+
+    # 页面完整度门禁：骨架模式（抽象需求）保持极简；明确业务需求不允许
+    # 交回一张只有空页面 / 占位的画布。
+    if (
+        visual_v0
+        and shape in {"lightweight_web", "full_stack_system"}
+        and not draft.skeleton_mode
+    ):
+        business = [
+            item
+            for item in components
+            if not item.get("isPlaceholder")
+            and str(item.get("role") or "").lower() not in {"placeholder", ""}
+        ]
+        if len(business) < 2:
+            issues.append(
+                "V0 页面不能为空：首页至少需要 2 个业务区块"
+                "（如指标 + 列表/表格/表单），components 需分别声明 page 与 region"
+            )
+        for route in frontend_routes:
+            if not isinstance(route, dict):
+                continue
+            path = str(route.get("path") or "").strip()
+            if not path or path == "/":
+                continue
+            normalized_path = path if path.startswith("/") else "/" + path
+            if not any(
+                _component_page_path(item) == normalized_path for item in business
+            ):
+                issues.append(f"V0 页面 {normalized_path} 缺少业务组件，禁止只建空页面")
+        if shape == "full_stack_system":
+            root_roles = {
+                str(item.get("role") or "").lower()
+                for item in business
+                if _component_page_path(item) == "/"
+            }
+            if not root_roles & {
+                "list",
+                "table",
+                "form",
+                "summary",
+                "metric",
+                "kpi",
+                "ai",
+            }:
+                issues.append(
+                    "V0 首页缺少数据 / 操作区块："
+                    "list/table/form/summary 至少需要一种"
                 )
 
     # 前端骨架由 FrontendCoder 直接消费这三项，缺失时不允许进入确认。

@@ -26,13 +26,14 @@ from ai_core.api.runs import router as runs_router
 from ai_core.api.sandbox import router as sandbox_router
 from ai_core.api.source_analysis import router as source_analysis_router
 from ai_core.api.supervisor import router as supervisor_router
+from ai_core.api.testing import router as testing_router
 from ai_core.api.visual_agent import router as visual_agent_router
 from ai_core.config import get_settings
 from ai_core.persistence.run_store import get_run_store
 from ai_core.run_guard import get_run_guard
 from ai_core.error_envelope import install_error_handlers
 from ai_core.sandbox import get_sandbox_provider
-from ai_core.sandbox_gc import start_container_gc, start_draft_gc
+from ai_core.sandbox_gc import start_container_gc, start_draft_gc, start_idle_gc
 from ai_core.schemas import HealthResponse, PingResponse
 
 settings = get_settings()
@@ -60,6 +61,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     provider = get_sandbox_provider()
     collector = start_draft_gc(provider, settings)
     container_collector = start_container_gc(provider, settings)
+    idle_collector = start_idle_gc(provider, settings)
     try:
         yield
     finally:
@@ -67,6 +69,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             collector.stop()
         if container_collector is not None:
             container_collector.stop()
+        if idle_collector is not None:
+            idle_collector.stop()
         # 刷出异步事件写队列；Redis 不可用时是 no-op。
         get_run_store().close()
 
@@ -92,6 +96,7 @@ app.include_router(collaboration_router)
 app.include_router(fullstack_router)
 app.include_router(generated_apps_router)
 app.include_router(supervisor_router)
+app.include_router(testing_router)
 app.include_router(visual_agent_router)
 app.include_router(source_analysis_router)
 

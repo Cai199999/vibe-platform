@@ -10050,6 +10050,124 @@ body.is-viewport-panning * {
   white-space: nowrap;
 }
 
+.admin-panel-empty {
+  margin: 0;
+  padding: 18px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  color: var(--faint);
+  font-size: 12px;
+  text-align: center;
+}
+
+.admin-gate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-gate-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(148, 163, 184, 0.04);
+}
+
+.admin-gate-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.admin-gate-main code {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(248, 113, 113, 0.12);
+  color: #fecaca;
+  font-size: 10.5px;
+}
+
+.admin-gate-main span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-gate-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.admin-gate-meta strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-testing-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.admin-testing-stats article {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(148, 163, 184, 0.04);
+}
+
+.admin-testing-stats span {
+  color: var(--faint);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+
+.admin-testing-stats strong {
+  color: var(--text);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-testing-stats em {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-style: normal;
+}
+
+.admin-testing-tiers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.admin-testing-tiers span {
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
 /* System health ------------------------------------------------------ */
 .admin-health-panel {
   background:
@@ -13583,6 +13701,25 @@ body.is-viewport-panning * {
   color: var(--faint);
 }
 
+.vc-page-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.vc-page-switcher .vc-page-remove {
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: var(--faint);
+  line-height: 1;
+}
+
+.vc-page-switcher .vc-page-remove:hover:not(:disabled) {
+  border-color: rgba(248, 113, 113, 0.6);
+  background: rgba(248, 113, 113, 0.14);
+  color: #fecaca;
+}
+
 .vc-page-switcher button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -13652,7 +13789,70 @@ body.is-viewport-panning * {
 
 .visual-preview-body {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--color-canvas, #f1f5f9);
+  color: var(--color-text, #0f172a);
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+.visual-preview-url {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.24);
+  background: #0f172a;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.visual-preview-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.visual-preview-dots i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #475569;
+}
+
+.visual-preview-dots i:nth-child(1) {
+  background: #f87171;
+}
+
+.visual-preview-dots i:nth-child(2) {
+  background: #fbbf24;
+}
+
+.visual-preview-dots i:nth-child(3) {
+  background: #34d399;
+}
+
+.visual-preview-url-badge {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  border-radius: 999px;
+  color: #7dd3fc;
+  font-size: 11px;
+}
+
+.visual-preview-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
   overflow: auto;
+  border: 0;
+  background: #f1f5f9;
+}
+
+.visual-preview-page {
+  min-height: 100vh;
   background: var(--color-canvas, #f1f5f9);
   color: var(--color-text, #0f172a);
   font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;

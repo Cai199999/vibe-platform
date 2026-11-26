@@ -93,4 +93,39 @@ describe('VisualDocumentPreview', () => {
     })
     expect(onSwitchPage).toHaveBeenCalled()
   })
+
+  it('V0 表格子行按真实行渲染，不再生成假表头', () => {
+    let doc = createEmptyVisualDocument({
+      projectId: 'proj_table',
+      title: '工单系统',
+    })
+    const table = createVisualNode('table', { name: '工单列表' })
+    doc = insertVisualNodeIntoDocument(doc, {
+      parentId: doc.root.id,
+      type: 'table',
+      node: table,
+    })
+    doc = insertVisualNodeIntoDocument(doc, {
+      parentId: table.id,
+      type: 'text',
+      node: createVisualNode('text', { props: { text: 'T-1 打印机故障' } }),
+    })
+
+    const localContainer = document.createElement('div')
+    document.body.appendChild(localContainer)
+    const localRoot = createRoot(localContainer)
+    act(() => {
+      localRoot.render(
+        <VisualDocumentPreview document={doc} onClose={() => {}} />,
+      )
+    })
+
+    expect(localContainer.querySelector('[data-preview-table]')).toBeTruthy()
+    expect(localContainer.textContent).toContain('T-1 打印机故障')
+    expect(localContainer.querySelector('.visual-preview-url')).toBeTruthy()
+    expect(localContainer.textContent).toContain('React 模拟预览')
+
+    act(() => localRoot.unmount())
+    localContainer.remove()
+  })
 })

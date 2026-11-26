@@ -24,7 +24,27 @@ public final class AdminMetricsDtos {
             String timezone,
             Overview overview,
             List<AgentShare> agentDistribution,
-            List<RecentRun> recentRuns
+            List<RecentRun> recentRuns,
+            UsageSummary usage
+    ) {
+    }
+
+    /**
+     * Token / 成本汇总。
+     *
+     * <p>来自 Run 事件 payload.usage（Python 侧按节点累计）；
+     * 只统计带 usage 的 Run。货币与 Python 计价配置保持一致。</p>
+     */
+    public record UsageSummary(
+            long inputTokens,
+            long outputTokens,
+            long cachedInputTokens,
+            long totalTokens,
+            long calls,
+            double cost,
+            String currency,
+            long runsWithUsage,
+            double averageCost
     ) {
     }
 

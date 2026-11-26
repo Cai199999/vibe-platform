@@ -246,6 +246,23 @@ function PreviewNode({ node, document, onSwitchPage, depth = 0 }) {
       ? node.props.columns
       : []
     const count = node.repeat ? Math.max(1, node.repeat.sampleCount || 3) : 1
+    // V0 确定性构建器会把真实示例数据渲染成子行节点；此时直接平铺，
+    // 不再套一层“每个子节点一格”的假表格。
+    if ((node.children || []).length > 0) {
+      return (
+        <section {...common} data-preview-table>
+          {(node.children || []).map((child) => (
+            <PreviewNode
+              key={child.id}
+              node={child}
+              document={document}
+              onSwitchPage={onSwitchPage}
+              depth={depth + 1}
+            />
+          ))}
+        </section>
+      )
+    }
     return (
       <table {...common}>
         {columns.length > 0 && (
@@ -582,12 +599,30 @@ export default function VisualDocumentPreview({
           </button>
         </header>
         <div className="visual-preview-body">
-          <PreviewNode
-            node={activePage?.root}
-            document={document}
-            onSwitchPage={onSwitchPage}
-          />
-          <PreviewSimulation model={simulation} />
+          <div className="visual-preview-url" data-visual-preview-url>
+            <span className="visual-preview-dots" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+            </span>
+            <span>{`preview.local${activePage?.path || '/'}`}</span>
+            <span className="visual-preview-url-badge">React 模拟预览</span>
+          </div>
+          <div
+            className="visual-preview-frame"
+            data-visual-preview-frame
+            role="region"
+            aria-label={`${document?.title || '页面'} 预览`}
+          >
+            <div className="visual-preview-page" style={tokenStyle}>
+              <PreviewNode
+                node={activePage?.root}
+                document={document}
+                onSwitchPage={onSwitchPage}
+              />
+              {simulation && <PreviewSimulation model={simulation} />}
+            </div>
+          </div>
         </div>
       </div>
     </div>

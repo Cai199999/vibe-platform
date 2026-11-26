@@ -21,6 +21,7 @@ import {
   validateVisualDocument,
   withActivePageRoot,
   addVisualPage,
+  removeVisualPage,
   activePageIdOf,
 } from './visualDocument.js'
 
@@ -148,6 +149,17 @@ export const useVisualDocumentStore = create((set, get) => {
       const state = get()
       const result = addVisualPage(state.doc, { title, path })
       return commit(result.document, firstSelectableChild(result.page.root))
+    },
+
+    deletePage: (pageId) => {
+      if (!editable()) return false
+      const state = get()
+      const next = removeVisualPage(state.doc, pageId)
+      if (!next) {
+        set({ lastError: '至少保留一个页面，无法删除' })
+        return false
+      }
+      return commit(next, firstSelectableChild(next.root))
     },
 
     addNode: (type, parentId = null, index = -1) => {

@@ -67,7 +67,12 @@ class AdminMetricsControllerTest {
                 .andExpect(jsonPath("$.data.agentDistribution.length()").value(2))
                 .andExpect(jsonPath("$.data.recentRuns.length()").value(10))
                 // 最近一条必须是仍在运行的 Run，前端据此显示 RUNNING。
-                .andExpect(jsonPath("$.data.recentRuns[0].status").value("RUNNING"));
+                .andExpect(jsonPath("$.data.recentRuns[0].status").value("RUNNING"))
+                // Token / 成本汇总：只统计带 usage 的终态 Run。
+                .andExpect(jsonPath("$.data.usage.runsWithUsage").value(15))
+                .andExpect(jsonPath("$.data.usage.totalTokens").value(125500))
+                .andExpect(jsonPath("$.data.usage.cost").value(0.995))
+                .andExpect(jsonPath("$.data.usage.currency").value("CNY"));
     }
 
     @Test

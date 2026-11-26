@@ -38,6 +38,7 @@ from langgraph.graph import END, START, StateGraph
 
 from ai_core.a2a import A2A_LOG, build_feedback
 from ai_core.agent.events import EventSink, NullEventSink
+from ai_core.collaboration.error_router import MAX_FIX_ATTEMPTS
 from ai_core.codegen.visual import (
     VisualCodegenError,
     compile_visual_document,
@@ -64,6 +65,7 @@ from ai_core.fullstack.coders import (
     generate_frontend_bundle,
     generate_frontend_skeleton_bundle,
     generate_infra_bundle,
+    parse_ddl_tables,
 )
 from ai_core.fullstack.consistency import (
     ConsistencyError,
@@ -124,16 +126,33 @@ def _merge_package_manifests(base: str, override: str) -> str:
 
 # 节点总数用于日志与 SSE 的 index/total；新增节点时只需改这一处。
 GRAPH_NODE_TOTAL = 7
-# 一致性检查失败后，最多把缺失路由回传 BackendCoder 自愈 2 次。
-MAX_CONSISTENCY_REPAIRS = 2
-# ORM 模型与迁移 DDL 字段错位时，最多让 DBACoder 按 DDL 重写 2 次。
-MAX_ORM_REPAIRS = 2
-# JOIN 别名 / include 关系与契约不一致时，最多让 BackendCoder 重建 2 次。
-MAX_JOIN_REPAIRS = 2
-# Applier AST 门禁拦截后，最多让 BackendCoder 重新生成 2 次。
-MAX_APPLIER_REPAIRS = 2
+# 单个确定性错误的统一修复预算：任何门禁最多自愈 3 次，耗尽回到 Architect。
+MAX_CONSISTENCY_REPAIRS = MAX_FIX_ATTEMPTS
+MAX_ORM_REPAIRS = MAX_FIX_ATTEMPTS
+MAX_JOIN_REPAIRS = MAX_FIX_ATTEMPTS
+MAX_APPLIER_REPAIRS = MAX_FIX_ATTEMPTS
 # 对话前置模式的初始前端骨架只执行三个节点。
 FRONTEND_GRAPH_NODE_TOTAL = 3
+
+
+def _merge_usage(current: Any, delta: Any) -> dict[str, Any]:
+    """合并两段 token usage（缺失字段按 0 处理，成本保留 6 位）。"""
+    base = dict(current) if isinstance(current, dict) else {}
+    extra = dict(delta) if isinstance(delta, dict) else {}
+    if not extra:
+        return base
+    for key in ("inputTokens", "outputTokens", "cachedInputTokens", "calls"):
+        base[key] = int(base.get(key) or 0) + int(extra.get(key) or 0)
+    base["totalTokens"] = int(base.get("inputTokens") or 0) + int(
+        base.get("outputTokens") or 0
+    )
+    base["cost"] = round(
+        float(base.get("cost") or 0.0) + float(extra.get("cost") or 0.0), 6
+    )
+    base["currency"] = extra.get("currency") or base.get("currency") or "CNY"
+    return base
+
+
 FULLSTACK_NODE_ORDER = [
     "DBACoder",
     "BackendCoder",
@@ -299,6 +318,8 @@ class FullstackState(TypedDict, total=False):
     # 上一次被拦截候选产物的指纹；诊断相同但产物变了，仍允许再迭代一次，
     # 避免把“模型正在逐步修”误判成死循环。
     applier_candidate_fingerprint: str
+    # LLM 修复调用累计的 token / 成本（跨节点保留，终态快照可读取）。
+    token_usage: dict[str, Any]
     # 上一轮被 Applier 拦截的候选产物。下一轮 LLM 修复以此为基线，
     # 避免每轮都从模板重置、反复引入同类缺陷。
     applier_previous_files: dict[str, str]
@@ -660,6 +681,7 @@ class FullstackGraphRunner:
                 if str(item).strip()
             ]
             llm_repaired = False
+            usage_total = dict(state.get("token_usage") or {})
             if feedback:
                 bundle, llm_repaired = self._repair_backend_with_llm(
                     state,
@@ -670,6 +692,7 @@ class FullstackGraphRunner:
                     # 只读地放进修复 Prompt，模型才能对齐实际 RELATIONS。
                     authoritative_db_js=self._read_optional(sandbox_id, "server/db.js"),
                 )
+                usage_total = _merge_usage(usage_total, bundle.metadata.get("usage"))
             try:
                 files = self._write_bundle(state, bundle)
             except ApplierSafetyBlock as exc:
@@ -682,6 +705,7 @@ class FullstackGraphRunner:
                         for path in ("server/index.js",)
                         if isinstance(bundle.files.get(path), str)
                     }
+                blocked["token_usage"] = usage_total
                 return blocked
             collection = str(bundle.metadata.get("collectionPath") or "")
             summary = bundle.summary
@@ -710,6 +734,7 @@ class FullstackGraphRunner:
                 "applier_previous_files": {},
                 "llm_repair_count": int(state.get("llm_repair_count") or 0)
                 + (1 if llm_repaired else 0),
+                "token_usage": usage_total,
             }
         except FullstackGenerationError:
             raise
@@ -828,6 +853,7 @@ class FullstackGraphRunner:
                     (repaired.metadata.get("llmRepair") or {}).get("files") or []
                 ),
                 "diagnostics": feedback,
+                "usage": repaired.metadata.get("usage") or {},
             },
         )
         logger.info(
@@ -1083,6 +1109,59 @@ class FullstackGraphRunner:
                     **extension_dependencies(extensions),
                 }
                 try:
+                    collection_endpoints = [
+                        route.path
+                        for route in state["contract"].api_routes
+                        if str(route.method).upper() == "GET"
+                        and "{" not in route.path
+                        and not any(
+                            token in route.path.lower()
+                            for token in (
+                                "/health",
+                                "/login",
+                                "/logout",
+                                "/register",
+                                "/me",
+                                "/auth",
+                                "/session",
+                                "/password",
+                            )
+                        )
+                    ]
+                    tables = {
+                        table.name.lower(): table.column_names
+                        for table in parse_ddl_tables(
+                            state["contract"].database_ddl or ""
+                        )
+                    }
+                    collection_fields: dict[str, list[str]] = {}
+                    for endpoint in collection_endpoints:
+                        segment = (
+                            endpoint.rstrip("/")
+                            .split("/")[-1]
+                            .replace("-", "_")
+                            .lower()
+                        )
+                        columns = tables.get(segment) or []
+                        if not columns:
+                            columns = next(iter(tables.values()), [])
+                        fields = [
+                            column
+                            for column in columns
+                            if column.lower()
+                            not in {
+                                "id",
+                                "tenant_id",
+                                "created_at",
+                                "updated_at",
+                                "deleted_at",
+                            }
+                            and not column.lower().endswith("_id")
+                        ][:6]
+                        collection_fields[endpoint] = fields or [
+                            "name",
+                            "description",
+                        ]
                     compiled = compile_visual_document(
                         visual_document,
                         include_interactions=True,
@@ -1090,6 +1169,8 @@ class FullstackGraphRunner:
                         extra_dev_dependencies=stack.dev_dependencies,
                         extra_imports=list(stack.imports),
                         visual_extensions=extensions,
+                        collection_endpoints=collection_endpoints,
+                        collection_fields=collection_fields,
                     )
                 except VisualCodegenGateUnavailable as exc:
                     raise FullstackGenerationError(
@@ -1889,7 +1970,11 @@ class FullstackGraphRunner:
         )
         policy = self._quality(state)
         try:
-            self._sandbox.restart(sandbox_id, ready_path=ready_path)
+            self._sandbox.restart(
+                sandbox_id,
+                ready_path=ready_path,
+                require_root=True,
+            )
             handle = self._sandbox.get(sandbox_id)
         except Exception as exc:
             if not policy.blocking:
@@ -2139,6 +2224,32 @@ class FullstackGraphRunner:
             payload=payload,
         )
         item = A2A_LOG.publish(feedback)
+        # 确定性门禁错误统一入账：记录错误码、指纹、尝试次数与负责 Agent；
+        # Architect 通过收件箱与 gate.error.routed 事件获得可执行的修复分派。
+        try:
+            from ai_core.collaboration.error_router import GATE_ERRORS
+
+            assignments = GATE_ERRORS.ingest_feedback(item)
+            if assignments:
+                routes = [assign.to_dict() for assign in assignments]
+                item["gateRoute"] = routes
+                # 同步写进 payload，Architect 收件箱（AgentReport）才能看到分派。
+                if isinstance(item.get("payload"), dict):
+                    item["payload"]["gateRoute"] = routes
+                self._emit(
+                    "gate.error.routed",
+                    {
+                        "runId": str(state.get("run_id") or ""),
+                        "fromAgent": from_agent,
+                        "toAgent": to_agent,
+                        "kind": kind,
+                        "assignments": routes,
+                    },
+                )
+        except Exception:  # pragma: no cover - 记录失败不能阻断生成
+            logger.exception(
+                "门禁错误入账失败 run=%s kind=%s", state.get("run_id"), kind
+            )
         self._emit("a2a.feedback", item)
         # Architect 中心制：所有子 Agent 反馈同步进入共享收件箱；
         # 报告失败不能阻断生成，但必须留下可观测事件。
@@ -2149,7 +2260,7 @@ class FullstackGraphRunner:
                 state.get("build_retry_count") or 0
             )
             ARCHITECT_HUB.ingest_feedback(
-                feedback,
+                item,
                 task_id=str(
                     (payload or {}).get("taskId")
                     or contract_id

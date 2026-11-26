@@ -299,7 +299,7 @@ class RegistryTest(unittest.TestCase):
                 registry.require_routable(agent_id)
 
     def test_full_dev_team_capabilities_and_skills(self) -> None:
-        """8 个虚拟研发团队成员都必须有可执行语义的 capabilities 与 skills。"""
+        """9 个虚拟研发团队成员都必须有可执行语义的 capabilities 与 skills。"""
         registry = AgentRegistry()
         expected = {
             "supervisor": ("intent_routing", "supervisor.intent_routing"),
@@ -316,6 +316,8 @@ class RegistryTest(unittest.TestCase):
                 "verify.contract_conformance",
             ),
             "devops_agent": ("containerization", "devops.github_actions"),
+            # 测试 Agent：只做只读验收，dispatchable=false，不参与业务路由。
+            "test_agent": ("test_plan", "test.preview_smoke"),
         }
         builtin_ids = {
             item.agent_id for item in registry.list_agents() if item.source == "builtin"

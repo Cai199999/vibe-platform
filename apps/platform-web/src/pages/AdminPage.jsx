@@ -3,7 +3,10 @@ import AdminHeader from '../components/AdminHeader.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
 import {
   fetchAdminFullstackMetrics,
+  fetchAdminGateErrorStats,
   fetchAdminMetrics,
+  fetchAdminTestingMetrics,
+  fetchAdminTestingReports,
 } from '../admin/adminClient.js'
 
 const REFRESH_MS = 30_000
@@ -64,6 +67,15 @@ function formatDuration(milliseconds) {
   const minutes = Math.floor(seconds / 60)
   const rest = Math.round(seconds % 60)
   return `${minutes}m ${String(rest).padStart(2, '0')}s`
+}
+
+function formatTokens(value) {
+  return NUMBER.format(Math.max(0, Number(value) || 0))
+}
+
+function formatCost(value, currency = 'CNY') {
+  const amount = Number(value) || 0
+  return `${currency} ${amount.toFixed(4)}`
 }
 
 function formatTime(iso) {
@@ -431,6 +443,156 @@ function DashboardSkeleton() {
  * 访问控制由 /admin 路由守卫与 BFF @IsAdmin 双层保证；本页只负责
  * 拉取 /api/v1/admin/metrics 并渲染。
  */
+function GateErrorPanel({ state }) {
+  const data = state?.data
+  if (state?.status === 'error') {
+    return (
+      <section className="admin-panel" data-admin-gate-errors>
+        <div className="admin-panel-head">
+          <div>
+            <h2>门禁错误 Top</h2>
+            <p>确定性门禁错误按指纹聚合，统计修复次数与负责 Agent。</p>
+          </div>
+        </div>
+        <p className="admin-panel-empty">
+          门禁错误统计暂不可用：{state.error?.message || 'AI Core 未返回数据'}
+        </p>
+      </section>
+    )
+  }
+  const topErrors = Array.isArray(data?.topErrors) ? data.topErrors : []
+  return (
+    <section className="admin-panel" data-admin-gate-errors>
+      <div className="admin-panel-head">
+        <div>
+          <h2>门禁错误 Top</h2>
+          <p>
+            确定性错误按指纹聚合；单错误最多修复 {data?.maxAttempts ?? 3} 次，
+            超过后回到 Architect。
+          </p>
+        </div>
+        <span className="admin-panel-meta">
+          {NUMBER.format(data?.total ?? 0)} 条 · 耗尽{' '}
+          {NUMBER.format(data?.exhausted ?? 0)}
+        </span>
+      </div>
+      {topErrors.length > 0 ? (
+        <ul className="admin-gate-list">
+          {topErrors.map((item) => (
+            <li key={item.fingerprint}>
+              <div className="admin-gate-main">
+                <code>{item.code}</code>
+                <span>{item.message}</span>
+              </div>
+              <div className="admin-gate-meta">
+                <strong>{NUMBER.format(item.count ?? 0)}×</strong>
+                <span>{item.lastStage || item.lastAgent || '—'}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="admin-panel-empty">
+          暂无门禁错误记录；新 Run 触发门禁拦截或失败后会出现在这里。
+        </p>
+      )}
+    </section>
+  )
+}
+
+function TestingPanel({ state }) {
+  const metrics = state?.metrics
+  const reports = state?.reports || []
+  if (!metrics && state?.status === 'error') {
+    return (
+      <section className="admin-panel" data-admin-testing>
+        <div className="admin-panel-head">
+          <div>
+            <h2>测试验收</h2>
+            <p>TestAgent 分级验收：L1 预览 / L2 业务闭环 / L3 生产仿真。</p>
+          </div>
+        </div>
+        <p className="admin-panel-empty">
+          测试指标暂不可用：{state.error?.message || 'AI Core 未返回数据'}
+        </p>
+      </section>
+    )
+  }
+  const checks = metrics?.checks || {}
+  const tiers = Object.entries(metrics?.byTier || {})
+  return (
+    <section className="admin-panel" data-admin-testing>
+      <div className="admin-panel-head">
+        <div>
+          <h2>测试验收</h2>
+          <p>
+            L1/L2 自动验收仅供交付参考；L3 需要生产仿真沙盒，未接入时如实跳过。
+          </p>
+        </div>
+        <span className="admin-panel-meta">
+          {NUMBER.format(metrics?.totalRuns ?? 0)} 次测试
+        </span>
+      </div>
+      <div className="admin-testing-stats">
+        <article>
+          <span>检查通过率</span>
+          <strong>{formatPercent(metrics?.checkPassRate)}</strong>
+          <em>
+            {NUMBER.format(checks.passed ?? 0)} / {NUMBER.format(checks.total ?? 0)}
+          </em>
+        </article>
+        <article>
+          <span>失败 / 异常</span>
+          <strong>
+            {NUMBER.format((checks.failed ?? 0) + (checks.error ?? 0))}
+          </strong>
+          <em>跳过 {NUMBER.format(checks.skipped ?? 0)}</em>
+        </article>
+        <article>
+          <span>平均检查耗时</span>
+          <strong>{formatDuration(metrics?.averageCheckDurationMs)}</strong>
+          <em>{metrics?.lastRunAt ? formatTime(metrics.lastRunAt) : '暂无运行'}</em>
+        </article>
+      </div>
+      {tiers.length > 0 && (
+        <div className="admin-testing-tiers">
+          {tiers.map(([tier, values]) => (
+            <span key={tier}>
+              {tier} · {NUMBER.format(values.runs ?? 0)} 次 · 通过{' '}
+              {NUMBER.format(values.passed ?? 0)}
+            </span>
+          ))}
+        </div>
+      )}
+      {reports.length > 0 ? (
+        <ul className="admin-gate-list">
+          {reports.map((report) => (
+            <li key={report.reportId}>
+              <div className="admin-gate-main">
+                <code>{report.tier}</code>
+                <span>
+                  {report.status} · {report.advisory || report.sourceRunId}
+                </span>
+              </div>
+              <div className="admin-gate-meta">
+                <strong>
+                  {NUMBER.format(report.summary?.passed ?? 0)}/
+                  {NUMBER.format(report.summary?.total ?? 0)}
+                </strong>
+                <span>{report.summary?.skipped ? '含跳过' : '自动'}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="admin-panel-empty">
+          暂无测试报告；通过 /api/v1/internal/testing/runs 触发一次验收。
+        </p>
+      )}
+    </section>
+  )
+}
+
 export default function AdminPage() {
   const { session, user } = useAuth()
   const abortRef = useRef(null)
@@ -444,6 +606,17 @@ export default function AdminPage() {
   const [health, setHealth] = useState({
     status: 'loading',
     data: null,
+    error: null,
+  })
+  const [gateErrors, setGateErrors] = useState({
+    status: 'loading',
+    data: null,
+    error: null,
+  })
+  const [testing, setTesting] = useState({
+    status: 'loading',
+    metrics: null,
+    reports: [],
     error: null,
   })
 
@@ -461,8 +634,14 @@ export default function AdminPage() {
       })
 
       try {
-        // 健康指标与主看板并行拉取；健康接口失败不得阻断主指标。
-        const [metricsResult, healthResult] = await Promise.allSettled([
+        // 健康指标、全栈指标与门禁统计并行拉取；附属接口失败不得阻断主看板。
+        const [
+          metricsResult,
+          healthResult,
+          gateResult,
+          testingMetricsResult,
+          testingReportsResult,
+        ] = await Promise.allSettled([
           fetchAdminMetrics({
             token: session?.token,
             role: user?.role,
@@ -472,6 +651,23 @@ export default function AdminPage() {
             token: session?.token,
             role: user?.role,
             signal: controller.signal,
+          }),
+          fetchAdminGateErrorStats({
+            token: session?.token,
+            role: user?.role,
+            signal: controller.signal,
+            top: 10,
+          }),
+          fetchAdminTestingMetrics({
+            token: session?.token,
+            role: user?.role,
+            signal: controller.signal,
+          }),
+          fetchAdminTestingReports({
+            token: session?.token,
+            role: user?.role,
+            signal: controller.signal,
+            limit: 5,
           }),
         ])
         if (controller.signal.aborted) return
@@ -487,6 +683,48 @@ export default function AdminPage() {
             status: 'error',
             data: null,
             error: healthResult.reason,
+          })
+        }
+
+        if (gateResult.status === 'fulfilled') {
+          setGateErrors({
+            status: 'ready',
+            data: gateResult.value?.data ?? null,
+            error: null,
+          })
+        } else {
+          setGateErrors({
+            status: 'error',
+            data: null,
+            error: gateResult.reason,
+          })
+        }
+
+        if (
+          testingMetricsResult.status === 'fulfilled' ||
+          testingReportsResult.status === 'fulfilled'
+        ) {
+          setTesting({
+            status: 'ready',
+            metrics:
+              testingMetricsResult.status === 'fulfilled'
+                ? testingMetricsResult.value?.data ?? null
+                : null,
+            reports:
+              testingReportsResult.status === 'fulfilled'
+                ? testingReportsResult.value?.data?.reports ?? []
+                : [],
+            error:
+              testingMetricsResult.status === 'rejected'
+                ? testingMetricsResult.reason
+                : null,
+          })
+        } else {
+          setTesting({
+            status: 'error',
+            metrics: null,
+            reports: [],
+            error: testingMetricsResult.reason,
           })
         }
 
@@ -615,9 +853,38 @@ export default function AdminPage() {
                 value={formatDuration(overview?.averageDurationMs)}
                 hint="成功与失败 Run 墙钟均值"
               />
+              <KpiCard
+                icon="runs"
+                label="累计 Token"
+                value={formatTokens(data.usage?.totalTokens)}
+                hint={`输入 ${formatTokens(
+                  data.usage?.inputTokens,
+                )} / 输出 ${formatTokens(data.usage?.outputTokens)}`}
+              />
+              <KpiCard
+                icon="success"
+                label="累计成本"
+                value={formatCost(
+                  data.usage?.cost,
+                  data.usage?.currency || 'CNY',
+                )}
+                hint={
+                  data.usage?.runsWithUsage
+                    ? `${NUMBER.format(
+                        data.usage.runsWithUsage,
+                      )} 个 Run · 均值 ${formatCost(
+                        data.usage.averageCost,
+                        data.usage.currency || 'CNY',
+                      )}`
+                    : '暂无带 usage 的 Run'
+                }
+              />
             </section>
 
             <SystemHealthCard health={health} />
+
+            <GateErrorPanel state={gateErrors} />
+            <TestingPanel state={testing} />
 
             <section className="admin-panel admin-chart-panel" aria-labelledby="agent-distribution-title">
               <div className="admin-panel-head">

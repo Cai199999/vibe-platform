@@ -9,6 +9,7 @@ import {
   insertVisualNodeIntoDocument,
   insertVisualNodesIntoDocument,
   moveVisualNodeInDocument,
+  removeVisualPage,
   switchVisualPage,
   updateVisualNodeInDocument,
   validateVisualDocument,
@@ -247,6 +248,37 @@ describe('VisualDocument 多页面', () => {
   it('页面 root 必须存在，空页面列表表示空白画布', () => {
     const doc = { ...emptyDoc(), pages: [], activePageId: '', root: null }
     expect(validateVisualDocument(doc).ok).toBe(true)
+  })
+
+  it('可删除页面并回退到相邻页，悬空 navigate 交互一并清理', () => {
+    let doc = createEmptyVisualDocument({ projectId: 'proj_pages_delete' })
+    const users = addVisualPage(doc, { title: '用户管理', path: '/users' })
+    doc = users.document
+    doc.interactions = [
+      {
+        id: 'int_to_users',
+        nodeId: doc.root.children[0]?.id || doc.root.id,
+        event: 'click',
+        action: 'navigate',
+        targetPageId: users.page.pageId,
+        status: 'CONFIRMED',
+      },
+    ]
+
+    const next = removeVisualPage(doc, users.page.pageId)
+    expect(next).not.toBeNull()
+    expect(next.pages).toHaveLength(1)
+    expect(next.pages[0].path).toBe('/')
+    expect(next.activePageId).toBe(next.pages[0].pageId)
+    expect(next.root.id).toBe(next.pages[0].root.id)
+    expect(next.interactions).toHaveLength(0)
+    expect(validateVisualDocument(next).ok).toBe(true)
+  })
+
+  it('至少保留一个页面', () => {
+    const doc = createEmptyVisualDocument({ projectId: 'proj_last_page' })
+    expect(removeVisualPage(doc, doc.activePageId)).toBeNull()
+    expect(removeVisualPage(doc, 'pg_missing')).toBeNull()
   })
 })
 

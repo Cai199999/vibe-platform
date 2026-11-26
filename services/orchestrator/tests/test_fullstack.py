@@ -344,7 +344,13 @@ class _MemorySandbox(SandboxProvider):
     def read_file(self, sandbox_id: str, path: str) -> str:
         return self.files[path]
 
-    def restart(self, sandbox_id: str, ready_path: str = "/") -> None:
+    def restart(
+        self,
+        sandbox_id: str,
+        ready_path: str = "/",
+        *,
+        require_root: bool = False,
+    ) -> None:
         self.restarts.append((sandbox_id, ready_path))
 
     def export_archive(self, sandbox_id: str) -> bytes:
@@ -1941,8 +1947,8 @@ class GraphTests(unittest.TestCase):
         )
         self.assertEqual(sandbox.restarts, [(sandbox.handle.sandbox_id, "/api/health")])
 
-    def test_consistency_retries_at_most_twice_then_fails(self) -> None:
-        """自愈最多 2 次；仍不一致时在一致性格点终止，不进入构建。"""
+    def test_consistency_retries_at_most_three_times_then_fails(self) -> None:
+        """自愈最多 3 次；仍不一致时在一致性格点终止，不进入构建。"""
         sandbox = _MemorySandbox()
         sandbox.files = _base_files()
         sandbox.files["src/App.jsx"] = (
@@ -2012,12 +2018,12 @@ class GraphTests(unittest.TestCase):
             if event.type == "fullstack.node.started"
             and event.payload["node"] == "BackendCoder"
         ]
-        # 初始生成 1 次 + 自愈 2 次。
-        self.assertEqual(len(backend_starts), 3)
+        # 初始生成 1 次 + 自愈 3 次。
+        self.assertEqual(len(backend_starts), 4)
         repairs = [
             event for event in events if event.type == "fullstack.consistency.repair"
         ]
-        self.assertEqual([event.payload["attempt"] for event in repairs], [1, 2])
+        self.assertEqual([event.payload["attempt"] for event in repairs], [1, 2, 3])
 
     def test_contract_contradiction_stops_without_retry(self) -> None:
         """前端调用了未声明接口：这是契约矛盾，不能靠重跑 BackendCoder 修复。"""
@@ -2369,7 +2375,7 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(template_calls["count"], 2)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["attempt"], 1)
-        self.assertEqual(calls[0]["max_attempts"], 2)
+        self.assertEqual(calls[0]["max_attempts"], 3)
         self.assertEqual(calls[0]["contract"].database_ddl, contract.database_ddl)
         self.assertTrue(calls[0]["dba_schema"])
         feedback = "\n".join(calls[0]["diagnostics"])
@@ -2442,7 +2448,7 @@ class GraphTests(unittest.TestCase):
         )
 
     def test_applier_exhaustion_escalates_to_architect(self) -> None:
-        """代码自愈 2/2 耗尽后，必须把诊断升级给 Architect 复核契约。"""
+        """代码自愈 3/3 耗尽后，必须把诊断升级给 Architect 复核契约。"""
         sandbox = _MemorySandbox()
         sandbox.files = _base_files()
         runner = FullstackGraphRunner(sandbox, event_sink=RunEventBuffer("x"))
@@ -2461,7 +2467,7 @@ class GraphTests(unittest.TestCase):
         state = {
             "run_id": "fsk_applier_exhausted",
             "contract": _master_detail_contract(),
-            "applier_retry_count": 2,
+            "applier_retry_count": 3,
         }
         from ai_core.fullstack.graph import FullstackGenerationError
 
@@ -2484,6 +2490,10 @@ class GraphTests(unittest.TestCase):
         self.assertTrue(review, a2a)
         self.assertEqual(review[-1]["requestedAction"], "REVIEW_CONTRACT")
         self.assertEqual(review[-1]["kind"], "contract_review")
+        # 门禁错误统一入账：耗尽后必须分派回 Architect，而不是继续空转。
+        self.assertTrue(review[-1].get("gateRoute"), review[-1])
+        self.assertEqual(review[-1]["gateRoute"][0]["assignedTo"], "Architect")
+        self.assertTrue(review[-1]["gateRoute"][0]["exhausted"])
 
     def test_identical_diagnostics_short_circuit_retry(self) -> None:
         """连续两次诊断一字不差时，不再浪费第二轮 LLM 修复。"""

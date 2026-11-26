@@ -22,7 +22,7 @@ function abortError() {
   return new DOMException('Aborted', 'AbortError')
 }
 
-async function responseError(response) {
+export async function responseError(response, { allowExpired = true } = {}) {
   let body = null
   try {
     body = await response.json()
@@ -30,10 +30,26 @@ async function responseError(response) {
     // 非 JSON 错误体
   }
   const detail = body?.detail
-  if (typeof detail === 'string') return detail
-  if (detail?.message) return `${detail.code || response.status} · ${detail.message}`
-  if (body?.message) return `${body.code || response.status} · ${body.message}`
-  return `HTTP ${response.status} ${response.statusText || ''}`.trim()
+  const code =
+    (detail && typeof detail === 'object' && detail.code) ||
+    (typeof body?.code === 'string' ? body.code : null)
+  let message
+  if (typeof detail === 'string') message = detail
+  else if (detail?.message) message = `${detail.code || response.status} · ${detail.message}`
+  else if (body?.message) message = `${body.code || response.status} · ${body.message}`
+  else message = `HTTP ${response.status} ${response.statusText || ''}`.trim()
+
+  const knownExpired = code === 'ARCHITECT_RUN_NOT_FOUND' || code === 'RUN_NOT_FOUND'
+  if (allowExpired && knownExpired) {
+    message = '上一次架构会话已过期（AI Core 可能已重启），请重新发起架构分析。'
+  }
+  const error = new Error(message)
+  error.code = code
+  error.httpStatus = response.status
+  // 启动新 Architect Run 的 404 不是“旧记录过期”，保留真实错误。
+  error.runExpired =
+    allowExpired && (knownExpired || response.status === 404)
+  return error
 }
 
 function parseFrame(raw) {
@@ -139,9 +155,9 @@ export async function streamArchitect({
       }
 
       if (!response.ok) {
-        const error = new Error(await responseError(response))
-        error.httpStatus = response.status
-        throw error
+        throw await responseError(response, {
+          allowExpired: mode !== 'start',
+        })
       }
 
       await consumeStream(response, {

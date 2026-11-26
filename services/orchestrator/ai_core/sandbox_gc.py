@@ -127,3 +127,55 @@ def start_container_gc(
         logger.info("stopped sandbox gc disabled by config")
         return None
     return SandboxContainerGarbageCollector(provider, settings).start()
+
+
+class IdleSandboxGarbageCollector:
+    """回收空闲超过 TTL 的运行中沙盒，防止长期占用内存。"""
+
+    def __init__(self, provider: SandboxProvider, settings: Settings) -> None:
+        self._provider = provider
+        self._settings = settings
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="vibe-idle-sandbox-gc",
+            daemon=True,
+        )
+
+    def start(self) -> "IdleSandboxGarbageCollector":
+        self._thread.start()
+        return self
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop_event.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        interval = max(
+            60,
+            int(getattr(self._settings, "sandbox_idle_gc_interval_seconds", 300)),
+        )
+        ttl = float(getattr(self._settings, "sandbox_idle_ttl_seconds", 1800))
+        while not self._stop_event.is_set():
+            try:
+                reclaimed = self._provider.reap_idle_sandboxes(ttl)
+                if reclaimed:
+                    logger.info(
+                        "idle sandbox gc reclaimed %d container(s): %s",
+                        len(reclaimed),
+                        ", ".join(reclaimed),
+                    )
+            except Exception:  # pragma: no cover - 防御性兜底
+                logger.warning("idle sandbox gc failed", exc_info=True)
+            self._stop_event.wait(interval)
+
+
+def start_idle_gc(
+    provider: SandboxProvider,
+    settings: Settings,
+) -> IdleSandboxGarbageCollector | None:
+    if not getattr(settings, "sandbox_idle_gc_enabled", False):
+        logger.info("idle sandbox gc disabled by config")
+        return None
+    return IdleSandboxGarbageCollector(provider, settings).start()

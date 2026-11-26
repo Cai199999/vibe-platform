@@ -400,6 +400,37 @@ export function addVisualPage(
   }
 }
 
+/**
+ * 删除一个页面；至少保留一页。
+ *
+ * 返回 null 表示不可删除（不存在 / 只剩一页），调用方据此保留原文档。
+ * 指向被删页面的 navigate 交互会一并移除，避免留下悬空跳转；其余页面的
+ * 根节点、页面顺序与当前选中页保持不变。
+ */
+export function removeVisualPage(document, pageId) {
+  if (!document) return null
+  const synced = withActivePageRoot(document, document.root)
+  const pages = ensureVisualPages(synced)
+  if (pages.length <= 1) return null
+  const index = pages.findIndex((page) => page.pageId === pageId)
+  if (index < 0) return null
+  const remaining = pages.filter((page) => page.pageId !== pageId)
+  const activeId = activePageIdOf(synced)
+  const nextActive =
+    activeId === pageId
+      ? remaining[Math.min(index, remaining.length - 1)]
+      : remaining.find((page) => page.pageId === activeId) || remaining[0]
+  return {
+    ...synced,
+    pages: remaining,
+    activePageId: nextActive.pageId,
+    root: nextActive.root,
+    interactions: (synced.interactions || []).filter(
+      (item) => item.targetPageId !== pageId,
+    ),
+  }
+}
+
 export function cloneVisualNode(node, createdBy = 'user') {
   return {
     ...JSON.parse(JSON.stringify(node)),

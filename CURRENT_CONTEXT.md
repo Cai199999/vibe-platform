@@ -116,3 +116,61 @@ P0：多调用点运行时消歧、rename/add 全量同步、身份模型正式�
 - 多服务生成产品入口（2026-11-25）：Python `POST /api/v1/internal/generated-apps/generate` + `GET /runs/{id}`，BFF `POST /api/v1/architect/multi-service/generate`；前端 ArchitectPanel 增加“多服务生成（原型）”按钮，返回状态/产物数/幂等/镜像摘要。当前使用固定工单蓝图（Kafka + consumer + LangGraph Agent + OTel），同步生成并跑 SQLite 冒烟；**不是 compose 实时预览**。BFF 实测 `runId=ff_20261125T084822Z_0370ef45`、`status=ok`、产物 41、幂等第二发 true、交付校验 true。测试：Python 2 项、前端客户端 2 项；BFF 37、前端 96。
 - K8s / OTel 交付清单（2026-11-25）：生成物新增 Helm `Service / Job / ConfigMap / PVC / OTel Collector`，迁移以 pre-install/pre-upgrade Job 执行；`scripts/k8s_manifest_check.py` 结构校验通过（Deployment=2 / ConfigMap=2 / Job=1 / Service=1 / PVC=1）。**OTel SDK 已注入**：Python consumer/agent 上报 `consume_event/classify`，Node API 上报 `POST /api/tickets`；compose 增加 Collector，E2E 阶段 `otel_spans` 实测命中 `ticket-consumer`、`consume_event`、`ticket-api`。边界：未装 helm/kubectl、未做真实集群部署；调试容器 `debugotel/debug2/debug3/debug4` 因守卫规则未自动清理。
 - 平台鉴权底座（2026-11-25）：BFF 新增可开关 OIDC Resource Server（`VIBE_OIDC_ENABLED` + issuer/JWKS，启用缺配置启动失败）、`TenantContext/TenantFilter`（**JWT claim `tenant_id` 优先**，与 `X-Tenant-Id` 不一致返回 403；校验/回写/清理）、`AuditFilter + vibe_audit_event` MySQL 只追加审计（POST/PUT/PATCH/DELETE，不记请求体，失败仅告警）、**审计查询 API** `GET /api/v1/audit/events`（管理员、按租户、limit≤200）。BFF **37 项测试通过**；实机 POST 422 后 MySQL 记录 `tenant_audit / user_audit / POST /api/v1/architect/documents/classify / 422`。边界：无 RLS、未接真实 IdP、审计无导出/保留策略。设计见 `docs/design/22_平台鉴权租户与审计.md`。
+
+## 2026-11-26 · 生成体验修复（页面完整度 / 横向布局 / 模拟预览）
+- RUN_NOT_FOUND：全栈与 Architect SSE 客户端把 404 / `RUN_NOT_FOUND` / `FULLSTACK_RUN_NOT_FOUND` / `ARCHITECT_RUN_NOT_FOUND` 归类为“Run 已过期”，立即停止重连；`useArchitect` 清空旧 `runId/lastSeq/steps` 并提示重新生成，全栈错误卡片显示专用文案。启动时仍即时写入 started 事件，Redis 有历史时回放为 `RUN_INTERRUPTED`。
+- V0 页面完整度：`components` 支持 `page/region/sample_data/fields`；确定性构建器按页面归位组件，生成 header/sidebar/main/footer、指标卡、表格/列表真实示例行、表单字段，并把主区域按“指标区/工作区/内容区”横向分带（保持组件原顺序）。V0 门禁（非 skeleton_mode）要求首页 ≥2 业务区块、每个路由至少 1 个业务组件、全栈首页含 list/table/form/summary 之一。
+- 画布/预览：表格节点优先渲染真实子行（不再叠假表头）；预览改为“浏览器窗口”样式（地址栏 + React 模拟页 + 多页 Tab/navigate/模拟数据），样式与画布保持一致。
+- 验证：Python **930** 项、前端 **102** 项、`npm run build` 全通过。
+
+## 2026-11-26 · 页面删除 + 门禁错误路由
+- 虚拟树页面删除：页面 Tab 增加 ×；至少保留一页；删除活动页自动回退相邻页，指向该页的 navigate 交互一并清理；可撤销。
+- RUN_NOT_FOUND 误判修复：只有“续传旧 Run”的 404 才判定过期；启动新 Run 的 404 保留真实接口/配置错误，不再显示“上次记录过期”。
+- 门禁错误统一路由：`ai_core/collaboration/error_router.py` 汇总错误目录（错误码 → 负责 Agent）、分派计划、尝试账本与高频统计；单错误最多修复 **3** 次（`MAX_FIX_ATTEMPTS`），超过必须回到 Architect；Applier / Consistency / Coder 等门禁的自愈上限统一为 3。
+- 可观测：每条门禁错误写 `logger.warning` + `data/gate-errors.jsonl`；A2A 反馈附带 `gateRoute` 并发 `gate.error.routed`；`GET /api/v1/internal/collaboration/errors/catalog|stats`、`/runs/{id}/errors`，BFF 代理 `/api/v1/architect/collaboration/errors/*`；Architect 契约 prompt 注入错误目录与分派规则。
+- 验证：Python **942** 项、前端 **105** 项、BFF 测试、`npm run build` 全通过。
+
+## 2026-11-26 · 运营化补强（Admin 指标 / 限流 / 审计导出）
+- Admin 看板：新增 Token/成本 KPI（输入、输出、总额、成本、均值、覆盖率）；BFF 从 Run 事件 `payload.usage` 聚合，按 `type+node+ts+tokens+cost+calls` 指纹去重，兼容 SSE 重放；演示数据补齐 usage。
+- 门禁错误看板：BFF `GET /api/v1/admin/gate-errors/stats` 透传 Python 账本；Admin 新增“门禁错误 Top”面板（次数、阶段、耗尽数、最大修复次数）。
+- 平台级限流：`RateLimitFilter` 按租户令牌桶，默认 **600 次/分钟**；健康检查、CORS 预检与静态资源豁免；超限 429 `RATE_LIMITED` + `Retry-After`；compose 与 `.env.example` 增加开关。
+- 审计导出：`GET /api/v1/audit/events/export` 按当前租户导出 CSV（≤5000 条，仅管理员）。
+- Fullstack LLM 修复调用采集 usage 并写入 `fullstack.applier.llm_repair` 事件，供 Admin 统计。
+- 验证：Python **942** 项、前端 **105** 项、BFF **45** 项、`npm run build` 全通过；`/admin/metrics`、`/admin/gate-errors/stats`、`/audit/events/export` 实机 200。
+
+## 2026-11-26 · G1 回归（页面完整度 + 3 次自愈）
+- 最终真实 5 任务 **5/5 PASS**、自动验收 5/5；P50 / P95 **189.2s / 252.9s**；Architect 成本 **0.697752 CNY**（均 0.13955）。对比 11-25：P50 +17%、成本 +3.1%，V0 节点 22–52（页面更完整），门禁错误 0 条、3 次自愈未触发。产物 `reports/g1/runs/2026-11-26T02-54-55-004-auto/`。
+- 同日首轮 4/5 为验收时序误判：fullstack 成功后 8s 截图，Vite 首次编译未完成导致 iframe 空白；沙盒 200、headless 复核正常。`g1_task_suite_e2e.mjs` 改为 30s 轮询 live 正文；报销单任务重跑 181.9s PASS。
+- Admin 实测本轮 G1：15 个 Run、**405,218 tokens**、**0.915148 CNY**、10 个带 usage 的 Run；门禁错误 Top 为空（无确定性错误）。
+- 边界：人工接受率 PENDING、回滚率未触发、单轮无方差、未接 CI 回归。
+
+## 2026-11-26 · 测试层与测试 Agent（test_agent）
+- 新增 `ai_core/testing/`：`models`（TestRequest/Plan/Report）、`planner`（从契约确定性生成 L1/L2/L3 计划）、`runner`（HTTP 验收 + 沙盒内回退）、`agent`（执行、失败回流、报告回传）、`manifest.json`。注册进 AgentRegistry，`dispatchable=false`，Supervisor 不会自动抢占 UI/Architect 请求。
+- 分级：L1 预览 shell（轮询 200 + `#root`，按 `text/html` 请求）；L2 登录 → 集合查询 → 创建 → 详情 → 更新 → 复核 → 删除；L3 生产仿真检查未接入时如实 `SKIPPED`，不伪造通过。L1/L2 报告带“仅供参考”提示。
+- 容器部署回退：python-ai 无法直连宿主 127.0.0.1 沙盒端口时，自动在沙盒容器内用 `wget` / Node fetch 执行，保持与浏览器同源。
+- 失败治理：`TEST_*` 错误码进入 `error_router`（最多 3 次，超限回 Architect），报告写入 A2A 日志与 Architect 收件箱；门禁统计重启后从 JSONL 恢复（实测 224 条历史）。
+- API：`POST /api/v1/internal/testing/runs|plans`、`GET /runs/{id}|/reports`。实机 expense 沙盒：L1 PASS、L2 PASS（含 update/verify_update/delete）、L3 SKIPPED。
+- 可观测/可评测/可迭代：`testing/metrics.py` 聚合 Run 数、分级通过率、检查耗时；报告写 `data/test-reports.jsonl` + RunStore 快照，重启后可按 runId 回源；`GET /testing/metrics|reports`，BFF `/api/v1/admin/testing/metrics|reports`，Admin 新增“测试验收”面板（通过率、分级、最近报告）。
+- Fullstack 可选后置验收：`FULLSTACK_TEST_AGENT_ENABLED`（默认 false）、`TIER`（L1）、`TIMEOUT`；开启后发 `fullstack.test.started/completed/failed`，完成事件与快照携带 `testReport`；验收失败只追加 warning，不改判生成结果。
+- 验证：Python **956** 项、BFF **47** 项、前端 **105** 项 + build 通过；实机 expense 沙盒 L1/L2 PASS、L3 SKIPPED；Admin 测试指标实测 `totalRuns=3 / checkPassRate=1.0 / L1·1 + L2·2`。边界：L2 是 HTTP 级业务闭环，尚未接 Playwright 浏览器交互；L3 需独立 Verify 沙盒。
+
+## 2026-11-26 · 项目/契约持久化 + 就绪探针 + 沙盒空闲回收
+- 项目持久化：BFF `/api/v1/projects` 支持列表/创建/详情/更新/软删；写入 MySQL `projects`；前端新建/导入/关闭同步到服务端，刷新时拉取并合并服务端项目（本地源码保留）。G1 mock 实测 `proj_677f9d23465e` 已落库。
+- 契约持久化：`project_contracts` 表按需创建，`POST /api/v1/projects/{id}/contracts` 保存契约 JSON；前端契约 `CONFIRMED` 后自动落库（按 projectId+contractId 去重）。G1 mock 实测 `ctr_5893ffd55c674ee0b4b1 / CONFIRMED`。
+- 就绪探针：React 沙盒创建/重启时轮询首页并要求 `id="root"`，完成后再返回 `fullstack.sandbox.ready`；导入 HTML 项目仍只查 HTTP 200。
+- 沙盒空闲回收：Provider 记录 `last_used`（get/apply/read/restart），后台 GC 默认 **30 分钟** TTL、5 分钟巡检；重启后发现的受管容器给一个完整 TTL 宽限，避免误杀。配置 `SANDBOX_IDLE_GC_ENABLED / TTL / INTERVAL`。
+- 测试报告可迭代：重启后 `GET /testing/metrics|reports` 从 JSONL 恢复；实测重启后指标仍为 `3 runs / 1.0`。
+- 验证：Python **956**、BFF **50**、前端 **105** + build 通过；G1 mock 单任务 PASS；真实 DeepSeek todo 单任务 PASS（447.2s，V0 34 节点，成本 0.141568 CNY）；项目/契约实机落库（mock `proj_677f9d23465e`、真实 `ctr_5665e9d973f54a069d15` 均 CONFIRMED）。
+- 边界：服务端项目只恢复元数据，源码仍依赖本地草稿/`project-sources`；`SUCCEEDED` 沙盒保留（预览需要），失败即时销毁仍待配置化；真实 5 任务未在本轮后全量复跑；当前沙盒 14 个，空闲 GC 30 分钟后回收。
+
+## 2026-11-26 · 跨设备源码同步 + Playwright UI 闭环
+- 源码上云：Fullstack 成功后从沙盒读取 27 个文本产物（src/server/config），PUT 到 BFF `project-sources`（MinIO），实测 `proj_b2ba0f834fe9` 27 文件 / 324,269 bytes；前端移除“仅 App.jsx 自动保存”避免覆盖完整快照，跨设备通过 GET `project-sources` 回灌。
+- 项目/契约列表：MySQL 现有 12 个项目；G1 创建的项目与契约均落库。
+- Playwright UI：`scripts/ui_test_runner.mjs` 独立 runner（登录→选创建表单→填值→提交→成功文案→回首页刷新→数据仍在）；TestAgent 新增 `ui_flow`，`UI_*` 错误码进入 error_router。
+- CodeGen 修复：表单提交真实 FormData（input `name` 由标签推导）、POST 成功显示“提交成功”、按契约 GET 集合追加 DataList。真实 TODO 验收：UI PASS，刷新后 marker 仍在。
+- 447s 诊断：节点耗时对比（DBACoder 8.6→43.8s、Backend 2.0→13.2s、Frontend 2.4→11.0s、Build 57.8→78.9s、SandboxRestart 6.7→14.2s），就绪探针仅 +~7s，不是冷启动；整体呈上游模型/宿主负载波动。
+- 待办：失败 Run 立即销毁、切项目 stop/start 秒级唤醒（当前 30min 空闲 GC 是销毁而非休眠）。
+- 正式 5 任务回归（2026-11-26T07-08-41）：**5/5 PASS**、自动验收 5/5；P50 / P95 **204.1s / 214.8s**；Architect 成本 **0.754138 CNY**（均 0.150828）；产物 `reports/g1/runs/2026-11-26T07-08-41-131-auto/`。
+- Playwright UI 真实断言（修复后）：**5/5 PASS**——TODO / Blog / CRM / Inventory / Expense 均完成“打开页面 → 填写 → 提交 → 成功提示 → 回列表刷新后数据仍在”。修复项：DataList 监听提交成功事件自动 refetch；CodeGen 生成 `QuickCreate`（+ 新增弹窗，字段来自 DDL，与 DataList 同集合根）；表单提交真实 FormData；登录路径按 `/login` 优先匹配（修复 Blog 登录被注册到 `/posts`）；UI runner 支持弹窗表单与 60s 导航超时。
+- 正式回归前 447s 异常：节点耗时 DBACoder 8.6→43.8s、Backend 2.0→13.2s、Frontend 2.4→11.0s、Build 57.8→78.9s、SandboxRestart 6.7→14.2s；就绪探针仅 +~7s，属模型/宿主负载波动，不是冷启动。
+- 验证：Python **958**、前端 **105** + build、BFF **50**；源码 27 文件 / 324KB 跨设备回灌实测；正式 5 任务回归 **5/5、P50 204.1s / P95 214.8s、成本 0.754138 CNY**。

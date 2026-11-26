@@ -90,15 +90,22 @@ def _output_phase_block(phase: str) -> str:
             "- **visual_document 必须输出空对象 {}**：平台会根据 "
             "frontend_routes / page_layout / components 确定性生成虚拟树；"
             "禁止在 JSON 里重复输出整棵树，避免契约超出模型输出上限；\n"
-            "- frontend_routes / page_layout / components 必须完整描述页面："
-            "首页包含 header + main + 至少 3 个业务区块，components 写清名称、"
-            "区域、角色与真实文案 / 示例数据，禁止全部占位；\n"
-            "- 多路由应用把页面写进 frontend_routes；V0 确定性骨架先渲染首页，"
-            "其余页面进入画布后补充；\n"
+            "- frontend_routes / page_layout / components 必须完整描述每个页面："
+            "首页 main 至少 3 个业务区块（指标 + 列表/表格 + 操作/表单），"
+            "其它路由 main 至少 1 个业务区块；每个路由都必须有对应组件，"
+            "禁止只建空页面；\n"
+            "- 每个组件必须写清 name、role、page（路由 path）、region"
+            "（header/sidebar/main/footer）、description；role 取值："
+            "summary/metric/kpi、table、list、form、action、ai、card；\n"
+            "- 列表 / 表格 / 指标必须给 2-5 条 sample_data（对象数组，字段名"
+            "就是界面列名）；表单必须给 fields（真实字段名）；示例数据只能"
+            "使用已确认业务实体，不得借示例新增未确认实体；\n"
+            "- 组件按页归属：page 使用 frontend_routes 中的 path；不写 page "
+            "视为首页；不写 region 视为 main；\n"
             '- 页面跳转 interaction 使用 action="navigate"，targetPageId '
             "指向 frontend_routes 中的页面 path；\n"
-            "- 输出预算：contract_markdown ≤ 1200 字，components ≤ 12 项，"
-            "frontend_routes ≤ 5 项，page_layout ≤ 6 项；禁止输出重复章节。"
+            "- 输出预算：contract_markdown ≤ 1200 字，components ≤ 24 项，"
+            "frontend_routes ≤ 5 项，page_layout ≤ 7 项；禁止输出重复章节。"
         )
     if phase == "BACKEND_BINDING":
         return (
@@ -118,6 +125,26 @@ def _output_phase_block(phase: str) -> str:
             "- relations 的 parent_key / foreign_key 必须引用 DDL 中真实存在的列。"
         )
     return ""
+
+
+def _gate_error_catalog_block() -> str:
+    """把平台确定性错误目录注入 Architect，供其拆解与分派修复。"""
+    try:
+        from ai_core.collaboration.error_router import GATE_ERRORS
+
+        summary = GATE_ERRORS.catalog_summary(limit=18)
+    except Exception:  # pragma: no cover - 目录不可用时不影响契约
+        summary = ""
+    if not summary:
+        return ""
+    return (
+        "\n\n【平台确定性错误目录 · Architect 必须知晓】\n"
+        "- 所有门禁错误都会带 code / source / attempt / maxAttempts 回传你；"
+        "单个错误最多修复 3 次，超过后必须回到你复核契约，禁止无限重试。\n"
+        "- 先判断契约是否矛盾：契约缺陷由你修订；代码缺陷按 owner 分派给"
+        "对应 Coder，禁止让不拥有该错误的 Agent 空转。\n"
+        "已知错误 → 负责 Agent：\n" + summary
+    )
 
 
 def _quality_tier_block(tier: str) -> str:
@@ -983,19 +1010,22 @@ class MockArchitectLLM(ArchitectLLM):
                 {
                     "name": "RecordList",
                     "role": "list",
-                    "section": "业务工作区",
+                    "page": f"/{table}",
+                    "region": "main",
                     "description": "分页展示记录，覆盖加载 / 空 / 错误状态",
                 },
                 {
                     "name": "SubmitForm",
                     "role": "form",
-                    "section": "业务工作区",
+                    "page": f"/{table}",
+                    "region": "main",
                     "description": "创建记录，包含前端校验与防重复提交",
                 },
                 {
                     "name": "StatusSummary",
                     "role": "summary",
-                    "section": "业务工作区",
+                    "page": "/",
+                    "region": "main",
                     "description": "展示数量、状态等关键指标",
                 },
                 *(
@@ -1003,7 +1033,8 @@ class MockArchitectLLM(ArchitectLLM):
                         {
                             "name": "AIWorkspace",
                             "role": "ai",
-                            "section": "业务工作区",
+                            "page": "/",
+                            "region": "main",
                             "description": "AI 对话与文件分析，含加载 / 错误 / 重试状态",
                         }
                     ]
@@ -1308,9 +1339,11 @@ class DeepSeekArchitectLLM(ArchitectLLM):
             '"type":"one_to_many","alias":""}],"component_interactions":'
             '[{"component":"","event":"","api_route":"","logic":""}],'
             '"frontend_routes":[{"path":"/","name":"页面名","description":""}],'
-            '"page_layout":[{"region":"header|main|sidebar","title":"",'
+            '"page_layout":[{"region":"header|main|sidebar|footer","title":"",'
             '"description":""}],"components":[{"name":"","role":"",'
-            '"section":"","description":"","is_placeholder":false}],'
+            '"page":"/","region":"main","description":"",'
+            '"sample_data":[{"字段":"示例值"}],"fields":["字段名"],'
+            '"is_placeholder":false}],'
             '"visual_document":{"schemaVersion":"1.0","docId":"vdoc_...",'
             '"projectId":"","revision":0,"status":"DRAFT","title":"",'
             '"designTokens":{},"root":{"id":"nd_...","type":"page",'
@@ -1439,6 +1472,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
         system += _project_mode_block(context.project_mode)
         system += _output_phase_block(context.output_phase)
         system += _quality_tier_block(context.quality_tier)
+        system += _gate_error_catalog_block()
         system += _engineering_standards_block()
         system += _changelog_block(context)
         human = _contract_human(context)
@@ -1528,6 +1562,7 @@ class DeepSeekArchitectLLM(ArchitectLLM):
         system += _project_mode_block(context.project_mode)
         system += _output_phase_block(context.output_phase)
         system += _quality_tier_block(context.quality_tier)
+        system += _gate_error_catalog_block()
         system += _engineering_standards_block()
         system += _changelog_block(context)
         human = (
@@ -1771,9 +1806,7 @@ def _solution_choice_block(context: ArchitectContext) -> str:
     summary = str(choice.get("summary") or "").strip()
     integration_plan = str(choice.get("integrationPlan") or "").strip()
     notes = [
-        str(item).strip()
-        for item in (choice.get("notes") or [])
-        if str(item).strip()
+        str(item).strip() for item in (choice.get("notes") or []) if str(item).strip()
     ]
     note_text = "；".join(notes[:3]) or "（无）"
     return (

@@ -175,7 +175,21 @@ class SandboxProvider(ABC):
         """
         raise SandboxGitError(f"当前 Provider 不支持生成快照 Diff: {sandbox_id}")
 
-    def restart(self, sandbox_id: str, ready_path: str = "/") -> None:
+    def reap_idle_sandboxes(
+        self,
+        ttl_seconds: float,
+        protected_ids: set[str] | None = None,
+    ) -> list[str]:
+        """回收空闲超过 TTL 的运行中沙盒；默认 Provider 不支持。"""
+        return []
+
+    def restart(
+        self,
+        sandbox_id: str,
+        ready_path: str = "/",
+        *,
+        require_root: bool = False,
+    ) -> None:
         """重启沙盒内的开发服务，并等待 ``ready_path`` 可访问。
 
         默认实现不支持重启；LocalDockerSandbox 通过 ``container.restart``

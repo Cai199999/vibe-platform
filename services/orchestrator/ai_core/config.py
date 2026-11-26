@@ -145,6 +145,13 @@ class Settings(BaseSettings):
     sandbox_container_orphan_ttl_days: int = 7
     sandbox_container_gc_interval_seconds: int = 6 * 3600
 
+    # 运行中沙盒的空闲回收：最后一次 API / 文件操作超过 TTL 后销毁，
+    # 防止“生成完不关页面”长期占内存。预览页本身不产生后端调用，
+    # 因此 TTL 默认 30 分钟；需要长期预览可调大或关闭。
+    sandbox_idle_gc_enabled: bool = True
+    sandbox_idle_ttl_seconds: int = 1800
+    sandbox_idle_gc_interval_seconds: int = 300
+
     # 全局 Run 并发舱壁：同一进程最多同时执行 N 个 Graph。超出上限的
     # Run 在各自后台线程排队，HTTP 仍立即返回 202，不改变交互语义。
     max_concurrent_runs: int = 8
@@ -333,6 +340,10 @@ class Settings(BaseSettings):
     # 模板默认生成；仅当 Applier 判为 CODE_DEFECT / 一致性要求重建 JOIN
     # 时，才把诊断反馈交给 LLM 重写 server/index.js。关闭后退化为纯模板。
     fullstack_llm_repair_enabled: bool = True
+    # 生成完成后的可选测试验收（TestAgent）；默认关闭，避免拖慢正常生成。
+    fullstack_test_agent_enabled: bool = False
+    fullstack_test_agent_tier: str = "L1"
+    fullstack_test_agent_timeout_seconds: int = 20
 
     # ------------------------------------------------------------
     # Architect（M2.5 全栈架构澄清与 Path 生成）

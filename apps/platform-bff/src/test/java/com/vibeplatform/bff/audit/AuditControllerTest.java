@@ -44,6 +44,29 @@ class AuditControllerTest {
                 .andExpect(jsonPath("$.events[0].actor").value("user_audit"));
     }
 
+    @Test
+    void adminExportsTenantScopedCsv() throws Exception {
+        mockMvc.perform(get("/api/v1/audit/events/export")
+                        .header("X-User-Role", "admin")
+                        .header("X-Tenant-Id", "tenant_audit"))
+                .andExpect(status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .header().string("Content-Disposition",
+                                "attachment; filename=\"audit-events.csv\""))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .content().string(org.hamcrest.Matchers.containsString(
+                                "id,tenantId,traceId,actor,method,path,status")))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                        .content().string(org.hamcrest.Matchers.containsString(
+                                "tenant_audit")));
+    }
+
+    @Test
+    void exportRejectsMissingRole() throws Exception {
+        mockMvc.perform(get("/api/v1/audit/events/export"))
+                .andExpect(status().isForbidden());
+    }
+
     @TestConfiguration
     static class TestBeans {
 

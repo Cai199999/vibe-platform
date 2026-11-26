@@ -588,9 +588,19 @@ function FullstackGeneration({
           data-failure-kind={state.failureKind ?? 'CODE'}
         >
           <strong>
-            {needsClarification ? '契约存在结构性矛盾' : '全栈生成失败'}
+            {needsClarification
+              ? '契约存在结构性矛盾'
+              : state.errorCode === 'RUN_EXPIRED'
+                ? '上一次生成记录已过期'
+                : '全栈生成失败'}
           </strong>
           <span>{state.error}</span>
+          {state.errorCode === 'RUN_EXPIRED' && (
+            <span className="architect-fullstack-error-hint">
+              服务重启或记录超出保留期会让旧 Run 无法续传；点击下方按钮会以新的
+              Run 重新开始，不影响已确认的契约与源码。
+            </span>
+          )}
           {state.failureKind === 'CONTRACT' && (
             <span className="architect-fullstack-error-hint">
               这不是代码生成缺陷：重试不会修复契约矛盾，请修改契约后重新确认。

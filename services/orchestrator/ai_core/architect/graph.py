@@ -854,6 +854,30 @@ class ArchitectGraphRunner:
                     "status": "DRAFTING_CONTRACT",
                 }
 
+        # 确定性契约门禁同样进入统一账本：架构师可看到每条错误的来源、
+        # 尝试次数与负责 Agent，便于按目录分派而不是盲目重试。
+        try:
+            from ai_core.collaboration.error_router import (
+                GATE_ERRORS,
+                MAX_FIX_ATTEMPTS,
+            )
+
+            repair_budget = max(
+                1,
+                min(
+                    MAX_FIX_ATTEMPTS,
+                    int(state.get("repair_limit") or 1) + 1,
+                ),
+            )
+            GATE_ERRORS.record_validation_issues(
+                run_id=str(state.get("run_id") or ""),
+                issues=issues,
+                attempt=int(state.get("repair_count") or 0) + 1,
+                max_attempts=repair_budget,
+            )
+        except Exception:  # pragma: no cover - 记录失败不能阻断契约流程
+            logger.exception("契约门禁错误入账失败 run=%s", state.get("run_id"))
+
         repair_limit = int(state.get("repair_limit") or 1)
         repair_count = int(state.get("repair_count") or 0)
         if repair_count < repair_limit:

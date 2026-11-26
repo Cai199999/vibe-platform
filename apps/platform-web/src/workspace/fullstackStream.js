@@ -10,13 +10,21 @@
 
 const TERMINAL_EVENTS = new Set(['fullstack.completed', 'fullstack.failed'])
 
+// Run 已不存在（服务重启 / 事件过期 / 本地残留 runId）时不再重连，
+// 由上层清掉旧 run 身份并引导用户重新生成。
+const RUN_EXPIRED_CODES = new Set(['RUN_NOT_FOUND', 'FULLSTACK_RUN_NOT_FOUND'])
+
 const RECONNECT_LIMIT = 6
 
 function abortError() {
   return new DOMException('Aborted', 'AbortError')
 }
 
-async function responseError(response) {
+export function isRunExpiredCode(code) {
+  return RUN_EXPIRED_CODES.has(code)
+}
+
+export async function responseError(response, { allowExpired = true } = {}) {
   let body = null
   try {
     body = await response.json()
@@ -24,10 +32,28 @@ async function responseError(response) {
     // 非 JSON 错误体
   }
   const detail = body?.detail
-  if (typeof detail === 'string') return detail
-  if (detail?.message) return `${detail.code || response.status} · ${detail.message}`
-  if (body?.message) return `${body.code || response.status} · ${body.message}`
-  return `HTTP ${response.status} ${response.statusText || ''}`.trim()
+  const code =
+    (detail && typeof detail === 'object' && detail.code) ||
+    (typeof body?.code === 'string' ? body.code : null)
+  let message
+  if (typeof detail === 'string') message = detail
+  else if (detail?.message) message = `${detail.code || response.status} · ${detail.message}`
+  else if (body?.message) message = `${body.code || response.status} · ${body.message}`
+  else message = `HTTP ${response.status} ${response.statusText || ''}`.trim()
+
+  const knownExpired = isRunExpiredCode(code)
+  if (allowExpired && knownExpired) {
+    message =
+      '上一次全栈生成记录已过期（AI Core 可能已重启或超出保留时间），请重新点击“生成全栈代码”。'
+  }
+  const error = new Error(message)
+  error.code = code
+  error.httpStatus = response.status
+  // 只有“续传旧 Run”才把 404 当过期；启动新 Run 的 404 是真实接口/配置
+  // 错误，必须把原始信息交给用户，不能误报成“上次记录过期”。
+  error.runExpired =
+    allowExpired && (knownExpired || response.status === 404)
+  return error
 }
 
 function parseFrame(raw) {
@@ -140,9 +166,9 @@ export async function streamFullstack({
       }
 
       if (!response.ok) {
-        const error = new Error(await responseError(response))
-        error.httpStatus = response.status
-        throw error
+        throw await responseError(response, {
+          allowExpired: mode !== 'start',
+        })
       }
 
       await consumeStream(response, {

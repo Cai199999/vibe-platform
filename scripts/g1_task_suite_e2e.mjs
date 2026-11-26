@@ -464,7 +464,15 @@ async function runTask(browser, task) {
     await liveFrame.waitFor({ state: 'visible', timeout: 60000 })
     const frame = page.frameLocator('.tab-window.is-active .canvas-live-frame')
     await frame.locator('body').waitFor({ state: 'visible', timeout: 60000 })
-    const text = await frame.locator('body').innerText()
+    // Vite 冷启动 / HMR 首次编译可能晚于 fullstack 终态几秒；
+    // 在 30s 内轮询正文，避免把“预览还没挂载”误判为“页面为空”。
+    let text = ''
+    const liveDeadline = Date.now() + 30000
+    while (Date.now() < liveDeadline) {
+      text = await frame.locator('body').innerText().catch(() => '')
+      if (text.trim().length >= 20) break
+      await page.waitForTimeout(500)
+    }
     record.liveTextLength = text.trim().length
     record.liveTextSample = text.trim().slice(0, 300)
     record.previewUrl = await active

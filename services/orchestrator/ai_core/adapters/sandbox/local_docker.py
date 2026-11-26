@@ -139,6 +139,8 @@ class LocalDockerSandbox(SandboxProvider):
         self._image_lock = threading.Lock()
         # sandbox_id -> container_id。进程重启后通过容器标签恢复。
         self._sandboxes: dict[str, str] = {}
+        # 最近一次被 API / 文件操作触及的时间（monotonic），用于空闲回收。
+        self._last_used: dict[str, float] = {}
         # 已分配但尚未被 Docker 确认的宿主端口，避免同进程内重复分配。
         self._reserved_ports: set[int] = set()
         # 活跃草稿：draft_id -> 元数据。草稿是内存态，Python 进程重启后
@@ -211,10 +213,15 @@ class LocalDockerSandbox(SandboxProvider):
             # 在 Agent 第一次写入前建立基线 commit：后续每一轮成功 Run 都
             # 在它之上追加 checkpoint，删除标注时可回滚到真正的初始代码。
             self._ensure_git_repo(container)
-            self._wait_until_ready(container, sandbox_id)
+            self._wait_until_ready(
+                container,
+                sandbox_id,
+                require_root=template == "react-vite",
+            )
 
             with self._lock:
                 self._sandboxes[sandbox_id] = container.id
+                self._last_used[sandbox_id] = time.monotonic()
                 self._reserved_ports.add(host_port)
                 self._reserved_ports.add(draft_host_port)
         except (APIError, DockerException) as exc:
@@ -313,10 +320,12 @@ class LocalDockerSandbox(SandboxProvider):
                 container,
                 sandbox_id,
                 timeout=self.settings.sandbox_import_timeout_seconds,
+                require_root=kind == "react",
             )
 
             with self._lock:
                 self._sandboxes[sandbox_id] = container.id
+                self._last_used[sandbox_id] = time.monotonic()
                 self._reserved_ports.add(host_port)
                 self._reserved_ports.add(draft_host_port)
         except (APIError, DockerException) as exc:
@@ -347,6 +356,7 @@ class LocalDockerSandbox(SandboxProvider):
 
     def get(self, sandbox_id: str) -> SandboxHandle:
         """恢复已存在沙盒的句柄，供同一标注的多轮增量修改复用。"""
+        self._touch(sandbox_id)
         container = self._get_container(sandbox_id)
         try:
             container.reload()
@@ -706,7 +716,13 @@ class LocalDockerSandbox(SandboxProvider):
                 workdir=workdir,
             )
 
-    def restart(self, sandbox_id: str, ready_path: str = "/") -> None:
+    def restart(
+        self,
+        sandbox_id: str,
+        ready_path: str = "/",
+        *,
+        require_root: bool = False,
+    ) -> None:
         """重启容器并等待开发服务 / 反向代理就绪。
 
         注意：容器入口为 ``npm run dev``。全栈生成会把该脚本改写为
@@ -714,12 +730,101 @@ class LocalDockerSandbox(SandboxProvider):
         因此重启后不能只探测 ``/``，还要探测 ``/api/health`` 才能确认
         Vite 的 ``/api`` 代理和沙盒后端都已可用。
         """
+        self._touch(sandbox_id)
         container = self._get_container(sandbox_id)
         try:
             container.restart(timeout=20)
         except DockerException as exc:
             raise SandboxStartupError(f"重启沙盒失败: {exc}") from exc
-        self._wait_until_ready(container, sandbox_id, ready_path=ready_path)
+        self._wait_until_ready(
+            container,
+            sandbox_id,
+            ready_path=ready_path,
+            require_root=require_root,
+        )
+
+    def reap_idle_sandboxes(
+        self,
+        ttl_seconds: float,
+        protected_ids: set[str] | None = None,
+    ) -> list[str]:
+        """销毁空闲超过 TTL 的运行中沙盒，防止长期占用内存。
+
+        ``protected_ids`` 用于保护正在执行 Run / 显式预览的沙盒；
+        当前调用方为空时仅依赖最后一次 API / 文件操作时间。
+        """
+        if ttl_seconds <= 0:
+            return []
+        protected = set(protected_ids or ())
+        now = time.monotonic()
+        # 进程重启后内存登记表为空：先发现仍在运行的受管容器并给予一个
+        # 完整 TTL 宽限期，避免“刚重启就误杀上一会话的预览”。
+        try:
+            containers = self._require_client().containers.list(
+                filters={"label": f"{LABEL_MANAGED}=true"}
+            )
+            with self._lock:
+                for container in containers:
+                    labels = getattr(container, "labels", None) or {}
+                    sandbox_id = labels.get(LABEL_SANDBOX_ID, "")
+                    if sandbox_id and sandbox_id not in self._sandboxes:
+                        self._sandboxes[sandbox_id] = container.id
+                        self._last_used[sandbox_id] = now
+        except (DockerException, SandboxError):
+            logger.warning("idle sandbox discovery skipped: docker unavailable")
+        with self._lock:
+            candidates = [
+                (sandbox_id, container_id)
+                for sandbox_id, container_id in self._sandboxes.items()
+                if sandbox_id not in protected
+                and now - self._last_used.get(sandbox_id, now) >= float(ttl_seconds)
+            ]
+        reclaimed: list[str] = []
+        for sandbox_id, container_id in candidates:
+            container = None
+            host_ports: list[int] = []
+            try:
+                container = self._require_client().containers.get(container_id)
+                for internal_port in (
+                    self.settings.sandbox_dev_port,
+                    self.settings.sandbox_draft_port,
+                ):
+                    try:
+                        port = self._published_port(container, internal_port)
+                    except SandboxError:
+                        continue
+                    if port:
+                        host_ports.append(port)
+                self._safe_remove(container)
+            except NotFound:
+                pass
+            except DockerException as exc:
+                logger.warning("空闲沙盒回收失败 sandbox_id=%s: %s", sandbox_id, exc)
+                continue
+            with self._lock:
+                self._sandboxes.pop(sandbox_id, None)
+                self._last_used.pop(sandbox_id, None)
+                for port in host_ports:
+                    self._reserved_ports.discard(port)
+                for draft_id, meta in list(self._drafts.items()):
+                    if str(meta.get("sandbox_id") or "") == sandbox_id:
+                        self._drafts.pop(draft_id, None)
+            reclaimed.append(sandbox_id)
+            logger.info(
+                "idle sandbox reclaimed sandbox_id=%s ttl=%ss",
+                sandbox_id,
+                int(ttl_seconds),
+            )
+        return reclaimed
+
+    def _touch(self, sandbox_id: str) -> None:
+        lock = getattr(self, "_lock", None)
+        if lock is None:
+            return
+        with lock:
+            if not hasattr(self, "_last_used"):
+                self._last_used = {}
+            self._last_used[sandbox_id] = time.monotonic()
 
     def apply_patch(
         self,
@@ -729,6 +834,7 @@ class LocalDockerSandbox(SandboxProvider):
         deleted_paths: list[str] | None = None,
         draft_id: str | None = None,
     ) -> list[str]:
+        self._touch(sandbox_id)
         container = self._get_container(sandbox_id)
         workdir = self._resolve_workdir(sandbox_id, draft_id)
         changed: list[str] = []
@@ -845,6 +951,7 @@ class LocalDockerSandbox(SandboxProvider):
         真实状态一致（尤其适用于 unified diff 场景）。传入 ``draft_id``
         时读取草稿 worktree，审批前绝不触碰主工作树。
         """
+        self._touch(sandbox_id)
         container = self._get_container(sandbox_id)
         workdir = self._resolve_workdir(sandbox_id, draft_id)
         rel_path = self._normalize_path(path)
@@ -2333,20 +2440,25 @@ class LocalDockerSandbox(SandboxProvider):
         sandbox_id: str,
         timeout: int | None = None,
         ready_path: str = "/",
+        *,
+        require_root: bool = False,
     ) -> None:
         """轮询容器内开发服务器，确认目标路径已真正可用。
 
         ``ready_path="/api/health"`` 时，请求会经过 Vite 的 ``/api`` 代理，
-        同时验证前端、代理与 Node 后端三者都就绪。
+        同时验证前端、代理与 Node 后端三者都就绪。``require_root=True``
+        时首页还必须包含 React 根节点，避免“HTTP 200 但 index 还是空壳”
+        被当成可访问。
         """
         deadline = time.monotonic() + (
             timeout or self.settings.sandbox_start_timeout_seconds
         )
         path = ready_path if ready_path.startswith("/") else f"/{ready_path}"
-        probe = (
-            "wget -q -T 2 -O /dev/null "
-            f"http://127.0.0.1:{self.settings.sandbox_dev_port}{path}"
-        )
+        url = f"http://127.0.0.1:{self.settings.sandbox_dev_port}{path}"
+        if require_root and path in {"/", "/index.html"}:
+            probe = f"wget -qO- -T 2 {url} | grep -q 'id=\"root\"'"
+        else:
+            probe = f"wget -q -T 2 -O /dev/null {url}"
         while time.monotonic() < deadline:
             container.reload()
             if container.status != "running":

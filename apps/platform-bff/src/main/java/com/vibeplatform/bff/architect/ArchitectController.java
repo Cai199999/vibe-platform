@@ -145,6 +145,20 @@ public class ArchitectController {
         return architectService.collaboration(runId);
     }
 
+    /** 平台确定性错误目录（错误码 → 负责 Agent）。 */
+    @GetMapping("/collaboration/errors/catalog")
+    public ResponseEntity<JsonNode> errorCatalog() {
+        return architectService.errorCatalog();
+    }
+
+    /** 高频门禁错误统计。 */
+    @GetMapping("/collaboration/errors/stats")
+    public ResponseEntity<JsonNode> errorStats(
+            @RequestParam(defaultValue = "10") int top
+    ) {
+        return architectService.errorStats(top);
+    }
+
     /** 多服务生成原型入口。 */
     @PostMapping("/multi-service/generate")
     public ResponseEntity<JsonNode> generateMultiService(

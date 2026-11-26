@@ -254,46 +254,52 @@ function VisualNodeView({
           onMagic={magic}
           frozen={frozen}
         />
-        <table className="vc-table">
-          <thead>
-            <tr>
-              {columns.map((column, index) => (
-                <th key={`${column}-${index}`}>{column}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {Array.from({ length: node.repeat?.sampleCount || 2 }).map(
-              (_, rowIndex) => (
-                <tr key={`row-${rowIndex}`}>
-                  {columns.map((column, columnIndex) => (
-                    <td key={`${column}-${columnIndex}`}>
-                      {columnIndex === columns.length - 1
-                        ? '查看'
-                        : `示例 ${rowIndex + 1}`}
-                    </td>
+        {node.children.length > 0 ? (
+          // V0 构建器会把真实示例数据渲染成子行节点；优先展示这些行，
+          // 避免“假表格 + 行节点”重复渲染。
+          <div
+            className="vc-children"
+            data-visual-children
+            style={layoutStyle(node)}
+          >
+            {renderNodeList(node.children)}
+          </div>
+        ) : (
+          <>
+            <table className="vc-table">
+              <thead>
+                <tr>
+                  {columns.map((column, index) => (
+                    <th key={`${column}-${index}`}>{column}</th>
                   ))}
                 </tr>
-              ),
-            )}
-          </tbody>
-        </table>
-        <div className="vc-repeat-hint">
-          {node.repeat
-            ? `数据源：${node.repeat.source}`
-            : '表格数据将在业务审查阶段绑定'}
-        </div>
-        <div
-          className="vc-children"
-          data-visual-children
-          style={layoutStyle(node)}
-        >
-          {node.children.length === 0 ? (
-            <div className="vc-empty-container">拖入表格工具栏或附加组件</div>
-          ) : (
-            renderNodeList(node.children)
-          )}
-        </div>
+              </thead>
+              <tbody>
+                {Array.from({ length: node.repeat?.sampleCount || 2 }).map(
+                  (_, rowIndex) => (
+                    <tr key={`row-${rowIndex}`}>
+                      {columns.map((column, columnIndex) => (
+                        <td key={`${column}-${columnIndex}`}>
+                          {columnIndex === columns.length - 1
+                            ? '查看'
+                            : `示例 ${rowIndex + 1}`}
+                        </td>
+                      ))}
+                    </tr>
+                  ),
+                )}
+              </tbody>
+            </table>
+            <div className="vc-repeat-hint">
+              {node.repeat
+                ? `数据源：${node.repeat.source}`
+                : '表格数据将在业务审查阶段绑定'}
+            </div>
+            <div className="vc-empty-container">
+              拖入表格工具栏或附加组件
+            </div>
+          </>
+        )}
       </div>
     )
   }
@@ -498,6 +504,7 @@ export default function OfflineVisualCanvas({
     freezeDocument,
     switchPage,
     addPage,
+    deletePage,
     clearError,
   } = store
   const [draggingId, setDraggingId] = useState(null)
@@ -955,19 +962,37 @@ export default function OfflineVisualCanvas({
           <div className="vc-canvas-toolbar">
             <div className="vc-page-switcher" role="tablist" aria-label="页面">
               {pages.map((page) => (
-                <button
-                  key={page.pageId}
-                  type="button"
-                  role="tab"
-                  aria-selected={page.pageId === activePageId}
-                  className={
-                    page.pageId === activePageId ? 'is-selected' : ''
-                  }
-                  onClick={() => switchPage(page.pageId)}
-                  title={page.path}
-                >
-                  {page.title || page.path}
-                </button>
+                <span className="vc-page-tab" key={page.pageId}>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={page.pageId === activePageId}
+                    className={
+                      page.pageId === activePageId ? 'is-selected' : ''
+                    }
+                    onClick={() => switchPage(page.pageId)}
+                    title={page.path}
+                  >
+                    {page.title || page.path}
+                  </button>
+                  <button
+                    type="button"
+                    className="vc-page-remove"
+                    title={
+                      pages.length <= 1
+                        ? '至少保留一个页面'
+                        : `删除页面「${page.title || page.path}」`
+                    }
+                    aria-label={`删除页面 ${page.title || page.path}`}
+                    disabled={frozen || pages.length <= 1}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      deletePage(page.pageId)
+                    }}
+                  >
+                    ×
+                  </button>
+                </span>
               ))}
               <button
                 type="button"

@@ -111,6 +111,23 @@ def _visual_v0_draft() -> ContractDraft:
         contract_markdown="# V0 虚拟原型\n\n" + ("页面结构说明。" * 60),
         tech_stack={},
         visual_document=_visual_document(),
+        components=[
+            {
+                "name": "指标概览",
+                "role": "summary",
+                "page": "/",
+                "region": "main",
+                "description": "关键指标",
+            },
+            {
+                "name": "数据列表",
+                "role": "list",
+                "page": "/",
+                "region": "main",
+                "description": "核心业务记录",
+            },
+        ],
+        frontend_routes=[{"path": "/", "name": "首页"}],
         implementation_path=[{"phase": "1", "title": "原型", "tasks": []}],
     )
 
@@ -137,6 +154,85 @@ class MultiPageBuilderTests(unittest.TestCase):
         self.assertEqual(document.active_page_id, document.pages[0].page_id)
         report = validate_visual_document(document)
         self.assertTrue(report.ok, report.errors)
+
+    def test_components_follow_page_region_and_sample_data(self) -> None:
+        payload = build_visual_document_from_contract(
+            title="工单系统",
+            page_layout=[
+                {"region": "header", "title": "顶部导航"},
+                {"region": "sidebar", "title": "侧边栏"},
+                {"region": "main", "title": "主内容区"},
+            ],
+            components=[
+                {
+                    "name": "工单统计",
+                    "role": "summary",
+                    "page": "/",
+                    "region": "main",
+                    "sample_data": [
+                        {"label": "待处理", "value": 12},
+                        {"label": "已完成", "value": 8},
+                    ],
+                },
+                {
+                    "name": "工单列表",
+                    "role": "table",
+                    "page": "/",
+                    "region": "main",
+                    "sample_data": [
+                        {
+                            "编号": "T-1",
+                            "标题": "打印机故障",
+                            "状态": "待处理",
+                        }
+                    ],
+                },
+                {
+                    "name": "新建工单",
+                    "role": "form",
+                    "page": "/new",
+                    "region": "main",
+                    "fields": ["标题", "优先级"],
+                },
+            ],
+            frontend_routes=[
+                {"path": "/", "name": "总览"},
+                {"path": "/new", "name": "新建工单"},
+            ],
+        )
+        document = VisualDocument.model_validate(payload)
+        self.assertTrue(validate_visual_document(document).ok)
+        pages = {page.path: page for page in document.pages}
+
+        def find(node: VisualNode, name: str) -> VisualNode | None:
+            if node.name == name:
+                return node
+            for child in node.children:
+                found = find(child, name)
+                if found is not None:
+                    return found
+            return None
+
+        home_main = find(pages["/"].root, "主内容区")
+        self.assertIsNotNone(home_main)
+        self.assertEqual(
+            [node.name for node in home_main.children],
+            ["工单统计", "工单列表"],
+        )
+        table = find(pages["/"].root, "工单列表")
+        self.assertEqual(table.type, "table")
+        first_row = find(table, "表格行 1")
+        self.assertIsNotNone(first_row)
+        self.assertTrue(
+            any(
+                "打印机故障" in str(node.props.get("text") or "")
+                for node in first_row.children
+            )
+        )
+        new_main = find(pages["/new"].root, "主内容区")
+        self.assertEqual([node.name for node in new_main.children], ["新建工单"])
+        form = find(new_main, "新建工单")
+        self.assertIn("标题输入框", [node.name for node in form.children])
 
 
 class VisualV0Tests(unittest.TestCase):
@@ -176,6 +272,72 @@ class VisualV0Tests(unittest.TestCase):
         self.assertIn("V0", envelope.user_message)
         self.assertNotIn("内部问题", envelope.user_message)
         self.assertTrue(envelope.retryable)
+
+    def test_v0_rejects_blank_secondary_pages(self) -> None:
+        draft = replace(
+            _visual_v0_draft(),
+            frontend_routes=[
+                {"path": "/", "name": "首页"},
+                {"path": "/reports", "name": "报表"},
+            ],
+        )
+        validation = validate_draft(
+            "full_stack_system",
+            draft,
+            output_phase="VISUAL_V0",
+        )
+        self.assertFalse(validation.valid)
+        self.assertTrue(
+            any("/reports" in issue for issue in validation.issues),
+            validation.issues,
+        )
+
+    def test_v0_requires_two_business_blocks(self) -> None:
+        draft = replace(
+            _visual_v0_draft(),
+            components=[
+                {
+                    "name": "数据列表",
+                    "role": "list",
+                    "page": "/",
+                    "region": "main",
+                    "description": "唯一区块",
+                }
+            ],
+        )
+        validation = validate_draft(
+            "full_stack_system",
+            draft,
+            output_phase="VISUAL_V0",
+        )
+        self.assertFalse(validation.valid)
+        self.assertTrue(
+            any("至少需要 2 个业务区块" in issue for issue in validation.issues),
+            validation.issues,
+        )
+
+    def test_v0_skeleton_mode_skips_completeness_gate(self) -> None:
+        draft = replace(
+            _visual_v0_draft(),
+            skeleton_mode=True,
+            components=[
+                {
+                    "name": "待定区域",
+                    "role": "placeholder",
+                    "is_placeholder": True,
+                }
+            ],
+            frontend_routes=[
+                {"path": "/", "name": "首页"},
+                {"path": "/pending", "name": "待定"},
+            ],
+        )
+        validation = validate_draft(
+            "full_stack_system",
+            draft,
+            output_phase="VISUAL_V0",
+        )
+        self.assertTrue(validation.valid, validation.issues)
 
     def test_v0_assembly_has_no_backend(self) -> None:
         contract = assemble_contract(

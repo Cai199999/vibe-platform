@@ -21,6 +21,7 @@ import WorkspaceTabs from '../components/WorkspaceTabs.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { useSettings } from '../settings/SettingsContext.jsx'
 import { useWorkspace } from '../workspace/useWorkspace.js'
+import { saveProjectContract } from '../workspace/projectClient.js'
 import {
   EMPTY_ARCHITECT,
   countPendingKeyQuestions,
@@ -1372,13 +1373,15 @@ export default function WorkspacePage() {
     closeTab,
     setActiveTab,
     reorderTabs,
-  } = useWorkspace()
+  } = useWorkspace({ token: session?.token })
 
   // M2.5 全局架构澄清：与画布 Run 完全独立的 SSE / 状态存储。
   const architect = useArchitect({ token: session?.token })
   const architectStates = architect.states
   // 冻结回调是延迟 effect：用 ref 读取最新状态，避免闭包拿到旧的 qualityTier。
   const architectStatesRef = useRef(architectStates)
+  // 契约确认后落库去重：同一 projectId + contractId 只写一次。
+  const contractPersistRef = useRef(new Map())
   architectStatesRef.current = architectStates
 
   // 导入源码的服务端回灌：localStorage 只是缓存，BFF 持久化快照才是
@@ -1388,12 +1391,21 @@ export default function WorkspacePage() {
     if (!session?.token) return
     const tenantId = user?.tenantId || 'tenant_local'
     projects
-      .filter(
-        (project) =>
-          project?.imported &&
+      .filter((project) => {
+        if (!project?.id) return false
+        if (
+          project.imported &&
           (project.kind === 'react' ||
-            String(project.template || '').startsWith('imported-react')),
-      )
+            String(project.template || '').startsWith('imported-react'))
+        ) {
+          return true
+        }
+        // 跨设备恢复的服务端项目本地没有 files，也要尝试从 MinIO 回灌。
+        const hasLocalSource = Object.values(project.files || {}).some(
+          (value) => typeof value === 'string' && value.trim().length > 0,
+        )
+        return Boolean(project.serverSynced) || !hasLocalSource
+      })
       .forEach((project) => {
         if (projectSourceHydrationRef.current.has(project.id)) return
         projectSourceHydrationRef.current.set(project.id, 'settled')
@@ -4910,6 +4922,22 @@ export default function WorkspacePage() {
     projects,
     user?.tenantId,
   ])
+
+  // 契约确认后持久化到 BFF（MySQL），刷新 / 换设备仍可追溯。
+  useEffect(() => {
+    Object.entries(architectStates).forEach(([projectId, state]) => {
+      if (state?.status !== 'CONFIRMED') return
+      const contract = state?.contract
+      const contractId = contract?.contractId
+      if (!contractId) return
+      const key = `${projectId}:${contractId}`
+      if (contractPersistRef.current.has(key)) return
+      contractPersistRef.current.set(key, 'pending')
+      void saveProjectContract(projectId, contract, { token: session?.token })
+        .then(() => contractPersistRef.current.set(key, 'done'))
+        .catch(() => contractPersistRef.current.set(key, 'failed'))
+    })
+  }, [architectStates, session?.token])
 
   // 契约一旦 CONFIRMED，旧版无 visualDocument 契约才触发前端骨架生成。
   // 新链路必须等用户在虚拟画布确认视觉后，由阶段三 CodeGen 统一生成。

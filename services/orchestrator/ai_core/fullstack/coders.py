@@ -1816,15 +1816,22 @@ def build_auth_support(
     table_list = list(tables)
     auth_table = _find_auth_table(table_list)
     routes = list(contract.api_routes or [])
+    # 路径优先级高于描述：模型可能把“用户登录”文案挂到集合 POST 上，
+    # 若先按描述匹配会把 /api/v1/posts 误注册成登录端点。
     login = next(
         (
             route
             for route in routes
             if str(route.method or "").upper() == "POST"
-            and (
-                str(route.path or "").rstrip("/").lower().endswith("/login")
-                or "登录" in str(route.description or "")
-            )
+            and str(route.path or "").rstrip("/").lower().endswith("/login")
+        ),
+        None,
+    ) or next(
+        (
+            route
+            for route in routes
+            if str(route.method or "").upper() == "POST"
+            and "登录" in str(route.description or "")
         ),
         None,
     )
@@ -1833,10 +1840,15 @@ def build_auth_support(
             route
             for route in routes
             if str(route.method or "").upper() == "POST"
-            and (
-                str(route.path or "").rstrip("/").lower().endswith("/register")
-                or "注册" in str(route.description or "")
-            )
+            and str(route.path or "").rstrip("/").lower().endswith("/register")
+        ),
+        None,
+    ) or next(
+        (
+            route
+            for route in routes
+            if str(route.method or "").upper() == "POST"
+            and "注册" in str(route.description or "")
         ),
         None,
     )

@@ -24,6 +24,10 @@ public class ArchitectService {
     private static final String RUN_PATH = "/api/v1/internal/architect/runs/{runId}";
     private static final String COLLABORATION_PATH =
             "/api/v1/internal/collaboration/runs/{runId}";
+    private static final String ERROR_CATALOG_PATH =
+            "/api/v1/internal/collaboration/errors/catalog";
+    private static final String ERROR_STATS_PATH =
+            "/api/v1/internal/collaboration/errors/stats";
     private static final String GENERATED_APP_PATH =
             "/api/v1/internal/generated-apps/generate";
     private static final String GENERATED_APP_RUN_PATH =
@@ -143,6 +147,25 @@ public class ArchitectService {
                 COLLABORATION_PATH,
                 "architect collaboration snapshot",
                 runId
+        );
+    }
+
+    /** 平台确定性错误目录：错误码 → 负责 Agent 与最大修复次数。 */
+    public ResponseEntity<JsonNode> errorCatalog() {
+        return getJson(
+                aiCoreInteractiveRestClient,
+                ERROR_CATALOG_PATH,
+                "architect error catalog"
+        );
+    }
+
+    /** 高频门禁错误统计：按错误码 / 指纹 / Agent 聚合。 */
+    public ResponseEntity<JsonNode> errorStats(int top) {
+        int capped = Math.max(1, Math.min(50, top));
+        return getJson(
+                aiCoreInteractiveRestClient,
+                ERROR_STATS_PATH + "?top=" + capped,
+                "architect error stats"
         );
     }
 

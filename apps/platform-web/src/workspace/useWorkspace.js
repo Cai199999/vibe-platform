@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { INITIAL_APP } from '../mockProject.js'
+import {
+  createProjectRemote,
+  deleteProjectRemote,
+  fetchProjects,
+} from './projectClient.js'
 
 const STORAGE_KEY = 'vibe.workspace.v1'
 const STORAGE_VERSION = 1
@@ -60,6 +65,25 @@ const createProject = (name, { blank = false } = {}) => ({
   generated: false,
   createdAt: new Date().toISOString(),
 })
+
+/** 服务端项目只恢复元数据；源码仍由本地草稿 / project-sources 提供。 */
+function projectFromRemote(remote) {
+  return {
+    id: remote.id,
+    name: remote.name || '未命名项目',
+    template: 'vibe-react',
+    templateVersion: TEMPLATE_VERSION,
+    files: {},
+    entryFile: TARGET_FILE,
+    bootstrap: 'pending',
+    canvasMode: 'blank',
+    generated: false,
+    appType: remote.appType,
+    sourceMode: remote.sourceMode,
+    serverSynced: true,
+    createdAt: remote.createdAt || new Date().toISOString(),
+  }
+}
 
 const createInitialState = () => {
   const project = createProject('演示项目')
@@ -163,7 +187,7 @@ function loadState() {
  *
  * 仅持久化工作区结构；沙盒预览与 Run 结果属于会话态，刷新后重置。
  */
-export function useWorkspace() {
+export function useWorkspace({ token } = {}) {
   const [state, setState] = useState(loadState)
   // 同步操作（导入后立即跳转）需要读取最新工作区状态，绕开 setState 的
   // 异步批处理，确保 localStorage 在 navigate 之前已写入。
@@ -178,23 +202,55 @@ export function useWorkspace() {
     }
   }, [state])
 
+  // 服务端项目列表回灌：本地已有项目保留源码，仅补充服务端独有的元数据项目。
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchProjects({ token, signal: controller.signal })
+      .then((remoteProjects) => {
+        if (!remoteProjects.length) return
+        setState((previous) => {
+          const byId = new Map(
+            previous.projects.map((project) => [project.id, project]),
+          )
+          let changed = false
+          remoteProjects.forEach((remote) => {
+            if (!remote?.id || byId.has(remote.id)) return
+            byId.set(remote.id, projectFromRemote(remote))
+            changed = true
+          })
+          return changed
+            ? { ...previous, projects: [...byId.values()] }
+            : previous
+        })
+      })
+      .catch((cause) => {
+        if (cause?.name !== 'AbortError') {
+          // 离线可用：服务端列表失败不阻断本地工作区。
+        }
+      })
+    return () => controller.abort()
+  }, [token])
+
   const createNewProject = useCallback(() => {
-    setState((previous) => {
-      if (previous.openTabs.length >= MAX_OPEN_TABS) {
-        return previous
-      }
-      const created = createProject(
-        nextProjectName(previous.projects, previous.openTabs.length),
-        { blank: true },
-      )
-      return {
-        ...previous,
-        projects: [...previous.projects, created],
-        openTabs: [...previous.openTabs, created.id],
-        activeTabId: created.id,
-      }
+    const previous = stateRef.current
+    if (previous.openTabs.length >= MAX_OPEN_TABS) return
+    const created = createProject(
+      nextProjectName(previous.projects, previous.openTabs.length),
+      { blank: true },
+    )
+    const next = {
+      ...previous,
+      projects: [...previous.projects, created],
+      openTabs: [...previous.openTabs, created.id],
+      activeTabId: created.id,
+    }
+    stateRef.current = next
+    persistWorkspaceState(next)
+    setState(next)
+    void createProjectRemote(created, { token }).catch(() => {
+      // 本地项目已创建；服务端同步失败不阻断使用。
     })
-  }, [])
+  }, [token])
 
   /**
    * 导入项目：沙盒已经由 Python 启动，前端只负责建立项目 / Tab。
@@ -248,8 +304,11 @@ export function useWorkspace() {
     stateRef.current = next
     persistWorkspaceState(next)
     setState(next)
+    void createProjectRemote({ ...project, kind }, { token }).catch(() => {
+      // 导入项目已在本地建立；服务端同步失败不阻断只读投影。
+    })
     return projectId
-  }, [])
+  }, [token])
 
   const openProject = useCallback((projectId) => {
     setState((previous) => {
@@ -290,7 +349,10 @@ export function useWorkspace() {
         activeTabId,
       }
     })
-  }, [])
+    void deleteProjectRemote(projectId, { token }).catch(() => {
+      // 本地已关闭；服务端删除失败由下次刷新列表兜底。
+    })
+  }, [token])
 
   const setActiveTab = useCallback((projectId) => {
     setState((previous) =>

@@ -1,0 +1,101 @@
+{
+  "agent_id": "test_agent",
+  "name": "测试工程师",
+  "description": "对生成物执行分级验收（L1 预览 / L2 业务闭环 / L3 生产仿真），输出结构化 TestReport，并把失败按确定性错误码回流 Architect。只读验收，不修改代码。",
+  "version": "1.0.0",
+  "status": "available",
+  "graph": "TestAgentRunner",
+  "capabilities": [
+    {
+      "id": "test_plan",
+      "description": "从契约推导 L1/L2/L3 测试计划，不依赖模型。"
+    },
+    {
+      "id": "test_execute",
+      "description": "在预览/沙盒环境执行测试，返回结构化结果与证据。"
+    },
+    {
+      "id": "test_report",
+      "description": "产出可入库、可回放、可回传 Architect 的测试报告。"
+    }
+  ],
+  "supported_tools": [
+    "http_probe",
+    "http_request",
+    "login_test_user",
+    "crud_flow",
+    "record_test_report",
+    "route_test_failure"
+  ],
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "TestRequest",
+    "type": "object",
+    "properties": {
+      "sourceRunId": { "type": "string" },
+      "projectId": { "type": "string" },
+      "contractId": { "type": "string" },
+      "tier": { "type": "string", "enum": ["L1", "L2", "L3"] },
+      "previewUrl": { "type": "string" },
+      "apiBaseUrl": { "type": "string" },
+      "contract": { "type": "object" },
+      "visualDocument": { "type": "object" },
+      "auth": { "type": "object" },
+      "samplePayload": { "type": "object" },
+      "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 120 }
+    },
+    "required": ["tier", "previewUrl"]
+  },
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "TestReport",
+    "type": "object",
+    "required": ["reportId", "planId", "tier", "status", "checks", "summary"],
+    "properties": {
+      "reportId": { "type": "string" },
+      "planId": { "type": "string" },
+      "sourceRunId": { "type": "string" },
+      "projectId": { "type": "string" },
+      "contractId": { "type": "string" },
+      "tier": { "type": "string", "enum": ["L1", "L2", "L3"] },
+      "status": {
+        "type": "string",
+        "enum": ["PASSED", "FAILED", "SKIPPED", "ERROR"]
+      },
+      "advisory": { "type": "string" },
+      "checks": { "type": "array", "items": { "type": "object" } },
+      "summary": { "type": "object" },
+      "warnings": { "type": "array", "items": { "type": "string" } },
+      "startedAt": { "type": "string" },
+      "finishedAt": { "type": "string" },
+      "evidence": { "type": "object" }
+    }
+  },
+  "skills": [
+    {
+      "skill_id": "test.preview_smoke",
+      "name": "预览冒烟",
+      "description": "轮询预览地址，确认 HTTP 200 且 React 根节点存在；超时与空壳分开报告。",
+      "tools": ["http_probe"]
+    },
+    {
+      "skill_id": "test.business_flow",
+      "name": "业务闭环验收",
+      "description": "登录 → 集合查询 → 创建 → 详情校验 → 更新 → 删除，证据随报告返回。",
+      "tools": ["http_request", "login_test_user", "crud_flow"]
+    },
+    {
+      "skill_id": "test.failure_routing",
+      "name": "失败回流",
+      "description": "按 TEST_* 错误码记录到 error_router，单错误最多 3 次，超限回 Architect。",
+      "tools": ["route_test_failure", "record_test_report"]
+    }
+  ],
+  "keywords": [],
+  "metadata": {
+    "role": "verification",
+    "dispatchable": false,
+    "tiers": ["L1", "L2", "L3"],
+    "advisory": "L1/L2 自动验收仅供交付参考，人工接受率仍需确认。"
+  }
+}

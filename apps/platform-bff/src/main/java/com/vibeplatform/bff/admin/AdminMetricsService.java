@@ -9,12 +9,15 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import com.vibeplatform.bff.admin.AdminMetricsDtos.UsageSummary;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -104,6 +107,7 @@ public class AdminMetricsService {
                     && !sandboxNode.asText().isBlank()) {
                 run.sandboxId = sandboxNode.asText();
             }
+            accumulateUsage(run, type, eventAt, payload);
         }
 
         lastEventAt = later(lastEventAt, eventAt);
@@ -255,6 +259,12 @@ public class AdminMetricsService {
                 // 刚过零点时所有样例会被压缩到最近几秒，结束时间不能晚于 now。
                 run.finishedAt = finishedAt.isAfter(now) ? now : finishedAt;
                 run.durationMs = durationMillis(startedAt, run.finishedAt);
+                // 演示 token / 成本：架构师链路显著高于局部 UI 修改。
+                boolean architect = ARCHITECT_AGENT_ID.equals(spec.agentId());
+                run.inputTokens = architect ? 12_400 : 3_200;
+                run.outputTokens = architect ? 4_100 : 1_100;
+                run.calls = architect ? 9 : 3;
+                run.cost = architect ? 0.135 : 0.032;
             } else if (!isBlank(spec.sandboxId())) {
                 // 让“活跃沙盒”卡片与进行中的 Run 对得上。
                 sandboxRegistry.record(spec.runId(), spec.sandboxId());
@@ -265,6 +275,48 @@ public class AdminMetricsService {
         lastEventAt = now;
         log.info("admin demo metrics seeded: {} runs", specs.size());
         return true;
+    }
+
+    /**
+     * 从事件 payload 累计 token / 成本。
+     *
+     * <p>Architect 按节点下发增量 usage，UI Run 在终态下发汇总 usage。
+     * 断线重放会重复投递同一事件，因此用
+     * {@code type + node + ts + tokens + cost + calls} 指纹去重。</p>
+     */
+    private void accumulateUsage(
+            MutableRun run,
+            String type,
+            Instant eventAt,
+            JsonNode payload
+    ) {
+        JsonNode usage = payload.get("usage");
+        if (usage == null || !usage.isObject()) {
+            return;
+        }
+        long input = Math.max(0, usage.path("inputTokens").asLong(0));
+        long output = Math.max(0, usage.path("outputTokens").asLong(0));
+        long cached = Math.max(0, usage.path("cachedInputTokens").asLong(0));
+        long calls = Math.max(0, usage.path("calls").asLong(0));
+        double cost = Math.max(0.0, usage.path("cost").asDouble(0.0));
+        if (input == 0 && output == 0 && calls == 0 && cost == 0.0) {
+            return;
+        }
+        String node = payload.path("node").asText("");
+        String fingerprint = type + "|" + node + "|" + eventAt
+                + "|" + input + "|" + output + "|" + calls + "|" + cost;
+        if (!run.usageKeys.add(fingerprint)) {
+            return;
+        }
+        run.inputTokens += input;
+        run.outputTokens += output;
+        run.cachedInputTokens += cached;
+        run.calls += calls;
+        run.cost += cost;
+        String currency = usage.path("currency").asText("");
+        if (!currency.isBlank()) {
+            run.currency = currency;
+        }
     }
 
     // --------------------------------------------------------
@@ -312,6 +364,39 @@ public class AdminMetricsService {
                 durationCount == 0 ? 0 : durationSum / durationCount
         );
 
+        long inputTokens = 0;
+        long outputTokens = 0;
+        long cachedInputTokens = 0;
+        long calls = 0;
+        double cost = 0.0;
+        long runsWithUsage = 0;
+        String currency = "CNY";
+        for (MutableRun run : runs.values()) {
+            if (run.calls <= 0 && run.inputTokens <= 0 && run.outputTokens <= 0) {
+                continue;
+            }
+            runsWithUsage++;
+            inputTokens += run.inputTokens;
+            outputTokens += run.outputTokens;
+            cachedInputTokens += run.cachedInputTokens;
+            calls += run.calls;
+            cost += run.cost;
+            if (!isBlank(run.currency)) {
+                currency = run.currency;
+            }
+        }
+        UsageSummary usage = new UsageSummary(
+                inputTokens,
+                outputTokens,
+                cachedInputTokens,
+                inputTokens + outputTokens,
+                calls,
+                roundCost(cost),
+                currency,
+                runsWithUsage,
+                runsWithUsage == 0 ? 0.0 : roundCost(cost / runsWithUsage)
+        );
+
         return new MetricsData(
                 now,
                 freshnessSeconds(now),
@@ -319,7 +404,8 @@ public class AdminMetricsService {
                 zone.getId(),
                 overview,
                 agentDistribution(),
-                recentRuns(now)
+                recentRuns(now),
+                usage
         );
     }
 
@@ -500,6 +586,10 @@ public class AdminMetricsService {
         return Math.round((double) numerator / denominator * 10_000d) / 10_000d;
     }
 
+    private static double roundCost(double value) {
+        return Math.round(value * 1_000_000d) / 1_000_000d;
+    }
+
     private static Instant later(Instant current, Instant candidate) {
         if (candidate == null) {
             return current;
@@ -538,6 +628,13 @@ public class AdminMetricsService {
         private Instant finishedAt;
         private long durationMs = -1;
         private boolean terminal;
+        private long inputTokens;
+        private long outputTokens;
+        private long cachedInputTokens;
+        private long calls;
+        private double cost;
+        private String currency = "CNY";
+        private final Set<String> usageKeys = new HashSet<>();
 
         private MutableRun(
                 String runId,

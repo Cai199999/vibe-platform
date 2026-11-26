@@ -71,3 +71,44 @@ export async function fetchAdminFullstackMetrics({ token, role, signal } = {}) {
     signal,
   })
 }
+
+/**
+ * GET /api/v1/admin/gate-errors/stats
+ *
+ * 门禁错误高频统计：按错误码 / 指纹 / 负责 Agent 聚合。
+ */
+export async function fetchAdminGateErrorStats({
+  token,
+  role,
+  signal,
+  top = 10,
+} = {}) {
+  return requestAdminJson(`/api/v1/admin/gate-errors/stats?top=${top}`, {
+    token,
+    role,
+    signal,
+  })
+}
+
+/** GET /api/v1/admin/testing/metrics —— TestAgent 聚合指标。 */
+export async function fetchAdminTestingMetrics({ token, role, signal } = {}) {
+  return requestAdminJson('/api/v1/admin/testing/metrics', {
+    token,
+    role,
+    signal,
+  })
+}
+
+/** GET /api/v1/admin/testing/reports —— 最近测试报告。 */
+export async function fetchAdminTestingReports({
+  token,
+  role,
+  signal,
+  limit = 5,
+} = {}) {
+  return requestAdminJson(`/api/v1/admin/testing/reports?limit=${limit}`, {
+    token,
+    role,
+    signal,
+  })
+}
